@@ -54,8 +54,8 @@ workspace cleanup on init failure.
 
 ### Scope and API
 
-Since R16 (forty-eighth pass) the contracts live in the pub doc comments,
-and docs/learn/loader.md is the guide. This section points to them:
+The contracts live in the pub doc comments, and docs/learn/loader.md is
+the guide. This section points to them and keeps the reasons:
 
 - API, lifetimes and errors: `Loader` (`init`, `start`, `wait`, `cancel`,
   `deinit`, `Options`), `TensorStore` (`View`, `Binding`, `Program`),
@@ -65,10 +65,11 @@ and docs/learn/loader.md is the guide. This section points to them:
   loader.zig `//!` header. Where admission cannot measure the room (a
   device that reports no limit, such as CPU, or the buffered backend), one
   program group is in flight at a time.
-- Backend selection and the `LoadSpec` contract: backend.zig. The direct
-  backend's sizing, planner, credits and pumps: the direct_loader.zig
-  header. The buffered backend: the buffered_loader.zig header. The module
-  map: `zml/io.zig`.
+- Backend selection (`backend.loadsDirect`) and the `LoadSpec` contract:
+  backend.zig. The direct backend's sizing, planner, credits and pumps: the
+  direct_loader.zig header, then the doc comments of `Planner`,
+  `Scheduler`, `Batch`, `ReadRequest`, `Dma` and `Credits`. The buffered
+  backend: the buffered_loader.zig header. The module map: `zml/io.zig`.
 - Diagnostics: each direct batch logs its planning and completion lines at
   debug when awaited; the backend logs its totals (reads, bytes, credits
   high water, pinned mapped, waits, DMA) at debug from `destroy`; the
@@ -78,257 +79,253 @@ and docs/learn/loader.md is the guide. This section points to them:
 
 - The direct backend's pinned reads go through its private
   `readFilePositionalAllV`, the one exact positional scatter (short-read
-  resumption, local `IOV_MAX` batching; out of safetensors.zig since the
-  fifty-fifth pass). `Tensor.readRange` validates the range and reads with
-  std's `readPositionalAll` over a shared open file. The direct backend
-  opens each distinct safetensor object once and keeps it open until the
-  loader's `deinit`.
+  resumption, local `IOV_MAX` batching). `Tensor.readRange` validates the
+  range and reads with std's `readPositionalAll` over a shared open file.
+  The direct backend opens each distinct safetensor object once
+  (`SourceSlot`) and keeps it open until the loader's `deinit`.
 - HTTP, S3, GCS and HF share one range read loop,
   `range_read.performRangeRead`, over the governed loop of
-  `vfs/request.zig`: one whole Range request per admitted positional call,
-  retries and holds serial inside that caller's source credit (the retired
+  `vfs/request.zig`: one whole Range request per positional call, retries
+  and holds serial inside the caller's read permit (the retired
   backend-local `parallel_read` pools must not return). Every other request
   a backend makes (HF tree and redirect chain, S3/GCS listings and HEADs,
   GCS token exchanges, the HTTP HEAD chain) uses the same loop, so one
-  governor covers a backend's whole quota. Each backend owns one
-  `request.Governor` (io, client, its name for logs, what a 503 means, the
-  read stats); a request is a `RequestSpec` (`target` for logs, the
-  rate-limit `key`, `retry_once`), and a range read adds a per-attempt
-  `prepare` hook returning URI, authorization and extra headers; the loop
-  appends `Range`. S3 recomputes the SigV4 timestamp and signature per
-  attempt, GCS copies (refreshing when expired) its bearer, HTTP is static,
-  HF re-resolves an expired signed URL once (`retry_once` on 401 and 403).
-  `exchange` watches each exchange for `Retry.stall_timeout` and maps an
-  open's 404, 410, 401 and 403 (`ExchangeOptions.open`). Backends keep URL
-  construction, credentials and `backend()` read hints; retry settings are
-  one `request.Retry` (each backend's `retry` option);
-  `Governor.logTotals` logs a backend's totals at debug from its `deinit`
-  (fifty-fifth pass).
+  `request.Governor` per backend covers its whole quota. A request is a
+  `RequestSpec` (`target` for logs, the rate-limit `key`, `retry_once`); a
+  range read adds a per-attempt `prepare` hook (URI, authorization, extra
+  headers; the loop appends `Range`): S3 re-signs SigV4 per attempt, GCS
+  refreshes an expired bearer, HTTP is static, HF re-resolves an expired
+  signed URL once (`retry_once` on 401 and 403). `exchange` retries as a
+  timeout an exchange silent for `Retry.stall_timeout` and maps an open's
+  404, 410, 401 and 403 (`ExchangeOptions.open`). Backends keep URL
+  construction, credentials and read hints; `Governor.logTotals` logs
+  their totals at debug from `deinit`.
 - Registration, `Remotes`, read hints, the remote error contract and the
   VFS's lifetime: the vfs/vfs.zig header and the doc comments of
   `registerBackend`, `Remotes`, `io` and `readHints` (`ReadHints` is in
-  vfs/base.zig).
-- Range handling reads `Content-Range` before taking the body reader (which
-  releases the head bytes), validates that it covers the request, handles a
-  `200` that ignores Range by discarding the prefix, then scatters into
-  caller buffers; there is no response timing (`ResponseTiming` and the
-  first-body probe were dead). `request.classifyStatus`: 408 timeout, 429
-  throttle, other 5xx server failure; 503 is a throttle on S3 (`SlowDown`)
-  and GCS but a server failure on HTTP and HF. A throttle arms the
-  backend's hold instead of charging the retry budget (sixteenth pass); any
-  other retried status naming a delay (`Retry-After` delta-seconds, or HF's
-  `RateLimit` `t=`; HTTP-date is not parsed) sleeps that long, at most
-  `Retry.max_delay`, instead of the jittered delay. Backends count
-  requests, retries, timeouts, server failures, throttles, bytes, delay,
-  holds and hold waits.
-- Rate limiting is a hold, in `vfs/request.zig`. One `Governor` per backend
-  instance (keyed by URI authority, so a per-authority scope is a one-
-  function change) holds a deadline: a throttle arms it at `max(server
-  delay, full-jitter backoff)` clamped to `[initial_delay, max_hold]`,
-  extends it when a later answer names something longer, never shortens
-  it. Every request of that backend waits it out with its own jitter and
-  re-checks. A clean window as long as the last hold ends the episode and
-  resets the backoff; an episode without one for longer than
-  `throttle_budget` fails requests with `error.RateLimited` until one
-  comes. Timeouts never hold. Two budgets: a throttle is not charged to
-  `max_retries`, so a limited server cannot exhaust a reader; everything
-  else keeps per-request backoff. Defaults (`request.Retry`): five retries,
-  500 ms to 30 s backoff, 2 minute hold cap, 5 minute episode budget. A
-  deadline, not a permit, composes with the loader's fixed width; a request
-  holding a source credit simply waits.
-- One source job is one exact absolute scatter read into pinned blocks;
-  extra physical calls occur only for short reads/retries or `IOV_MAX`.
-  The loader counts read operations, not physical calls: a remote source's
-  request count is in its backend's totals; a local file has none.
+  vfs/base.zig). `Content-Range` validation, the `200` that ignores Range
+  and the scatter: the vfs/range_read.zig header and `readResponse`.
+- `request.classifyStatus`: 408 timeout, 429 throttle, other 5xx server
+  failure; 503 is a throttle on S3 (`SlowDown`) and GCS but a server
+  failure on HTTP and HF. Any other retried status naming a delay
+  (`Retry-After` delta-seconds, or HF's `RateLimit` `t=`; HTTP-date is not
+  parsed) sleeps that long, at most `Retry.max_delay`, instead of the
+  jittered delay.
+- Rate limiting is a hold (the vfs/request.zig header). One `Governor` per
+  backend instance holds one deadline; each request carries its URI
+  authority (`RequestSpec.key`), so a per-authority hold is a change to
+  `Governor.holdFor` alone. A throttle arms the deadline at `max(server
+  delay, full-jitter backoff)` clamped to `[initial_delay, max_hold]` and
+  only ever extends it; every request of that backend waits it out with
+  its own jitter. A clean window as long as the last hold ends the
+  episode; an episode without one past `throttle_budget` fails requests
+  with `error.RateLimited`. Timeouts never hold. Two budgets (sixteenth
+  pass): a throttle is not charged to `max_retries`, so a limited server
+  cannot exhaust a reader; everything else keeps per-request backoff.
+  Defaults (`request.Retry`): five retries, 500 ms to 30 s backoff, 2
+  minute hold cap, 5 minute episode budget. A deadline, not a permit,
+  composes with the loader's fixed width: a read waiting out a hold keeps
+  its read permit.
+- A `dma_read` or `host_bounce` job is one positional read into its slot's
+  blocks, exact or widened to the direct-I/O alignment. A `host_direct`
+  job, and a landing job's (`dma_land`) scattered extent, make one read per
+  `max_positional_iovecs` (`IOV_MAX`, 1024 on Linux) non-adjacent ranges
+  (`Scatter.flush`); a landing job's other extents are one read each, into
+  the worker's bounce buffer. A fill job reads nothing. Within one read,
+  `readFilePositionalAllV` adds physical calls only for short reads,
+  retries or `IOV_MAX`. The loader counts read operations (`readGated`
+  calls), not physical calls: a remote source's request count is in its
+  backend's totals; a local file has none.
 
 ### Coalesced source planner
 
-The direct_loader.zig `//!` header is the current summary of the direct
-backend. The sections below keep the detail and reasons from the passes
-that built it; a name here can lag a later rename (the passes record them).
-
-The old planner made jobs tensor-local: `source_request_size` was only a
-cap, so small adjacent tensors each cost a source operation.
-`DirectLoader.submit` sorts the selected ranges once by file URI, offset
-and size (`sortedItemOrder`) and plans one file at a time (`preparePlan`),
-publishing each plan as soon as it exists (`publishFiles`), so workers read
-the first file while later ones are planned. Each plan:
+Tensor-local jobs made every small tensor its own source operation:
+~69,445 reads for DeepSeek-V4-Flash against 9,524 coalesced ("Latest
+DeepSeek result"). `Loader.submit` sorts the parts once by file URI,
+delivery class (DMA, host, gathered), offset and size
+(`Planner.sortedPartOrder`) and plans one file at a time (`preparePlan`),
+publishing each plan as soon as it exists (`publishFiles`), so workers
+read the first file while later ones are planned. Each plan
+(`JobCut.cutRuns`):
 
 1. Covers one file group of the sorted order.
 2. Forms the union of touching or overlapping requested ranges, never
    reading across an unrequested gap or a file boundary. Duplicate or
-   overlapping bindings are read once but keep a transfer piece per output.
-3. Partitions each merged run into the minimum number of jobs the
-   request/block/`IOV_MAX` limit permits.
-4. Keeps that count while preferring tensor-safe boundaries: for
-   `N = ceil(run_length / max_job_length)`, each cut takes the latest safe
-   tensor boundary that leaves the remainder fitting in `N-1` jobs, else
-   the latest feasible hard cut. A boundary is safe only if the next
-   touching interval begins at the current union end, which preserves
-   overlap and duplicate coverage.
+   overlapping bindings are read once but keep a transfer per output.
+3. Partitions each merged run into the minimum number of jobs of at most
+   `maximumJobLen`: a request, less two alignment units for a file read
+   directly, whose reads are widened to the alignment.
+4. Keeps that count while preferring part-safe boundaries: for
+   `N = ceil(run_length / maximum_job_len)`, each cut takes the latest safe
+   boundary that leaves the remainder fitting in `N-1` jobs, else the
+   latest feasible hard cut. A boundary is safe only if the next touching
+   range begins at the current union end, which preserves overlap and
+   duplicate coverage.
 
-Jobs keep planning order, which is file order (sixteenth pass: a byte-fair
-order across destination devices made no difference). No job depends on
-another: every DMA piece is submitted as soon as its block is read (fifth
-pass), so a tensor's tail may be read before its earlier requests. The
-planner also emits the final item, block index/offset, writer mask,
-destination offset and length records; the published plan owns its jobs
-with those records, and runtime tensor state owns no other dispatch plan
-(no order indirection or remaining-work suffix arrays). Physical source
-bytes are distinct from logical tensor bytes so duplication and replication
-do not distort diagnostics. Planning is `O(tensors log tensors)`: 0.32 s
-for DeepSeek-V4-Flash as one plan on MI300 (46 shards); with per-file plans
-only the first file's planning delays the first claim (Llama: 4 plans,
-1-2 ms in total).
+Jobs are claimed in file order (by first read; a stable sort interleaves
+the classes), the fill jobs last (sixteenth pass: a byte-fair order across
+destination devices made no difference). No job depends on another: every
+DMA piece is submitted as soon as its job is read (fifth pass), so a
+tensor's tail may land before its head. The plan holds each job's
+transfers (`Batch.Plan.Transfer`: destination, landing offset in the job's
+blocks, writer mask, destination offset, length) and the landing jobs'
+extents and items; nothing else dispatches at runtime (no order
+indirection or suffix arrays). Staging by destination box and gathering
+strided parts (`JobCut.placeDma`, `JobCut.appendGatherJobs`), with their
+measurements: the direct_loader.zig header and those functions' doc
+comments. Physical source bytes (`Plan.source_bytes`) are distinct from
+logical bytes so duplication and replication do not distort diagnostics.
+Planning is `O(parts log parts)`: 0.32 s for DeepSeek-V4-Flash as one plan
+on MI300X (46 shards); with per-file plans only the first file's planning
+delays the first claim (Llama: 4 plans, 1-2 ms in total).
 
 ### Pinned blocks, scattering, and ownership
 
-- A worker initializes the destinations its records reference, derives
-  block references and destination queue counts, atomically leases all
-  pinned blocks for the job, reads into them, and publishes the records to
-  existing per-tensor PJRT transfer managers. Compatible adjacent records
-  were merged during planning; workers neither traverse sharding spans nor
-  rebuild a transfer list. (Per-node NUMA affinity matching was removed in
-  the eighth pass.)
-- One pinned block may feed several tensor transfers: one atomic lease is
-  counted across every consuming PJRT event, and its final completion
-  releases the block and completes the parent request, only after all
-  child transfers finish or are abandoned. Source/allocation/enqueue/PJRT
-  failures close scheduling, retire the batch's unclaimed jobs, fail
-  unfinished buffers and release each reference exactly once; the batch
-  still reaches `done` through its normal completion units.
-- `enqueueBlocks` reserves all affected destination queue capacity first
-  (allocation failure is atomic), publishes a whole job under one metadata
-  lock, and pumps once; per-piece enqueue had cost ~69k-79k locks and
-  pumps.
-- Workers retain scratch for leases, reference counts, iovecs and queue
-  counts; request, block and event contexts come preallocated with the
-  plan; positional-read scratch is stack bounded. A source job makes no
-  allocator call in steady state.
-- Coalescing preserves per-tensor device buffers, so about one DMA
-  submission per tensor is the floor. Going lower needs packed device
-  allocations or a device-side scatter/copy stage and changes buffer
-  ownership/model layout.
+- A worker takes a lifecycle credit, a fixed slot of blocks (`Credits`),
+  claims a job, creates the device state of each destination it is first
+  to touch (`Destination.ensureState`), reads into its slot and hands the
+  transfers to `Dma.enqueue`. Pieces were merged during planning; workers
+  neither walk sharding spans nor rebuild a transfer list. A host-resident
+  destination (`Memory.isHost`) is written in place by the worker that
+  reads it, not through DMA (`Batch.Plan.Job.Kind`), and created ahead of
+  its reads by the batch's allocation task (`Loader.startAllocations`).
+- One block may feed several transfers and devices: a `ReadRequest` holds
+  its scheduling reference plus one per queued piece, and its last
+  release (`ReadRequest.release`) returns the credit, then the job's
+  completion unit, only after every piece completed or was abandoned.
+- `Dma.enqueue` counts each device's pieces, takes every pump lock in
+  device order, checks the sticky error, reserves each device's queue (an
+  allocation failure queues nothing), takes the piece references, pushes
+  the whole job, unlocks and pumps each device that got pieces: per-piece
+  enqueue had cost ~69k-79k locks and pumps per DeepSeek load.
+- Workers keep one iovec array and a page-aligned bounce buffer allocated
+  on first use (`ReadRequest.Scratch`); request and event contexts come
+  with the plan; per-device piece counts are a stack array. A source job
+  makes no allocator call in steady state.
+- Coalescing keeps per-tensor device buffers, so roughly tensors x
+  destination devices DMA submissions is the floor. Going lower needs
+  packed device allocations or a device-side scatter/copy stage and changes
+  buffer ownership and model layout.
 
 ### Scheduling and concurrency
 
 - Reads and DMA complete in any order: PJRT makes a buffer ready once every
   transfer submitted to it completed and one carried the last-transfer
-  flag, so the pump flags the submission that completes the target's
-  placement bytes (`Target.total` against `submitted_bytes`; the pieces
-  partition the placement) and no piece waits for another (fifth pass). A
-  batch completing without error must have closed every target, or
-  `awaitBatch` fails the loader with `error.IncompleteTransfer` rather than
-  leave a buffer that never becomes ready. Per-device ready queues are
-  `std.Deque`s served in arrival order, so the oldest submission's pieces
-  complete first. No live device queues, debt counters, claimed bitmap,
-  runtime order indirection or suffix-metadata arrays.
-- The scheduler is a strict FIFO of published plans (a `std.Deque` under
-  one mutex and condition; sixteenth pass, it queued batches before).
-  `publish(batch, plan)` stamps the plan with its batch, appends it, adds
-  its completion units and queues it when it has jobs (capacity reserved
-  first, so plan, units and queue entry appear together); `claim` advances
-  the front plan's cursor and pops it with its last job; `waitForWork`
-  sleeps while nothing is unclaimed; `fail` retires the unclaimed units of
-  every queued plan and clears the queue. A submission publishes and seals
-  (`sealed_at`) on one task, so its plans are contiguous in file order and
-  a later submission's first job is claimed only after every earlier one:
-  fairness is intra-plan, and the caller's submission order is the
-  cross-submission policy. While a submission is still planning, idle
-  workers sleep at most one file's planning time. A plan is queued only
-  with jobs left and its units are added in the same critical section, so
-  a queued plan's batch still holds a unit, cannot be freed under the
-  scheduler, and needs no worker rendezvous. Persistent workers loop
-  `waitForWork` -> lifecycle credit -> `claim` -> read -> enqueue.
-- A `Batch` owns its items and plans (heap `Plan{batch, jobs, transfers,
-  requests, blocks, events, events_used, planning_ns, cursor}`, one per
-  file). The planner preallocates every context a plan can need: one
-  `RequestContext` per job (initialised idle), one `BlockContext` per job
-  block (exact `divCeil(len, block_size)`; `Job.blocks` is the job's slice)
-  and one `EventContext` per planned DMA submission
-  (`planned_dma_submissions` on the batch line), handed out in submission
-  order under `metadata_mutex`. A `Claim` names its plan and job index and
-  slices the plan's arrays, so `registerBlock` cannot fail and takes no
-  lock; a load allocates only per file.
+  flag, so the pump flags the piece that completes the target's bytes
+  (`TensorTransfer.Target.nextIsLast`) and no piece waits for another
+  (fifth pass: a tail that waited for its prefixes could hold every credit
+  while the prefixes stayed unclaimed). `awaitBatch` panics if a batch
+  that completed without error left a target short, a bookkeeping bug.
+  Per-device ready queues (`Dma.ReadyQueue`) are served in arrival order,
+  so the oldest submission's pieces complete first.
+- `Scheduler` is a strict FIFO of published plans (its doc comment). A
+  submission publishes and seals (`sealed_at`) on one task, so its plans
+  are contiguous in file order and a later submission's first job is
+  claimed only after every earlier one: fairness is intra-plan, and the
+  caller's submission order is the cross-submission policy. While a
+  submission is still planning, idle workers sleep at most one file's
+  planning time. A queued plan holds a completion unit of its batch, so
+  the scheduler never sees a freed batch and needs no worker rendezvous.
+- A `Batch`'s arena holds its plans (one per file, built by
+  `JobCut.finish` with one `ReadRequest` per job and one `Dma.EventContext`
+  per planned DMA submission, handed out in submission order through
+  `events_used`), its destinations and its parts until it retires. A load
+  allocates per file, not per job.
 - The batch completes when `remaining` (a publish sentinel held until the
-  seal, plus one unit per job) reaches zero and sets `done`. A job's unit is
-  released exactly once: at the request's final reference drop (last DMA
-  callback or abandonment; `completeOne` releases the lifecycle credit
-  first and calls `finishJobs` last) or by `scheduler.fail` for unclaimed
-  jobs. Callback order rule: the PJRT ready callback and the submission
-  failure path copy `pipeline`, `device_index` and `block` into locals,
-  call `eventCompleted` (which may pump on the callback's thread), push the
-  context onto the pipeline's `retired` stack, then call `block.complete()`
-  last, because the block's completion may free the batch.
-- A planning failure, before or after the first publish, fails the
-  pipeline (a partial submission can never complete): `submit` records
-  it, seals, awaits and retires the batch, so the caller sees only the
-  sticky error (fifty-fourth pass). `awaitBatch` waits `done` (after
-  which nothing touches the batch), marks unsubmitted targets when the
-  pipeline failed, retires the contexts under `metadata_mutex` (so neither
-  `abortReady` nor a pump draining `retired` can race the free), logs the
-  batch and frees it. No per-batch gate drain, barrier, loader-wide
-  context list or reap. A pipeline failure is sticky: every open handle's
-  await returns it and later submissions are rejected with it. The
-  buffered backend mirrors this with `BufferedBatch{pending, done}` over
-  its `LimitedGroup` read tasks.
-- The source width is fixed for the load (fifteenth pass) and never
-  changes during it (sixteenth pass): `Options.read_parallelism`, else
-  `Loader.Options.local_read_parallelism` (16) or, when the checkpoint's
-  read hints say `high_latency`, `high_latency_read_parallelism` (32;
-  sweeps in the fifteenth pass), resolved once by `backendOptions`. The
-  direct backend clips it to one less than the requests the pre-grown
-  pinned set holds. The adaptive controller (fourth to sixth passes) is
-  gone. Rate limiting is handled one layer down by the VFS governor; the
+  seal, one unit per job, one for the allocation task while it runs)
+  reaches zero and sets `done`. A job's unit is released exactly once: by
+  `ReadRequest.release` at its last reference (last DMA callback, a host
+  job's end, or abandonment) or by `Scheduler.fail` for an unclaimed job.
+  Memory-order rule (the ready callback and `Dma.submitOne`'s failure
+  path): copy the fields into locals, call `eventCompleted` (which may pump
+  on that thread), hand the context to the pump (`retireEvent`, callback
+  only), then call `request.release()` last, because the release may free
+  the batch.
+- `recordError` keeps the first error (`first_error`,
+  `stdx.FirstError(anyerror)`), logs it once, retires the unclaimed jobs
+  (`Scheduler.fail`) and releases the queued pieces (`Dma.abortReady`);
+  requests in flight stop at their next read (`readGated`, after the
+  permit) or enqueue. The error is sticky: every await returns it and
+  later submissions are refused with it. A planning failure, before or
+  after the first publish, fails the loader too (a partial submission can
+  never complete): `submit` seals, awaits and returns the sticky error
+  (fifty-fourth pass). `awaitBatch` waits `done` uncancelably, after which
+  nothing touches the batch; `Dma.retireBatch` drains every pump's
+  `retired` under every pump lock, so neither `abortReady` nor a pump can
+  race the free; destroying the batch destroys its transfer managers,
+  whose PJRT destructor errors every buffer whose last transfer never went
+  out, so a buffer a failure left open reports an error, never success.
+- The buffered backend's batch is a cursor over its specs, run by up to
+  `read_parallelism` workers of its own (a `std.Io.Group`, started with
+  `concurrent`; inside `submit` when none starts) and awaited
+  uncancelably; read permits bound their reads and one staging budget
+  (`min(width, 12)` x the largest staging request, live and kept buffers)
+  their bytes, not their number. Details: the buffered_loader.zig header.
+- The source width is fixed for the load: `Options.read_parallelism`, else
+  16 locally or 32 when the checkpoint's read hints say `high_latency`
+  (`Loader.Options` holds the sweeps behind both; fifteenth pass), resolved
+  once by `backendOptions`. The direct backend clips it so `width + 1`
+  requests fit under the mapped ceiling beside the DMA reserve and the
+  zero block. There is no adaptive controller (fourth to sixth passes); a
+  throttled source is held one layer down by the VFS governor, and the
   loader reads no VFS statistics (forty-seventh pass).
-- Two gates, both constant for the load (sixteenth pass). Lifecycle
-  capacity is the pre-grown pinned capacity in requests
-  (`pool.capacity / blocks_per_request`): `width + 1` source requests plus
-  the calibrated per-device DMA depth, so the DMA stage keeps its depth at
-  any read width (fourth pass) and no credit can want an unmapped block. A
-  request returns its credit only after all its DMA children finish. The
-  read gate alone limits source calls, at the width.
-- Pinned pre-growth happens at loader creation: the DMA reserve
-  (calibrated depth x devices, at least one maximal request) plus
-  `width + 1` source requests, as two arenas, reserve first (ROCm balances
-  bytes per allocation across host nodes). `create` computes the width
-  once from the blocks the mapped ceiling leaves beside the reserve
-  (264 MiB for width 16 with 8 MiB requests on CPU, against 528 MiB for the
-  former 32-wide set) and returns `OutOfMemory`, logged at err, when it fits
-  no request (direct_loader.zig:214-216). Nothing maps inside a load
-  (146-230 ms of hipHostMalloc on MI300X when it did) and `pinned_mapped ==
-  high_water` on every recorded run. A pregrowth line logs `retained`,
-  `pregrown` and `pregrowth_ms`.
+- Two bounds, both constant for the load. Lifecycle credits
+  (`Credits.count()`): the carved pinned set after the zero block, in
+  requests, at least `width + 1` source requests plus the DMA reserve, so
+  the DMA stage keeps its depth at any read width (fourth pass; the
+  `Loader.credits` doc comment has the GB300 numbers) and no credit can
+  want an unmapped block. A request returns its credit only after all its
+  pieces finish. Read permits (`read_permits`, a `std.Io.Semaphore` of
+  `read_width`) alone limit source calls.
+- Pinned pre-growth happens in `create`: calibration's ring stays mapped,
+  then `Workspace.carve` maps the blocks missing below the DMA reserve
+  (`dma_calibration.depth` blocks per device, at least one maximal
+  request) as one arena and those missing below the total (`width + 1`
+  requests, the reserve and the zero block) as another (ROCm balances
+  bytes per allocation across host nodes), and cuts every arena into
+  blocks. `create` computes the width once from the blocks the mapped
+  ceiling leaves beside the reserve and returns `OutOfMemory`, logged at
+  err, when it fits no request. Four CPU devices, 4 MiB blocks, 8 MiB
+  requests and width 16 map 17 x 8 MiB + 33 x 4 MiB = 268 MiB. Nothing
+  maps inside a load (146-230 ms of hipHostMalloc on MI300X when it did);
+  `Workspace.allocate` asserts it. The "host workspace pregrown" line logs
+  `retained`, `pregrown` and `pregrowth_ms`.
 - `width + 1` workers are spawned at creation and never retired or parked:
   a worker hands its request to the DMA stage and claims the next, so
   credits beyond the width need no workers (128 persistent workers had
   cost 7% on one MI300X).
-- DMA depth is fixed at eight blocks per device by default (see "Adaptive
-  DMA width" in the ledger), enforced by the pump as a byte budget
-  (`max_in_flight_per_device x block_size`) with at most 64 pieces in
-  flight per device, so a block of small tensors keeps the calibrated bytes
-  moving (fourth pass). No global DMA cap.
+- DMA depth is the constant `dma_calibration.depth` (8) blocks per device
+  (see "Adaptive DMA width" in the ledger), enforced by the pump as a byte
+  budget (`dma_budget_bytes`, `DevicePump.hasRoom`) with at most 64 pieces
+  in flight per device (`max_dma_pieces_per_device`), so a block of small
+  tensors keeps the bytes moving (fourth pass). No global DMA cap.
 - DMA event lifetime: a ready callback pushes its `EventContext` onto its
-  device pump's intrusive `retired` stack under the pump's mutex, after its
-  own `eventCompleted` and before `block.complete()`; `pump` destroys the
-  stack at the top of every iteration, so an event is destroyed by a later
-  pump or by `retireBatch`, never inside its own callback. Live PJRT events
-  are bounded by devices x 64 plus one pump batch. Checked on the oneAPI
-  plugin under sustained load (PLAN.md task 9).
+  device pump's intrusive `retired` stack under the pump's mutex
+  (`retireEvent`), after its own `eventCompleted` and before
+  `request.release()`; `pump` destroys the stack at the top of every
+  iteration (`destroyRetired`), so an event is destroyed by a later pump
+  or by `retireBatch`, never inside its own callback. Live PJRT events are
+  bounded by devices x 64 plus one pump batch. Every shipped plugin
+  accepts destruction outside the callback (PLAN.md task 9;
+  `DevicePump.retired`).
 
 ### DMA memory and calibration
 
 - Host memory (arenas per platform, NUMA interleave, the 16 GiB mapped
-  ceiling, `OutOfMemory`): the host_memory.zig header. The direct backend
-  owns its workspace and maps it once, before the first read.
-- Calibration (the screen, CPU's defaults, `measure` for dma-bench): the
-  dma_calibration.zig header. Screen defaults (`dma_calibration.Options`):
-  2 ms and 32 transfers per window, 25 ms and 256 transfers per borderline
-  confirmation. One `dma_bench` debug line: platform, device kind, block,
-  width, GiB/s, duration, retained mapped bytes.
+  ceiling `Workspace.mapped_bytes_ceiling`, `OutOfMemory`): the
+  host_memory.zig header. The direct backend owns its workspace and maps
+  it once, before the first read.
+- Calibration (the screen, CPU's `cpu_block_size`, `measure` for
+  dma-bench): the dma_calibration.zig header. `calibrate` and `measure`
+  return the block. Screen defaults (`dma_calibration.Options`): 2 ms and
+  32 transfers per window; borderline confirmations run 25 ms and 256
+  transfers (private constants). One `dma_bench` debug line: platform,
+  devices, device kind, block, parallelism, GiB/s, duration, retained
+  mapped bytes.
 - `Platform.warmupDeviceAllocators(io)` is the only allocator warm-up;
-  `init`'s task and `measure` run it first. Calibration measures one
-  representative device; its block and depth apply to every device.
+  `init`'s task (`setUp`) and `measure` run it first. Calibration measures
+  one representative device (device 0); its block applies to every
+  device, and the depth is the constant `dma_calibration.depth`.
 
 ## Latest DeepSeek result: why coalescing mattered
 
@@ -5122,7 +5119,619 @@ Left:
   `ops/mla/state.zig` keeps a dead `deinitOwnedParameterBuffers` (older than
   the wave).
 
+## Fifty-sixth pass: wave 1 on GB300 and MI300X, and F1 (2026-10-30, gb300-1 and mi300)
+
+Wave 1 (fifty-fifth pass) is committed as `rework`: zml 8af7fd3c on
+93428bd0, monorepo b791da11 on 0bf031d9. It ran on gb300-1 (aarch64, 4x
+GB300, CUDA) and mi300 (x86_64, 8x MI300X, ROCm, plugin
+202610231457.291.1.799ad5c39a34) against its parents. Trees: w0 = the
+parents, built from the same checkout with `jj restore --from` and restored
+after; w1 = `rework`; w1ng and w1fix = temporary mi300 builds of w1 with
+F1's n-gram fix, then with the n-gram and page-cost fixes; w2 = `rework` +
+M11-M16 + F1 (fifty-seventh pass). llmd builds with
+`--config=release_with_symbols`, which is release_safe, so
+`stdx.debug.assert` and M7's block-FP8 expert assert are live in every GPU
+binary. Reports and saved binaries stay in `~/phase8` on each host. Every
+llmd run answered "Paris" and "391" unless stated.
+
+zml suite:
+- gb300-1, w1, 4 GPUs: 402 tests, 365 passed, 34 skipped, 3 failed. The
+  sub-mesh buffer test and Sharding's 'GSPMD executes a reduction across a
+  folded logical axis' fail with FileNotFound on libzml_cpu.so (aarch64 has
+  no CPU plugin); moe's 'FlashInfer compatibility matrix' fails
+  MoeComplianceFailed. The Triton and CuTe MXFP4 matrices were skipped by a
+  temporary edit (they abort the binary, fifty-first pass). io: 80 OK, 14
+  SKIP (they need a CPU platform).
+- mi300, 4 GPUs (`ROCR_VISIBLE_DEVICES=0,1,2,3`): w1 402 tests, 377 passed,
+  24 skipped, 1 failed; w0 401, 376/24/1. All 94 io tests pass. The failure
+  (moe's Fly matrix) and an abort on 8 GPUs are the same on both trees
+  (pre-existing, below).
+
+examples/io with `ZML_LOAD_CHECK=1` (M9; M3's borrowed dims):
+- GB300, Qwen3.8-27B-FP8 sharded on 2 GPUs: 28.75 GiB in 1.446 s (dbg), 1606
+  of 1606 tensors ok, 1,860 reads, credits 23 of 33.
+- MI300, Llama-3.1-8B-Instruct on 4 GPUs: sharded 1.186 s, tp 1.221 s,
+  host_mapped 14.109 s (allocating its 291 host destinations takes 14.10 s);
+  291 of 291 ok each.
+
+llmd on GB300, w0 against w1:
+- DeepSeek-V4.1-Flash, GPUs 2,3, `--token-batch-size=256 --batch-size=1`, 3
+  runs each: 467.10 GiB in 11.53 s against 10.72 s (medians; w0 waited
+  2.5-3.4 s for compiles, w1 0-0.64 s); decode 5.67-5.95 against 5.74-5.76
+  ms/step; the same KV plan (5148591 pages, 95.593 GiB). The spread is XLA's
+  per-process autotuning: the before_optimizations HLO is identical across
+  trees once PJRT pointers are masked.
+- The same with the native DSpark drafter, 6 runs each: 474.50 GiB in
+  10.37-11.49 s against 10.12-11.03 s; median tokens/step 2.47 and 2.43.
+- Qwen3.8-27B-FP8 + z-lab DFlash2: ~980 ms loads, ~20 ms/step, 2.93-3.26
+  tokens/step on both. Qwen3.8-27B + RedHatAI DSpark: 2.88-2.96 tokens/step,
+  one resolve line. A qwen4 model given a drafter logs one warning and
+  resolves nothing.
+- Qwen3.8-Flash-Next BF16 at `--cache-memory-fraction=0.6`: 329.58 GiB in
+  9.266 s (w0) and 8.237 s (w1). Flash-Next-FP8, 15 runs: 169.41 GiB in
+  3.5-4.6 s, median decode 9.14 (w0) and 9.07 (w1) ms/step.
+- Smokes at w1: Qwen3.8-27B, Qwen3.6-35B-A3B, gemma-4-26B-A4B-it,
+  gemma-4-31B-it, Laguna-XS-2.1, MiMo-V2.6-Flash-MOPD (block-FP8 MoE, 158.11
+  GiB in 3.207 s). Both trees log the same kinds of lines.
+
+llmd on MI300:
+- DeepSeek-V4.1-Flash, GPUs 0-3, 2 runs each: 466.95 GiB in 103.6 s (w0) and
+  102.1 s (w1) (medians; slow on both, below); decode 12.53-12.74 ms/step;
+  4987539 KV pages every run; MXFP4 experts through fly. With the native
+  drafter (w1): 474.34 GiB in 1m26.9s, 24.16 ms/step at 2.43 tokens/step.
+- Qwen3.8-27B-FP8 + DFlash2: 3.26-3.36 s loads, ~39 ms/step, 2.68-3.37
+  tokens/step. Block-FP8 on CDNA3 (R9's FNUZ conversion) gives coherent
+  text; three of four runs are byte-identical across trees.
+- Drafters at w1: Llama-3.1-8B + z-lab DFlash-UltraChat 3.22 tokens/step,
+  Laguna-XS-2.1 + poolside DFlash 1.98, gemma-4-31B-it + z-lab DFlash 3.75,
+  Muse-Glimmer-30B + incoai DFlash2 2.96.
+- MiMo-V2.6-Flash-MOPD (fp8 128x128, 256 experts), GPUs 4,5: 158.11 GiB in
+  11.186 s, 15.03 ms/step, long answer correct. Smokes: Qwen3.6-27B,
+  Qwen3.6-35B-A3B, gemma-4-26B-A4B-it, Qwen3-4B-Instruct-2507.
+
+M7's paths: no MI300 run reached the block-FP8 expert assert (MiMo,
+Flash-Next-FP8 with F1's n-gram fix, Qwen3.8-27B-FP8, DeepSeek). GB300 ran
+block-FP8 experts through `bindQuantized` (Flash-Next-FP8, MiMo). MXFP4
+experts ran through cute on GB300 and fly on MI300 (DeepSeek). NVFP4 never
+ran: no NVFP4 checkpoint on either host has a model type llmd supports. No
+FP8 checkpoint gb300-1's llmd runs used (Flash-Next-FP8, MiMo,
+Qwen3.8-27B-FP8, DeepSeek) stores a quantized lm_head, router or gate;
+mi300's checkpoints were not inspected.
+
+`hostMappedBytes` (M8) equals the old `extra_device_memory_bytes` on w0 and
+w1. Its only consumer is XLA's `device_memory_size` = bytes_limit + extra
+(zml/Compiler.zig:906), read from XLA config dumps on GB300 and from a
+temporary log line on MI300. Per device: GB300 DeepSeek 101379016992 B
+(94.42 GiB of Engram tables), Flash-Next BF16 at 0.6 51200245760 B, FP8 at
+0.3 25600122880 B; MI300 DeepSeek 50689508496 B for prefill and decode (0
+for loader programs), Flash-Next BF16 at 0.75 51200245760 B.
+
+What failed, and F1's fixes (1-3 older than the rework, w0 fails alike; 4
+is wave 1's own, M10's new test, absent at w0):
+1. Flash-Next BF16 does not load on 2x MI300X at the default fraction
+   (0.95): ResourceExhausted on layers.12.mlp.experts.gate_up_proj
+   (pa_allocated 184253677568); at 0.85 on layers.35. The plan offloads
+   the n-grams (164.15 GiB available, 166.46 GiB fixed, 47.68 GiB
+   offloaded). Cause:
+   `qwen4/spec.zig:159` subtracted the PLE convolution cache's per-page term
+   (from `ngramMemory`) from `full_bytes_per_page`, but that cache stays in
+   device memory; only the n-gram tables bind host_mapped. The page count
+   came out ~3.5x too high. Line 160 subtracted the n-gram bytes from the
+   fixed memory a second time (harmless in every run). gb300-1 never failed:
+   at 0.6 it overshot the fraction silently (below). Fix: `ngramBytes()`
+   returns only the tables' bytes per device, the PLE term stays in
+   `memoryRequirements`, and the offload test compares `available >
+   fixed_memory - ngram_bytes` before reducing the fixed memory once.
+2. Flash-Next-FP8 cannot serve on ROCm: the first request fails with
+   'Unsupported data type for reduction operation: f8e4m3fn', then panics at
+   llmd/models.zig:249. `NgramEmbedding.gather` all-reduced the e4m3 rows in
+   their own dtype, which CUDA accepts. Fix: an 8-bit table's rows are
+   summed across shards in bf16, exact since e4m3 converts to bf16
+   losslessly and one shard owns each row.
+3. An unsupported model_type failed with a bare 'error: InvalidModelType'
+   naming neither the type nor the checkpoint (mistral_large4, glm_moe_dsa,
+   beam, lfm3, deepseek_v4, glm5_next). Fix: `fromConfig` refuses with
+   `weights.refuse("Unsupported model_type {s}")` or "config.json has no
+   model_type string", logged once at err.
+4. M10's sub-mesh test built its own 4-device CPU platform, so it failed on
+   gb300-1 and ran on a CPU platform on mi300: M10's walk never ran on an
+   accelerator. Fix: `testing.Devices.init(allocator, io, 4) catch return
+   error.SkipZigTest`, the accelerator's devices when it has 4.
+
+F1 is zml +6/-2 and monorepo 3 files +29/-24. Checked on the GPUs as w2,
+against w1 on gb300-1 and against w1fix on mi300:
+- Suites: gb300-1 403 tests, 366 passed, 35 skipped, 2 failed (Sharding's
+  GSPMD test and FlashInfer); mi300 403, 378/24/1. The sub-mesh test passes
+  on 4 GB300 and on 4 MI300X: M10's walk ran on an accelerator.
+- MI300 Flash-Next BF16 at the default fraction loads and serves: 48.11 s
+  against 47.78 s (medians), within this model's 47.66-49.73 s spread (the
+  load waits on host_mapped allocation); 16.58 ms/step.
+- MI300 Flash-Next-FP8 on 2 GPUs: 10.16 s against 10.15 s, 15.14 against
+  15.13 ms/step. 3000-token greedy generations: 5 of 6 (w2) and 5 of 5
+  (w1fix) coherent to the end; one w2 run looped on one sentence after
+  ~1,377 words, judged not a defect (w1fix sums in bf16 too).
+- GB300 Flash-Next-FP8's qwen4_forward has 96 bf16 and 1 f8e4m3fn
+  all-reduces at w1, 97 bf16 and none in f8 at w2; median decode 8.76 (w2)
+  against 9.25 (w1) ms/step, noisy. BF16 at 0.6: plan lines and
+  `device_memory_size` (318512309334) unchanged.
+- The refusal: 'error(llmd): Unsupported model_type mistral_large4' (GB300)
+  or '... lfm3' (MI300), then Zig's 'error: InvalidModelType'.
+
+Behaviour change: when qwen4 offloads its n-grams it now plans fewer KV
+pages and stays within `--cache-memory-fraction`. Flash-Next BF16 at 0.6 on
+2x GB300: 127,286 pages at w1, 35,959 at w2 (read from qwen4_forward's
+entry_computation_layout), so 575,344 cached tokens per device instead of
+2,036,576. Peak per GPU (nvidia-smi) fell from 239,531-240,409 to
+159,739-160,963 MiB: w1 overshot the fraction by ~77.7 GiB per device, the
+640 KiB per page of PLE cache it did not count (127,286 x 640 KiB). FP8 at
+0.3: peak 115,257-116,117 -> 83,745-84,365 MiB (pages not dumped). FP8 at
+default args offloads nothing and is unchanged. qwen4 logs no page count.
+
+Pre-existing, w0 the same:
+- mi300, 8 GPUs: the suite aborts at test 6, the paged-attention decltest
+  ("can't shard {...,hkv=4/model,...} ... for Mesh(name=model,
+  partitions=8)", paged_attention.zig:457 via triton.zig:277).
+- mi300: moe's 'Fly compatibility matrix' cases 38, 39, 41, 42 (geglu,
+  mxfp4, before_down) fail MoeComplianceFailed after 'geglu was requested
+  but we only support the tanh approximation'.
+- mi300 DeepSeek-V4.1-Flash loads in 84-117 s against ~10 s on GB300: ~68-70
+  s allocating its 189 GiB of host_mapped engram tables (~2.8 GiB/s)
+  overlaps 59-91 s waiting for 17 loader compiles that start only with the
+  load, after the 3m51 model compile. With the native drafter it waited 0 ms
+  (not investigated).
+- mi300 Qwen3-4B-Instruct-2507 answers 17x23 = 401 at temperature 0 (411 and
+  491 when sampling); not checked on CUDA.
+- Flash-Next-FP8 does not fit one MI300X (ResourceExhausted in
+  NormalizeBlockFp8Weight, with F1 too). On two, and for Qwen3.8-27B-FP8,
+  the loader warns 'program group exceeds the device room alone ... admitted
+  anyway'.
+- GB300 Flash-Next-FP8 decode is bimodal per process (~9.0 or ~12.6 ms/step;
+  1 of 8 w1 and 2 of 7 w0 processes). Its fixed memory went 87.13 -> 86.38
+  GiB and decode 11.65 -> ~9.0 ms/step between the fifty-second pass and w0:
+  unexplained.
+- 'loader admission' prints min_room_seen=0B when no program group ran (the
+  null prints as 0).
+- Text at temperature 0 differs between processes; compare trees by
+  /metrics.
+
+Notes for later runs: the loader's debug scope is `zml/io/load`
+(zml/io/log.zig:10) and `dma_bench` logs on `zml/io`; the GB300 reports'
+"GB" peaks are nvidia-smi MiB / 1000. Saving a binary built with
+`--config=remote` (which ends with `--remote_download_outputs=minimal`)
+needs `--remote_download_toplevel` on gb300-1 and
+`--remote_download_outputs=toplevel --build_runfile_links` on mi300. The
+mi300 plugin's `RocmExecutor::IsHostMemoryPinned` is a local symbol,
+invisible to `nm -D`; dma_bench gives 46.6-47.3 GiB/s on 4 devices against
+4.5-7.6 with the stale plugin.
+
+Left of the fifty-fifth pass's GPU list: NVFP4; a quantized head on a real
+checkpoint (DeepSeek's `createBf16` `wo_a` is exercised only by DeepSeek
+answering correctly); `expectShards`' memory argument against real host
+spaces (no report names it); the buffered backend (no TPU, neuron or metal);
+remote checkpoints; oneAPI; zoo; the `DSparkDrafter.init` leak fix's failure
+path; a model's free path and a progress bar watched to the end (every llmd
+was stopped by its PID).
+
+## Fifty-seventh pass: waves 2 and 3 (M11-M19) and their GPU A/B (2026-10-30/31)
+
+Waves 2 and 3 of `LOADER_DESIGN_REVIEW.md`, uncommitted on `rework`, in this
+order: M11, M12, M13, M14, M15, M16, F1 (fifty-sixth pass), M17, W2F, M18,
+M19. The monorepo changes only by F1. Each move was implemented, reviewed
+read-only and fixed by a fixer who first tried to refute each finding, with
+both gates after each. A review of wave 2 as a whole (direct, front and
+completeness on a frozen copy after M17, a refuting verifier per finding: 7
+findings, 6 confirmed) gave W2F; its sixth finding, stale docs, is this pass
+and the "Current design" refresh. Line counts are snapshot diffs, against
+Part 2's estimates.
+
+Moves:
+- M11, admission by fixed arrays ([0]; loader.zig): `DeviceBytes =
+  [Platform.MAX_NUM_DEVICES]u64`. `admit(executables) !DeviceBytes` fills
+  inputs, execution and temporaries only while `memory_supported`, so
+  `compiledTempBytes` and `readRoom` no longer run unmeasured; unmeasured,
+  it still retires until no program group is pending. New: `fits`,
+  `pendingExecution` (summed from `pending`, saturating),
+  `programGroupPending`, `readRoom() ?DeviceBytes`. Gone: `Scratch`,
+  `pending_execution`, `pending_executes`, `Fit`, `measureFit`, the heap
+  `execution` slice and its hand-off, init's only allocation. `Loader.init`
+  returns `error{InvalidOptions}`; a backend set-up error comes from the
+  first `start` (docs/learn/loader.md:179). The unmeasured `execute
+  admission:` debug line prints only `retired=` and `measured=false`. -12
+  lines against -35: `room: ?DeviceBytes` keeps "unmeasured" when a device
+  stops reporting a limit mid-load, and `admission.admits` keeps slices so
+  its pure tests do not depend on `MAX_NUM_DEVICES`. Reverses the
+  forty-fifth pass's "Fixed `[MAX_NUM_DEVICES]` arrays were not taken"
+  (`Platform.init` caps the count with `InvalidDeviceCount`, and only a
+  measured loader fills them) and the fifty-fourth pass's explicit
+  `{InvalidOptions, OutOfMemory}` for `init`.
+- M12, one arena per direct batch ([38], [39], [29], [32], [33.1]):
+  `Batch.arena` holds the destinations, the parts and every plan until
+  `destroy`. `JobCut.finish(arena)` copies a plan's jobs, transfers, extents
+  and items into it, with one `ReadRequest` per job and one `EventContext`
+  per planned DMA submission (counted by job kind). Gone: `Plan.allocator`,
+  `Plan.create`, `Plan.destroy`, the take-on-success rule and its test,
+  eight errdefers, `JobCut.dma_submissions`, `Batch.freeing`,
+  `Batch.planning_source`, the `sealed_at` assert, LazyOnce's context
+  structs and trampolines (now `LazyOnce(T).ensure(io, initFn, args)`),
+  `Destination.hostResident` (`memory.isHost()`). -93 against -100. Part 2's
+  "publishFiles' errdefer logs the file" is impossible, since Zig 0.17
+  rejects `errdefer |err|`: `publishFiles` hands the file out through
+  `source: *[]const u8` and submit's `recordError` logs it once, when first.
+  "No allocator call per job" holds by construction (finish makes a fixed
+  set of arena calls per plan); a test counting them could not fail and
+  went. JobCut keeps a scratch allocator for its growing lists.
+- M13, planner representation ([40]-[42], [35], [33.2], [44]): `dma_staged`
+  and `dma_gather` became one `dma_land: Land{len, extent_start, extent_len,
+  zeroed}`; each `Extent` owns its items, and a staged job is a one-extent
+  landing job. Kinds: dma_read, dma_land, dma_fill, host_direct,
+  host_bounce, host_fill. A Transfer is `{destination, landing, writer_mask,
+  destination_offset, len}`; the block is found once, at enqueue.
+  `Destination.Delivery{dma, host, gathered}`: `sortedPartOrder` sorts by
+  uri, class, offset and size, and `preparePlan` cuts three slices.
+  `Planner.Reads{io, vfs, policy, alignment}` is built once in `create`
+  (`Loader.reads`); `boundOf(uri)` gives a file's widest alignment without
+  opening it. Gone: `Config.alignment`, `Loader.direct_io`, the per-submit
+  Reads, `Reads.failed_source`, `readLimit`, `JobCut.read_limit`,
+  `Plan.direct_reads`, `Staged.data_offset` (the fiftieth pass kept it),
+  `class_order`. All 184 plans of `//zml:test` hashed identical before and
+  after (dma_staged 18 + dma_gather 298 = dma_land 316). -56 against -75.
+  Deviations: `preparePlan` takes `source` (the file of a planning-time open
+  failure), since a Reads built once cannot hold it; `finish(arena)` has no
+  `source_slot` (JobCut holds it); the host_bounce bound assert stays (the
+  last block holds stale bytes past the read); run's bounds assert moved to
+  enqueue, after the read; `staged_jobs` and `gather_jobs` stay in
+  `logBatch`, derived per landing job; the class partition moved into
+  `sortedPartOrder`, outside `planning_ns`.
+- M14, one scatter, one block primitive ([48], [45], [47], [49]):
+  `FileReader`, `BytesReader` and the `anytype` readers are gone.
+  `readSlot(loader, slot, iovecs, file_offset, minimum_len)` opens the
+  slot's file, reads through `readGated` and records `open {s}` or `read {s}
+  at {d}, {d} bytes at least`; every worker read goes through it
+  (`ReadRequest.readBlocks` too). `HostScatter` and `ScatterSink` fold into
+  one concrete `Scatter`; `blockPiece` replaces `copyToBlocks`,
+  `copyFromBlocks` and the split loops. `Dma.enqueueBlocks` became
+  `Dma.enqueue(request, blocks)`: it counts pieces per device on the stack,
+  then takes every pump lock, checks the sticky error, reserves the queues
+  and takes the piece references (no rollback); `Scratch.queue_counts` and
+  `host_iovecs` are gone. `retireBatch` drains every pump's retired stack;
+  `EventContext.err` is gone and onReady frees its PJRT error. -110 against
+  -105. Deviations: `blockPiece` clamps and `enqueue` asserts `data.len ==
+  transfer.len`; one flush rule for both former scatters; the shared ensure
+  loop skips consecutive transfers to one destination, so `tensor_init_ns`
+  sums fewer calls. A failed read's line no longer names the job kind and
+  gives the bytes needed (16769664) rather than the widened read (16773120).
+- M15, gates and shutdown ([46], [43], [37], [34]): `RequestGate` became
+  `read_permits: std.Io.Semaphore` of `read_width`; `readGated` waits
+  uncancelably, then checks `first_error` once and returns the loader's
+  first error. Gone: `Credits.close`, `Scheduler.stop`, `unclaimed_total`,
+  `failed()`, `errorValue()`, `error.Closed` (log.zig's clause too;
+  `publish` returns `Canceled` once failed), and five scattered failure
+  checks (Part 2 said four). `recordError` sets `first_error`, logs, fails
+  the scheduler and aborts ready DMA. `stopWorkers` asserts the queue is
+  empty (`fail` now drains it), calls `Scheduler.fail` and awaits the
+  workers. `stdx.FirstError(E)` (`set`, `get`) replaces seven hand-encoded
+  first-error atomics: both loaders, ChunkedRead, dma_calibration,
+  platform's allocator warm-up, mock_server and http_acceptance_test (new
+  against master, so no VFS-diff cost). +40 against -100 (8 files
+  +299/-259): direct_loader +29 (outside test blocks -76, the test helper
+  `unclaimedJobs`'s +10 included; test blocks +105, the two new tests 81
+  and 26 lines), `FirstError` and its test +27, the six other files -16.
+  `first_error` is `FirstError(anyerror)`, not Part 2's
+  `FirstError(StickyError)` (the error rules; the pjrt sites and ChunkedRead
+  keep their sets); `Scheduler.stopping` stays. The sixteenth pass's
+  rejection of folding `stop` into `fail` is now done, and the thirty-fifth
+  pass's "the read gate closes only after a recorded error or in `destroy`"
+  no longer applies: nothing closes.
+- M16, calibration returns its block ([50], [51], [54]): `Result`,
+  `Result.default` and `max_in_flight_per_device` are gone;
+  `dma_calibration.depth` (8) is a constant and `cpu_block_size` (4 MiB) is
+  returned on CPU without measuring; `calibrate` and `measure` return the
+  block. The confirmation's 25 ms, 256 transfers and 0.02 margin are private
+  constants; `validate` still checks parallelism 1..32, the block list,
+  `minimum_duration` and the tolerance. `Report` and `measureTransfer` are
+  inlined; `Session` owns the handles, `transfer`, `warmup` and one
+  `FirstError(pjrt.ApiError)`. `Workspace.max_mapped_bytes` (eighth pass)
+  became the constant `mapped_bytes_ceiling` (16 GiB). -57 against -50.
+  Deviations: `cpu_block_size` and `Candidate.block` added; the calibrate
+  failure line dropped `mapped_ceiling=`; host_memory's ceiling tests are
+  rewritten against the constant, not deleted.
+- M17, buffered backend ([24], [27], [22] with [25]; the fallback [23] not
+  needed): `stdx.LimitedGroup` and its five tests are gone (-216). Master's
+  own `LimitedGroup` goes with it (only master's zml/io.zig used it), so
+  stdx's diff against master is 2 files +28/-59 instead of growth. A batch
+  is `{specs, progress, next, workers: std.Io.Group}`: `submit` starts
+  min(width, specs.len) workers with `concurrent`, never `async`, and runs
+  the batch inside `submit` when none start; `awaitBatch` waits with cancel
+  protection blocked. `loadOneStaged` went; each step calls `fail(err, step,
+  spec, part)`. One `Staging{budget, live_bytes, free, retained_bytes}`
+  replaces `StagingAdmission` and `StagingPool`: `acquire` takes the
+  smallest kept buffer that fits without waiting, else waits for room, frees
+  too-small kept buffers and allocates; `release` keeps the buffer. The
+  budget is min(width, 12) x the largest `stagingBytes` (tensor plus widest
+  strided span), kept buffers included. `readInto` lowers its claim width
+  when fewer helpers start than permits taken. -149 against -310: `Staging`
+  keeps best-fit reuse and eviction, which the serial 14.96 GiB load needs
+  (ninth pass). Deviations: workers are W per pending batch, not "up to 2W"
+  (2W with programs or two starts, 3W in llmd's two-start loads; 384 threads
+  only at read_parallelism 128 with three starts); "except a request that
+  runs alone" is dropped, since `acquire` asserts `size <= budget`; small
+  tensors on kept large buffers run about 12 wide rather than the read width
+  (kept: a 2x eviction rule would map per tensor in a serial load); a failed
+  transfer logs `spec.parts[0]`. Fixed: the fifty-third pass's "buffered
+  helper reads run inline under a busy Threaded io", the unheld budget and
+  the latent hang on a canceled `LimitedGroup` admission (Part 2's bugs
+  met). The thirty-first pass's watch task halving the buffered remote
+  parallelism under a finite `async_limit` no longer applies, and the
+  fifteenth pass's staging at "`min(width, 12)` tensors" is now the byte
+  budget above.
+- W2F, the wave-2 review's five confirmed code findings (+73/-65): the
+  worker's catch logs only `source request: file={s}, job={t}`, since
+  `readSlot` records every open and read and only an OutOfMemory (bounce
+  buffer, queue reservation, logged at debug) reaches it; offset and minimum
+  length, which the forty-sixth pass kept on the request's line, are on
+  readSlot's line. A failed `onReady` awaits and destroys its event at once,
+  and `retireBatch`'s event loop went (it drains the pumps and asserts every
+  request completed). The buffered `loadOne` re-checks `first_error` after
+  acquiring its staging: after `abort`, a worker parked in `Staging.acquire`
+  still loaded its whole tensor, up to about 3W-12 tensors at W=32; a new
+  test fails 'expected 0, found 1' without the check. `staging_tensors`'s
+  doc lost its history and `Staging.widen`'s a wrong reason. `writeTestFile`
+  replaces six copies of a tmp-file block (seven callers with M18's test).
+  Refuted: that M12's arena, M15's reads in flight and M17's staging high
+  water need a probe in the A/B. None is logged, but the last two hold by
+  construction (the `read_permits` semaphore; `Staging.acquire`'s assert),
+  both exercised by CPU tests, and M12's was already recorded.
+- M18, completion self-checks PJRT already does ([28], [30], [56]'s
+  setBufferError half): first the test 'a default-memory output a failed
+  load left unfinished reports an error on every device' (`testing.Devices`
+  with 2; a replicated u8 tensor of 3 requests whose reads fail from the
+  third; each shard's ready event must carry an error). Gone: awaitBatch's
+  `SetBufferError` pass with its double-failure CHECK abort,
+  `Target.closed`, `HostWritten`, `host_written`, `host_total`,
+  `TensorTransfer.fullySubmitted` (inlined), pjrt's `setBufferError` and
+  `setBufferErrorUnknown`. Destroying a batch destroys its transfer
+  managers, and XLA's `CommonAsyncHostToDeviceTransferManager` destructor
+  errors every buffer whose last transfer never went out: 'Internal: Async
+  transfer object was deleted before transfers completed.' A host
+  destination keeps only the debug `unread_bytes == 0` check (Part 2's
+  accepted cost); its zero fill (host_fill returns before `recordRead`) is
+  covered only by CPU content tests. -16 against -70. Deviations: Part 2
+  counts the fifth pass's oneAPI abort among the removed CHECKs, but that is
+  the submit-path CHECK in `TransferRawDataToSubBuffer` (through
+  `transferData`), unchanged; "the `Internal` failure for a batch that
+  missed a last transfer" has been a panic since before wave 2, kept for DMA
+  targets. Supersedes the fifth pass's `Target.closed` marking (its "a
+  buffer failed asynchronously, then marked, still aborts" is gone with the
+  marking), the tenth pass's `setBufferErrorUnknown` (its transferData half
+  holds) and the twenty-second pass's `host_written` count.
+- M19, one host-memory arena list ([52]): `HugePageAllocator`,
+  `PinnedHostAllocation`, the `PjrtHost` and `Pages` payload types, the
+  per-arm `allocations` lists, `arenaCount`/`arenaAt`, `Backend.allocate`,
+  `discovered_nodes` and the running `Workspace.mapped_bytes` are gone.
+  `Workspace.arenas: std.ArrayList(Arena{bytes, pjrt_buffer})` with
+  `mappedBytes()`; `Backend` is `union{pjrt_host{platform, host_nodes},
+  pages{platform, numa_mask}}` with `map` and `unmap`; `HostNode.node: ?u32`
+  dedupes nodes. `allocate` reserves the arena's slot before mapping, so a
+  mapped arena is always retained and counted by the ROCm balancer. Log
+  lines are unchanged. -73 against -40. Deviations: `mappedBytes()` is new
+  pub surface; `place`, `pageAlignment` and `adviseHugePages` are helpers
+  inside `Backend`. This replaces the `HugePageAllocator` of "API follow-ups
+  after the tenth pass" and of the thirty-fifth pass (#35's `free` is
+  `Backend.unmap`) and the sixteenth pass's `Pages` payload.
+
+Checks: `//zml:test` 376 passed, 29 skipped, against the fifty-fifth pass's
+373: -1 M12 ('plan construction releases allocations and takes transfers
+only on success'); +2 M15 ('exactly the width of reads are in flight, and a
+read failing mid-load leaves nothing held', 'a worker waiting for a credit
+when the loader fails gets one back and stops'); M17 swaps 'staging
+admission bounds concurrent tensors by bytes and always admits one' and
+'staging pool retains up to the peak the tasks held and prefers the sizes
+that fit' for 'staging holds live and retained bytes within one budget' and
+'buffered loader runs overlapping batches over their cursors, with or
+without concurrency'; +1 W2F ('a worker waiting for its staging loads
+nothing once the loader failed'); +1 M18. `//vfs:test` 54; examples build;
+llmd 10/10 (`llmd:test` 256, 9 skipped; `weights_test` 25). Outside the
+gate, `//stdx:test` gains `FirstError`'s test and loses `LimitedGroup`'s
+five.
+
+Lines (CTX.md and LOADER_DESIGN_REVIEW.md excluded): zml against `rework` 15
+files +1,943/-2,457 (-514), against Part 2's about -885 (-775 and -110);
+against 93428bd0, 60 files +4,688/-5,938 (-1,250). Monorepo against `rework`
+3 files +29/-24 (+5, F1); against 0bf031d9, 31 files +914/-1,412 (-498). Per
+step: M11 -12, M12 -93, M13 -56, M14 -110, M15 +40, M16 -57, F1 +4, M17
+-149, W2F +8, M18 -16, M19 -73.
+
+GPU A/B. Part 2 asked for a GB300 and B70 A/B against HEAD; it ran on
+gb300-1 and mi300 against `rework`. Trees: w1 and w2 as in the fifty-sixth
+pass (w2 has no M17); w3 = the final tree. Builds as there, but gb300-1's
+examples/io is now release_safe (asserts checked); mi300's stays dbg, on
+page-cached checkpoints. gb300-1's examples/io series pin the block
+(`ZML_DMA_BENCH_BLOCK_MIB=16`) and direct I/O (`ZML_DIRECT_IO=on`); mi300's
+calibrate on every load (16 MiB in every run). Trees are interleaved; log
+builds enable `zml/io/load`, `zml/io` and `zml/mem` at debug. Every llmd
+run answered "Paris" and "391".
+
+gb300-1 (w1 against w2, then against w3):
+- Suites: w3 405 tests, 368 passed, 35 skipped, 2 failed (w2 in the
+  fifty-sixth pass; Sharding's GSPMD test and FlashInfer, pre-existing). 15
+  io tests skip on aarch64 (no CPU platform), M15's width test among them;
+  M18's test runs on the CUDA devices.
+- Counters identical in every pair: DeepSeek-V4.1-Flash in examples/io
+  sharded over 4 GPUs (with an instrument edit that replicates its
+  indivisible tensors, and a BFC pool, `ZML_GPU_MEMORY_FRACTION=0.9`) 30,446
+  reads, 413,349 transfers, 431,751 DMA submissions, credits 49 of 49;
+  Qwen3.8-27B-FP8 sharded 1,860 reads and 4,919 submissions, tp 424 staged
+  jobs and 5,261 submissions, host_pinned and host_mapped 1,860 host jobs.
+- Loads within spread (medians, s): DeepSeek 10.12 -> 9.88 (w2, n=5) and
+  10.73 -> 10.34 (w3, n=3); Qwen sharded 1.463 -> 1.404 (w2, n=5), not
+  reproduced at w3 (1.293 -> 1.299, n=3); tp 1.282 -> 1.268 (w2, n=5) and
+  1.275 -> 1.265 (w3, n=7); host_pinned 0.731 -> 0.724 (w2) and 0.586 both
+  (w3); host_mapped 0.736 -> 0.737 (w2) and 0.590 -> 0.587 (w3), n=3 each.
+  DeepSeek `planning_elapsed` 0.078 -> 0.073 s (w2; every w2 run below
+  every w1 run) and 0.073 -> 0.068 s (w3).
+- Admission (M11), llmd DeepSeek-V4.1-Flash TP=2 log builds: submissions 41,
+  `execute_admission_retires` 39-40, every group measured (inputs 2.32 GiB,
+  execution 2.34 GiB), max `pending_execution` 44.43-44.46 GiB and one
+  oversize warning per run, on every tree.
+- Calibration (M16): `io dma-bench` 10 of 10 `block_bytes=16777216
+  parallelism=8`; llmd `dma_bench` 183.5-184.2 GiB/s at 16 MiB on both
+  trees.
+- M19's lines identical: examples/io Qwen on 2 GPUs `kind=dma_map
+  placement=interleave nodes=0x3` arenas of 128/128/288 MiB, retained 544,
+  pregrown 416 MiB; DeepSeek on 4 GPUs 128/384/288, retained 800, pregrown
+  672; llmd Qwen on 1 GPU 256/160 MiB with a 416 MiB teardown in 26-27 ms;
+  llmd DeepSeek TP=2 256/288 MiB, retained 544, pregrown 288, teardown 544
+  MiB in 31-34 ms.
+- Failure injection: a Qwen3.8-27B-FP8 copy whose last-planned file is cut
+  to 160002048 B mid-load, 12 runs (w2) and 14 (w3) over sharded, tp,
+  host_pinned and host_mapped: one err line, the error from `wait`, exit 1,
+  start to exit 3.8-6.5 s on both trees; no abort, hang, PJRT or CHECK line;
+  `destroy` ran (the summary and DMA counters print after the error). One
+  read permit (`ZML_LOAD_READ_PARALLELISM=1`): one line, exit 1. chmod 000
+  or rm after start fails in the planner's open ('plan batch 0, source=...,
+  published_plans=65: AccessDenied') with 11 DMA submissions out, M18's
+  case: one line, exit 1 after 2.0 s. llmd on the cut copy: one line, exit
+  0.36-0.38 s after it.
+- M18's test passes on 4 GB300 (`testing.Devices` with 2 takes all four). A
+  probe build printed, per shard, 'ready with error internal: Async transfer
+  object was deleted before transfers completed.'
+- `ZML_LOAD_CHECK=1`: DeepSeek-V4.1-Flash at w2 96085 of 96085 tensors
+  (758.49 GiB checked); Qwen3.8-27B-FP8 at w3, 8 runs over host_pinned and
+  host_mapped (sharded, replicated, tp, `ZML_DIRECT_IO=on`) and default
+  memory: 1606 of 1606.
+- End to end at w3: DeepSeek-V4.1-Flash 5.75 ms/step with the same KV plan
+  (5148591 pages); Qwen3.8-27B-FP8 + DFlash2 20.12 ms/step at 3.28
+  tokens/step.
+
+mi300 (w1 against w2, then against w3; GPUs 0-3 unless stated):
+- Suites: w3 405 tests, 380 passed, 24 skipped, 1 failed (w2 in the
+  fifty-sixth pass; Fly, pre-existing). Both M15 tests pass on x86.
+- Counters identical: Llama-3.1-8B sharded 960 reads and 2,088 submissions,
+  tp 1,842 reads, 3,464 submissions and 331 staged jobs, host_mapped 960
+  host jobs; DeepSeek-V4-Flash on one GPU (BFC 0.95) 9,524 reads and 69,572
+  submissions, about one per tensor of 69,187 (Part 2's DeepSeek reference;
+  its "about 5,468" submissions and 1-4 ms planning are Llama-3.1-8B tp on
+  four B70, twenty-fifth and twenty-sixth passes; DeepSeek here plans in
+  155-190 ms over 46 plans, dbg); Qwen3.8-27B-FP8 1,860 and 8,131; llmd
+  DeepSeek-V4.1-Flash 75,786 reads, 176,318 submissions, 160 staged jobs.
+- Loads within spread: Llama sharded 1.165 -> 1.163 s (n=10, rank-sum
+  p~0.55), tp 1.173 -> 1.182 s (p~0.41), host_mapped 13.18 -> 13.10 s
+  (allocation-bound); DeepSeek-V4-Flash 9.021 -> 8.914 s; llmd DeepSeek
+  85.06 -> 84.08 s (log builds; w3log 87.89 and 81.98 s).
+- Admission: submissions 41, retires 40 and the `pending_execution` sequence
+  identical on every tree; `extra_device_memory_bytes` 50689508496
+  throughout.
+- Calibration: 16 MiB in every io and llmd load; its time is bimodal on
+  every tree (~345-375 ms or ~1120-1195 ms).
+- M19's lines identical across 27 runs: `kind=pjrt_host device=0`
+  256/256/288 MiB on GPUs 0-3, and 'device=0 256, device=2 256, device=0
+  288' on GPUs 0,1,4,5 (the per-node balance); retained 800, pregrown 544,
+  pinned_mapped 800 MiB; `retained_mapped_bytes=268435456`; teardown 800
+  MiB. pregrowth 238.4 -> 245.7 ms in io (wave 1: 245-249).
+- Failure injection: a Llama copy truncated mid-`lm_head` before any read,
+  15 runs (5 modes x 3 trees): one line with file and offset,
+  UnexpectedEndOfFile from `wait`, `destroy` 13-20 ms after the error with
+  default memory and 1.9-2.0 s with host-resident memory, alike on every
+  tree. An LD_PRELOAD shim returning EOF or EIO mid-file (w2): the same. A
+  real device-allocation failure (DeepSeek-V4-Flash on one GPU under the
+  default allocator): one 'initialize tensor ... ResourceExhausted' line,
+  `destroy` 0.5 s later. No PJRT line names the errored buffers: nothing
+  awaits them before they are freed.
+- M18: the suite passes it; alone, 10 of 10 on 4 and on 2 MI300X; a probe
+  printed the same 'Internal: Async transfer object was deleted before
+  transfers completed.'; no CHECK abort or hang.
+- `ZML_LOAD_CHECK=1` at w3: Llama host_pinned and host_mapped, sharded and
+  replicated, direct I/O auto and on: 291 of 291 in all six.
+  DeepSeek-V4-Flash at w2: 69187 of 69187.
+- End to end at w3: Qwen3.8-27B-FP8 + DFlash2 39.25 and 38.61 ms/step at
+  3.37-3.39 tokens/step; DeepSeek-V4.1-Flash 466.95 GiB in 2m3.4s (86.8 s
+  waiting for compiles), 12.53 ms/step, the same KV plan.
+
+Findings:
+- DeepSeek examples/io on gb300-1 exits ~2 s sooner since wave 2, all in
+  teardown: wall 17.33-17.88 s (w3) against 19.27-20.04 s (w1) at the same
+  load time; loader summary minus 'Loaded weights' 0.485-0.502 s against
+  1.107-1.354 s. Likely M12's one arena per batch; not traced.
+- MI300 staged tensor-parallel loads hold more credits and spend longer per
+  DMA submission since w2, at no cost. llmd Llama-3.1-8B over 4 GPUs (474
+  staged jobs; log builds, w1 against w3), 5 runs each:
+  `credits_high_water` 25, 23, 25, 25, 25 -> 28, 26, 28, 31, 35 of 49
+  (p~0.008), `dma_submit_us_per_piece` 13.65 -> 19.03 (p~0.03), load 0.894
+  -> 0.855 s; io tp (331 staged jobs; w1 against w2) dma_stage 2.89 -> 3.41
+  ms/read. Absent from sharded loads, DeepSeek-V4-Flash and GB300's tp.
+  The timed code matches w1's; suspected: M13's `dma_land` changes when
+  staged jobs reach the queues. Credits are fixed slots in mapped memory, so
+  the higher peak costs nothing. To confirm (a code change): time
+  `transferData` and `onReady` apart in `submitTransfer` and count the
+  callbacks run inline (`dma_piece_ns` near 0).
+- llmd's DeepSeek planning counters vary between runs of one binary on
+  gb300-1: 71,134 / 71,122 / 71,120 DMA submissions and 60,607 / 60,697 /
+  60,712 reads, batch 0 identical. Not a tree difference. Guess, unchecked:
+  per-file direct-I/O auto decisions that depend on the page cache
+  (examples/io with `ZML_DIRECT_IO=on` and mi300's page-cached llmd repeat
+  exactly).
+- llmd still flips between 8 and 16 MiB on GB300 (thirty-third pass; llmd
+  cannot pin the block): 8 MiB in the first DeepSeek log pair on both trees,
+  once per tree in the Qwen log series, once in an end-to-end pair. Arenas
+  and counters follow the block (Qwen on 1 GPU: the 256 MiB ring alone at 8
+  MiB, 256 + 160 at 16; 3,535 reads and 4,465 submissions against 1,776 and
+  2,705), so llmd load A/Bs are confounded; examples/io pins it.
+- Not the loader: one 18.43 s end-to-end DeepSeek load at w3 beside another
+  load at host load 37 (three later w3 loads took 9.64-10.06 s); one 19.24 s
+  w2 load, the Engram registration stall (ahead_init 11.3 s; thirty-third
+  pass); one compile-time transient to 281,191/283,143 MiB before any load.
+- `min_room_seen` reaches 0 B in some DeepSeek runs on every tree: the
+  pre-existing admitted-anyway path. A proposal to record the device and
+  submission of the minimum was not taken.
+
+Declined: the mi300 report proposed making M18's test print the plugin's
+message (a `std.log.warn`, or the `output.await` the review deleted). The
+test asserts that every shard's event is ready with an error, a passing test
+prints nothing, and the message is recorded here.
+
+Left:
+- Not reached (Open work lists them): the DMA-callback failures, which need
+  a plugin-level fault injector (M18's double failure, M14, W2F's failed
+  onReady, M15, M16); a remote source failing mid-load; Furiosa, oneAPI
+  (the B70 A/B) and the buffered backend (M17, W2F); M12's arena, M15's
+  reads in flight and M17's staging high water, none logged; the buffered
+  start counts and a planning failure beside a stuck one, untested.
+- readSlot's open failure was not reached: when `io` is a VFS and direct
+  I/O is auto or on, the planner opens each local file before its reads
+  (`Reads.alignmentOf`), and an open descriptor survives chmod and rm. With
+  `ZML_DIRECT_IO=off` or an `io` that is no VFS, the first read opens a
+  local file, so a chmod or rm after `start` would reach readSlot; so would
+  a remote file's open failure (neither run).
+- W2F's buffered test relies on a 5 ms sleep to park its worker; it cannot
+  fail falsely.
+- Left as records: LOADER_REVIEW.md:452 and :758 build on `host_written`
+  (if that CUDA registration-stall fix is ever taken, trigger on
+  `Destination.unread_bytes` reaching 0); :718 proposes what M18 did
+  (SetBufferError, `Target.closed`); PLAN.md:103-104; Part 2's texts for
+  M12, M15, M17 and M18 (the deviations above).
+
+With the records, two code doc comments were fixed (the `DevicePump`
+comment no longer names `IncompleteTransfer`; `Options.read_parallelism`
+says the direct backend clips so `width + 1` requests fit under the mapped
+ceiling beside its DMA reserve), and "Current design"'s CPU pre-growth was
+measured: Llama-3.1-8B sharded on four CPU devices (opt) logs
+`retained=268.00MiB` in two pageable arenas of 128 and 140 MiB,
+`source_width=16, lifecycle_credits=33, workers=17`, 14.96 GiB in 1.798 s.
+
 ## Open work
+
+Status on 2026-10-31: wave 1 is committed as `rework` (zml 8af7fd3c,
+monorepo b791da11); waves 2 and 3 (M11-M19), F1 and W2F are in the tree,
+uncommitted on top. All of it ran on gb300-1 and mi300 (fifty-sixth and
+fifty-seventh passes): no loader regression (one perf-neutral MI300
+credits shift, below), and F1 fixed what wave 1's runs found. Left of
+`LOADER_DESIGN_REVIEW.md`: M20 (outside the rework, a separate PR) and the
+Part 3 decisions not taken. "Current design" describes the final tree.
+Closed since 2026-10-29: the MI300 block-FP8 item (accuracy, M7's assert,
+Flash-Next-FP8 with F1) and most of wave 1 on a GPU (borrowed dims, M10's
+walks on 4 GB300 and 4 MI300X, the drafters, `hostMappedBytes`,
+examples/io on CUDA and ROCm), fifty-sixth pass; the wave-2 GPU A/B and
+read failures injected on CUDA and ROCm, fifty-seventh pass.
 
 Status on 2026-10-29: wave 1 of `LOADER_DESIGN_REVIEW.md` (M1-M4,
 M7-M10) and the VFS re-scope's steps are in the tree, uncommitted, none
@@ -5147,28 +5756,108 @@ monorepo): 35th R1 `zmxzvvly`/`szqpusxv`; 36th R3 `rktvmymx`/`yyqsnszp`;
 only).
 
 Loader and llmd:
-- MI300 / ROCm, not run since the rework: R9's block-FP8 accuracy on
-  CDNA3 (every block-FP8 model, re-encoded blocks especially), now with
-  stacked block-FP8 experts converted by `bindQuantized`, and a MoE run
-  showing no MI300 path reaches M7's block-FP8 expert assert
-  (forty-second, forty-ninth, fifty-fifth passes).
-- GB300 MoE kernel tests and the aarch64 CPU plugin (fifty-first pass);
-  M7's paths there: `bindQuantized`'s swizzled block-FP8 scales, cute
-  MXFP4 and FlashInfer NVFP4 experts through `layOutExperts`, the NVFP4
-  global programs (fifty-fifth pass).
-- Wave 1 on a GPU, not run (fifty-fifth pass): the direct backend
-  borrowing spec parts and dims (M3); M10's mesh walks on an accelerator
-  with more devices than a test asks for, and `expectShards`' memory
-  argument against real host spaces; the buffered backend on TPU, neuron
-  or metal (M3's `.default` assert, M10); llmd with a drafter (M8:
-  `Drafter.open`, two starts before one wait, DSpark native);
-  `hostMappedBytes` against the old `extra_device_memory_bytes` on an
-  offloaded DeepSeek-V4.1 or Qwen3.8-Flash-Next run; examples/io's load
-  path on CUDA, ROCm or oneAPI (M9), a remote checkpoint included.
+- GB300 MoE kernel tests and the aarch64 CPU plugin (fifty-first pass):
+  the Triton and CuTe MXFP4 matrices abort the binary and are skipped by
+  hand, the FlashInfer matrix fails MoeComplianceFailed, and without a CPU
+  plugin Sharding's GSPMD folded-axis test fails and 15 io tests skip,
+  M15's width test among them (fifty-seventh pass). M7's NVFP4 paths
+  (FlashInfer NVFP4 experts through `layOutExperts`, the NVFP4 global
+  programs) never ran: no NVFP4 checkpoint on gb300-1 or mi300 has a model
+  type llmd supports (mistral_large4, beam, lfm3), and ROCm refuses nvfp4
+  MoE (zml/kernels/moe/moe.zig:110). Block-FP8 experts through
+  `bindQuantized` and cute MXFP4 ran (fifty-sixth pass).
+- Wave 1 on a GPU, left (the fifty-sixth pass ran the rest):
+  `expectShards`' memory argument against real host spaces (the MI300 io
+  tests pass; no report names it); examples/io on oneAPI and from a remote
+  checkpoint; the buffered backend on TPU, neuron or metal (M3's
+  `.default` assert, M10).
 - Real checkpoints for M7's detect changes: the routers, gates and heads
   now built by `linear.create` or `maybeCreate`, a quantized lm_head or
-  g_proj (now loaded quantized), DeepSeek's `createBf16` `wo_a`. zoo was
-  built, not run (it needs network and an accelerator).
+  g_proj (now loaded quantized; none of the FP8 checkpoints gb300-1's llmd
+  runs used stores one, and mi300's were not inspected), DeepSeek's
+  `createBf16` `wo_a` (exercised only by DeepSeek answering correctly).
+  The `DSparkDrafter.init` leak fix's failure path. zoo was built, not run
+  (it needs network and an accelerator).
+- Waves 2 and 3, not reached by the GPU runs (fifty-seventh pass): every
+  DMA-callback failure needs a plugin-level fault injector: M18's
+  double-failure path (an asynchronous DMA failure, then an unrelated read
+  failure), M14's onReady freeing its PJRT error, W2F's failed-onReady
+  branch (no CPU coverage either), M15's `recordError` from a callback
+  while workers wait on credits, M16's failing transfer during the
+  screen. A remote source failing mid-load. Furiosa (M18, M19's
+  pjrt_host arm). The buffered backend (M17, W2F) on TPU, neuron or
+  metal: the staging high water and kept bytes against the min(width, 12)
+  x largest-request budget on a dense checkpoint, a serial
+  (read_parallelism 1) load of the 14.96 GiB Llama-3.1-8B, an hf://
+  Qwen3.5-4B load at width 32 (small tensors on kept large buffers, helper
+  splitting), and the peak thread count and first-batch retire time in a
+  two-start load. The B70 (oneAPI) A/B against `rework` that Part 2 asked
+  for: host-resident load time and read_operations after M14, and the
+  time from a failure to `wait` with `tensor_init_ms_per_read`, since M15
+  lets a job claimed before a failure create its destinations (at most
+  width + 1 jobs). Not logged, so unmeasured: M12's arena
+  (`Batch.arena.queryCapacity()` at retire) and peak host RSS on DeepSeek,
+  and reads in flight against `source_width` (a CPU test only, skipped on
+  aarch64). No test asserts the buffered workers' and helpers' start
+  counts (M17) or drives a planning failure while another failure is
+  stuck (M12).
+- MI300 staged tensor-parallel loads since wave 2 (fifty-seventh pass):
+  `credits_high_water` 23-25 -> 26-35 of 49 and `dma_submit_us_per_piece`
+  13.65 -> 19.03 on llmd Llama-3.1-8B over 4 GPUs (log builds, w1 against
+  w3), load equal or faster; cause unconfirmed (suspected: M13's
+  `dma_land` timing). Confirm by timing `transferData` and `onReady` apart
+  in `submitTransfer` and counting the callbacks run inline (a code
+  change).
+- After F1 (fifty-sixth pass): qwen4 logs no KV page count, so MI300's
+  count under the new page cost is unmeasured and GB300's FP8 at 0.3 was
+  not dumped (a page-count log line would close both); Flash-Next BF16 on
+  2x GB300 at the default fraction was not run, and the fifty-first
+  pass's need for 0.6 is unexplained (at the default fraction FP8 sees
+  236.50 GiB available, above BF16's 166.46 GiB fixed); MI300's FP8
+  greedy loop (1 of 6 runs on w2, 0 of 5 on w1fix) rests on few samples
+  and was not compared with CUDA.
+- Pre-existing, examples/io: its `sharded` mode splits axis 0 of every
+  tensor of rank > 0 (examples/io/main.zig:276-279), so no DeepSeek-V4.x
+  checkpoint binds over 2 or 4 GPUs: 89 tensors of V4.1-Flash (90 of
+  V4-Flash), 86 of them f32[3] `hc_attn_scale` and `hc_ffn_scale`, fail
+  with InvalidBinding (thirty-third pass, as `IncompatibleSharding`).
+  Proposed, not applied: replicate a tensor whose dim(0) % partitions !=
+  0, or an explicit mode.
+- Pre-existing, device allocators on examples/io's DeepSeek loads: CUDA's
+  default allocator fails with ResourceExhausted ('cuMemSetAccess for
+  peer device: CUDA_ERROR_OUT_OF_MEMORY') after ~97 GiB of
+  DeepSeek-V4.1-Flash sharded 4 ways (~96k buffers per device); ROCm's
+  default VMM allocator runs out of PA budget at 122.6 GiB of
+  DeepSeek-V4-Flash on one GPU. A BFC pool (`ZML_GPU_MEMORY_FRACTION` 0.9
+  or 0.95) loads them in ~10 s and ~9 s. Causes guessed: per-buffer VMM
+  and peer mapping; per-buffer rounding over ~34k small scale tensors.
+  llmd's DeepSeek (stacked experts, fewer buffers) is unaffected.
+- Pre-existing on mi300 (fifty-sixth pass): moe's Fly matrix cases 38,
+  39, 41, 42 (geglu, MXFP4) fail MoeComplianceFailed
+  (zml/kernels/moe/tests.zig:502); on 8 GPUs the suite aborts at the
+  paged-attention decltest, hkv=4 over 8 partitions
+  (paged_attention.zig:457; build its mesh over min(devices, hkv)
+  devices, or skip when hkv % devices != 0); DeepSeek-V4.1-Flash loads in
+  84-117 s against ~10 s on GB300 (its 189 GiB host_mapped engram
+  allocation at ~2.8 GiB/s overlaps 59-91 s waiting for loader compiles
+  that start only with the load; with the native drafter it waited 0 ms,
+  not investigated); Qwen3-4B-Instruct-2507 answers 17x23 = 401 at
+  temperature 0 (not checked on CUDA); Flash-Next-FP8 does not fit one
+  MI300X (NormalizeBlockFp8Weight).
+- Pre-existing, admission: 'program group exceeds the device room alone
+  ... admitted anyway' on DeepSeek-V4.1-Flash (both hosts), Flash-Next-FP8
+  and Qwen3.8-27B-FP8 (2 MI300X), and `min_room_seen` reaches 0 B in some
+  DeepSeek runs. Proposal, not taken: record the device and submission of
+  the minimum (loader.zig:631) and print them in 'loader admission:'.
+  That line prints min_room_seen=0B when no program group ran (the null
+  prints as 0, loader.zig:712).
+- Pre-existing on gb300-1: Flash-Next-FP8 decode is bimodal per process
+  (~9.0 or ~12.6 ms/step, per-process autotuning); its fixed memory went
+  87.13 -> 86.38 GiB and decode 11.65 -> ~9.0 ms/step between the
+  fifty-second pass and the rework's parent, unexplained. llmd's DeepSeek
+  planning counters vary between runs of one binary (71,120-71,134 DMA
+  submissions; guess, unchecked: direct-I/O auto decisions that depend on
+  the page cache).
 - No real remote (HF, S3, GCS, HTTPS) since R5, R6 and R15, nor since the
   fifty-fifth pass's VFS steps: the remote totals line was never seen
   printed; untested are hf's streaming and seek fixes, signed S3 through
@@ -5193,9 +5882,8 @@ Loader and llmd:
   and after the wave; no test shows examples/io's `checkLoaded` catches a
   corrupted buffer; llmd's ops/mla/state.zig keeps a dead
   `deinitOwnedParameterBuffers`.
-- Docs: the tutorial has no build target; "Current design" keeps
-  sixteenth-pass names in its direct backend sections; loader.md is 221
-  lines; LOADER_*.md say `getSourcesById`; `bazel/huggingface.bzl` reads
+- Docs: the tutorial has no build target; loader.md is 221 lines;
+  LOADER_*.md say `getSourcesById`; `bazel/huggingface.bzl` reads
   `HUGGINGFACE_TOKEN` (forty-eighth, forty-ninth passes).
 - Known limits, documented: a denied local file opened by name in
   `fromPath` is `AccessDenied`; the `deinit` warning fires on a caller's
@@ -5205,13 +5893,13 @@ Loader and llmd:
   tensor whose bits are not a multiple of 8 is `InvalidBinding`
   (forty-fifth, fifty-fifth passes); a `dma_block_sizes` block under
   32 KiB makes longer jobs (fiftieth pass).
-- Not checked on their own on a GPU (may be stale: see fifty-first
-  pass): the unlanded-bytes room, temporaries charged as a maximum,
-  host-pinned routing (forty-fifth); a model's free path (thirty-sixth)
-  and a progress bar watched to the end (thirty-seventh), both changed by
-  M8 (fifty-fifth pass).
-- ExpertLayout (`.loader` or `.device`) stays the user's call
-  (forty-fourth pass).
+- A model's free path (thirty-sixth pass) and a progress bar watched to
+  the end (thirty-seventh), both changed by M8: every GPU llmd run was
+  stopped by its PID. The measured admission (the unlanded-bytes room,
+  temporaries as a maximum; M11 rewrote it) and host-pinned routing ran
+  on both GPU hosts (fifty-seventh pass).
+- ExpertLayout: both arms (`.loader`, `.device`) stay (D7); choosing one
+  stays the user's call (forty-fourth pass).
 - LOADER_REVIEW items open since the thirty-first pass: S3 credentials
   and key encoding (#5, #12), GCS key files (#16), and the rest of #20's
   header checks (a tensor's byte size against `end - start`, `F8_E5M2`,
@@ -5231,7 +5919,9 @@ DeepSeek and calibration (2026-10-20, 10-21):
   thirty-third pass); otherwise read-bound at ~50 GiB/s; O_DIRECT re-read
   44 GiB of cached data; NCCL init holds a CPU for ~35 s (no sm_103
   code). Next steps are listed there. R12's `host_mapped` allocates
-  through the same `SharedHostAllocation`; not re-profiled.
+  through the same `SharedHostAllocation`; not re-profiled. The stall
+  showed again in one wave-2 GB300 load: ahead_init 11.3 s (11,346 ms;
+  fifty-seventh pass).
 - The calibrated request size (thirty-third pass): on GB300, 8 MiB sits
   on the DMA screen's 8% tolerance line, so the choice flips (4 of 10
   replicated and 2 of 10 sharded Qwen runs, 7 of 48 DeepSeek runs), and
@@ -5240,7 +5930,9 @@ DeepSeek and calibration (2026-10-20, 10-21):
   calibration measures DMA only. The rule also chose 2 MiB on a degraded
   MI300. Calibration caching per host/plugin, or re-screening on an
   implausibly low rate, is open. The user declined a fixed block size
-  (thirtieth pass): do not propose removing calibration.
+  (thirtieth pass): do not propose removing calibration. llmd still flips
+  on GB300 at w1, w2 and w3, and the arenas and counters follow the block
+  (fifty-seventh pass).
 
 Third-pass items left open; `PLAN.md` holds the checklist. Items whose
 setup changed since are marked.
@@ -5280,8 +5972,10 @@ setup changed since are marked.
   same manager); four further runs completed. The manager nulls the event
   under its own mutex before our callback runs, so no loader-side flag
   closes the window (fifth pass). If it recurs, stop submitting into a
-  manager whose event errored and surface the plugin error.
-- `--test_filter` is ignored by the rules_zig test runner.
+  manager whose event errored and surface the plugin error. M18 does not
+  touch this submit-path CHECK (fifty-seventh pass).
+- `--test_filter` is ignored by the rules_zig test runner, and so is a
+  `--test-filter` in `zig_test`'s `zigopts` (handoff rules).
 - Backpressure is process-global and load-untagged; real AWS runs need
   credentials this machine lacks.
 - CPU: the direct path is 14% slower than the buffered one on
@@ -5334,3 +6028,8 @@ fifteenth pass) and `load`/`loadInto` (gone since the thirty-fourth).
   rather than assuming a historical uncommitted edit still exists (may be
   stale: `VFS.Remotes` registers the remote schemes since R6, and the
   loader reads no VFS counters since R15).
+- rules_zig ignores a `--test-filter` passed through `zig_test`'s
+  `zigopts`: every test runs. To run one test on a GPU host, run the
+  whole suite (on GB300 with the moe Triton and CuTe MXFP4 matrices
+  skipped, since they abort the binary), or drive the test binary's
+  `--listen=-` protocol directly.

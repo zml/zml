@@ -1,10 +1,9 @@
 //! The loader's log scopes. A failure is logged once, where it is
-//! detected, at `err` with the values that explain it; cancellation,
-//! shutdown and a plain allocation failure log at `debug`. Frames that only
-//! propagate an error do not log it again. Test builds log `err` at
-//! `debug`, since the test runner counts logged errors as failures:
-//! error-path tests assert the returned errors and the cleanup, not the
-//! logs.
+//! detected, at `err` with the values that explain it; cancellation and a
+//! plain allocation failure log at `debug`. Frames that only propagate an
+//! error do not log it again. Test builds log `err` at `debug`, since the
+//! test runner counts logged errors as failures: error-path tests assert
+//! the returned errors and the cleanup, not the logs.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -26,14 +25,14 @@ fn Scoped(comptime scope: @EnumLiteral()) type {
         }
 
         /// The first failure of a pipeline, with the error's name appended.
-        /// Cancellation and shutdown are expected, an `InvalidBinding` was
-        /// logged where its rule was checked, and an `OutOfMemory` is a
-        /// plain allocation failure, returned unlogged, or was logged where
-        /// it failed (host memory): those log at `debug`.
+        /// Cancellation is expected, an `InvalidBinding` was logged where
+        /// its rule was checked, and an `OutOfMemory` is a plain allocation
+        /// failure, returned unlogged, or was logged where it failed (host
+        /// memory): those log at `debug`.
         pub fn failure(e: anyerror, comptime fmt: []const u8, args: anytype) void {
             const named_fmt = fmt ++ ": {s}";
             const named_args = args ++ .{@errorName(e)};
-            const logged = e == error.Canceled or e == error.Cancelled or e == error.Closed or e == error.InvalidBinding or e == error.OutOfMemory;
+            const logged = e == error.Canceled or e == error.Cancelled or e == error.InvalidBinding or e == error.OutOfMemory;
             if (logged) debug(named_fmt, named_args) else err(named_fmt, named_args);
         }
     };

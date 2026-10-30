@@ -151,16 +151,17 @@ pub fn main(init: std.process.Init) !void {
                 &zml.io.dma_calibration.default_block_sizes,
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
-            const calibration = try zml.io.dma_calibration.measure(allocator, io, platform, .{
+            const block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", zml.io.dma_calibration.depth);
+            const block_size = try zml.io.dma_calibration.measure(allocator, io, platform, .{
                 .block_sizes = block_sizes,
-                .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                .block_parallelism = block_parallelism,
                 .minimum_duration = .fromMilliseconds(std.math.cast(i64, window_ms) orelse return error.Overflow),
                 .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
                 .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
             });
             try stdout_writer.interface.print(
                 "dma_benchmark block_bytes={d} parallelism={d}\n",
-                .{ calibration.block_size, calibration.max_in_flight_per_device },
+                .{ block_size, block_parallelism },
             );
             try stdout_writer.flush();
         },

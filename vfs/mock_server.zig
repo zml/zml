@@ -6,6 +6,8 @@
 
 const std = @import("std");
 
+const stdx = @import("stdx");
+
 pub const MockServer = struct {
     /// How the server rate limits. A throttled answer carries the status
     /// and whichever of the two delay headers the test asked for.
@@ -58,7 +60,7 @@ pub const MockServer = struct {
     get_requests: std.atomic.Value(usize) = .init(0),
     active_gets: std.atomic.Value(usize) = .init(0),
     peak_gets: std.atomic.Value(usize) = .init(0),
-    first_error: std.atomic.Value(u16) = .init(0),
+    first_error: stdx.FirstError(anyerror) = .{},
     /// Awake nanoseconds of the first throttled answer and of the first
     /// answer served after one; zero until they happen.
     first_throttle_ns: std.atomic.Value(i64) = .init(0),
@@ -96,8 +98,7 @@ pub const MockServer = struct {
     /// first error the server met.
     pub fn stop(self: *MockServer, io: std.Io) !void {
         self.group.cancel(io);
-        const error_code = self.first_error.load(.acquire);
-        if (error_code != 0) return @errorFromInt(error_code);
+        if (self.first_error.get()) |err| return err;
     }
 
     /// Stops serving if `stop` did not, and closes the listening socket.
@@ -184,10 +185,6 @@ pub const MockServer = struct {
         return self.tcp.socket.address.getPort();
     }
 
-    fn recordError(self: *MockServer, err: anyerror) void {
-        _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-    }
-
     fn run(self: *MockServer, io: std.Io) std.Io.Cancelable!void {
         var connections: std.Io.Group = .init;
         defer connections.cancel(io);
@@ -196,13 +193,13 @@ pub const MockServer = struct {
             const stream = self.tcp.accept(io) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => {
-                    self.recordError(err);
+                    _ = self.first_error.set(err);
                     return;
                 },
             };
             connections.concurrent(io, onConnection, .{ self, stream, io }) catch |err| {
                 stream.close(io);
-                self.recordError(err);
+                _ = self.first_error.set(err);
                 return;
             };
         }
@@ -216,7 +213,7 @@ pub const MockServer = struct {
         defer stream.close(io);
         self.handleConnection(stream, io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => self.recordError(err),
+            else => _ = self.first_error.set(err),
         };
     }
 

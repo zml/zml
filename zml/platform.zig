@@ -441,7 +441,7 @@ pub const Platform = struct {
         const Worker = struct {
             platform: *const Platform,
             device_index: usize,
-            first_error: *std.atomic.Value(u16),
+            first_error: *stdx.FirstError(pjrt.ApiError),
 
             fn run(worker: @This()) void {
                 const dims: []const i64 = &.{1};
@@ -452,13 +452,13 @@ pub const Platform = struct {
                     .layout = worker.platform.defaultMemoryLayout(dims, .u8),
                     .dst = .{ .memory = memory.pjrt_memory },
                 }) catch |err| {
-                    _ = worker.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+                    _ = worker.first_error.set(err);
                     return;
                 };
                 buffer.deinit(worker.platform.pjrt_api);
             }
         };
-        var first_error: std.atomic.Value(u16) = .init(0);
+        var first_error: stdx.FirstError(pjrt.ApiError) = .{};
         var group: std.Io.Group = .init;
         // A failed spawn leaves the earlier tasks writing `first_error`.
         errdefer group.cancel(io);
@@ -468,8 +468,7 @@ pub const Platform = struct {
             .first_error = &first_error,
         }});
         try group.await(io);
-        const error_code = first_error.load(.acquire);
-        if (error_code != 0) return @as(pjrt.ApiError, @errorCast(@errorFromInt(error_code)));
+        if (first_error.get()) |err| return err;
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {

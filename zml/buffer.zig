@@ -423,8 +423,12 @@ test "device round-trip" {
 test "a buffer on a sub-mesh has one shard per device of that mesh" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const platform: *Platform = try .init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 4 } });
-    defer platform.deinit(allocator, io);
+    // Four devices: the accelerator's when it has them, else a CPU platform's
+    // (none on a host without the CPU plugin, such as aarch64 Linux).
+    var devices: testing.Devices = undefined;
+    devices.init(allocator, io, 4) catch return error.SkipZigTest;
+    defer devices.deinit();
+    const platform = devices.platform;
     // Two of the four devices, out of the platform's order.
     const nodes = [_]Sharding.PhysicalNode{ .device(platform.devices[3]), .device(platform.devices[1]) };
     var physical: Sharding.PhysicalMesh = try .fromTree(allocator, platform.target, .axis(.bus, .tree, &nodes));

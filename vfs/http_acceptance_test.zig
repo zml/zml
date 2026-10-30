@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
+
 const GCS = @import("gcs.zig").GCS;
 const HTTP = @import("http.zig").HTTP;
 const MockServer = @import("mock_server.zig").MockServer;
@@ -193,7 +195,7 @@ test "generic HTTP physical concurrency does not exceed caller admission" {
 
     var outputs: [admission][read_size]u8 = undefined;
     var results: [admission]usize = @splat(0);
-    var first_error: std.atomic.Value(u16) = .init(0);
+    var first_error: stdx.FirstError(anyerror) = .{};
     var start: std.Io.Event = .unset;
     var readers: std.Io.Group = .init;
     const Reader = struct {
@@ -203,16 +205,16 @@ test "generic HTTP physical concurrency does not exceed caller admission" {
             output: []u8,
             offset: u64,
             result: *usize,
-            first_error_: *std.atomic.Value(u16),
+            first_error_: *stdx.FirstError(anyerror),
             start_: *std.Io.Event,
         ) void {
             start_.wait(io_) catch |err| {
-                _ = first_error_.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+                _ = first_error_.set(err);
                 return;
             };
             const buffers = [_][]u8{output};
             result.* = file_.readPositional(io_, &buffers, offset) catch |err| {
-                _ = first_error_.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+                _ = first_error_.set(err);
                 return;
             };
         }
@@ -232,8 +234,7 @@ test "generic HTTP physical concurrency does not exceed caller admission" {
     start.set(io);
     try readers.await(io);
 
-    const reader_error = first_error.load(.acquire);
-    if (reader_error != 0) return @errorFromInt(reader_error);
+    if (first_error.get()) |err| return err;
     for (0..admission) |index| {
         try std.testing.expectEqual(read_size, results[index]);
         try std.testing.expectEqualSlices(

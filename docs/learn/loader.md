@@ -176,11 +176,11 @@ That holds for the buffers `bufferize` made, which `start` empties again.
 
 ## Errors
 
-`Loader.init` returns `InvalidOptions`, logged with the option it refuses,
-or `OutOfMemory`. `start` and `wait` return the error where it was
-detected, under its own name, and that is where it is logged, once, at
-err, with what explains it; a plain allocation failure and `Canceled` are
-returned unlogged.
+`Loader.init` returns only `InvalidOptions`, logged with the option it
+refuses; an error of the backend's set-up is returned by the first `start`.
+`start` and `wait` return the error where it was detected, under its own
+name, and that is where it is logged, once, at err, with what explains it;
+a plain allocation failure and `Canceled` are returned unlogged.
 
 A model whose bindings are wrong is `InvalidBinding`, whichever rule it
 breaks; the log names the tensor, the checkpoint key its source reads and

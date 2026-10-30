@@ -1,6 +1,6 @@
 # Loader design review (2026-10-28)
 
-**Status, 2026-10-29.** Wave 1 (M1-M4, M7-M10) is in the tree, uncommitted. M5 and M6 are replaced by the VFS re-scope, which keeps the vfs/ diff against master minimal (D4). Waves 2 and 3 (M11-M19) are open. CTX.md's fifty-fifth pass records what landed and how it differs from this review.
+**Status, 2026-10-31.** Waves 1-3 are done. Wave 1 (M1-M4, M7-M10, with the VFS re-scope that replaces M5 and M6 and keeps the vfs/ diff against master minimal, D4) is committed as `rework` (zml 8af7fd3c, monorepo b791da11). Waves 2 and 3 (M11-M19), with F1 (fixes found by wave 1's GPU runs) and W2F (fixes from the review of wave 2 as a whole), are uncommitted on top. All of it ran on gb300-1 (CUDA) and mi300 (ROCm). M20 (a separate PR) and the Part 3 decisions not taken stay open. CTX.md's fifty-fifth to fifty-seventh passes record what landed and how it differs from this review (wave 1 in the fifty-fifth, its GPU runs and F1 in the fifty-sixth, waves 2 and 3 in the fifty-seventh), which stays pinned to HEAD 93428bd0.
 
 This review looks at the design of the model loading rework in zml (HEAD 93428bd0, against master b37ba315) and in llmd (monorepo HEAD 0bf031d9, against dc7ba734). It judges every surface against one brief: do more with less. Fewer abstractions, not only fewer lines. Logic that reads locally. Abstractions that do not leak. Nothing left to remove.
 

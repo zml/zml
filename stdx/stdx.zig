@@ -87,6 +87,33 @@ pub fn Once(comptime f: anytype) type {
     };
 }
 
+/// The first error of concurrent tasks, kept once and readable by any of
+/// them. The state is the error's integer value, zero while none is kept.
+pub fn FirstError(comptime E: type) type {
+    return struct {
+        code: std.atomic.Value(@Int(.unsigned, @bitSizeOf(anyerror))) = .init(0),
+
+        /// Keeps `err` unless an error is kept already; true when this call
+        /// kept it.
+        pub fn set(self: *@This(), err: E) bool {
+            return self.code.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null;
+        }
+
+        pub fn get(self: *const @This()) ?E {
+            const code = self.code.load(.acquire);
+            return if (code == 0) null else @errorCast(@errorFromInt(code));
+        }
+    };
+}
+
+test FirstError {
+    var first: FirstError(error{ A, B }) = .{};
+    try std.testing.expectEqual(null, first.get());
+    try std.testing.expect(first.set(error.B));
+    try std.testing.expect(!first.set(error.A));
+    try std.testing.expectEqual(error.B, first.get().?);
+}
+
 /// Packed storage of sub-byte values
 ///
 /// Note: before Zig 0.17, @Vector(u2, 4) was always one byte and could be used as a storage type,

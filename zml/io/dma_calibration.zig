@@ -1,34 +1,36 @@
-//! DMA sizing for the direct backend: the block size and the transfers in
-//! flight per device, decided once when the backend is created. It screens
-//! the blocks of `Loader.Options.dma_block_sizes` (2 to 32 MiB by default)
-//! on one representative device, at a fixed eight transfers per device and
-//! over fixed windows, and keeps the smallest block within 8% of the
-//! measured peak; borderline candidates get longer, alternating
-//! confirmation windows. The ring it measures in stays mapped as the load's
-//! first pinned capacity. CPU returns the 4 MiB, eight-transfer defaults
-//! without measuring: its plugin's transfer is a memcpy, and a load takes
-//! the same time at every block size. The buffered backend has nothing to
-//! size. `measure` runs the same warm-up and screen without a loader, with
-//! every knob, for `examples/io`'s `dma-bench`.
+//! DMA sizing for the direct backend: the block size, decided once when the
+//! backend is created. It screens the blocks of
+//! `Loader.Options.dma_block_sizes` (2 to 32 MiB by default) on one
+//! representative device, at `depth` transfers per device and over fixed
+//! windows, and keeps the smallest block within 8% of the measured peak;
+//! borderline candidates get longer, alternating confirmation windows. The
+//! ring it measures in stays mapped as the load's first pinned capacity.
+//! CPU returns `cpu_block_size` without measuring: its plugin's transfer is
+//! a memcpy, and a load takes the same time at every block size. The
+//! buffered backend has nothing to size. `measure` runs the same warm-up
+//! and screen without a loader, with every knob, for `examples/io`'s
+//! `dma-bench`.
 const std = @import("std");
 
 const pjrt = @import("pjrt");
+const stdx = @import("stdx");
 
 const Platform = @import("../platform.zig").Platform;
 const backend = @import("backend.zig");
 const host_memory = @import("host_memory.zig");
 const log = @import("log.zig").io;
 
-/// Immutable result shared by every device participating in one load.
-pub const Result = struct {
-    block_size: usize,
-    max_in_flight_per_device: usize,
+/// Blocks in flight per device: the screen runs `depth` transfers (the
+/// default `Options.block_parallelism`), and the direct backend's DMA
+/// budget is `depth` blocks per device, in bytes (`DevicePump.hasRoom` in
+/// direct_loader.zig). Eight repeatedly won or tied on MI300X; wider stages
+/// mostly increased callback latency and pinned memory. Adaptive DMA width
+/// added state with little load benefit, so source width is the only
+/// runtime search.
+pub const depth: usize = 8;
 
-    pub const default: Result = .{
-        .block_size = 4 * 1024 * 1024,
-        .max_in_flight_per_device = 8,
-    };
-};
+/// The block CPU loads with, unmeasured (`calibrate`).
+pub const cpu_block_size: usize = 4 * 1024 * 1024;
 
 /// Keep a block screen rather than adopting one accelerator's preferred size.
 /// Historical loads on one MI300X measured 23.84/24.90/25.43 GiB/s at
@@ -49,24 +51,18 @@ pub const default_block_sizes = [_]usize{
 /// other defaults; `measure` takes them all.
 pub const Options = struct {
     block_sizes: []const usize = &default_block_sizes,
-    /// Fixed per-device width used by the block screen and the loader, at
-    /// most `max_block_parallelism`.
-    /// Eight repeatedly won or tied on MI300X; wider stages mostly increased
-    /// callback latency and pinned memory. Adaptive DMA width added state with
-    /// little load benefit, so source width is the only runtime search.
-    block_parallelism: usize = 8,
+    /// Transfers in flight per device in the screen, at most
+    /// `max_block_parallelism`. The loader keeps `depth`.
+    block_parallelism: usize = depth,
     /// A screen window runs for at least this long and, unless the target is
     /// zero, until the representative device completes the transfer target.
     /// Reducing 10 ms/128 transfers to 2 ms/32 shortened calibration with
     /// eight MI300X from 4.834 to 0.956 s while still selecting 16 MiB and
     /// width eight. Short screens sometimes selected the wrong block under
-    /// noise, hence the longer borderline confirmation below.
+    /// noise, hence the longer borderline confirmation windows
+    /// (`confirmation_duration`).
     minimum_duration: std.Io.Duration = .fromMilliseconds(2),
     minimum_transfers: u64 = 32,
-    /// Borderline block candidates receive longer paired windows, alternating which runs first.
-    confirmation_duration: std.Io.Duration = .fromMilliseconds(25),
-    confirmation_minimum_transfers: u64 = 256,
-    confirmation_margin: f64 = 0.02,
     /// Prefer the smallest block within this tolerance of the measured peak
     /// transfer throughput.
     block_selection_tolerance: f64 = 0.08,
@@ -75,14 +71,22 @@ pub const Options = struct {
 /// The widest screen `measure` takes.
 pub const max_block_parallelism: usize = 32;
 
+/// Borderline block candidates receive longer paired windows, alternating
+/// which runs first. A candidate is borderline when its rounds disagree on
+/// whether it is near the peak, or when its median ratio to the peak lies
+/// within `confirmation_margin` of the tolerance's floor.
+const confirmation_duration: std.Io.Duration = .fromMilliseconds(25);
+const confirmation_minimum_transfers: u64 = 256;
+const confirmation_margin: f64 = 0.02;
+
 /// Measures as the direct loader's creation does, without a loader and with
-/// every knob of `opts`: warms the device allocators, then screens the
-/// blocks in a workspace of its own, released before it returns. CPU
-/// returns the defaults without measuring; a platform that loads through
-/// the buffered backend (`backend.loadsDirect`) returns
-/// `UnsupportedPlatform`. A knob out of range is `InvalidOptions`, logged.
-/// For `examples/io`'s `dma-bench`.
-pub fn measure(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) !Result {
+/// every knob of `opts`, and returns the block it selects: warms the device
+/// allocators, then screens the blocks in a workspace of its own, released
+/// before it returns. CPU returns `cpu_block_size` without measuring; a
+/// platform that loads through the buffered backend (`backend.loadsDirect`)
+/// returns `UnsupportedPlatform`. A knob out of range is `InvalidOptions`,
+/// logged. For `examples/io`'s `dma-bench`.
+pub fn measure(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) !usize {
     try validate(opts);
     if (!backend.loadsDirect(platform)) {
         log.err("DMA calibration: {t} loads through the buffered backend, which has no DMA to measure: UnsupportedPlatform", .{platform.target});
@@ -113,74 +117,39 @@ fn validate(opts: Options) error{InvalidOptions}!void {
             return error.InvalidOptions;
         }
     }
-    if (opts.minimum_duration.nanoseconds <= 0 or opts.confirmation_duration.nanoseconds <= 0) {
-        log.err("invalid DMA calibration options: minimum_duration={f}, confirmation_duration={f}, expected more than zero: InvalidOptions", .{ opts.minimum_duration, opts.confirmation_duration });
+    if (opts.minimum_duration.nanoseconds <= 0) {
+        log.err("invalid DMA calibration options: minimum_duration={f}, expected more than zero: InvalidOptions", .{opts.minimum_duration});
         return error.InvalidOptions;
     }
     // Written so that NaN fails too.
-    if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1)) {
-        log.err("invalid DMA calibration options: block_selection_tolerance={d}, confirmation_margin={d}, expected [0, 1): InvalidOptions", .{ opts.block_selection_tolerance, opts.confirmation_margin });
+    if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1)) {
+        log.err("invalid DMA calibration options: block_selection_tolerance={d}, expected [0, 1): InvalidOptions", .{opts.block_selection_tolerance});
         return error.InvalidOptions;
     }
 }
 
-/// Measures one representative device into the direct loader's workspace;
-/// CPU returns defaults without measuring. On a platform mixing device
-/// kinds, device 0's sizing serves every device: it is a tuning choice,
-/// valid for all of them. `opts` were checked (`validate`, or
-/// `Loader.init` for the loader's block sizes).
+/// Measures one representative device into the direct loader's workspace
+/// and returns the block it selects; CPU returns `cpu_block_size` without
+/// measuring. On a platform mixing device kinds, device 0's block serves
+/// every device: it is a tuning choice, valid for all of them. `opts` were
+/// checked (`validate`, or `Loader.init` for the loader's block sizes). The
+/// rate the `dma_bench` line logs is that one device's synthetic H2D rate,
+/// not the platform's nor a prediction of a checkpoint's load speed.
 pub fn calibrate(
     workspace: *host_memory.Workspace,
     platform: *const Platform,
     opts: Options,
-) !Result {
+) !usize {
     // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
     // the submitting thread. With four PJRT CPU devices, warm sharded Llama took
-    // 1.55-1.60 s at 2, 8 and 16 MiB blocks, so the defaults stand and the
+    // 1.55-1.60 s at 2, 8 and 16 MiB blocks, so the default stands and the
     // loader grows its own arenas. Calibration spent 607 ms measuring
     // 102 GiB/s into a reused ring; the load instead first-touched fresh
     // device buffers in 4 KiB pages (3.94M minor faults for 14.96 GiB).
     // The synthetic bandwidth was not the load's bottleneck; other
     // page-size/THP configurations were not measured.
-    if (platform.target == .cpu) return .default;
+    if (platform.target == .cpu) return cpu_block_size;
 
-    const result = try measureTransfer(workspace, platform, opts);
-
-    log.debug("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} duration={f} retained_mapped_bytes={d}", .{
-        @tagName(platform.target),
-        platform.devices.len,
-        platform.devices[0].kind(),
-        result.calibration.block_size,
-        result.calibration.max_in_flight_per_device,
-        result.measured_bytes_per_second / (1024 * 1024 * 1024),
-        result.duration,
-        result.retained_mapped_bytes,
-    });
-
-    return result.calibration;
-}
-
-const sample_count = 3;
-
-/// What one benchmark reports internally for the summary log.
-const Report = struct {
-    calibration: Result,
-    retained_mapped_bytes: usize,
-    measured_bytes_per_second: f64,
-    duration: std.Io.Duration,
-};
-
-/// Measures synthetic PJRT transfers on one representative device.
-/// Every addressable device allocator is still warmed; benchmark allocations
-/// remain mapped in the supplied workspace for later use.
-/// The reported rate is that one device's synthetic H2D rate, not aggregate
-/// platform throughput or a prediction of checkpoint load speed. All-device
-/// warm-up and retained capacity do not turn this into an all-device sample.
-fn measureTransfer(
-    workspace: *host_memory.Workspace,
-    platform: *const Platform,
-    opts: Options,
-) !Report {
     const allocator = workspace.allocator;
     const io = workspace.io;
     const start: std.Io.Timestamp = .now(io, .awake);
@@ -190,7 +159,7 @@ fn measureTransfer(
         max_total_bytes = @max(max_total_bytes, block_size * opts.block_parallelism);
     }
     // Map one ring for the largest candidate at the fixed transfer width;
-    // every candidate reuses it.
+    // every candidate reuses it, and the load keeps it.
     const calibration_source = try workspace.allocate(max_total_bytes);
 
     var session = try Session.init(allocator, io, platform, opts.block_sizes, opts.block_parallelism);
@@ -199,28 +168,25 @@ fn measureTransfer(
     const candidates = try allocator.alloc(Candidate, opts.block_sizes.len);
     defer allocator.free(candidates);
     for (candidates, opts.block_sizes, 0..) |*candidate, block_size, index| {
-        candidate.* = .{
-            .io = io,
-            .platform = platform,
-            .manager = session.manager,
-            .buffer_offset = index * opts.block_parallelism,
-            .buffer_count = opts.block_parallelism,
-            .block_size = block_size,
-        };
+        candidate.* = .{ .block_size = block_size, .buffer_offset = index * opts.block_parallelism };
     }
     try measureAllCandidates(&session, opts, candidates, calibration_source);
     const winner = try selectCandidate(&session, opts, candidates, calibration_source);
 
-    return .{
-        .calibration = .{
-            .block_size = winner.block_size,
-            .max_in_flight_per_device = opts.block_parallelism,
-        },
-        .retained_mapped_bytes = workspace.mapped_bytes,
-        .measured_bytes_per_second = winner.metrics.bytesPerSecond(),
-        .duration = start.durationTo(.now(io, .awake)),
-    };
+    log.debug("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} duration={f} retained_mapped_bytes={d}", .{
+        @tagName(platform.target),
+        platform.devices.len,
+        platform.devices[0].kind(),
+        winner.block_size,
+        opts.block_parallelism,
+        winner.metrics.bytesPerSecond() / (1024 * 1024 * 1024),
+        start.durationTo(.now(io, .awake)),
+        workspace.mappedBytes(),
+    });
+    return winner.block_size;
 }
+
+const sample_count = 3;
 
 fn measureAllCandidates(
     session: *Session,
@@ -234,9 +200,9 @@ fn measureAllCandidates(
             const candidate = &candidates[index];
             const metrics = try runWindow(
                 session.io,
+                session,
                 candidate,
-                source[0 .. candidate.block_size * opts.block_parallelism],
-                opts.block_parallelism,
+                source,
                 opts.minimum_duration,
                 opts.minimum_transfers,
             );
@@ -281,11 +247,9 @@ fn selectCandidate(
             candidate_index,
             peak_index,
             opts.block_selection_tolerance,
-            opts.confirmation_margin,
         )) {
             const confirmation = try confirmCandidateAgainstPeak(
-                session.io,
-                opts,
+                session,
                 &candidates[candidate_index],
                 &candidates[peak_index],
                 source,
@@ -315,7 +279,6 @@ fn isCloseToPeak(
     candidate_index: usize,
     peak_index: usize,
     tolerance: f64,
-    margin: f64,
 ) bool {
     if (candidate_index == peak_index) return false;
     const candidate = candidates[candidate_index];
@@ -343,12 +306,11 @@ fn isCloseToPeak(
     const candidate_rate = candidate.median().bytesPerSecond();
     const peak_rate = peak.median().bytesPerSecond();
     const ratio = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
-    return @abs(ratio - (1.0 - tolerance)) <= margin;
+    return @abs(ratio - (1.0 - tolerance)) <= confirmation_margin;
 }
 
 fn confirmCandidateAgainstPeak(
-    io: std.Io,
-    opts: Options,
+    session: *Session,
     candidate: *Candidate,
     peak: *Candidate,
     source: []const u8,
@@ -362,12 +324,12 @@ fn confirmCandidateAgainstPeak(
             [_]*Candidate{ peak, candidate };
         for (order) |measured| {
             const metrics = try runWindow(
-                io,
+                session.io,
+                session,
                 measured,
-                source[0 .. measured.block_size * opts.block_parallelism],
-                opts.block_parallelism,
-                opts.confirmation_duration,
-                opts.confirmation_minimum_transfers,
+                source,
+                confirmation_duration,
+                confirmation_minimum_transfers,
             );
             if (measured == candidate)
                 candidate_runs[repeat] = metrics
@@ -409,18 +371,21 @@ fn medianThroughputRatioIndex(
     return ordered_indices[ordered_indices.len / 2];
 }
 
+/// Runs one window of `candidate`'s transfers, `session.parallelism` at a
+/// time. `io` sleeps and joins the window; the workers transfer on the
+/// session's.
 fn runWindow(
     io: std.Io,
+    session: *Session,
     candidate: *Candidate,
     source: []const u8,
-    parallelism: usize,
     minimum_duration: std.Io.Duration,
     minimum_transfers: u64,
 ) !Measurement {
     const Worker = struct {
-        candidate: *Candidate,
-        source: []const u8,
-        slot: usize,
+        session: *Session,
+        buffer_index: usize,
+        block: []const u8,
         metrics: *Counters,
         ready: *std.atomic.Value(usize),
         start: *std.Io.Event,
@@ -428,10 +393,10 @@ fn runWindow(
 
         fn run(self: @This()) void {
             _ = self.ready.fetchAdd(1, .release);
-            self.start.waitUncancelable(self.candidate.io);
+            self.start.waitUncancelable(self.session.io);
             while (!self.stop.load(.acquire)) {
-                self.candidate.transfer(self.source, self.slot, self.metrics);
-                if (self.candidate.first_error.load(.acquire) != 0) return;
+                self.session.transfer(self.buffer_index, self.block, self.metrics);
+                if (self.session.first_error.get() != null) return;
             }
         }
     };
@@ -448,11 +413,11 @@ fn runWindow(
         start.set(io);
         group.await(io) catch {};
     }
-    for (0..parallelism) |slot| {
+    for (0..session.parallelism) |slot| {
         try group.concurrent(io, Worker.run, .{Worker{
-            .candidate = candidate,
-            .source = source,
-            .slot = slot,
+            .session = session,
+            .buffer_index = candidate.buffer_offset + slot,
+            .block = candidate.block(source, slot),
             .metrics = &metrics,
             .ready = &ready,
             .start = &start,
@@ -460,14 +425,14 @@ fn runWindow(
         }});
     }
 
-    try candidate.warmupBuffers(source, parallelism);
+    try session.warmup(candidate, source);
 
-    while (ready.load(.acquire) != parallelism) try io.sleep(.fromMicroseconds(100), .awake);
+    while (ready.load(.acquire) != session.parallelism) try io.sleep(.fromMicroseconds(100), .awake);
     const start_at: std.Io.Timestamp = .now(io, .awake);
     start.set(io);
     while (true) {
         const elapsed = start_at.durationTo(.now(io, .awake));
-        if (candidate.firstError()) |err| return err;
+        if (session.first_error.get()) |err| return err;
         // is window complete
         if (elapsed.nanoseconds >= minimum_duration.nanoseconds and metrics.transfers.load(.acquire) >= minimum_transfers) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -475,7 +440,7 @@ fn runWindow(
     stop.store(true, .release);
     try group.await(io);
     const elapsed = start_at.durationTo(.now(io, .awake));
-    if (candidate.firstError()) |err| return err;
+    if (session.first_error.get()) |err| return err;
     return .{
         .bytes = metrics.bytes.load(.acquire),
         .transfers = metrics.transfers.load(.acquire),
@@ -483,15 +448,13 @@ fn runWindow(
     };
 }
 
+/// One block size and its screen measurements. Its slots are the session's
+/// buffers from `buffer_offset` on, one per transfer in flight.
 const Candidate = struct {
     block_size: usize,
-    io: std.Io,
-    platform: *const Platform,
-    manager: *pjrt.AsyncHostToDeviceTransferManager,
     buffer_offset: usize,
-    buffer_count: usize,
+    /// Slots warmed so far (`Session.warmup`).
     warmed_buffers: usize = 0,
-    first_error: std.atomic.Value(u16) = .init(0),
 
     metrics: [sample_count]Measurement = undefined,
     metrics_len: usize = 0,
@@ -517,61 +480,51 @@ const Candidate = struct {
         }.lessThan);
         return populated[populated.len / 2];
     }
-    fn recordError(self: *Candidate, err: pjrt.ApiError) void {
-        _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-    }
 
-    fn firstError(self: *const Candidate) ?pjrt.ApiError {
-        const code = self.first_error.load(.acquire);
-        return if (code == 0) null else @errorCast(@errorFromInt(code));
-    }
-
-    fn transfer(
-        self: *Candidate,
-        source: []const u8,
-        slot: usize,
-        metrics: ?*Counters,
-    ) void {
-        const len = self.block_size;
-        const source_offset = slot * self.block_size;
-        const event = self.manager.transferData(
-            self.platform.pjrt_api,
-            self.buffer_offset + slot,
-            source[source_offset..][0..len],
-            0,
-            false,
-        ) catch |err| {
-            self.recordError(err);
-            return;
-        };
-        event.await(self.platform.pjrt_api, self.io) catch |err| {
-            event.deinit(self.platform.pjrt_api);
-            self.recordError(err);
-            return;
-        };
-        event.deinit(self.platform.pjrt_api);
-        if (metrics) |output| {
-            _ = output.bytes.fetchAdd(@intCast(len), .monotonic);
-            _ = output.transfers.fetchAdd(1, .monotonic);
-        }
-    }
-
-    fn warmupBuffers(self: *Candidate, source: []const u8, parallelism: usize) !void {
-        while (self.warmed_buffers < parallelism) : (self.warmed_buffers += 1) {
-            const slot = self.warmed_buffers;
-            self.transfer(source, slot, null);
-            self.transfer(source, slot, null);
-            if (self.firstError()) |err| return err;
-        }
+    /// The ring's bytes that `slot` transfers.
+    fn block(self: Candidate, source: []const u8, slot: usize) []const u8 {
+        return source[slot * self.block_size ..][0..self.block_size];
     }
 };
 
+/// One transfer manager for the whole screen, sliced per candidate, and the
+/// screen's first transfer error, which ends it.
 const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
     manager: *pjrt.AsyncHostToDeviceTransferManager,
     buffers: []*pjrt.Buffer,
+    /// Each candidate's slots, and the transfers a window runs at a time.
+    parallelism: usize,
+    first_error: stdx.FirstError(pjrt.ApiError) = .{},
+
+    fn transfer(self: *Session, buffer_index: usize, block: []const u8, metrics: ?*Counters) void {
+        const api = self.platform.pjrt_api;
+        const event = self.manager.transferData(api, buffer_index, block, 0, false) catch |err| {
+            _ = self.first_error.set(err);
+            return;
+        };
+        defer event.deinit(api);
+        event.await(api, self.io) catch |err| {
+            _ = self.first_error.set(err);
+            return;
+        };
+        if (metrics) |output| {
+            _ = output.bytes.fetchAdd(@intCast(block.len), .monotonic);
+            _ = output.transfers.fetchAdd(1, .monotonic);
+        }
+    }
+
+    /// Transfers twice into each of `candidate`'s slots not yet warmed.
+    fn warmup(self: *Session, candidate: *Candidate, source: []const u8) !void {
+        while (candidate.warmed_buffers < self.parallelism) : (candidate.warmed_buffers += 1) {
+            const slot = candidate.warmed_buffers;
+            self.transfer(candidate.buffer_offset + slot, candidate.block(source, slot), null);
+            self.transfer(candidate.buffer_offset + slot, candidate.block(source, slot), null);
+            if (self.first_error.get()) |err| return err;
+        }
+    }
 
     fn init(
         allocator: std.mem.Allocator,
@@ -610,6 +563,7 @@ const Session = struct {
             .platform = platform,
             .manager = manager,
             .buffers = buffers,
+            .parallelism = parallelism,
         };
     }
 
@@ -652,13 +606,14 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         .platform = undefined,
         .manager = undefined,
         .buffers = undefined,
+        .parallelism = undefined,
     };
     const opts: Options = .{ .block_selection_tolerance = 0.05 };
 
     var candidates = [_]Candidate{
-        .{ .block_size = 2, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
-        .{ .block_size = 4, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
-        .{ .block_size = 8, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 2, .buffer_offset = undefined },
+        .{ .block_size = 4, .buffer_offset = undefined },
+        .{ .block_size = 8, .buffer_offset = undefined },
     };
     const rates = [_][3]u64{
         .{ 60, 10, 62 },
@@ -685,10 +640,10 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
 
     // A dip between two near-peak values must not end the scan early.
     var bimodal = [_]Candidate{
-        .{ .block_size = 2, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
-        .{ .block_size = 4, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
-        .{ .block_size = 8, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
-        .{ .block_size = 16, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 2, .buffer_offset = undefined },
+        .{ .block_size = 4, .buffer_offset = undefined },
+        .{ .block_size = 8, .buffer_offset = undefined },
+        .{ .block_size = 16, .buffer_offset = undefined },
     };
     const bimodal_rates = [_]u64{ 80, 100, 70, 99 };
     for (&bimodal, bimodal_rates) |*candidate, rate| {
@@ -710,8 +665,8 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
 
 test "DMA benchmark confirms a candidate when round qualification disagrees" {
     var candidates = [_]Candidate{
-        .{ .block_size = 4, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
-        .{ .block_size = 8, .io = undefined, .platform = undefined, .manager = undefined, .buffer_offset = undefined, .buffer_count = undefined },
+        .{ .block_size = 4, .buffer_offset = undefined },
+        .{ .block_size = 8, .buffer_offset = undefined },
     };
     const rates = [_][3]u64{
         .{ 96, 80, 97 },
@@ -729,7 +684,6 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
         0,
         1,
         0.05,
-        0.02,
     ));
 }
 
@@ -742,23 +696,23 @@ test "measure refuses a knob out of range before it touches the platform" {
         .{ .block_parallelism = 0 },
         .{ .block_parallelism = max_block_parallelism + 1 },
         .{ .minimum_duration = .zero },
-        .{ .confirmation_duration = .fromMilliseconds(-1) },
+        .{ .minimum_duration = .fromMilliseconds(-1) },
         .{ .block_selection_tolerance = 1 },
+        .{ .block_selection_tolerance = -0.01 },
         .{ .block_selection_tolerance = std.math.nan(f64) },
-        .{ .confirmation_margin = -0.01 },
     };
     for (cases) |opts| {
         try std.testing.expectError(error.InvalidOptions, measure(std.testing.allocator, std.testing.io, undefined, opts));
     }
 }
 
-test "measure needs no loader and selects the CPU defaults" {
+test "measure needs no loader and selects the CPU block" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
         return error.SkipZigTest;
     defer platform.deinit(allocator, io);
-    try std.testing.expectEqual(Result.default, try measure(allocator, io, platform, .{}));
+    try std.testing.expectEqual(cpu_block_size, try measure(allocator, io, platform, .{}));
 }
 
 test "DMA benchmark shares one manager across candidate sizes and slots" {
@@ -772,18 +726,11 @@ test "DMA benchmark shares one manager across candidate sizes and slots" {
     defer session.deinit();
     const source: [32]u8 = @splat(0);
     for ([_]usize{ 8, 16 }, 0..) |block_size, index| {
-        var candidate: Candidate = .{
-            .io = io,
-            .platform = platform,
-            .manager = session.manager,
-            .buffer_offset = index * 2,
-            .buffer_count = 2,
-            .block_size = block_size,
-        };
-        try candidate.warmupBuffers(&source, 2);
+        var candidate: Candidate = .{ .block_size = block_size, .buffer_offset = index * 2 };
+        try session.warmup(&candidate, &source);
         try std.testing.expectEqual(2, candidate.warmed_buffers);
-        try std.testing.expectEqual(null, candidate.firstError());
     }
+    try std.testing.expectEqual(null, session.first_error.get());
 }
 
 test "DMA benchmark cancellation drains transfer workers" {
@@ -796,14 +743,7 @@ test "DMA benchmark cancellation drains transfer workers" {
     var source: [16]u8 = @splat(0);
     var session = try Session.init(allocator, io, platform, &.{source.len}, 1);
     defer session.deinit();
-    var candidate: Candidate = .{
-        .io = io,
-        .platform = platform,
-        .manager = session.manager,
-        .buffer_offset = 0,
-        .buffer_count = 1,
-        .block_size = source.len,
-    };
+    var candidate: Candidate = .{ .block_size = source.len, .buffer_offset = 0 };
     var vtable = io.vtable.*;
     vtable.sleep = struct {
         fn sleep(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
@@ -816,9 +756,9 @@ test "DMA benchmark cancellation drains transfer workers" {
     // while they transfer. In either case they must finish before teardown.
     try std.testing.expectError(error.Canceled, runWindow(
         canceled_io,
+        &session,
         &candidate,
         &source,
-        1,
         .max,
         0,
     ));
