@@ -153,8 +153,8 @@ test "dump stem keeps module identity" {
 
 test "collective matches reject missing and reused channels" {
     var instructions = [_]hlo.HloInstructionProto{ .{ .opcode = "all-reduce", .channel_id = 3 }, .{ .opcode = "all-reduce", .channel_id = 4 } };
-    var computations = [_]hlo.HloComputationProto{.{ .instructions = .{ .items = &instructions, .capacity = 2 } }};
-    const module: hlo.HloModuleProto = .{ .computations = .{ .items = &computations, .capacity = 1 } };
+    var computations = [_]hlo.HloComputationProto{.{ .instructions = .fromOwnedSlice(&instructions) }};
+    const module: hlo.HloModuleProto = .{ .computations = .fromOwnedSlice(&computations) };
     try std.testing.expect(matchCollective(module, .{ .opcode = "all-reduce", .channel_id = 3 }) == .unique);
     try std.testing.expect(matchCollective(module, .{ .opcode = "all-gather", .channel_id = 1 }) == .absent);
     instructions[1].channel_id = 3;

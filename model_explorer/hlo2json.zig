@@ -697,11 +697,11 @@ fn FloatType(exponent_bits: u8, mantissa_bits: u8) type {
     const bit_size = sign_bits + exponent_bits + mantissa_bits;
     if (bit_size % 8 != 0) @compileError("FloatType should have a number of bits divisible by 8");
 
-    return packed struct(std.meta.Int(.unsigned, bit_size)) {
+    return packed struct(@Int(.unsigned, bit_size)) {
         const Self = @This();
 
-        mantissa: std.meta.Int(.unsigned, mantissa_bits),
-        exponent: std.meta.Int(.unsigned, exponent_bits),
+        mantissa: @Int(.unsigned, mantissa_bits),
+        exponent: @Int(.unsigned, exponent_bits),
         sign: u1,
 
         /// Lossless conversion to f32.
@@ -760,14 +760,14 @@ test "decode HLO and emit Model Explorer graphs" {
             .name = "constant.2",
             .opcode = "constant",
             .shape = shape,
-            .literal = .{ .shape = shape, .f32s = .{ .items = @constCast(&[_]f32{2.5}), .capacity = 1 } },
+            .literal = .{ .shape = shape, .f32s = .fromOwnedSlice(@constCast(&[_]f32{2.5})) },
         },
         .{
             .id = 3,
             .name = "call\"\\\n",
             .opcode = "custom-call",
             .shape = shape,
-            .operand_ids = .{ .items = @constCast(&[_]i64{ 1, 2 }), .capacity = 2 },
+            .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{ 1, 2 })),
             .metadata = .{ .source_file = "a\"\\b.zig", .source_line = 42, .op_name = "op\nname", .op_type = "type" },
         },
     };
@@ -775,11 +775,11 @@ test "decode HLO and emit Model Explorer graphs" {
         .id = 1,
         .name = "entry",
         .root_id = 3,
-        .instructions = .{ .items = &instructions, .capacity = instructions.len },
+        .instructions = .fromOwnedSlice(&instructions),
     }};
     const proto: hlo.HloProto = .{ .hlo_module = .{
         .name = "module",
-        .computations = .{ .items = &computations, .capacity = computations.len },
+        .computations = .fromOwnedSlice(&computations),
     } };
     var encoded: std.Io.Writer.Allocating = .init(allocator);
     try proto.encode(&encoded.writer, allocator);
@@ -937,20 +937,20 @@ fn ringSendBytes(opcode: []const u8, bytes: u64, count: u64) ?u64 {
 
 test "logical payloads and ideal ring traffic" {
     var dims = [_]i64{ 1, 16, 4, 128 };
-    var shape: hlo.ShapeProto = .{ .element_type = .BF16, .dimensions = .{ .items = &dims, .capacity = dims.len } };
+    var shape: hlo.ShapeProto = .{ .element_type = .BF16, .dimensions = .fromOwnedSlice(&dims) };
     try std.testing.expectEqual(@as(?u64, 16384), logicalBytes(shape));
     try std.testing.expectEqual(@as(?u64, 16384), ringSendBytes("all-gather", 16384, 2));
     try std.testing.expectEqual(@as(?u64, 131072), ringSendBytes("all-reduce", 131072, 2));
     try std.testing.expectEqual(@as(?u64, 0), ringSendBytes("all-reduce", 131072, 1));
     try std.testing.expectEqual(@as(?u64, null), ringSendBytes("all-gather", std.math.maxInt(u64), 3));
     var dynamic = [_]bool{true};
-    shape.is_dynamic_dimension = .{ .items = &dynamic, .capacity = 1 };
+    shape.is_dynamic_dimension = .fromOwnedSlice(&dynamic);
     try std.testing.expectEqual(@as(?u64, null), logicalBytes(shape));
 }
 
 test "explicit partial replication and missing collective groups" {
     var dims = [_]i64{ 2, 1, 4 };
-    const description = try shardingText(std.testing.allocator, .{ .type = .OTHER, .tile_assignment_dimensions = .{ .items = &dims, .capacity = 3 }, .replicate_on_last_tile_dim = true });
+    const description = try shardingText(std.testing.allocator, .{ .type = .OTHER, .tile_assignment_dimensions = .fromOwnedSlice(&dims), .replicate_on_last_tile_dim = true });
     defer std.testing.allocator.free(description);
     try std.testing.expect(std.mem.indexOf(u8, description, "replication factor=4") != null);
     try std.testing.expectEqual(@as(?u64, null), collectiveGroupSize(.{}));
@@ -962,7 +962,7 @@ test "global references match parameter numbers and reject ambiguous provenance"
         .{ .name = "dot.1", .opcode = "dot" },
         .{ .name = "dot.1", .opcode = "dot" },
     };
-    const reference: hlo.HloComputationProto = .{ .instructions = .{ .items = &candidates, .capacity = candidates.len } };
+    const reference: hlo.HloComputationProto = .{ .instructions = .fromOwnedSlice(&candidates) };
     const converter: Converter = .{ .allocator = std.testing.allocator, .reference = &reference };
     try std.testing.expect(converter.referenceInstruction(.{ .opcode = "parameter", .parameter_number = 3 }) == &candidates[0]);
     try std.testing.expect(converter.referenceInstruction(.{ .metadata = .{ .op_name = "dot.1" } }) == null);
@@ -1062,27 +1062,27 @@ test "partition namespaces retain edges and called computations" {
     const shape: hlo.ShapeProto = .{ .element_type = .F32 };
     var instructions = [_]hlo.HloInstructionProto{
         .{ .id = 1, .opcode = "parameter", .shape = shape },
-        .{ .id = 2, .opcode = "all-gather", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{1}), .capacity = 1 } },
-        .{ .id = 3, .opcode = "call", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{2}), .capacity = 1 }, .called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 } },
+        .{ .id = 2, .opcode = "all-gather", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{1})) },
+        .{ .id = 3, .opcode = "call", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{2})), .called_computation_ids = .fromOwnedSlice(@constCast(&[_]i64{20})) },
     };
     var callee = [_]hlo.HloInstructionProto{.{ .id = 4, .opcode = "parameter", .shape = shape }};
     var computations = [_]hlo.HloComputationProto{
-        .{ .id = 10, .name = "entry", .instructions = .{ .items = &instructions, .capacity = instructions.len } },
-        .{ .id = 20, .name = "callee", .instructions = .{ .items = &callee, .capacity = callee.len } },
+        .{ .id = 10, .name = "entry", .instructions = .fromOwnedSlice(&instructions) },
+        .{ .id = 20, .name = "callee", .instructions = .fromOwnedSlice(&callee) },
     };
     var converter: Converter = .{ .allocator = allocator };
     var output: std.Io.Writer.Allocating = .init(allocator);
-    try converter.emitModule(&output.writer, .{ .hlo_module = .{ .computations = .{ .items = &computations, .capacity = computations.len } } }, null);
+    try converter.emitModule(&output.writer, .{ .hlo_module = .{ .computations = .fromOwnedSlice(&computations) } }, null);
     const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
     const graphs = json.value.object.get("graphs").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), graphs.len);
     const nodes = graphs[0].object.get("nodes").?.array.items;
-    try std.testing.expectEqualStrings("stage_000 CMR (0.0 ∕ 0.0 B)", nodes[0].object.get("namespace").?.string);
-    try std.testing.expectEqualStrings("stage_001 CMR (4.0 ∕ 4.0 B)", nodes[1].object.get("namespace").?.string);
-    try std.testing.expectEqualStrings("stage_001 CMR (4.0 ∕ 4.0 B)", nodes[2].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_000", nodes[0].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_001", nodes[1].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_001", nodes[2].object.get("namespace").?.string);
     try std.testing.expectEqualStrings("1", nodes[1].object.get("incomingEdges").?.array.items[0].object.get("sourceNodeId").?.string);
     try std.testing.expectEqualStrings("callee", nodes[2].object.get("subgraphIds").?.array.items[0].string);
-    try std.testing.expectEqualStrings("", graphs[1].object.get("nodes").?.array.items[0].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_000", graphs[1].object.get("nodes").?.array.items[0].object.get("namespace").?.string);
 }
 
 const PartitionMetrics = struct {
@@ -1137,25 +1137,25 @@ test "CMR excludes views and async bookkeeping and counts kernel inputs once" {
     defer arena.deinit();
     const allocator = arena.allocator();
     var dims = [_]i64{256};
-    const shape: hlo.ShapeProto = .{ .element_type = .F32, .dimensions = .{ .items = &dims, .capacity = 1 } };
+    const shape: hlo.ShapeProto = .{ .element_type = .F32, .dimensions = .fromOwnedSlice(&dims) };
     var nodes = [_]hlo.HloInstructionProto{
         .{ .id = 1, .opcode = "parameter", .shape = shape },
-        .{ .id = 2, .opcode = "async-start", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{1}), .capacity = 1 }, .called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 } },
-        .{ .id = 3, .opcode = "async-done", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{2}), .capacity = 1 } },
-        .{ .id = 4, .opcode = "bitcast", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{3}), .capacity = 1 } },
-        .{ .id = 5, .opcode = "fusion", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{4}), .capacity = 1 } },
-        .{ .id = 6, .opcode = "custom-call", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{ 4, 5 }), .capacity = 2 } },
-        .{ .id = 7, .opcode = "tuple", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{ 5, 6 }), .capacity = 2 } },
+        .{ .id = 2, .opcode = "async-start", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{1})), .called_computation_ids = .fromOwnedSlice(@constCast(&[_]i64{20})) },
+        .{ .id = 3, .opcode = "async-done", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{2})) },
+        .{ .id = 4, .opcode = "bitcast", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{3})) },
+        .{ .id = 5, .opcode = "fusion", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{4})) },
+        .{ .id = 6, .opcode = "custom-call", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{ 4, 5 })) },
+        .{ .id = 7, .opcode = "tuple", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{ 5, 6 })) },
     };
     var collective = [_]hlo.HloInstructionProto{
         .{ .id = 8, .opcode = "parameter", .shape = shape },
-        .{ .id = 9, .opcode = "all-to-all", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{8}), .capacity = 1 } },
+        .{ .id = 9, .opcode = "all-to-all", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{8})) },
     };
     var comps = [_]hlo.HloComputationProto{
-        .{ .id = 10, .name = "entry", .root_id = 7, .instructions = .{ .items = &nodes, .capacity = nodes.len } },
-        .{ .id = 20, .name = "async_collective", .root_id = 9, .instructions = .{ .items = &collective, .capacity = collective.len } },
+        .{ .id = 10, .name = "entry", .root_id = 7, .instructions = .fromOwnedSlice(&nodes) },
+        .{ .id = 20, .name = "async_collective", .root_id = 9, .instructions = .fromOwnedSlice(&collective) },
     };
-    const module: hlo.HloModuleProto = .{ .computations = .{ .items = &comps, .capacity = comps.len } };
+    const module: hlo.HloModuleProto = .{ .computations = .fromOwnedSlice(&comps) };
     var partitions = try graph_partitioner.partitionModule(allocator, module);
     defer partitions.deinit(allocator);
     const partition = partitions.computations.getPtr(10).?;
@@ -1170,7 +1170,7 @@ test "CMR excludes views and async bookkeeping and counts kernel inputs once" {
     try std.testing.expectEqual(@as(?u64, 3072), metrics[1].memory);
     try std.testing.expectEqual(@as(u64, 1), metrics[1].opaque_operations);
     const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
-    const attrs = json.value.object.get("graphs").?.array.items[0].object.get("groupNodeAttributes").?.object.get("stage_001 CMR (1.0 ∕ 3.1 KB)").?.object;
+    const attrs = json.value.object.get("graphs").?.array.items[0].object.get("groupNodeAttributes").?.object.get("stage_001").?.object;
     try std.testing.expectEqualStrings("(1.0 / 3.1 KB)", attrs.get("CMR").?.string);
     // Unknown shapes must not silently reduce the denominator.
     nodes[4].shape = null;
@@ -1188,7 +1188,7 @@ test "CMR preserves denominator magnitude, tuple payloads and unknown estimates"
     try std.testing.expectEqualStrings("unknown (logical reads unavailable)", try std.fmt.allocPrint(allocator, "{f}", .{Cmr{ .metric = .{ .memory = null } }}));
     try std.testing.expect(std.mem.indexOf(u8, try std.fmt.allocPrint(allocator, "{f}", .{Cmr{ .metric = .{ .communication = 1, .memory = 1_000_000_000 } }}), "e") != null);
     var shapes = [_]hlo.ShapeProto{ .{ .element_type = .F32 }, .{ .element_type = .BF16 }, .{ .element_type = .TOKEN } };
-    const tuple: hlo.ShapeProto = .{ .element_type = .TUPLE, .tuple_shapes = .{ .items = &shapes, .capacity = shapes.len } };
+    const tuple: hlo.ShapeProto = .{ .element_type = .TUPLE, .tuple_shapes = .fromOwnedSlice(&shapes) };
     try std.testing.expectEqual(@as(?u64, 6), payloadBytes(tuple));
     const converter: Converter = .{ .allocator = allocator };
     try std.testing.expectEqual(@as(?u64, 2), converter.collectivePayload(.{ .opcode = "all-gather-start", .shape = tuple }).?.bytes);
@@ -1224,17 +1224,17 @@ test "fusion reads propagate slices through views and conversions without interm
     };
     var converter: Converter = .{ .allocator = allocator };
     for (&nodes) |*node| try converter.instructions.put(allocator, node.id, node);
-    const comp: hlo.HloComputationProto = .{ .root_id = 5, .instructions = .{ .items = &nodes, .capacity = nodes.len } };
+    const comp: hlo.HloComputationProto = .{ .root_id = 5, .instructions = .fromOwnedSlice(&nodes) };
     try std.testing.expectEqual(@as(?u64, 64), converter.fusionReads(comp));
     try std.testing.expectEqual(@as(?u64, 0), converter.instructionReads(nodes[1]));
     try std.testing.expectEqual(@as(?u64, 32), converter.instructionReads(nodes[3]));
     try converter.computations.put(allocator, 20, &comp);
     var outer = [_]hlo.HloInstructionProto{readTestInstruction(10, "fusion", .BF16, 16, &.{1})};
-    outer[0].called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 };
+    outer[0].called_computation_ids = .fromOwnedSlice(@constCast(&[_]i64{20}));
     var partition: graph_partitioner.ComputationPartition = .{};
     try partition.instructions.put(allocator, 10, 0);
     partition.node_counts = try allocator.dupe(usize, &.{1});
-    const metrics = try converter.partitionMetrics(.{ .instructions = .{ .items = &outer, .capacity = 1 } }, &partition);
+    const metrics = try converter.partitionMetrics(.{ .instructions = .fromOwnedSlice(&outer) }, &partition);
     try std.testing.expectEqual(@as(?u64, 64), metrics[0].memory);
     nodes[3].shape = null;
     try std.testing.expectEqual(@as(?u64, null), converter.fusionReads(comp));
@@ -1251,7 +1251,7 @@ test "gather and dynamic slice count selected data and index reads" {
     };
     var converter: Converter = .{ .allocator = allocator };
     for (&nodes) |*node| try converter.instructions.put(allocator, node.id, node);
-    const comp: hlo.HloComputationProto = .{ .root_id = 3, .instructions = .{ .items = &nodes, .capacity = nodes.len } };
+    const comp: hlo.HloComputationProto = .{ .root_id = 3, .instructions = .fromOwnedSlice(&nodes) };
     try std.testing.expectEqual(@as(?u64, 64), converter.fusionReads(comp));
     try std.testing.expectEqual(@as(?u64, 64), converter.instructionReads(nodes[2]));
     nodes[1] = readTestInstruction(2, "parameter", .S32, 1, &.{});
@@ -1270,19 +1270,19 @@ test "scatter reads distinguish overwrite from read modify write" {
         readTestInstruction(3, "parameter", .F32, 16, &.{}),
         readTestInstruction(4, "scatter", .F32, 1024, &.{ 1, 2, 3 }),
     };
-    nodes[3].called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 };
+    nodes[3].called_computation_ids = .fromOwnedSlice(@constCast(&[_]i64{20}));
     var reducer = [_]hlo.HloInstructionProto{
         readTestInstruction(5, "parameter", .F32, 1, &.{}),
         readTestInstruction(6, "parameter", .F32, 1, &.{}),
         readTestInstruction(7, "add", .F32, 1, &.{ 5, 6 }),
     };
     reducer[1].parameter_number = 1;
-    var update: hlo.HloComputationProto = .{ .root_id = 6, .instructions = .{ .items = &reducer, .capacity = reducer.len } };
+    var update: hlo.HloComputationProto = .{ .root_id = 6, .instructions = .fromOwnedSlice(&reducer) };
     var converter: Converter = .{ .allocator = allocator };
     for (&nodes) |*node| try converter.instructions.put(allocator, node.id, node);
     for (&reducer) |*node| try converter.instructions.put(allocator, node.id, node);
     try converter.computations.put(allocator, 20, &update);
-    const comp: hlo.HloComputationProto = .{ .root_id = 4, .instructions = .{ .items = &nodes, .capacity = nodes.len } };
+    const comp: hlo.HloComputationProto = .{ .root_id = 4, .instructions = .fromOwnedSlice(&nodes) };
     try std.testing.expectEqual(@as(?u64, 96), converter.fusionReads(comp));
     try std.testing.expectEqual(@as(?u64, 96), converter.instructionReads(nodes[3]));
     update.root_id = 7;
@@ -1297,8 +1297,8 @@ fn readTestInstruction(id: i64, opcode: []const u8, comptime dtype: hlo.Primitiv
     return .{
         .id = id,
         .opcode = opcode,
-        .shape = .{ .element_type = dtype, .dimensions = .{ .items = @constCast(&[_]i64{elements}), .capacity = 1 } },
-        .operand_ids = .{ .items = @constCast(operands), .capacity = operands.len },
+        .shape = .{ .element_type = dtype, .dimensions = .fromOwnedSlice(@constCast(&[_]i64{elements})) },
+        .operand_ids = .fromOwnedSlice(@constCast(operands)),
     };
 }
 

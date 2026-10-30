@@ -147,11 +147,11 @@ fn partitionWithAsyncBoundaries(allocator: std.mem.Allocator, computation: hlo.H
 }
 
 fn instruction(id: i64, opcode: []const u8, operands: []const i64) hlo.HloInstructionProto {
-    return .{ .id = id, .opcode = opcode, .operand_ids = .{ .items = @constCast(operands), .capacity = operands.len } };
+    return .{ .id = id, .opcode = opcode, .operand_ids = .fromOwnedSlice(@constCast(operands)) };
 }
 
 fn testComputation(instructions: []hlo.HloInstructionProto) hlo.HloComputationProto {
-    return .{ .instructions = .{ .items = instructions, .capacity = instructions.len } };
+    return .{ .instructions = .fromOwnedSlice(instructions) };
 }
 
 test "parallel collectives, residual joins and late preparation" {
@@ -182,7 +182,7 @@ test "async collective, control dependencies and hidden tuple elements" {
         instruction(5, "all-reduce", &.{4}),
         instruction(6, "copy", &.{1}),
     };
-    nodes[5].control_predecessor_ids = .{ .items = @constCast(&[_]i64{5}), .capacity = 1 };
+    nodes[5].control_predecessor_ids = .fromOwnedSlice(@constCast(&[_]i64{5}));
     var result = try partitionComputation(std.testing.allocator, testComputation(&nodes));
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(usize, &.{ 1, 2, 2 }, result.node_counts);

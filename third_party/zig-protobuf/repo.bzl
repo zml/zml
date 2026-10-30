@@ -4,7 +4,7 @@ def repo():
     git_repository(
         name = "zig-protobuf",
         remote = "https://github.com/Arwalk/zig-protobuf",
-        commit = "b794f99323cead7f1794ae68554d0311cc309857",
+        commit = "e9e18c7664b8c950e5fc679259c968dd66ccc48b",
         # XLA ShapeProto and LayoutProto are mutually recursive.
         patches = [Label("//third_party/zig-protobuf:mutual-recursion.patch")],
         patch_args = ["-p1"],
