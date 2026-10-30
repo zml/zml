@@ -27,6 +27,15 @@ class ServerTest(unittest.TestCase):
         result = response.get_json()
         self.assertNotIn("error", result)
         self.assertTrue(path.exists())
+        if adapter == "model_explorer_hlo":
+            for collection in result["graphCollections"]:
+                for graph in collection["graphs"]:
+                    for attrs in graph.get("groupNodeAttributes", {}).values():
+                        for key, value in attrs.items():
+                            self.assertIsInstance(value, str, key)
+                    for node in graph["nodes"]:
+                        for attr in node.get("attrs", []):
+                            self.assertIsInstance(attr["value"], str, attr["key"])
         return result["graphCollections"]
 
     def test_health_ui_and_mlir_link(self):
@@ -112,21 +121,37 @@ class ServerTest(unittest.TestCase):
                 graph = self.convert(path, "model_explorer_hlo")[0]["graphs"][0]
                 return {a["key"]: a["value"] for a in graph["nodes"][0]["attrs"]}
 
-            self.assertEqual(attrs()["device connected"], "? / ?")
+            self.assertEqual(attrs()["device connected"], "null / null")
             stem.mkdir()
             gpu = field(3, "test GPU") + field(4, 1) + field(5, 1) + field(6, 2)
             topology = field(9, field(1, "type.googleapis.com/xla.GpuTopologyProto") + field(2, gpu))
             (stem / "topology.pb").write_bytes(topology)
             final = Path(str(stem) + ".sm_8.9_gpu_after_optimizations.hlo.pb")
             final.write_bytes(proto)
+
+            def stage_attrs(input_path):
+                graph = self.convert(input_path, "model_explorer_hlo")[0]["graphs"][0]
+                return graph["groupNodeAttributes"][graph["nodes"][0]["namespace"]]
+
+            self.assertNotIn("communication overhead", stage_attrs(path))
+            target = Path(str(stem) + ".gpu_target_config.pbtxt")
+            target.write_text("gpu_device_info { memory_bandwidth: 1000 pcie_bandwidth: 100 }")
+            for input_path in (path, final):
+                stage = stage_attrs(input_path)
+                self.assertEqual(stage["communication overhead"], "severe")
+                self.assertEqual(stage["communication bytes"], "4B")
+                self.assertEqual(stage["memory bytes"], "0B")
+            target.write_text("gpu_device_info { memory_bandwidth: 0 pcie_bandwidth: 100 }")
+            self.assertNotIn("communication overhead", stage_attrs(final))
+            target.unlink()
             enriched = attrs()
-            self.assertEqual(enriched["device connected"], "? / 2")
+            self.assertEqual(enriched["device connected"], "null / 2")
             self.assertNotIn("optimized collective", enriched)
-            self.assertEqual(enriched["bytes/device"], "out: 4B, in: ?")
+            self.assertEqual(enriched["bytes/device"], "out: 4B, in: null")
             (stem / "topology.pb").write_bytes(b"\xff")
-            self.assertEqual(attrs()["device connected"], "? / ?")
+            self.assertEqual(attrs()["device connected"], "null / null")
             Path(str(stem) + ".sm_9.0_gpu_after_optimizations.hlo.pb").write_bytes(proto)
-            self.assertEqual(attrs()["bytes/device"], "out: 4B, in: ?")
+            self.assertEqual(attrs()["bytes/device"], "out: 4B, in: null")
 
     def test_mlir_conversion(self):
         with tempfile.TemporaryDirectory() as directory:

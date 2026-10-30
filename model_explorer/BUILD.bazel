@@ -47,6 +47,7 @@ zig_binary(
     name = "hlo2json",
     srcs = [
         "dump_context.zig",
+        "gpu_info.zig",
         "graph_partitioner.zig",
         "json_writer.zig",
     ],
@@ -68,6 +69,7 @@ zig_test(
     name = "test",
     srcs = [
         "dump_context.zig",
+        "gpu_info.zig",
         "graph_partitioner.zig",
         "json_writer.zig",
     ],

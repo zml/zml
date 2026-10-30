@@ -5,6 +5,8 @@ const log = std.log.scoped(.hlo2json);
 
 const dump_context = @import("dump_context.zig");
 const json_writer = @import("json_writer.zig");
+const gpu_info = @import("gpu_info.zig");
+pub const GpuInfo = gpu_info.GpuInfo;
 const graph_partitioner = @import("graph_partitioner.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -62,7 +64,11 @@ pub fn convertFile(allocator: std.mem.Allocator, io: std.Io, input_hlo_path: []c
             log.warn("Could not load optional dump context: {s}", .{@errorName(err)});
         };
     }
-    try converter.emitModule(writer, proto);
+    const gpu = loadGpuInfo(proto_arena.allocator(), io, input_hlo_path) catch |err| blk: {
+        log.warn("Could not load optional GPU target config: {s}", .{@errorName(err)});
+        break :blk null;
+    };
+    try converter.emitModule(writer, proto, gpu);
 }
 
 threadlocal var py_writer: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
@@ -110,7 +116,7 @@ pub const Converter = struct {
 
     const Assigned = struct { physical: i64, start: i64, len: i64 };
 
-    pub fn emitModule(self: *Converter, writer: anytype, hlo_proto: hlo.HloProto) !void {
+    pub fn emitModule(self: *Converter, writer: anytype, hlo_proto: hlo.HloProto, gpu: ?GpuInfo) !void {
         const module = hlo_proto.hlo_module orelse return error.NoModule;
         self.entry_id = module.entry_computation_id;
         if (module.device_assignment) |assignment| {
@@ -170,14 +176,14 @@ pub const Converter = struct {
 
         for (module.computations.items) |computation| {
             var graph = try graphs.openDict();
-            try self.emitComputation(W, &graph, computation, partitions.computations.getPtr(computation.id).?);
+            try self.emitComputation(W, &graph, computation, partitions.computations.getPtr(computation.id).?, gpu);
             try graph.close();
         }
         try graphs.close();
         try top_level.close();
     }
 
-    pub fn emitComputation(self: *const Converter, Writer: type, graph: *json_writer.Dict(Writer), computation: hlo.HloComputationProto, partition: *const graph_partitioner.ComputationPartition) !void {
+    pub fn emitComputation(self: *const Converter, Writer: type, graph: *json_writer.Dict(Writer), computation: hlo.HloComputationProto, partition: *const graph_partitioner.ComputationPartition, gpu: ?GpuInfo) !void {
         const comp_caller = self.computation_caller.get(computation.id);
         // The name of the caller node is better cause computation name is typically just "fusion".
         try graph.write("id", if (comp_caller) |caller| caller.name else computation.name);
@@ -187,7 +193,14 @@ pub const Converter = struct {
         const namespaces = try self.allocator.alloc([]const u8, metrics.len);
         defer self.allocator.free(namespaces);
         for (metrics, 0..) |metric, stage| {
-            namespaces[stage] = if (metrics.len > 1) try stageNamespace(self.allocator, stage, metric) else "";
+            namespaces[stage] = label: {
+                if (gpu) |g| {
+                    if (g.overhead(metric.communication, metric.memory)) |ov| {
+                        break :label try std.fmt.allocPrint(self.allocator, "stage_{d:0>3} ({s} CMR)", .{ stage, gpu_info.bucket(ov) });
+                    }
+                }
+                break :label try std.fmt.allocPrint(self.allocator, "stage_{d:0>3}", .{stage});
+            };
         }
         defer for (namespaces) |namespace| {
             if (namespace.len > 0) self.allocator.free(namespace);
@@ -195,11 +208,14 @@ pub const Converter = struct {
         var groups = try graph.openDict("groupNodeAttributes");
         for (metrics, 0..) |metric, stage| {
             var attrs = try groups.openDict(namespaces[stage]);
-            try attrs.write("CMR", try formatCmr(self.allocator, metric));
-            try attrs.write("CMR estimate", "collective output payload / logical operand reads; per device; excludes views and collective reads; fusion inputs counted once");
-            try attrs.write("communication payload bytes", try compactCount(self.allocator, metric.communication));
-            try attrs.write("logical read bytes", try compactCount(self.allocator, metric.memory));
-            try attrs.write("opaque operations", try compactCount(self.allocator, metric.opaque_operations));
+            try attrs.write("CMR", try std.fmt.allocPrint(self.allocator, "{f}", .{Cmr{ .metric = metric }}));
+            if (gpu) |info| {
+                const overhead = info.overhead(metric.communication, metric.memory);
+                try attrs.write("communication overhead", if (overhead) |value| gpu_info.bucket(value) else "unavailable");
+            }
+            try attrs.writeTemplate("communication bytes", "\"{?B:.1}\"", .{metric.communication});
+            try attrs.writeTemplate("memory bytes", "\"{?B:.1}\"", .{metric.memory});
+            try attrs.writeTemplate("opaque ops", "\"{d}\"", .{metric.opaque_operations});
             try attrs.close();
         }
         try groups.close();
@@ -211,10 +227,11 @@ pub const Converter = struct {
             // node name + attrs
             try node.writeTemplate("id", "\"{d}\"", .{instr.id});
             try node.write("namespace", namespaces[partition.instructions.get(instr.id).?]);
-            try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}", .{self.instrLabel(instr)}));
+            try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}\nreads: {?B:.1}", .{ self.instrLabel(instr), self.instructionReads(instr) }));
             {
                 var attrs = try node.openList("attrs");
                 try self.writeAttr(Writer, &attrs, instr, comp_caller);
+                try attrs.writeTemplate("{{\"key\":\"read bytes\",\"value\":\"{?d}\"}}", .{self.instructionReads(instr)});
                 try attrs.close();
             }
 
@@ -298,16 +315,120 @@ pub const Converter = struct {
                 metric.communication = addEstimate(metric.communication, payload.bytes);
                 continue;
             }
-            // A fusion/custom call is one kernel boundary here. Do not recurse into
-            // its implementation: intermediate values need not be materialized.
+            // Opaque kernels retain a full-input estimate. Fusion reads are traced
+            // to parameters without charging intermediate values as HBM traffic.
             if (std.mem.eql(u8, instr.opcode, "custom-call") or std.mem.eql(u8, instr.opcode, "async-start") or std.mem.eql(u8, instr.opcode, "call") or std.mem.eql(u8, instr.opcode, "while") or std.mem.eql(u8, instr.opcode, "conditional")) metric.opaque_operations += 1;
-            for (instr.operand_ids.items) |id| {
-                const operand = self.instructions.get(id);
-                const bytes = if (operand) |op| if (op.shape) |shape| payloadBytes(shape) else null else null;
-                metric.memory = addEstimate(metric.memory, bytes);
-            }
+            metric.memory = addEstimate(metric.memory, self.instructionReads(instr));
         }
         return metrics;
+    }
+
+    fn instructionReads(self: *const Converter, instr: hlo.HloInstructionProto) ?u64 {
+        if (isMetadataOnly(instr.opcode) or std.mem.endsWith(u8, instr.opcode, "-done") or std.mem.eql(u8, instr.opcode, "async-update") or self.collectivePayload(instr) != null) return 0;
+        if (std.mem.eql(u8, instr.opcode, "fusion") and instr.called_computation_ids.items.len == 1) {
+            if (self.computations.get(instr.called_computation_ids.items[0])) |comp| {
+                return self.fusionReads(comp.*);
+            }
+        }
+        var total: ?u64 = 0;
+        for (instr.operand_ids.items, 0..) |_, i| total = addEstimate(total, self.operandReads(instr, i, instructionBytes(instr)));
+        return total;
+    }
+
+    // Logical input footprint of a fused kernel. Intermediate tensors are not
+    // charged as HBM reads. Fan-out demands are summed, capped at each value's
+    // size: overlap/cache-line effects and repeated dynamic indices are unknown.
+    fn fusionReads(self: *const Converter, comp: hlo.HloComputationProto) ?u64 {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const nodes = comp.instructions.items;
+        var indices: std.AutoHashMapUnmanaged(i64, usize) = .{};
+        const users = allocator.alloc(usize, nodes.len) catch return null;
+        @memset(users, 0);
+        const demands = allocator.alloc(?u64, nodes.len) catch return null;
+        @memset(demands, 0);
+        for (nodes, 0..) |node, i| indices.put(allocator, node.id, i) catch return null;
+        for (nodes) |node| for (node.operand_ids.items) |id| {
+            const i = indices.get(id) orelse return null;
+            users[i] += 1;
+        };
+        const root = indices.get(comp.root_id) orelse return null;
+        demands[root] = instructionBytes(nodes[root]);
+        var queue: std.ArrayList(usize) = .empty;
+        for (users, 0..) |count, i| if (count == 0) queue.append(allocator, i) catch return null;
+        var cursor: usize = 0;
+        var total: ?u64 = 0;
+        while (cursor < queue.items.len) : (cursor += 1) {
+            const i = queue.items[cursor];
+            const node = nodes[i];
+            if (std.mem.eql(u8, node.opcode, "parameter")) total = addEstimate(total, demands[i]);
+            for (node.operand_ids.items, 0..) |id, operand_index| {
+                const source = indices.get(id).?;
+                const requested = if (demands[i] == 0) @as(?u64, 0) else self.operandReads(node, operand_index, demands[i]);
+                demands[source] = capEstimate(addEstimate(demands[source], requested), instructionBytes(nodes[source]));
+                users[source] -= 1;
+                if (users[source] == 0) queue.append(allocator, source) catch return null;
+            }
+        }
+        return if (cursor == nodes.len) total else null;
+    }
+
+    fn operandReads(self: *const Converter, instr: hlo.HloInstructionProto, index: usize, demand: ?u64) ?u64 {
+        const operand = self.instructions.get(instr.operand_ids.items[index]) orelse return null;
+        const full = instructionBytes(operand.*);
+        const op = instr.opcode;
+        if (std.mem.eql(u8, op, "slice") or std.mem.eql(u8, op, "dynamic-slice") or std.mem.eql(u8, op, "gather")) {
+            // One data element per result element; indices are separate reads.
+            return if (index == 0) demand else full;
+        }
+        if (std.mem.eql(u8, op, "scatter")) {
+            const count = instr.operand_ids.items.len;
+            if (count < 3 or count % 2 != 1) return null;
+            const outputs = (count - 1) / 2;
+            if (index == outputs) return full; // scatter indices
+            const parameter = if (index < outputs) index else index - 1;
+            if (!(self.scatterUsesParameter(instr, parameter) orelse return null)) return 0;
+            if (index < outputs) {
+                // Optimized scatters update their destination in place; any
+                // materializing copy is a separate operation. Only touched old
+                // values are read, and overwrite updates do not read them at all.
+                const updates = self.instructions.get(instr.operand_ids.items[outputs + 1 + index]) orelse return null;
+                return instructionBytes(updates.*);
+            }
+            return full;
+        }
+        if (std.mem.eql(u8, op, "bitcast") or std.mem.eql(u8, op, "reshape") or std.mem.eql(u8, op, "transpose")) return capEstimate(demand, full);
+        if (isElementwiseRead(op)) {
+            const output_bytes = instructionBytes(instr) orelse return null;
+            const input_bytes = full orelse return null;
+            const requested = demand orelse return null;
+            if (output_bytes == 0) return 0;
+            const product = std.math.mul(u128, requested, input_bytes) catch return null;
+            const scaled = std.math.divCeil(u128, product, output_bytes) catch return null;
+            return @intCast(@min(input_bytes, scaled));
+        }
+        // Broadcasts reuse their input; reduction/contraction and opaque
+        // operations conservatively consume their full inputs.
+        return full;
+    }
+
+    fn scatterUsesParameter(self: *const Converter, instr: hlo.HloInstructionProto, parameter: usize) ?bool {
+        if (instr.called_computation_ids.items.len != 1) return null;
+        const comp = self.computations.get(instr.called_computation_ids.items[0]) orelse return null;
+        var seen: std.AutoHashMapUnmanaged(i64, void) = .{};
+        defer seen.deinit(self.allocator);
+        var pending: std.ArrayList(i64) = .empty;
+        defer pending.deinit(self.allocator);
+        pending.append(self.allocator, comp.root_id) catch return null;
+        while (pending.pop()) |id| {
+            const entry = seen.getOrPut(self.allocator, id) catch return null;
+            if (entry.found_existing) continue;
+            const node = self.instructions.get(id) orelse return null;
+            if (std.mem.eql(u8, node.opcode, "parameter") and node.parameter_number == parameter) return true;
+            pending.appendSlice(self.allocator, node.operand_ids.items) catch return null;
+        }
+        return false;
     }
 
     fn collectivePayload(self: *const Converter, instr: hlo.HloInstructionProto) ?struct { bytes: ?u64 } {
@@ -351,10 +472,10 @@ pub const Converter = struct {
                 if (input_bytes == null) break;
             }
             const output_bytes = if (instr.shape) |shape| logicalBytes(shape) else null;
-            try list.write(.{ .key = "bytes/device", .value = try std.fmt.allocPrint(self.allocator, "out: {s}, in: {s}", .{ try compactBytes(self.allocator, output_bytes), try compactBytes(self.allocator, input_bytes) }) });
+            try list.write(.{ .key = "bytes/device", .value = try std.fmt.allocPrint(self.allocator, "out: {?B:.1}, in: {?B:.1}", .{ output_bytes, input_bytes }) });
             const connected = collectiveGroupSize(instr);
             const total = self.context.device_count orelse self.device_count orelse collectiveDeviceCount(instr);
-            try list.write(.{ .key = "device connected", .value = try std.fmt.allocPrint(self.allocator, "{s} / {s}", .{ try compactCount(self.allocator, connected), try compactCount(self.allocator, total) }) });
+            try list.write(.{ .key = "device connected", .value = try std.fmt.allocPrint(self.allocator, "{?d} / {?d}", .{ connected, total }) });
         }
 
         if (instr.metadata) |meta| {
@@ -668,7 +789,7 @@ test "decode HLO and emit Model Explorer graphs" {
 
     var output: std.Io.Writer.Allocating = .init(allocator);
     var converter: Converter = .{ .allocator = allocator };
-    try converter.emitModule(&output.writer, decoded);
+    try converter.emitModule(&output.writer, decoded, null);
     const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
     const root = json.value.object;
     try std.testing.expectEqualStrings("module", root.get("label").?.string);
@@ -676,9 +797,9 @@ test "decode HLO and emit Model Explorer graphs" {
     try std.testing.expectEqualStrings("entry", graph.get("id").?.string);
     const nodes = graph.get("nodes").?.array.items;
     try std.testing.expectEqual(@as(usize, 3), nodes.len);
-    try std.testing.expectEqualStrings("Parameter 0", nodes[0].object.get("label").?.string);
-    try std.testing.expectEqualStrings("constant({ 2.5e0 }, F32)", nodes[1].object.get("label").?.string);
-    try std.testing.expectEqualStrings("custom-call: call\"\\\n", nodes[2].object.get("label").?.string);
+    try std.testing.expectEqualStrings("Parameter 0\nreads: 0B", nodes[0].object.get("label").?.string);
+    try std.testing.expectEqualStrings("constant({ 2.5e0 }, F32)\nreads: 0B", nodes[1].object.get("label").?.string);
+    try std.testing.expectEqualStrings("custom-call: call\"\\\n\nreads: 8B", nodes[2].object.get("label").?.string);
     const attrs = nodes[2].object.get("attrs").?.array.items;
     try std.testing.expectEqualStrings("a\"\\b.zig:42", attrs[2].object.get("value").?.string);
     try std.testing.expectEqualStrings("type:op\nname", attrs[3].object.get("value").?.string);
@@ -694,7 +815,7 @@ test "missing HLO module and truncated protobuf are rejected" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     var converter: Converter = .{ .allocator = std.testing.allocator };
-    try std.testing.expectError(error.NoModule, converter.emitModule(&output.writer, .{}));
+    try std.testing.expectError(error.NoModule, converter.emitModule(&output.writer, .{}, null));
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var reader: std.Io.Reader = .fixed("\x0a\x05\x01");
@@ -849,6 +970,7 @@ test "global references match parameter numbers and reject ambiguous provenance"
 }
 
 test {
+    _ = gpu_info;
     _ = dump_context;
     _ = graph_partitioner;
 }
@@ -876,7 +998,7 @@ test "source locations resolve protobuf stack frames and safely fall back" {
     const decoded = try hlo.HloProto.decode(&reader, allocator);
     var converter: Converter = .{ .allocator = allocator };
     var json: std.Io.Writer.Allocating = .init(allocator);
-    try converter.emitModule(&json.writer, decoded);
+    try converter.emitModule(&json.writer, decoded, null);
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json.written(), .{});
     const attrs = parsed.value.object.get("graphs").?.array.items[0].object.get("nodes").?.array.items[0].object.get("attrs").?.array.items;
     var found = false;
@@ -895,20 +1017,6 @@ test "source locations resolve protobuf stack frames and safely fall back" {
     converter.stack_frame_index.?.stack_frames.items[0].file_location_id = 1;
     converter.stack_frame_index.?.file_locations.items[0].file_name_id = 99;
     try std.testing.expect(try converter.sourceLocation(.{ .stack_frame_id = 1 }) == null);
-}
-
-fn compactCount(allocator: std.mem.Allocator, count: ?u64) ![]const u8 {
-    return if (count) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else "?";
-}
-
-fn compactBytes(allocator: std.mem.Allocator, bytes: ?u64) ![]const u8 {
-    const value = bytes orelse return "?";
-    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB", "PB", "EB" };
-    var unit: usize = 0;
-    var divisor: u64 = 1;
-    while (unit + 1 < units.len and value / divisor >= 1024) : (unit += 1) divisor *= 1024;
-    if (value % divisor == 0) return std.fmt.allocPrint(allocator, "{d}{s}", .{ value / divisor, units[unit] });
-    return std.fmt.allocPrint(allocator, "{d:.1}{s}", .{ @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(divisor)), units[unit] });
 }
 
 fn collectiveDeviceCount(instr: hlo.HloInstructionProto) ?u64 {
@@ -936,10 +1044,6 @@ test "compact collective bytes and device summaries" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    try std.testing.expectEqualStrings("16KB", try compactBytes(allocator, 16384));
-    try std.testing.expectEqualStrings("1.5KB", try compactBytes(allocator, 1536));
-    try std.testing.expectEqualStrings("0B", try compactBytes(allocator, 0));
-    try std.testing.expectEqualStrings("?", try compactBytes(allocator, null));
     var group: hlo.ReplicaGroup = .{};
     try group.replica_ids.appendSlice(allocator, &.{ 0, 1 });
     var instr: hlo.HloInstructionProto = .{ .opcode = "all-reduce" };
@@ -968,7 +1072,7 @@ test "partition namespaces retain edges and called computations" {
     };
     var converter: Converter = .{ .allocator = allocator };
     var output: std.Io.Writer.Allocating = .init(allocator);
-    try converter.emitModule(&output.writer, .{ .hlo_module = .{ .computations = .{ .items = &computations, .capacity = computations.len } } });
+    try converter.emitModule(&output.writer, .{ .hlo_module = .{ .computations = .{ .items = &computations, .capacity = computations.len } } }, null);
     const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
     const graphs = json.value.object.get("graphs").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), graphs.len);
@@ -1008,29 +1112,25 @@ fn payloadBytes(shape: hlo.ShapeProto) ?u64 {
     return logicalBytes(shape);
 }
 
-fn stageNamespace(allocator: std.mem.Allocator, stage: usize, metric: PartitionMetrics) ![]const u8 {
-    const ratio = try formatCmr(allocator, metric);
-    defer allocator.free(ratio);
-    // ASCII '/' creates a nested group in Model Explorer's namespace paths.
-    const label = try std.mem.replaceOwned(u8, allocator, ratio, "/", "∕");
-    defer allocator.free(label);
-    return std.fmt.allocPrint(allocator, "stage_{d:0>3} CMR {s}", .{ stage, label });
-}
+const Cmr = struct {
+    metric: PartitionMetrics,
+    separator: []const u8 = "/",
 
-fn formatCmr(allocator: std.mem.Allocator, metric: PartitionMetrics) ![]const u8 {
-    const memory = metric.memory orelse return allocator.dupe(u8, "unknown (logical reads unavailable)");
-    // Keep both quantities in the denominator's unit; never normalize to 1.
-    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB", "PB", "EB" };
-    var unit: usize = 0;
-    var divisor: u64 = 1;
-    while (unit + 1 < units.len and memory / divisor >= 1000) : (unit += 1) divisor *= 1000;
-    const denominator = @as(f64, @floatFromInt(memory)) / @as(f64, @floatFromInt(divisor));
-    const communication = metric.communication orelse return std.fmt.allocPrint(allocator, "(? / {d:.1} {s})", .{ denominator, units[unit] });
-    const numerator = @as(f64, @floatFromInt(communication)) / @as(f64, @floatFromInt(divisor));
-    // Scientific notation preserves tiny nonzero numerators in large stages.
-    if (communication > 0 and numerator < 0.05) return std.fmt.allocPrint(allocator, "({e:.1} / {d:.1} {s})", .{ numerator, denominator, units[unit] });
-    return std.fmt.allocPrint(allocator, "({d:.1} / {d:.1} {s})", .{ numerator, denominator, units[unit] });
-}
+    pub fn format(self: Cmr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const memory = self.metric.memory orelse return writer.writeAll("unknown (logical reads unavailable)");
+        // Both sides must share the denominator's unit; independent {B}
+        // formatting would choose a different unit for each side.
+        const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB", "PB", "EB" };
+        var unit: usize = 0;
+        var divisor: u64 = 1;
+        while (unit + 1 < units.len and memory / divisor >= 1000) : (unit += 1) divisor *= 1000;
+        const denominator = @as(f64, @floatFromInt(memory)) / @as(f64, @floatFromInt(divisor));
+        const communication = self.metric.communication orelse return writer.print("(? {s} {d:.1} {s})", .{ self.separator, denominator, units[unit] });
+        const numerator = @as(f64, @floatFromInt(communication)) / @as(f64, @floatFromInt(divisor));
+        if (communication > 0 and numerator < 0.05) return writer.print("({e:.1} {s} {d:.1} {s})", .{ numerator, self.separator, denominator, units[unit] });
+        return writer.print("({d:.1} {s} {d:.1} {s})", .{ numerator, self.separator, denominator, units[unit] });
+    }
+};
 
 test "CMR excludes views and async bookkeeping and counts kernel inputs once" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1063,7 +1163,7 @@ test "CMR excludes views and async bookkeeping and counts kernel inputs once" {
     for (2..8) |id| try std.testing.expectEqual(@as(usize, 1), partition.instructions.get(@intCast(id)).?);
     var converter: Converter = .{ .allocator = allocator };
     var output: std.Io.Writer.Allocating = .init(allocator);
-    try converter.emitModule(&output.writer, .{ .hlo_module = module });
+    try converter.emitModule(&output.writer, .{ .hlo_module = module }, null);
     const metrics = try converter.partitionMetrics(comps[0], partition);
     try std.testing.expectEqual(@as(?u64, 0), metrics[0].memory);
     try std.testing.expectEqual(@as(?u64, 1024), metrics[1].communication);
@@ -1082,15 +1182,138 @@ test "CMR preserves denominator magnitude, tuple payloads and unknown estimates"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    try std.testing.expectEqualStrings("(1.0 / 52.0 MB)", try formatCmr(allocator, .{ .communication = 1_000_000, .memory = 52_000_000 }));
-    try std.testing.expectEqualStrings("(0.0 / 0.0 B)", try formatCmr(allocator, .{}));
-    try std.testing.expectEqualStrings("(? / 52.0 MB)", try formatCmr(allocator, .{ .communication = null, .memory = 52_000_000 }));
-    try std.testing.expectEqualStrings("unknown (logical reads unavailable)", try formatCmr(allocator, .{ .memory = null }));
-    try std.testing.expect(std.mem.indexOf(u8, try formatCmr(allocator, .{ .communication = 1, .memory = 1_000_000_000 }), "e") != null);
+    try std.testing.expectEqualStrings("(1.0 / 52.0 MB)", try std.fmt.allocPrint(allocator, "{f}", .{Cmr{ .metric = .{ .communication = 1_000_000, .memory = 52_000_000 } }}));
+    try std.testing.expectEqualStrings("(0.0 / 0.0 B)", try std.fmt.allocPrint(allocator, "{f}", .{Cmr{ .metric = .{} }}));
+    try std.testing.expectEqualStrings("(? / 52.0 MB)", try std.fmt.allocPrint(allocator, "{f}", .{Cmr{ .metric = .{ .communication = null, .memory = 52_000_000 } }}));
+    try std.testing.expectEqualStrings("unknown (logical reads unavailable)", try std.fmt.allocPrint(allocator, "{f}", .{Cmr{ .metric = .{ .memory = null } }}));
+    try std.testing.expect(std.mem.indexOf(u8, try std.fmt.allocPrint(allocator, "{f}", .{Cmr{ .metric = .{ .communication = 1, .memory = 1_000_000_000 } }}), "e") != null);
     var shapes = [_]hlo.ShapeProto{ .{ .element_type = .F32 }, .{ .element_type = .BF16 }, .{ .element_type = .TOKEN } };
     const tuple: hlo.ShapeProto = .{ .element_type = .TUPLE, .tuple_shapes = .{ .items = &shapes, .capacity = shapes.len } };
     try std.testing.expectEqual(@as(?u64, 6), payloadBytes(tuple));
     const converter: Converter = .{ .allocator = allocator };
     try std.testing.expectEqual(@as(?u64, 2), converter.collectivePayload(.{ .opcode = "all-gather-start", .shape = tuple }).?.bytes);
     try std.testing.expectEqual(@as(?u64, null), addEstimate(std.math.maxInt(u64), 1));
+}
+
+fn instructionBytes(instr: hlo.HloInstructionProto) ?u64 {
+    return if (instr.shape) |shape| payloadBytes(shape) else null;
+}
+
+fn capEstimate(value: ?u64, limit: ?u64) ?u64 {
+    if (value == 0) return 0;
+    return @min(value orelse return null, limit orelse return null);
+}
+
+fn isElementwiseRead(opcode: []const u8) bool {
+    inline for (.{ "convert", "bitcast-convert", "add", "subtract", "multiply", "divide", "maximum", "minimum", "negate", "abs", "exp", "exponential", "log", "sqrt", "rsqrt", "sine", "cosine", "tanh", "compare", "select", "clamp", "and", "or", "xor", "not", "shift-left", "shift-right-arithmetic", "shift-right-logical" }) |name| {
+        if (std.mem.eql(u8, opcode, name)) return true;
+    }
+    return false;
+}
+
+test "fusion reads propagate slices through views and conversions without intermediate traffic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var nodes = [_]hlo.HloInstructionProto{
+        readTestInstruction(1, "parameter", .F32, 1024, &.{}),
+        readTestInstruction(2, "bitcast", .F32, 1024, &.{1}),
+        readTestInstruction(3, "convert", .BF16, 1024, &.{2}),
+        readTestInstruction(4, "slice", .BF16, 16, &.{3}),
+        readTestInstruction(5, "add", .BF16, 16, &.{ 4, 4 }),
+    };
+    var converter: Converter = .{ .allocator = allocator };
+    for (&nodes) |*node| try converter.instructions.put(allocator, node.id, node);
+    const comp: hlo.HloComputationProto = .{ .root_id = 5, .instructions = .{ .items = &nodes, .capacity = nodes.len } };
+    try std.testing.expectEqual(@as(?u64, 64), converter.fusionReads(comp));
+    try std.testing.expectEqual(@as(?u64, 0), converter.instructionReads(nodes[1]));
+    try std.testing.expectEqual(@as(?u64, 32), converter.instructionReads(nodes[3]));
+    try converter.computations.put(allocator, 20, &comp);
+    var outer = [_]hlo.HloInstructionProto{readTestInstruction(10, "fusion", .BF16, 16, &.{1})};
+    outer[0].called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 };
+    var partition: graph_partitioner.ComputationPartition = .{};
+    try partition.instructions.put(allocator, 10, 0);
+    partition.node_counts = try allocator.dupe(usize, &.{1});
+    const metrics = try converter.partitionMetrics(.{ .instructions = .{ .items = &outer, .capacity = 1 } }, &partition);
+    try std.testing.expectEqual(@as(?u64, 64), metrics[0].memory);
+    nodes[3].shape = null;
+    try std.testing.expectEqual(@as(?u64, null), converter.fusionReads(comp));
+}
+
+test "gather and dynamic slice count selected data and index reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var nodes = [_]hlo.HloInstructionProto{
+        readTestInstruction(1, "parameter", .F32, 1024, &.{}),
+        readTestInstruction(2, "parameter", .S32, 8, &.{}),
+        readTestInstruction(3, "gather", .F32, 8, &.{ 1, 2 }),
+    };
+    var converter: Converter = .{ .allocator = allocator };
+    for (&nodes) |*node| try converter.instructions.put(allocator, node.id, node);
+    const comp: hlo.HloComputationProto = .{ .root_id = 3, .instructions = .{ .items = &nodes, .capacity = nodes.len } };
+    try std.testing.expectEqual(@as(?u64, 64), converter.fusionReads(comp));
+    try std.testing.expectEqual(@as(?u64, 64), converter.instructionReads(nodes[2]));
+    nodes[1] = readTestInstruction(2, "parameter", .S32, 1, &.{});
+    nodes[2] = readTestInstruction(3, "dynamic-slice", .F32, 16, &.{ 1, 2 });
+    try std.testing.expectEqual(@as(?u64, 68), converter.fusionReads(comp));
+    try std.testing.expectEqual(@as(?u64, 68), converter.instructionReads(nodes[2]));
+}
+
+test "scatter reads distinguish overwrite from read modify write" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var nodes = [_]hlo.HloInstructionProto{
+        readTestInstruction(1, "parameter", .F32, 1024, &.{}),
+        readTestInstruction(2, "parameter", .S32, 8, &.{}),
+        readTestInstruction(3, "parameter", .F32, 16, &.{}),
+        readTestInstruction(4, "scatter", .F32, 1024, &.{ 1, 2, 3 }),
+    };
+    nodes[3].called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 };
+    var reducer = [_]hlo.HloInstructionProto{
+        readTestInstruction(5, "parameter", .F32, 1, &.{}),
+        readTestInstruction(6, "parameter", .F32, 1, &.{}),
+        readTestInstruction(7, "add", .F32, 1, &.{ 5, 6 }),
+    };
+    reducer[1].parameter_number = 1;
+    var update: hlo.HloComputationProto = .{ .root_id = 6, .instructions = .{ .items = &reducer, .capacity = reducer.len } };
+    var converter: Converter = .{ .allocator = allocator };
+    for (&nodes) |*node| try converter.instructions.put(allocator, node.id, node);
+    for (&reducer) |*node| try converter.instructions.put(allocator, node.id, node);
+    try converter.computations.put(allocator, 20, &update);
+    const comp: hlo.HloComputationProto = .{ .root_id = 4, .instructions = .{ .items = &nodes, .capacity = nodes.len } };
+    try std.testing.expectEqual(@as(?u64, 96), converter.fusionReads(comp));
+    try std.testing.expectEqual(@as(?u64, 96), converter.instructionReads(nodes[3]));
+    update.root_id = 7;
+    try std.testing.expectEqual(@as(?u64, 160), converter.fusionReads(comp));
+    try std.testing.expectEqual(@as(?u64, 160), converter.instructionReads(nodes[3]));
+    converter.allocator = std.testing.failing_allocator;
+    try std.testing.expectEqual(@as(?u64, null), converter.fusionReads(comp));
+    try std.testing.expectEqual(@as(?u64, null), converter.instructionReads(nodes[3]));
+}
+
+fn readTestInstruction(id: i64, opcode: []const u8, comptime dtype: hlo.PrimitiveType, comptime elements: i64, operands: []const i64) hlo.HloInstructionProto {
+    return .{
+        .id = id,
+        .opcode = opcode,
+        .shape = .{ .element_type = dtype, .dimensions = .{ .items = @constCast(&[_]i64{elements}), .capacity = 1 } },
+        .operand_ids = .{ .items = @constCast(operands), .capacity = operands.len },
+    };
+}
+
+fn loadGpuInfo(allocator: std.mem.Allocator, io: std.Io, input: []const u8) !?GpuInfo {
+    const stem = dump_context.dumpStem(input) orelse if (std.mem.endsWith(u8, input, ".hlo.pb")) input[0 .. input.len - ".hlo.pb".len] else return null;
+    const path = try std.fmt.allocPrint(allocator, "{s}.gpu_target_config.pbtxt", .{stem});
+    defer allocator.free(path);
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close(io);
+    var buffer: [8192]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    const content = try reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
+    defer allocator.free(content);
+    return gpu_info.parse(content);
 }

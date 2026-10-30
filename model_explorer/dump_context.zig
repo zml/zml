@@ -135,7 +135,7 @@ fn matchCollective(module: hlo.HloModuleProto, instr: hlo.HloInstructionProto) M
     return if (found) |value| .{ .unique = value } else .absent;
 }
 
-fn dumpStem(path: []const u8) ?[]const u8 {
+pub fn dumpStem(path: []const u8) ?[]const u8 {
     inline for (.{ ".after_spmd_partitioner.hlo.pb", ".before_optimizations.hlo.pb", ".before_config_assignment.hlo.pb" }) |suffix| {
         if (std.mem.endsWith(u8, path, suffix)) return path[0 .. path.len - suffix.len];
     }
