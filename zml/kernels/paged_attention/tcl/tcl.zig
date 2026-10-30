@@ -207,13 +207,19 @@ pub const paged = struct {
 /// decode up to `decode_keys` (flash past `straight_batch_decode_keys` from
 /// `chunked_decode_tokens`), else flash, in one chunk when it holds the table.
 fn defaultPlan(cfg: Cfg, keys: i64, columns: i64, plain_decode: bool, straight: bool, chunk: i64) Plan {
-    // The hybrid kernel needs tail pages past its head's.
-    if (plain_decode and cfg.tokens == 1 and columns > std.math.divCeil(i64, straight_decode_keys, cfg.pg) catch unreachable)
-        return .{ .head = head_keys, .chunk = tail_chunk_keys, .group = 1 };
+    // The hybrid kernel needs tail pages past its head's. TCC 2026.5 does not
+    // compile its tail for 2 or 4 KV heads wider than 128 (Qwen3.5's 4 of 256
+    // ran out of 25 minutes), which run flash instead; 1, 4 of 128 and 8 of up
+    // to 512 compile.
+    if (plain_decode and cfg.tokens == 1 and columns > std.math.divCeil(i64, straight_decode_keys, cfg.pg) catch unreachable) {
+        if (cfg.d <= 128 or cfg.hkv == 1 or cfg.hkv >= 8) return .{ .head = head_keys, .chunk = tail_chunk_keys, .group = 1 };
+        return .{ .head = 0, .chunk = chunk, .group = cfg.b * cfg.i };
+    }
     // Flash bounds a window's loop with power-of-two chunks.
     if (straight and cfg.window > 0) {
         const window_chunk = @max(window_chunk_keys, @as(i64, @intCast(std.math.ceilPowerOfTwo(u64, @intCast(cfg.window)) catch unreachable)));
-        if (window_chunk <= chunk and keys >= window_flash_chunks * window_chunk)
+        const chunks: i64 = if (cfg.tokens < chunked_decode_tokens) window_flash_chunks else batch_window_flash_chunks;
+        if (window_chunk <= chunk and keys >= chunks * window_chunk)
             return .{ .head = 0, .chunk = window_chunk, .group = cfg.tokens };
     }
     if (straight and keys <= decode_keys and (cfg.tokens < chunked_decode_tokens or keys <= straight_batch_decode_keys))
@@ -223,13 +229,17 @@ fn defaultPlan(cfg: Cfg, keys: i64, columns: i64, plain_decode: bool, straight: 
 }
 
 /// Decode over a window from `window_flash_chunks` chunks of at least
-/// `window_chunk_keys` keys runs flash attention, whose loop runs only the
-/// window's chunks. Gemma 4 12B sliding layer (window 1024) over a 32K table,
-/// straight vs flash in 1024-key chunks, per layer: one token 469 vs 480 us at
-/// 300 keys, 520 vs 503 at 8K, 649 vs 505 at 30K; 16 tokens 993 vs 656, 1682
-/// vs 852, 3861 vs 799. 4096-key chunks: 522, 505, 514.
+/// `window_chunk_keys` keys, `batch_window_flash_chunks` from
+/// `chunked_decode_tokens` tokens, runs flash attention, whose loop runs only
+/// the window's chunks. Gemma 4 12B sliding layer (window 1024), straight vs
+/// flash in 1024-key chunks, per layer at the shortest, a quarter and all of
+/// the table: one token over 8K keys 449, 459, 499 vs 477, 476, 500 us; over
+/// 16K 446, 469, 548 vs 477, 478, 502; over 32K 469, 519, 666 vs 480, 480,
+/// 507. 16 tokens over 4K keys 584, 657, 927 vs 655, 723, 848, compiled in
+/// 366 vs 55 s.
 const window_chunk_keys = 1024;
-const window_flash_chunks = 4;
+const window_flash_chunks = 16;
+const batch_window_flash_chunks = 4;
 
 /// Widest block table the straight-line decode kernel takes for one token.
 /// Its work follows the table's width, while the hybrid kernel's loop costs
@@ -247,11 +257,12 @@ const decode_keys = 65536;
 
 /// Tokens from which decode over more than `straight_batch_decode_keys` keys
 /// runs flash attention, whose loop computes only the chunks under the longest
-/// sequence. Llama 3.1 8B, 16 tokens, straight vs chunked: over 32K keys 513
-/// vs 585 tok/s with short sequences but 388 vs 356 at 8K tokens; over 64K
-/// keys 365 vs 586 and 270 vs 356.
+/// sequence. Llama 3.1 8B layer, 16 tokens, straight vs flash per layer at the
+/// shortest, a quarter and all of the table: over 4K keys 497, 522, 706 vs
+/// 728, 732, 793 us; over 16K 711, 940, 1510 vs 657, 778, 1620, compiled in
+/// 246 vs 48 s; over 32K 932, 1244, 2575 vs 656, 1062, 2745.
 const chunked_decode_tokens = 16;
-const straight_batch_decode_keys = 32768;
+const straight_batch_decode_keys = 8192;
 
 /// Decode contracts the gathered cache as is: keys past the valid ones hold
 /// anything, NaN included, but the scores' select drops them and the tensor
