@@ -155,7 +155,7 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Declares this tensor's layout on `mesh_`.
+    /// Declares this tensor's sharding on `mesh_`.
     /// Pass a `*const Mesh`, or a mesh name such as `.tp` during compilation.
     /// `partitioning` accepts a `Sharding.Partitioning` or a mapping from dimension
     /// tags to logical mesh axes, `.replicated`, or `.open`.
@@ -166,11 +166,11 @@ pub const Tensor = struct {
     /// keep a dimension whole on each shard.
     ///
     /// Outside compilation, updates the tensor's shape to describe an executable
-    /// input layout. Omitted dimensions are replicated and no graph constraint is
+    /// input's sharding. Omitted dimensions are replicated and no graph constraint is
     /// emitted. An explicit `Sharding.Partitioning` uses its supplied specs in both contexts.
     ///
     /// Executable inputs and explicitly annotated outputs must have no open
-    /// dimensions. An output with no declared layout defaults to replication.
+    /// dimensions. An output with no declared sharding defaults to replication.
     pub fn withPartitioning(self: Tensor, mesh_: anytype, partitioning: anytype) Tensor {
         if (@TypeOf(mesh_) == @EnumLiteral()) {
             const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit *const zml.Mesh object as input");
@@ -229,7 +229,7 @@ pub const Tensor = struct {
 
     /// Emits a graph constraint requiring a complete copy on every device.
     /// Requires active compilation. For a replicated input or buffer description,
-    /// use the default layout from `Tensor.init` or `Shape.init`.
+    /// use the default sharding from `Tensor.init` or `Shape.init`.
     pub fn replicate(self: Tensor) Tensor {
         const compiler = Compiler.current();
         const partitioning: Sharding.Partitioning = .repeat(.replicated, self.rank());

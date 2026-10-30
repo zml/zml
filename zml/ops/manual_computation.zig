@@ -215,7 +215,7 @@ noinline fn manualComputationInternal(
         },
     };
 
-    // Returned tensors describe the operation's global output shapes and layouts.
+    // Returned tensors describe the operation's global output shapes and sharding.
     for (0.., local_outputs, global_output_shapes) |o, output_tensor_ptr, output_shape| {
         output_tensor_ptr.* = Tensor._result(output_shape, op.result(o));
         output_tensor_ptr._shape = output_shape;

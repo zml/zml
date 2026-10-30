@@ -659,9 +659,9 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutO
         infos: std.MultiArrayList(TensorInfo) = .empty,
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
-            // Outputs with no declared layout default to replication. The graph
-            // constraint makes the partitioner produce the output buffer's layout.
-            const output = if (tensor.shape().hasSharding()) tensor.* else tensor.replicate();
+            // Outputs with no declared sharding default to replication. Constrain the
+            // returned value so the partitioner produces a replicated output buffer.
+            const output = if (tensor.shape().hasMesh() or tensor.shape().isFullyReplicated()) tensor.* else tensor.replicate();
             const og_shape = output.shape();
             if (og_shape.containsPartitionSpec(.open)) {
                 log.err("Executable output {d} has open sharding: {f}. Specify a logical mesh axis or .replicated for every dimension.", .{ ctx.infos.len, og_shape });

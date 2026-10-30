@@ -827,7 +827,7 @@ pub const Shape = struct {
         .grid = undefined,
     };
 
-    /// Returns shape metadata with the requested layout on `mesh`.
+    /// Returns shape metadata with the requested sharding on `mesh`.
     /// Omitted dimensions in a mapping are replicated, including during compilation.
     /// Use `Tensor.withPartitioning` to emit a constraint on a graph value.
     pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partitioning: anytype) Shape {
@@ -966,25 +966,24 @@ pub const Shape = struct {
         try testing.expect(!shape.isFullyPartitioned());
     }
 
-    /// Returns whether this shape declares a layout, including full replication.
-    /// A partially specified layout also returns true. Use
-    /// `containsPartitionSpec(.open)` to check for undecided dimensions.
-    pub fn hasSharding(self: Shape) bool {
-        return self._sharding.isSpecified();
+    /// Returns whether this shape's sharding is associated with a logical mesh.
+    /// The dimensions may be sharded, replicated, or open.
+    pub fn hasMesh(self: Shape) bool {
+        return self._sharding.mesh != null;
     }
 
-    test hasSharding {
+    test hasMesh {
         const replicated: Shape = .init(.{ .a = 10, .b = 20 }, .f32);
-        try testing.expect(replicated.hasSharding());
+        try testing.expect(!replicated.hasMesh());
 
         var unspecified = replicated;
         unspecified._sharding = .open;
-        try testing.expect(!unspecified.hasSharding());
+        try testing.expect(!unspecified.hasMesh());
 
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .feature }).hasSharding());
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .replicated, .b = .replicated }).hasSharding());
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .open }).hasSharding());
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .open, .b = .open }).hasSharding());
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .feature }).hasMesh());
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .replicated, .b = .replicated }).hasMesh());
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .open }).hasMesh());
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .open, .b = .open }).hasMesh());
     }
 
     pub fn isFullyReplicated(self: Shape) bool {

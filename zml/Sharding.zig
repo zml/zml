@@ -24,20 +24,17 @@ pub const MAX_MESH_RANK = 4;
 
 /// Full replication across participating devices.
 /// For buffers, each device holds a complete copy. Applied as a graph constraint,
-/// this closes every dimension to partitioning. `Shape.init` uses this layout;
+/// this closes every dimension to partitioning. `Shape.init` uses this sharding;
 /// unconstrained graph results use `open` instead.
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
 
-/// Unspecified layout for graph results. During compilation, the partitioner
+/// Unspecified sharding for graph results. During compilation, the partitioner
 /// may infer sharding from surrounding constraints or leave the value replicated.
-/// Executable inputs require closed layouts. An executable output with this
-/// unspecified layout defaults to replication; an explicitly declared output
-/// layout containing open dimensions is rejected.
+/// Executable inputs require closed sharding. An executable output with this
+/// unspecified sharding defaults to replication; an explicitly declared output
+/// sharding containing open dimensions is rejected.
 pub const open: Sharding = .{ .mesh = null, .partition = .open(Shape.MAX_RANK) };
 
-/// Returns the declared partition spec for tensor dimension `ax`.
-/// `.open` and `.replicated` are meaningful without a mesh; a mesh is only
-/// needed to interpret specs that refer to logical mesh axes.
 pub fn get(sharding: Sharding, ax: usize) PartitionSpec {
     return sharding.partition.get(ax);
 }
@@ -64,13 +61,6 @@ pub fn toArray(self: Sharding) [Shape.MAX_RANK]PartitionSpec {
     var result: [Shape.MAX_RANK]PartitionSpec = undefined;
     for (&result, 0..) |*spec, ax| spec.* = self.get(ax);
     return result;
-}
-
-/// Returns whether a sharding layout is declared.
-/// `Sharding.open` returns false. `Sharding.replicated` and layouts associated
-/// with a mesh return true, including layouts with open dimensions.
-pub fn isSpecified(self: Sharding) bool {
-    return self.mesh != null or self.isFullyReplicated();
 }
 
 pub fn isFullyReplicated(self: Sharding) bool {
@@ -119,9 +109,9 @@ test isCompatible {
     }
 }
 
-/// Formats the declared layout, not the partitioner's inferred layout.
+/// Formats the declared sharding, not the partitioner's inferred sharding.
 /// Without a mesh, prints `{replicated}` for full replication or `{open}` for
-/// an unspecified graph layout.
+/// unspecified graph sharding.
 ///
 /// With a mesh, entries follow tensor dimension order, e.g. `{data,replicated,?}@dp`:
 /// - `data`: split this dimension over the logical mesh axis named `data`.
@@ -151,7 +141,7 @@ pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
 /// Describes how one tensor dimension is distributed across a logical mesh.
 /// A mesh axis splits the dimension; `.replicated` keeps it whole on each shard.
 /// In a graph constraint, `.open` lets the partitioner choose either behavior.
-/// Executable buffer layouts must use closed specs: a mesh axis or `.replicated`.
+/// Executable buffers require closed sharding specs: a mesh axis or `.replicated`.
 pub const PartitionSpec = enum(u4) {
     mesh_axis_0 = 0,
     mesh_axis_1 = 1,
