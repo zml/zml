@@ -1,63 +1,70 @@
-"""Define runtime group annotations and collect annotated dependencies using an aspect."""
+"""Annotate assembled runtimes and group a binary's runfiles for packaging."""
 
+load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 
-# Holds the runtime group name declared by an annotation
-_RuntimeGroup = provider(fields = ["name"])
-# For one target, holds the groups mappings to runfiles collected by the aspect
-_RuntimeGroups = provider(fields = ["groups"])
+_RuntimeGroupInfo = provider("Runtime ownership annotation.", fields = ["name"])
+
+# This is a partial collection: unannotated runfiles are added at the consumer.
+_RuntimeGroupsInfo = provider("Partial transitive collection of annotated runtimes.", fields = ["entries"])
+
+def _runtime_group_impl(ctx):
+    if not ctx.attr.group or ctx.attr.group == "application":
+        fail("Runtime group names must be nonempty and must not be 'application'")
+    return [_RuntimeGroupInfo(name = ctx.attr.group)]
 
 runtime_group = rule(
-    implementation = lambda ctx: [_RuntimeGroup(name = ctx.attr.group)],
+    implementation = _runtime_group_impl,
     attrs = {"group": attr.string(mandatory = True)},
-    doc = "Annotate a producer target via aspect_hints with the group name for its runtime files.",
+    doc = "Assign a producer's complete runfiles to a named group through aspect_hints. Nested annotations are superseded.",
 )
 
 def _targets(value):
-    """Runtime groups propagate through single-label and label-list attributes only."""
-    values = value if type(value) == "list" else [value]
-    return [target for target in values if type(target) == "Target"]
+    """Extract targets from label attributes, including keyed and list dictionaries."""
+    values = value.keys() + value.values() if type(value) == "dict" else [value]
+    targets = []
+    for item in values:
+        targets.extend([target for target in (item if type(item) == "list" else [item]) if type(target) == "Target"])
+    return targets
 
 def _collect_impl(target, ctx):
     """Collect runtime groups from the target and its dependencies."""
 
-    # Skip build-tool targets because packaging collects dependencis for **running** the application, not for building it.
+    # Build tools do not contribute to the application's runtime package.
     if ctx.configuration.is_tool_configuration():
-        return [_RuntimeGroups(groups = {})]
+        return [_RuntimeGroupsInfo(entries = runfiles_groups.entries())]
 
     # Read this target runtime-group annotations, ignoring other aspect hints.
-    hints = [h for h in getattr(ctx.rule.attr, "aspect_hints", []) if _RuntimeGroup in h]
+    hints = [h for h in getattr(ctx.rule.attr, "aspect_hints", []) if _RuntimeGroupInfo in h]
     if len(hints) > 1:
         fail("Only one runtime group annotation is allowed on " + str(target.label))
 
-    # hints contains only this target annotations, not its dependencies
-    # LLMD (no annotation): receives dependency groups via `else`
-    # └── ROCm Zig library (no annotation): forwards rocm via `else`
-    #     └── libzml_rocm (annotated): defines rocm via if hints
-    # Groups propagate upward
     if hints:
-        # Use this annotated target runfiles (replacing any groups from its dependencies)
-        groups = {hints[0][_RuntimeGroup].name: target[DefaultInfo].default_runfiles}
-    else:
-        groups = {}
-        for edge in dir(ctx.rule.attr):
-            for dep in _targets(getattr(ctx.rule.attr, edge)):
-                if _RuntimeGroups in dep:
-                    for name, runfiles in dep[_RuntimeGroups].groups.items():
-                        groups.setdefault(name, []).append(runfiles)
-        # Merge contributions with the same group name at unannotated targets.
-        groups = {name: ctx.runfiles().merge_all(parts) for name, parts in groups.items()}
-    return [_RuntimeGroups(groups = groups)]
+        # The annotation owns the assembled runtime, including its dependencies.
+        return [_RuntimeGroupsInfo(entries = runfiles_groups.entries(direct = [
+            runfiles_groups.entry(
+                name = hints[0][_RuntimeGroupInfo].name,
+                content = target[DefaultInfo].default_runfiles,
+                rank = runfiles_groups.RANK_FOUNDATION,
+            ),
+        ]))]
+
+    return [_RuntimeGroupsInfo(entries = runfiles_groups.entries(transitive = [
+        dep[_RuntimeGroupsInfo].entries
+        for edge in dir(ctx.rule.attr)
+        for dep in _targets(getattr(ctx.rule.attr, edge))
+        if _RuntimeGroupsInfo in dep
+    ]))]
 
 # To be used on the consumer side to collect runtime groups from dependencies
 runtime_groups_aspect = aspect(
     implementation = _collect_impl,
     attr_aspects = ["*"],
-    provides = [_RuntimeGroups],
+    provides = [_RuntimeGroupsInfo],
 )
 
 def _entries(runfiles):
-    """ Index runfile entries so assigned group entries can be removed when computing shared. Runfiles depsets are immutable """
+    """Index each runfiles component without losing aliases or synthetic files."""
     return {
         "files": {f: f for f in runfiles.files.to_list()},
         "symlinks": {(s.path, s.target_file): s for s in runfiles.symlinks.to_list()},
@@ -65,34 +72,83 @@ def _entries(runfiles):
         "empty_filenames": {p: p for p in runfiles.empty_filenames.to_list()},
     }
 
-def collect_runtime_groups(ctx, binary):
-    """Collect intact producer groups and assign remaining binary runfiles to shared.
-
-    Every file and alias in a annotated group must also exist in the binary runfiles. Merge runfiles unassigned to any group into a `shared` group (preserving any existing shared group). Exclude the application executable and executable symlinks from shared group.
-    Executable targets must expose all application executable artifacts through DefaultInfo.files plus files_to_run.executable, with no runtime dependencies in those outputs.
-    Wrappers that hide original executables are unsupported.
-    The binary attribute must have runtime_groups_aspect applied.
-    """
-    collected = binary[_RuntimeGroups]
-    executable = binary[DefaultInfo].files_to_run.executable
-    excluded = {f: True for f in binary[DefaultInfo].files.to_list() + [executable]} if executable != None else {}
-    remaining = _entries(binary[DefaultInfo].default_runfiles)
-    groups = dict(collected.groups)
-
-    for runfiles in groups.values():
-        for field, entries in _entries(runfiles).items():
-            for key in entries:
-                remaining[field].pop(key, None)
-    if remaining["empty_filenames"]:
+def _runfiles(ctx, entries):
+    # Synthetic empty files cannot be constructed with ctx.runfiles(). They must
+    # stay in the intact annotated runfiles object that supplies them.
+    if entries["empty_filenames"]:
         fail("Unassigned synthetic empty runfiles require a producer annotation")
-
-    # Collect remaining unassigned entries to a shared runfiles group.
-    shared = ctx.runfiles(
-        files = [f for f in remaining["files"].values() if f not in excluded],
-        symlinks = {s.path: s.target_file for s in remaining["symlinks"].values() if s.target_file not in excluded},
-        root_symlinks = {s.path: s.target_file for s in remaining["root_symlinks"].values() if s.target_file not in excluded},
+    return ctx.runfiles(
+        files = entries["files"].values(),
+        symlinks = {s.path: s.target_file for s in entries["symlinks"].values()},
+        root_symlinks = {s.path: s.target_file for s in entries["root_symlinks"].values()},
     )
-    groups["shared"] = groups.get("shared", ctx.runfiles()).merge(shared)
 
-    # Return the final set of runtime groups. Including the shared group
-    return RunfilesGroupInfo(**groups)
+def collect_runtime_groups(ctx, binary, *, application_files = []):
+    """Return complete RunfilesGroupInfo for a target with runtime_groups_aspect.
+
+    Annotations own complete runtime bundles; every annotated entry must also
+    exist in the binary's runfiles. Groups may overlap. Unassigned entries join
+    `shared`, including any existing contributions to that group. The root
+    executable, explicitly selected application files, and their aliases, when
+    present in runfiles, belong to `application`.
+    Other DefaultInfo.files are not assumed to be executables.
+
+    Consumers resolve this provider with runfiles_groups.resolve(). They own
+    executable replacement, repository mappings, and the final package layout.
+    Collect once per binary and share the result between layer selectors.
+
+    Args:
+        ctx: The consuming rule's context.
+        binary: A target with runtime_groups_aspect applied.
+        application_files: Additional Files owned by the application, such as the
+            original executable behind a wrapper. Never inferred from default outputs.
+
+    Returns:
+        RunfilesGroupInfo whose entries cover DefaultInfo.default_runfiles.
+    """
+    collected = binary[_RuntimeGroupsInfo]
+    executable = binary[DefaultInfo].files_to_run.executable
+    application_files = {f: True for f in application_files}
+    if executable != None:
+        application_files[executable] = True
+    original = _entries(binary[DefaultInfo].default_runfiles)
+    remaining = {field: dict(entries) for field, entries in original.items()}
+
+    # Visiting all attributes can discover target-configured dependencies that
+    # are not runtime dependencies. Never silently add their files to a package.
+    for entry in collected.entries.to_list():
+        for field, entries in _entries(runfiles_groups.runfiles(ctx, entry)).items():
+            for key in entries:
+                if key not in original[field]:
+                    fail("Runtime group '{}' contains {} entry {} absent from {} runfiles".format(entry.name, field, key, binary.label))
+                file = key if field == "files" else key[1] if field in ["symlinks", "root_symlinks"] else None
+                if file in application_files:
+                    fail("Runtime group '{}' contains an application file of {}; annotate its runtime dependencies instead".format(entry.name, binary.label))
+                remaining[field].pop(key, None)
+
+    own = []
+    if application_files:
+        application = {
+            "files": {f: f for f in remaining["files"] if f in application_files},
+            "symlinks": {key: s for key, s in remaining["symlinks"].items() if s.target_file in application_files},
+            "root_symlinks": {key: s for key, s in remaining["root_symlinks"].items() if s.target_file in application_files},
+            "empty_filenames": {},
+        }
+        for field, entries in application.items():
+            for key in entries:
+                remaining[field].pop(key)
+        own.append(runfiles_groups.entry(
+            name = "application",
+            content = _runfiles(ctx, application),
+            kind = "first_party",
+        ))
+
+    own.append(runfiles_groups.entry(
+        name = "shared",
+        content = _runfiles(ctx, remaining),
+        rank = runfiles_groups.RANK_SHARED_DEPS,
+    ))
+    return RunfilesGroupInfo(
+        entries = runfiles_groups.entries(direct = own, transitive = [collected.entries]),
+        executable_group = "application" if executable != None else None,
+    )
