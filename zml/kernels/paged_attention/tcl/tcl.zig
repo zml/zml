@@ -12,13 +12,13 @@
 //! decode) up to the longest sequence, gathering whole pages and accumulating
 //! the softmax statistics in f32.
 //!
-//! Decode over BF16 caches in power-of-two pages instead runs fusible kernels
-//! in the layer, with the token metadata every layer shares computed once per
-//! forward pass: one straight-line kernel over the whole pages each token
-//! sees, or, for one token without sink or window past `straight_decode_keys`
-//! keys, a straight-line head over its first keys and a device loop over the
-//! chunks holding its other keys, so that the work follows the sequence's
-//! length instead of the block table's width. `chunked_decode_tokens` tokens past
+//! Decode over BF16 caches instead runs fusible kernels in the layer, with
+//! the token metadata every layer shares computed once per forward pass: one
+//! straight-line kernel over the whole pages each token sees, or, for one
+//! token without sink or window past `straight_decode_keys` keys, a
+//! straight-line head over its first keys and a device loop over the chunks
+//! holding its other keys, so that the work follows the sequence's length
+//! instead of the block table's width. `chunked_decode_tokens` tokens past
 //! `straight_batch_decode_keys` keys, and windows past `window_flash_chunks`
 //! chunks, run flash attention for the same reason; a window's loop starts at
 //! the chunk holding its first key.
@@ -155,10 +155,13 @@ pub const paged = struct {
         const plain_decode = decode and !cfg.use_sink and cfg.window == 0;
         // Converting the cache inside the unit stops TCC 2026.5's sparse
         // propagation ("Not implemented: Transmute"): straight decode reads
-        // BF16 caches. It also takes power-of-two pages: TCC fails on its
-        // metadata for 88 or 96 pages of 48 ("Fail to cover valid range").
-        const straight = decode and k_cache.dtype() == .bf16 and v_cache.dtype() == .bf16 and std.math.isPowerOfTwo(page);
-        const plan = calibration_plan orelse defaultPlan(cfg, keys, parameters.block_table.dim(.p), plain_decode and straight, straight, chunk);
+        // BF16 caches. TCC also fails on the metadata of several tokens over
+        // a page count that is not a power of two ("Fail to cover valid
+        // range" for 16 tokens over 80 to 160 pages but not 128), so their
+        // straight decode pads the table.
+        const straight = decode and k_cache.dtype() == .bf16 and v_cache.dtype() == .bf16;
+        const straight_keys = if (straight and cfg.tokens > 1) @as(i64, @intCast(std.math.ceilPowerOfTwo(u64, @intCast(@divExact(keys, page))) catch unreachable)) * page else keys;
+        const plan = calibration_plan orelse defaultPlan(cfg, straight_keys, parameters.block_table.dim(.p), plain_decode and straight, straight, chunk);
         const sink = if (opts.sink) |s| s.convert(.f32).reshape(.{ .hkv = cfg.hkv, .hg = cfg.g }) else Tensor.zeroes(.init(.{ .hkv = cfg.hkv, .hg = cfg.g }, .f32));
         if (plan.head > 0 and plan.chunk > 0) {
             stdx.debug.assert(plain_decode and cfg.tokens == 1, "TCL hybrid attention takes one plain decode token", .{});
@@ -167,7 +170,7 @@ pub const paged = struct {
         if (plan.chunk == 0 and straight) {
             return decodeAttention(parameters, q, k_cache, v_cache, sink, .{
                 .t = cfg.tokens,
-                .a = keys,
+                .a = straight_keys,
                 .group = plan.group,
                 .hkv = cfg.hkv,
                 .g = cfg.g,
