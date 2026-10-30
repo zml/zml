@@ -30,29 +30,49 @@ pub const GraphPartition = struct {
 pub fn partitionModule(allocator: std.mem.Allocator, module: hlo.HloModuleProto) !GraphPartition {
     var result: GraphPartition = .{};
     errdefer result.deinit(allocator);
+    var async_boundaries: std.AutoHashMapUnmanaged(i64, void) = .{};
+    defer async_boundaries.deinit(allocator);
+    var roots: std.AutoHashMapUnmanaged(i64, []const u8) = .{};
+    defer roots.deinit(allocator);
     for (module.computations.items) |computation| {
+        for (computation.instructions.items) |instr| {
+            if (instr.id == computation.root_id) try roots.put(allocator, computation.id, instr.opcode);
+        }
+    }
+    for (module.computations.items) |computation| {
+        async_boundaries.clearRetainingCapacity();
+        for (computation.instructions.items) |instr| {
+            if (!std.mem.eql(u8, instr.opcode, "async-start")) continue;
+            for (instr.called_computation_ids.items) |id| {
+                if (isBoundary(roots.get(id) orelse "")) try async_boundaries.put(allocator, instr.id, {});
+            }
+        }
         const entry = try result.computations.getOrPut(allocator, computation.id);
         if (entry.found_existing) return error.DuplicateComputationId;
         entry.value_ptr.* = .{};
-        entry.value_ptr.* = try partitionComputation(allocator, computation);
+        entry.value_ptr.* = try partitionWithAsyncBoundaries(allocator, computation, async_boundaries);
     }
     return result;
 }
 
 fn isBoundary(opcode: []const u8) bool {
     // Async collectives cross the boundary at start; done stays in that stage.
-    inline for (.{ "all-gather", "all-to-all", "all-gather-start", "all-to-all-start" }) |name| {
+    inline for (.{ "all-gather", "all-to-all", "all-reduce", "all-gather-start", "all-to-all-start", "all-reduce-start" }) |name| {
         if (std.mem.eql(u8, opcode, name)) return true;
     }
     return false;
 }
 
-/// Cut at all-gather/all-to-all: a collective starts a new stage after all
+/// Cut at all-gather/all-to-all/all-reduce: a collective starts a new stage after all
 /// dependencies. Parallel collectives share a stage; joins take the latest
 /// incoming stage. A reverse pass moves preparation work toward its first user,
 /// avoiding a huge initial partition of parameters/constants and their chains.
 /// Both passes include control dependencies and run in O(nodes + edges).
 pub fn partitionComputation(allocator: std.mem.Allocator, computation: hlo.HloComputationProto) !ComputationPartition {
+    return partitionWithAsyncBoundaries(allocator, computation, .{});
+}
+
+fn partitionWithAsyncBoundaries(allocator: std.mem.Allocator, computation: hlo.HloComputationProto, async_boundaries: std.AutoHashMapUnmanaged(i64, void)) !ComputationPartition {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const temp = scratch.allocator();
@@ -66,6 +86,8 @@ pub fn partitionComputation(allocator: std.mem.Allocator, computation: hlo.HloCo
     @memset(users, .empty);
     const remaining = try temp.alloc(usize, instructions.len);
     @memset(remaining, 0);
+    const boundaries = try temp.alloc(bool, instructions.len);
+    for (instructions, boundaries) |instr, *boundary| boundary.* = isBoundary(instr.opcode) or async_boundaries.contains(instr.id);
     const stages = try temp.alloc(PartitionId, instructions.len);
     @memset(stages, 0);
     for (instructions, 0..) |instr, i| {
@@ -92,7 +114,7 @@ pub fn partitionComputation(allocator: std.mem.Allocator, computation: hlo.HloCo
     var max_stage: usize = 0;
     while (cursor < order.items.len) : (cursor += 1) {
         const i = order.items[cursor];
-        stages[i] += @intFromBool(isBoundary(instructions[i].opcode));
+        stages[i] += @intFromBool(boundaries[i]);
         max_stage = @max(max_stage, stages[i]);
         for (users[i].items) |user| {
             stages[user] = @max(stages[user], stages[i]);
@@ -106,10 +128,10 @@ pub fn partitionComputation(allocator: std.mem.Allocator, computation: hlo.HloCo
     while (reverse > 0) {
         reverse -= 1;
         const i = order.items[reverse];
-        if (isBoundary(instructions[i].opcode) or users[i].items.len == 0) continue;
+        if (boundaries[i] or users[i].items.len == 0) continue;
         var latest: usize = max_stage;
         for (users[i].items) |user| {
-            latest = @min(latest, stages[user] - @intFromBool(isBoundary(instructions[user].opcode)));
+            latest = @min(latest, stages[user] - @intFromBool(boundaries[user]));
         }
         stages[i] = latest;
     }
@@ -139,7 +161,7 @@ test "parallel collectives, residual joins and late preparation" {
         instruction(2, "all-gather", &.{1}),
         instruction(3, "all-to-all", &.{1}),
         instruction(4, "add", &.{ 2, 3 }),
-        instruction(5, "all-to-all", &.{4}),
+        instruction(5, "all-reduce", &.{4}),
         instruction(6, "parameter", &.{}),
         instruction(7, "constant", &.{}),
         instruction(8, "multiply", &.{ 6, 7 }),
@@ -157,7 +179,7 @@ test "async collective, control dependencies and hidden tuple elements" {
         instruction(2, "all-gather-start", &.{1}),
         instruction(3, "all-gather-done", &.{2}),
         instruction(4, "get-tuple-element", &.{3}),
-        instruction(5, "all-to-all", &.{4}),
+        instruction(5, "all-reduce", &.{4}),
         instruction(6, "copy", &.{1}),
     };
     nodes[5].control_predecessor_ids = .{ .items = @constCast(&[_]i64{5}), .capacity = 1 };
@@ -169,7 +191,7 @@ test "async collective, control dependencies and hidden tuple elements" {
 }
 
 test "no collective, empty graph and invalid dependencies" {
-    var nodes = [_]hlo.HloInstructionProto{ instruction(1, "parameter", &.{}), instruction(2, "all-reduce", &.{1}) };
+    var nodes = [_]hlo.HloInstructionProto{ instruction(1, "parameter", &.{}), instruction(2, "copy", &.{1}) };
     var result = try partitionComputation(std.testing.allocator, testComputation(&nodes));
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(usize, &.{2}, result.node_counts);

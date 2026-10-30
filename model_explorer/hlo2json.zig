@@ -182,16 +182,35 @@ pub const Converter = struct {
         // The name of the caller node is better cause computation name is typically just "fusion".
         try graph.write("id", if (comp_caller) |caller| caller.name else computation.name);
 
+        const metrics = try self.partitionMetrics(computation, partition);
+        defer self.allocator.free(metrics);
+        const namespaces = try self.allocator.alloc([]const u8, metrics.len);
+        defer self.allocator.free(namespaces);
+        for (metrics, 0..) |metric, stage| {
+            namespaces[stage] = if (metrics.len > 1) try stageNamespace(self.allocator, stage, metric) else "";
+        }
+        defer for (namespaces) |namespace| {
+            if (namespace.len > 0) self.allocator.free(namespace);
+        };
+        var groups = try graph.openDict("groupNodeAttributes");
+        for (metrics, 0..) |metric, stage| {
+            var attrs = try groups.openDict(namespaces[stage]);
+            try attrs.write("CMR", try formatCmr(self.allocator, metric));
+            try attrs.write("CMR estimate", "collective output payload / logical operand reads; per device; excludes views and collective reads; fusion inputs counted once");
+            try attrs.write("communication payload bytes", try compactCount(self.allocator, metric.communication));
+            try attrs.write("logical read bytes", try compactCount(self.allocator, metric.memory));
+            try attrs.write("opaque operations", try compactCount(self.allocator, metric.opaque_operations));
+            try attrs.close();
+        }
+        try groups.close();
+
         var nodes = try graph.openList("nodes");
         for (computation.instructions.items) |instr| {
             if (std.mem.eql(u8, instr.opcode, "get-tuple-element")) continue;
             var node = try nodes.openDict();
             // node name + attrs
             try node.writeTemplate("id", "\"{d}\"", .{instr.id});
-            try node.write("namespace", if (partition.node_counts.len > 1)
-                try std.fmt.allocPrint(self.allocator, "stage_{d:0>3}", .{partition.instructions.get(instr.id).?})
-            else
-                "");
+            try node.write("namespace", namespaces[partition.instructions.get(instr.id).?]);
             try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}", .{self.instrLabel(instr)}));
             {
                 var attrs = try node.openList("attrs");
@@ -267,6 +286,46 @@ pub const Converter = struct {
             try node.close();
         }
         try nodes.close();
+    }
+
+    fn partitionMetrics(self: *const Converter, computation: hlo.HloComputationProto, partition: *const graph_partitioner.ComputationPartition) ![]PartitionMetrics {
+        const metrics = try self.allocator.alloc(PartitionMetrics, partition.node_counts.len);
+        @memset(metrics, .{});
+        for (computation.instructions.items) |instr| {
+            const metric = &metrics[partition.instructions.get(instr.id).?];
+            if (isMetadataOnly(instr.opcode) or std.mem.endsWith(u8, instr.opcode, "-done") or std.mem.eql(u8, instr.opcode, "async-update")) continue;
+            if (self.collectivePayload(instr)) |payload| {
+                metric.communication = addEstimate(metric.communication, payload.bytes);
+                continue;
+            }
+            // A fusion/custom call is one kernel boundary here. Do not recurse into
+            // its implementation: intermediate values need not be materialized.
+            if (std.mem.eql(u8, instr.opcode, "custom-call") or std.mem.eql(u8, instr.opcode, "async-start") or std.mem.eql(u8, instr.opcode, "call") or std.mem.eql(u8, instr.opcode, "while") or std.mem.eql(u8, instr.opcode, "conditional")) metric.opaque_operations += 1;
+            for (instr.operand_ids.items) |id| {
+                const operand = self.instructions.get(id);
+                const bytes = if (operand) |op| if (op.shape) |shape| payloadBytes(shape) else null else null;
+                metric.memory = addEstimate(metric.memory, bytes);
+            }
+        }
+        return metrics;
+    }
+
+    fn collectivePayload(self: *const Converter, instr: hlo.HloInstructionProto) ?struct { bytes: ?u64 } {
+        if (isCollective(instr.opcode)) return .{ .bytes = if (instr.shape) |shape| payloadBytes(shape) else null };
+        if (std.mem.eql(u8, instr.opcode, "async-start")) {
+            for (instr.called_computation_ids.items) |id| {
+                const comp = self.computations.get(id) orelse continue;
+                for (comp.instructions.items) |root| {
+                    if (root.id == comp.root_id and isCollective(root.opcode)) return .{ .bytes = if (root.shape) |shape| payloadBytes(shape) else null };
+                }
+            }
+        }
+        if (std.mem.endsWith(u8, instr.opcode, "-start") and isCollective(instr.opcode[0 .. instr.opcode.len - "-start".len])) {
+            // Dedicated collective starts return (input buffers, output buffers).
+            const shape = instr.shape orelse return .{ .bytes = null };
+            return .{ .bytes = if (shape.element_type == .TUPLE and shape.tuple_shapes.items.len >= 2) payloadBytes(shape.tuple_shapes.items[1]) else null };
+        }
+        return null;
     }
 
     pub fn writeAttr(self: *const Converter, Writer: type, list: *json_writer.List(Writer), instr: hlo.HloInstructionProto, comp_caller: ?*const hlo.HloInstructionProto) !void {
@@ -914,10 +973,124 @@ test "partition namespaces retain edges and called computations" {
     const graphs = json.value.object.get("graphs").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), graphs.len);
     const nodes = graphs[0].object.get("nodes").?.array.items;
-    try std.testing.expectEqualStrings("stage_000", nodes[0].object.get("namespace").?.string);
-    try std.testing.expectEqualStrings("stage_001", nodes[1].object.get("namespace").?.string);
-    try std.testing.expectEqualStrings("stage_001", nodes[2].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_000 CMR (0.0 ∕ 0.0 B)", nodes[0].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_001 CMR (4.0 ∕ 4.0 B)", nodes[1].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_001 CMR (4.0 ∕ 4.0 B)", nodes[2].object.get("namespace").?.string);
     try std.testing.expectEqualStrings("1", nodes[1].object.get("incomingEdges").?.array.items[0].object.get("sourceNodeId").?.string);
     try std.testing.expectEqualStrings("callee", nodes[2].object.get("subgraphIds").?.array.items[0].string);
     try std.testing.expectEqualStrings("", graphs[1].object.get("nodes").?.array.items[0].object.get("namespace").?.string);
+}
+
+const PartitionMetrics = struct {
+    communication: ?u64 = 0,
+    memory: ?u64 = 0,
+    opaque_operations: u64 = 0,
+};
+
+fn addEstimate(a: ?u64, b: ?u64) ?u64 {
+    return std.math.add(u64, a orelse return null, b orelse return null) catch null;
+}
+
+fn isMetadataOnly(opcode: []const u8) bool {
+    inline for (.{ "bitcast", "tuple", "get-tuple-element", "parameter", "constant", "after-all" }) |name| {
+        if (std.mem.eql(u8, opcode, name)) return true;
+    }
+    return false;
+}
+
+fn payloadBytes(shape: hlo.ShapeProto) ?u64 {
+    if (shape.element_type == .TOKEN) return 0;
+    if (shape.element_type == .TUPLE) {
+        var total: ?u64 = 0;
+        for (shape.tuple_shapes.items) |child| total = addEstimate(total, payloadBytes(child));
+        return total;
+    }
+    return logicalBytes(shape);
+}
+
+fn stageNamespace(allocator: std.mem.Allocator, stage: usize, metric: PartitionMetrics) ![]const u8 {
+    const ratio = try formatCmr(allocator, metric);
+    defer allocator.free(ratio);
+    // ASCII '/' creates a nested group in Model Explorer's namespace paths.
+    const label = try std.mem.replaceOwned(u8, allocator, ratio, "/", "∕");
+    defer allocator.free(label);
+    return std.fmt.allocPrint(allocator, "stage_{d:0>3} CMR {s}", .{ stage, label });
+}
+
+fn formatCmr(allocator: std.mem.Allocator, metric: PartitionMetrics) ![]const u8 {
+    const memory = metric.memory orelse return allocator.dupe(u8, "unknown (logical reads unavailable)");
+    // Keep both quantities in the denominator's unit; never normalize to 1.
+    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB", "PB", "EB" };
+    var unit: usize = 0;
+    var divisor: u64 = 1;
+    while (unit + 1 < units.len and memory / divisor >= 1000) : (unit += 1) divisor *= 1000;
+    const denominator = @as(f64, @floatFromInt(memory)) / @as(f64, @floatFromInt(divisor));
+    const communication = metric.communication orelse return std.fmt.allocPrint(allocator, "(? / {d:.1} {s})", .{ denominator, units[unit] });
+    const numerator = @as(f64, @floatFromInt(communication)) / @as(f64, @floatFromInt(divisor));
+    // Scientific notation preserves tiny nonzero numerators in large stages.
+    if (communication > 0 and numerator < 0.05) return std.fmt.allocPrint(allocator, "({e:.1} / {d:.1} {s})", .{ numerator, denominator, units[unit] });
+    return std.fmt.allocPrint(allocator, "({d:.1} / {d:.1} {s})", .{ numerator, denominator, units[unit] });
+}
+
+test "CMR excludes views and async bookkeeping and counts kernel inputs once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var dims = [_]i64{256};
+    const shape: hlo.ShapeProto = .{ .element_type = .F32, .dimensions = .{ .items = &dims, .capacity = 1 } };
+    var nodes = [_]hlo.HloInstructionProto{
+        .{ .id = 1, .opcode = "parameter", .shape = shape },
+        .{ .id = 2, .opcode = "async-start", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{1}), .capacity = 1 }, .called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 } },
+        .{ .id = 3, .opcode = "async-done", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{2}), .capacity = 1 } },
+        .{ .id = 4, .opcode = "bitcast", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{3}), .capacity = 1 } },
+        .{ .id = 5, .opcode = "fusion", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{4}), .capacity = 1 } },
+        .{ .id = 6, .opcode = "custom-call", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{ 4, 5 }), .capacity = 2 } },
+        .{ .id = 7, .opcode = "tuple", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{ 5, 6 }), .capacity = 2 } },
+    };
+    var collective = [_]hlo.HloInstructionProto{
+        .{ .id = 8, .opcode = "parameter", .shape = shape },
+        .{ .id = 9, .opcode = "all-to-all", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{8}), .capacity = 1 } },
+    };
+    var comps = [_]hlo.HloComputationProto{
+        .{ .id = 10, .name = "entry", .root_id = 7, .instructions = .{ .items = &nodes, .capacity = nodes.len } },
+        .{ .id = 20, .name = "async_collective", .root_id = 9, .instructions = .{ .items = &collective, .capacity = collective.len } },
+    };
+    const module: hlo.HloModuleProto = .{ .computations = .{ .items = &comps, .capacity = comps.len } };
+    var partitions = try graph_partitioner.partitionModule(allocator, module);
+    defer partitions.deinit(allocator);
+    const partition = partitions.computations.getPtr(10).?;
+    try std.testing.expectEqual(@as(usize, 2), partition.node_counts.len);
+    for (2..8) |id| try std.testing.expectEqual(@as(usize, 1), partition.instructions.get(@intCast(id)).?);
+    var converter: Converter = .{ .allocator = allocator };
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    try converter.emitModule(&output.writer, .{ .hlo_module = module });
+    const metrics = try converter.partitionMetrics(comps[0], partition);
+    try std.testing.expectEqual(@as(?u64, 0), metrics[0].memory);
+    try std.testing.expectEqual(@as(?u64, 1024), metrics[1].communication);
+    try std.testing.expectEqual(@as(?u64, 3072), metrics[1].memory);
+    try std.testing.expectEqual(@as(u64, 1), metrics[1].opaque_operations);
+    const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    const attrs = json.value.object.get("graphs").?.array.items[0].object.get("groupNodeAttributes").?.object.get("stage_001 CMR (1.0 ∕ 3.1 KB)").?.object;
+    try std.testing.expectEqualStrings("(1.0 / 3.1 KB)", attrs.get("CMR").?.string);
+    // Unknown shapes must not silently reduce the denominator.
+    nodes[4].shape = null;
+    const unknown = try converter.partitionMetrics(comps[0], partition);
+    try std.testing.expectEqual(@as(?u64, null), unknown[1].memory);
+}
+
+test "CMR preserves denominator magnitude, tuple payloads and unknown estimates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expectEqualStrings("(1.0 / 52.0 MB)", try formatCmr(allocator, .{ .communication = 1_000_000, .memory = 52_000_000 }));
+    try std.testing.expectEqualStrings("(0.0 / 0.0 B)", try formatCmr(allocator, .{}));
+    try std.testing.expectEqualStrings("(? / 52.0 MB)", try formatCmr(allocator, .{ .communication = null, .memory = 52_000_000 }));
+    try std.testing.expectEqualStrings("unknown (logical reads unavailable)", try formatCmr(allocator, .{ .memory = null }));
+    try std.testing.expect(std.mem.indexOf(u8, try formatCmr(allocator, .{ .communication = 1, .memory = 1_000_000_000 }), "e") != null);
+    var shapes = [_]hlo.ShapeProto{ .{ .element_type = .F32 }, .{ .element_type = .BF16 }, .{ .element_type = .TOKEN } };
+    const tuple: hlo.ShapeProto = .{ .element_type = .TUPLE, .tuple_shapes = .{ .items = &shapes, .capacity = shapes.len } };
+    try std.testing.expectEqual(@as(?u64, 6), payloadBytes(tuple));
+    const converter: Converter = .{ .allocator = allocator };
+    try std.testing.expectEqual(@as(?u64, 2), converter.collectivePayload(.{ .opcode = "all-gather-start", .shape = tuple }).?.bytes);
+    try std.testing.expectEqual(@as(?u64, null), addEstimate(std.math.maxInt(u64), 1));
 }
