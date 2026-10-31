@@ -15,6 +15,13 @@ sh_binary(
 )
 
 sh_binary(
+    name = "ncu",
+    srcs = ["ncu.sh"],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
     name = "rocprofv3",
     srcs = ["rocprofv3.sh"],
     data = [

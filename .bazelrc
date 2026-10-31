@@ -139,6 +139,9 @@ common:remote   --experimental_repo_remote_exec=true
 run:nsys       --@zml//platforms:cuda=true
 run:nsys       --run_under=//tools:nsys
 
+run:ncu        --@zml//platforms:cuda=true
+run:ncu        --run_under=//tools:ncu
+
 run:rocprofv3  --@zml//platforms:rocm=true
 run:rocprofv3  --run_under=//tools:rocprofv3
 

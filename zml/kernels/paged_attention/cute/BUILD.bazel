@@ -34,14 +34,17 @@ zig_test(
 zig_binary(
     name = "benchmark",
     srcs = [
+        "benchmark_report.zig",
         "cases.zig",
         "fixtures.zig",
     ],
     main = "benchmark.zig",
     tags = ["manual"],
-    target_compatible_with = select({
-        "//platforms:cuda.enabled": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
     deps = ["//zml"],
+)
+
+zig_test(
+    name = "benchmark_report_test",
+    srcs = ["cases.zig"],
+    main = "benchmark_report.zig",
 )

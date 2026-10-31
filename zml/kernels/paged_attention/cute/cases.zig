@@ -45,7 +45,7 @@ pub const Case = struct {
 
 // Eight geometry cases plus orthogonal semantics/boundary cases, not a Cartesian product.
 pub const correctness = blk: {
-    var result: [34]Case = undefined;
+    var result: [35]Case = undefined;
     var i: usize = 0;
     for ([_]usize{ 64, 128, 256, 512 }) |dim| {
         for ([_]bool{ false, true }) |mixed| {
@@ -79,11 +79,12 @@ pub const correctness = blk: {
     result[31] = .{ .name = "zero_scale", .head_dim = 256, .prefill = 1, .kv_len = 257, .sink = true, .scale = 0 };
     result[32] = .{ .name = "d512_window_prefill", .head_dim = 512, .batch = 1, .prefill = 1, .chunk = 33, .kv_len = 513, .mask = .window, .window = 129, .sink = true };
     result[33] = .{ .name = "prefill_inactive", .head_dim = 64, .batch = 4, .prefill = 2, .inactive = 2, .kv_len = 257, .group = 5 };
+    result[34] = .{ .name = "gemma_global_decode_inactive", .head_dim = 512, .batch = 4, .kv_heads = 4, .group = 8, .kv_len = 513, .inactive = 2, .shuffle_pages = true };
     break :blk result;
 };
 
 pub const benchmarks = blk: {
-    var result: [24]Case = undefined;
+    var result: [30]Case = undefined;
     var i: usize = 0;
     for ([_]usize{ 64, 128, 256, 512 }) |dim| {
         for ([_]usize{ 2, 8, 32 }) |batch| {
@@ -98,6 +99,34 @@ pub const benchmarks = blk: {
                 i += 1;
             }
         }
+    }
+    // Gemma 4 31B global attention: 32 query heads / 4 KV heads, D512.
+    // 8K is a representative decode context, not the model's context limit.
+    // https://huggingface.co/google/gemma-4-31B/blob/main/config.json
+    for ([_]usize{ 16, 32, 64 }) |batch| {
+        result[i] = .{
+            .name = "gemma4_31b_global_decode_8k",
+            .head_dim = 512,
+            .batch = batch,
+            .kv_heads = 4,
+            .group = 8,
+            .kv_len = 8192,
+        };
+        i += 1;
+    }
+    // Gemma 4 31B sliding attention: 32 query heads / 16 KV heads, D256.
+    for ([_]usize{ 16, 32, 64 }) |batch| {
+        result[i] = .{
+            .name = "gemma4_31b_sliding_decode_8k",
+            .head_dim = 256,
+            .batch = batch,
+            .kv_heads = 16,
+            .group = 2,
+            .kv_len = 8192,
+            .mask = .window,
+            .window = 1024,
+        };
+        i += 1;
     }
     break :blk result;
 };

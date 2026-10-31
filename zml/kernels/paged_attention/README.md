@@ -179,6 +179,7 @@ See each backend's README for execution details, supported options, and current
 limitations:
 
 - [Triton](triton/README.md) — CUDA, ROCm, and oneAPI.
+- [CuTe](cute/README.md) — CUDA benchmark exports and Nsight Compute capture.
 - [Mosaic TPU](mosaic_tpu/README.md) — TPU.
 - [Metal](metal/README.md) — Metal.
 - [StableHLO](stablehlo/README.md) — CPU and Furiosa fallback.
