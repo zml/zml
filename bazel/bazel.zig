@@ -12,7 +12,7 @@ const init_array_section = switch (builtin.object_format) {
     else => "",
 };
 
-export const _bazel_runfiles_init align(@alignOf(usize)) linksection(init_array_section) = &struct {
+const runfiles_init = &struct {
     fn call(argc: c_int, argv: [*c][*:0]u8, envp: [*:null]?[*:0]u8) callconv(.c) void {
         _ = argc;
         _ = envp;
@@ -30,6 +30,18 @@ export const _bazel_runfiles_init align(@alignOf(usize)) linksection(init_array_
         };
     }
 }.call;
+
+comptime {
+    if (builtin.os.tag == .linux) {
+        // Let the C compiler emit .init_array until Zig's incremental ELF linker
+        // handles its section type, flags, and size correctly.
+        @export(runfiles_init, .{ .name = "_bazel_runfiles_init_impl" });
+    } else {
+        @export(&struct {
+            const pointer align(@alignOf(usize)) linksection(init_array_section) = runfiles_init;
+        }.pointer, .{ .name = "_bazel_runfiles_init" });
+    }
+}
 
 pub fn runfiles(source_repository: []const u8) !bazel_runfiles.Runfiles.WithSourceRepo {
     return runfiles_global.withSourceRepo(source_repository);
