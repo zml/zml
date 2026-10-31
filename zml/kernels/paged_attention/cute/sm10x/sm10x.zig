@@ -19,6 +19,24 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
+fn decodeSplits(work: i64, max_splits: i64, multiprocessors: i64, windowed: bool) i64 {
+    // Short windows already expose enough independent heads for one wave.
+    // Long contexts benefit from two resident CTAs per SM. Rounding down to
+    // powers of two avoids a nearly empty second wave (e.g. 5 -> 4 splits).
+    const target = multiprocessors * @as(i64, if (windowed) 1 else 2);
+    const parallel = @divTrunc(target + work - 1, work);
+    const limit: u64 = @intCast(@max(1, @min(32, @min(parallel, max_splits))));
+    return @as(i64, 1) << @intCast(std.math.log2_int(u64, limit));
+}
+
+test "decode splits balance long contexts and short windows" {
+    try std.testing.expectEqual(@as(i64, 4), decodeSplits(16 * 4, 32, 152, false));
+    try std.testing.expectEqual(@as(i64, 2), decodeSplits(32 * 4, 32, 152, false));
+    try std.testing.expectEqual(@as(i64, 2), decodeSplits(64 * 4, 32, 152, false));
+    try std.testing.expectEqual(@as(i64, 1), decodeSplits(16 * 16, 5, 152, true));
+    try std.testing.expectEqual(@as(i64, 1), decodeSplits(1, 1, 152, false));
+}
+
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.AttentionOptions) zml.Tensor {
     return zml.ops.manualComputation(Context.body, Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }, q.shape());
 }
@@ -55,10 +73,17 @@ const Context = struct {
             .scale = self.opts.scale orelse 1 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd)))),
             .sink = self.opts.sink != null,
         };
-        const query_tiles = if (decode) c.batch * c.queryTiles() else c.batch + @divTrunc(c.tokens * c.group + c.rows() - 1, c.rows());
+        // Decode metadata reserves the server's maximum batch, including empty
+        // rows. A compiled token-count variant bounds the active sequences.
+        const query_tiles = if (decode) @min(c.batch, c.tokens) * c.queryTiles() else c.batch + @divTrunc(c.tokens * c.group + c.rows() - 1, c.rows());
         const work = query_tiles * c.kv_heads;
         const bound = if (c.window > 0 and c.causal) @min(c.window + @divTrunc(c.rows() + c.group - 1, c.group), c.pages_per_seq * c.page_size) else c.pages_per_seq * c.page_size;
-        c.splits = @max(1, @min(32, @min(@divTrunc(@as(i64, @intCast(cute.multiprocessorCount(zml.Compiler.current().platform))) * 2 + work - 1, work), @divTrunc(bound + 2 * c.keys() - 1, 2 * c.keys()))));
+        const multiprocessors: i64 = @intCast(cute.multiprocessorCount(zml.Compiler.current().platform));
+        const max_splits = @divTrunc(bound + 2 * c.keys() - 1, 2 * c.keys());
+        c.splits = if (decode)
+            decodeSplits(work, max_splits, multiprocessors, c.window > 0 and c.causal)
+        else
+            @max(1, @min(32, @min(@divTrunc(multiprocessors * 2 + work - 1, work), max_splits)));
         // An unused scalar stays a constant buffer; broadcasting a dummy for
         // every head would add a helper kernel to each attention invocation.
         const sink = if (self.opts.sink) |s| s.convert(.f32).reshape(.{c.kv_heads * c.group}) else zml.Tensor.scalar(0, .f32).reshape(.{1});
