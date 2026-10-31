@@ -35,6 +35,8 @@ comptime {
     if (builtin.os.tag == .linux) {
         // Let the C compiler emit .init_array until Zig's incremental ELF linker
         // handles its section type, flags, and size correctly.
+        // TODO: Revert this workaround once Zig issue #37453 is fixed:
+        // https://codeberg.org/ziglang/zig/issues/37453
         @export(runfiles_init, .{ .name = "_bazel_runfiles_init_impl" });
     } else {
         @export(&struct {
