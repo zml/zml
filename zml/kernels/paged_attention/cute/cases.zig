@@ -45,7 +45,7 @@ pub const Case = struct {
 
 // Eight geometry cases plus orthogonal semantics/boundary cases, not a Cartesian product.
 pub const correctness = blk: {
-    var result: [35]Case = undefined;
+    var result: [40]Case = undefined;
     var i: usize = 0;
     for ([_]usize{ 64, 128, 256, 512 }) |dim| {
         for ([_]bool{ false, true }) |mixed| {
@@ -80,11 +80,16 @@ pub const correctness = blk: {
     result[32] = .{ .name = "d512_window_prefill", .head_dim = 512, .batch = 1, .prefill = 1, .chunk = 33, .kv_len = 513, .mask = .window, .window = 129, .sink = true };
     result[33] = .{ .name = "prefill_inactive", .head_dim = 64, .batch = 4, .prefill = 2, .inactive = 2, .kv_len = 257, .group = 5 };
     result[34] = .{ .name = "gemma_global_decode_inactive", .head_dim = 512, .batch = 4, .kv_heads = 4, .group = 8, .kv_len = 513, .inactive = 2, .shuffle_pages = true };
+    result[35] = .{ .name = "gemma_sliding_decode_inactive", .head_dim = 256, .batch = 16, .kv_heads = 16, .group = 2, .kv_len = 1137, .mask = .window, .window = 1024, .inactive = 2, .shuffle_pages = true, .sink = true };
+    result[36] = .{ .name = "gemma_sliding_decode_short", .head_dim = 256, .batch = 2, .kv_heads = 2, .group = 2, .kv_len = 17, .mask = .window, .window = 7, .shuffle_pages = true };
+    result[37] = .{ .name = "gemma_sliding_decode_single", .head_dim = 256, .batch = 1, .kv_heads = 1, .group = 2, .kv_len = 1, .mask = .window, .window = 1, .sink = true, .scale = 0 };
+    result[38] = .{ .name = "gemma_sliding_prefill", .head_dim = 256, .batch = 2, .prefill = 1, .kv_heads = 2, .group = 2, .kv_len = 129, .mask = .window, .window = 33, .shuffle_pages = true, .sink = true };
+    result[39] = .{ .name = "split_window_unaligned", .head_dim = 256, .batch = 1, .kv_len = 4100, .mask = .window, .window = 257, .sink = true, .shuffle_pages = true };
     break :blk result;
 };
 
 pub const benchmarks = blk: {
-    var result: [30]Case = undefined;
+    var result: [33]Case = undefined;
     var i: usize = 0;
     for ([_]usize{ 64, 128, 256, 512 }) |dim| {
         for ([_]usize{ 2, 8, 32 }) |batch| {
@@ -123,6 +128,21 @@ pub const benchmarks = blk: {
             .kv_heads = 16,
             .group = 2,
             .kv_len = 8192,
+            .mask = .window,
+            .window = 1024,
+        };
+        i += 1;
+    }
+    // The window starts in the last row of a key tile, exposing left-edge
+    // overfetch that an aligned 8K context cannot reveal.
+    for ([_]usize{ 16, 32, 64 }) |batch| {
+        result[i] = .{
+            .name = "gemma4_31b_sliding_decode_8k_tail",
+            .head_dim = 256,
+            .batch = batch,
+            .kv_heads = 16,
+            .group = 2,
+            .kv_len = 8319,
             .mask = .window,
             .window = 1024,
         };

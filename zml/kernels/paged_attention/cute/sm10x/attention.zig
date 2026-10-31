@@ -117,8 +117,10 @@ fn keyRange(b: *B, c: Config, first_row: V, qlen: V, klen: V) Range {
     const last_pos = klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
     const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
     const end = if (c.causal) last_pos.add(1).minimum(klen) else klen;
-    const first = begin.div(c.keys());
-    return .{ .first = first, .count = end.add(c.keys() - 1).div(c.keys()).sub(first).maximum(0) };
+    // Decode has one query position: start at its exact window edge so a
+    // moving window does not add a mostly masked key tile on every step.
+    const first = if (c.decode and c.window > 0) begin else begin.div(c.keys()).mul(c.keys());
+    return .{ .first = first, .count = end.sub(first).add(c.keys() - 1).div(c.keys()).maximum(0) };
 }
 
 fn liveSplits(c: Config, tiles: V) V {
@@ -145,7 +147,7 @@ const Tile = struct {
     start: V,
     qlen: V,
     klen: V,
-    first_key_tile: V,
+    first_key: V,
     tiles: V,
     split: V,
 
@@ -167,6 +169,20 @@ const Tile = struct {
     }
     fn putProbability(t: Tile, row: V, key: V, value: V) void {
         t.b.storeHalf(t.shared.add(t.c.pBase()).add(swizzle(row, key, t.c.rows())), .shared, value.to(t.c.dtype).bitCast(.i16).to(.i32));
+    }
+    fn putDecodeProbability(t: Tile, row: V, key: V, value: V) void {
+        if (t.c.window == 0 or t.c.group > 2) {
+            t.putProbability(row, key, value);
+            return;
+        }
+        const bits = value.to(t.c.dtype).bitCast(.i16).to(.i32).bitAnd(0xffff);
+        const pair = bits.bitOr(t.b.shuffleXor(bits, 1).shl(16));
+        // Adjacent lanes own consecutive halves of one aligned shared word.
+        var even = t.b.openIf(t.lane.rem(2).eq(0));
+        {
+            t.b.storeWords(1, t.shared.add(t.c.pBase()).add(swizzle(row, key, t.c.rows())), .shared, .{pair});
+            even.close();
+        }
     }
     fn put(t: Tile, row: V, dim: V, value: V) void {
         const token = t.start.add(row.div(t.c.group));
@@ -203,8 +219,14 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
     });
     std.debug.assert(c.sharedBytes() <= 227 * 1024);
     b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
-    const seq = b.blockIdx().x.div(c.queryTiles());
-    const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(c.rows());
+    // Consecutive CTAs visit neighboring KV heads in a sliding window.
+    // This keeps simultaneous blocks closer in the interleaved KV cache.
+    const head_first = c.decode and c.window > 0 and c.kv_heads >= 8;
+    const linear = b.blockIdx().x.add(b.blockIdx().y.mul(c.batch * c.queryTiles()));
+    const query_tile = if (head_first) linear.div(c.kv_heads) else b.blockIdx().x;
+    const head = if (head_first) linear.rem(c.kv_heads) else b.blockIdx().y;
+    const seq = query_tile.div(c.queryTiles());
+    const first_row = query_tile.rem(c.queryTiles()).mul(c.rows());
     const starts = b.ptrToInt(a.starts, .i64);
     const start = loadInt(b, starts, seq);
     const qlen = loadInt(b, starts, seq.add(1)).sub(start);
@@ -233,12 +255,12 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             .lane = tid.rem(32),
             .warp = tid.div(32),
             .seq = seq,
-            .head = b.blockIdx().y,
+            .head = head,
             .first_row = first_row,
             .start = start,
             .qlen = qlen,
             .klen = klen,
-            .first_key_tile = range.first.add(lo),
+            .first_key = range.first.add(lo.mul(c.keys())),
             .tiles = hi.sub(lo),
             .split = split,
         };
@@ -307,14 +329,17 @@ fn produce(t: Tile) void {
         var offsets: [16]V = undefined;
         var valid: [16]V = undefined;
         for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
-            const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(row0).add(i * 8);
+            const key = t.first_key.add(tiles.iv.mul(c.keys())).add(row0).add(@as(i32, @intCast(i * 8)));
             valid[i] = key.lt(t.klen).bitAnd(col.lt(c.head_dim));
+            // No query in this tile can attend before its earliest window.
+            // Zero-fill those rows instead of fetching the rounded tile edge.
+            if (c.window > 0) valid[i] = valid[i].bitAnd(key.ge(t.klen.sub(t.qlen).add(t.first_row.div(c.group)).sub(c.window - 1)));
             const safe = b.select(key.lt(t.klen), key, b.constant(.i32, 0));
             const page = loadInt(b, t.table, t.seq.mul(c.pages_per_seq).add(safe.div(c.page_size)));
             offsets[i] = page.to(.i64).mul(c.page_size).add(safe.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64)).mul(2);
         }
         for (0..@as(usize, @intCast(c.features() * 2))) |stage| {
-            const id = tiles.iv.mul(c.features() * 2).add(stage);
+            const id = tiles.iv.mul(c.features() * 2).add(@as(i32, @intCast(stage)));
             var reuse = b.openIf(id.ge(c.buffers()));
             {
                 b.mbarrierWait(t.released(id), t.phase(id).bitXor(1));
@@ -323,7 +348,7 @@ fn produce(t: Tile) void {
             const source = if (stage < c.features()) t.k else t.v;
             const feature_offset: i64 = @mod(@as(i64, @intCast(stage)), c.features()) * 256;
             for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
-                const row = row0.add(i * 8);
+                const row = row0.add(@as(i32, @intCast(i * 8)));
                 b.cpAsync16(t.shared.add(id.rem(c.buffers()).mul(c.kvBytes())).add(swizzle(row, col, c.keys())), source.add(offsets[i]).add(feature_offset), valid[i]);
             }
             b.cpAsyncMbarrierArrive(t.ready(id), true);
@@ -386,7 +411,11 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
     const b = t.b;
     for (values, 0..) |value, h| {
         var reduced = value;
-        inline for (.{ 16, 8, 4, 2, 1 }) |step| reduced = if (maximum) reduced.maximum(b.shuffleXor(reduced, step)) else reduced.add(b.shuffleXor(reduced, step));
+        if (maximum and t.c.window > 0 and t.c.group <= 2) {
+            reduced = b.warpMaxF32(value);
+        } else inline for (.{ 16, 8, 4, 2, 1 }) |step| {
+            reduced = if (maximum) reduced.maximum(b.shuffleXor(reduced, step)) else reduced.add(b.shuffleXor(reduced, step));
+        }
         var leader = b.openIf(t.lane.eq(0));
         {
             b.storeWords(1, t.shared.add(t.c.reductions()).add(t.warp.mul(64)).add(h * 4), .shared, .{reduced.bitCast(.i32)});
@@ -419,12 +448,15 @@ fn decode(t: Tile, comptime heads: usize) void {
         initial[h] = neg_inf;
         initial[heads + h] = zero;
     }
+    // MMA reads a minimum of eight rows, even for MHA or small GQA groups.
+    // These padded probability rows remain zero for every KV tile.
+    for (heads..@as(usize, @intCast(c.rows()))) |h| t.putDecodeProbability(b.constant(.i32, h), key_row, zero);
     var tiles = b.openFor(0, t.tiles, 1, initial);
     {
         multiply(t, tiles.iv, true);
         const raw = b.tmemLoad32x32b(heads, address.add(c.scoreColumn()));
         b.fenceTmemLoad();
-        const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(key_row);
+        const key = t.first_key.add(tiles.iv.mul(c.keys())).add(key_row);
         var scores: [heads]V = undefined;
         for (0..heads) |h| scores[h] = b.select(t.valid(t.first_row.add(h), key), raw[h].bitCast(.f32).mul(c.scale * std.math.log2e), neg_inf);
         const maxima = reduceHeads(t, heads, scores, true);
@@ -440,9 +472,8 @@ fn decode(t: Tile, comptime heads: usize) void {
         const sums = reduceHeads(t, heads, probabilities, false);
         for (0..heads) |h| {
             next[heads + h] = tiles.carried[heads + h].mul(alpha[h]).add(sums[h]);
-            t.putProbability(b.constant(.i32, h), key_row, probabilities[h]);
+            t.putDecodeProbability(b.constant(.i32, h), key_row, probabilities[h]);
         }
-        for (heads..@as(usize, @intCast(c.rows()))) |h| t.putProbability(b.constant(.i32, h), key_row, zero);
         var rescale = b.openIf(tiles.iv.gt(0));
         {
             for (0..@as(usize, @intCast(c.features()))) |part| {
@@ -528,7 +559,7 @@ fn prefill(t: Tile) void {
             b.fenceTmemLoad();
             for (loaded, 0..) |value, i| scores[i] = value.bitCast(.f32);
         }
-        const key0 = t.first_key_tile.add(tiles.iv).mul(c.keys());
+        const key0 = t.first_key.add(tiles.iv.mul(c.keys()));
         // Hardware maxima describe raw scores. Only fully visible tiles may
         // use them; page tails and mask boundaries reduce post-mask values.
         const full = owns.bitAnd(t.valid(row, key0)).bitAnd(t.valid(row, key0.add(63)));
