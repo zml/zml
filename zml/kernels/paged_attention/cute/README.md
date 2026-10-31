@@ -58,6 +58,10 @@ and 8K context: 16 KV heads, two query heads per KV head, head dimension 256,
 and a 1,024-token sliding window. Only the window's KV data contributes to
 attention; the allocated cache still represents the full 8K context.
 
+Cases 30, 31, and 32 repeat the sliding geometry at a context of 8,319 tokens.
+The window starts at the last row of a 128-key tile, exposing unnecessary
+left-edge KV reads that the aligned 8K cases cannot reveal.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 bazel run //zml/kernels/paged_attention/cute:benchmark \
   --@zml//platforms:cuda=true -- --mode=benchmark --case=24 \
