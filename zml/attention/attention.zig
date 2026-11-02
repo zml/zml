@@ -93,29 +93,11 @@ pub const Metadata = union(BackendType) {
     }
 };
 
-/// Caller-selected logical mesh and query/KV head axes. `null` explicitly replicates.
-pub const Sharding = struct {
-    mesh: *const zml.Mesh,
-    heads: ?zml.Shape.Tag,
-    kv_heads: ?zml.Shape.Tag,
-
-    pub fn kvPartition(self: Sharding, shape: zml.Shape, head_dim: anytype) zml.Sharding.Partitioning {
-        var kv = self;
-        kv.heads = self.kv_heads;
-        return kv.partition(shape, head_dim);
-    }
-
-    pub fn partition(self: Sharding, shape: zml.Shape, head_dim: anytype) zml.Sharding.Partitioning {
-        const replicated: zml.Sharding.Partitioning = .replicated(shape.rank());
-        const axis = self.heads orelse return replicated;
-        const mesh_axis = self.mesh.resolveLogicalAxis(axis) orelse
-            std.debug.panic("Attention mesh '{s}' has no logical axis '{s}'", .{ self.mesh.name, axis });
-        return replicated.set(shape.axis(head_dim), .sharded(@intCast(mesh_axis)));
-    }
-};
-
 /// Causal attention as used in transformers.
-/// The result uses `sharding.heads` on the query head dimension on every backend.
+/// `partitioning` is null for unconstrained StableHLO, or declares `mesh`,
+/// `in_specs` and `out_specs`. Input specs cover q, k, v, token_index and metadata.
+/// With a declaration, every backend runs in a manual region with local tensors.
+/// Kernel backends require a declaration.
 ///
 /// **Shapes**:
 ///   - q, result: .{ .q, .h, .hd }
@@ -126,57 +108,36 @@ pub const Sharding = struct {
 ///   - .q is the number of queries
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, sharding: Sharding) zml.Tensor {
-    return switch (parameters) {
-        .stablehlo => b: {
-            // Generate the attention mask.
-            const seq_len = k.dim(.k);
-            var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, partitioning: anytype) zml.Tensor {
+    const Call = struct {
+        q: zml.Tensor,
+        k: zml.Tensor,
+        v: zml.Tensor,
+        token_index: zml.Tensor,
+        metadata: Metadata,
+        parameters: Parameters,
 
-            // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
-            // then slice into it, but XLA is able to optimize this correctly.
-            attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.appendAxes(.{.coord}), .{});
-            const attn_output = zml.nn.sdpa(q.withPartitioning(sharding.mesh, sharding.partition(q.shape(), .h)), k.withPartitioning(sharding.mesh, sharding.kvPartition(k.shape(), .h)), v.withPartitioning(sharding.mesh, sharding.kvPartition(v.shape(), .h)), .{ .attn_mask = attn_mask });
-            break :b attn_output.withPartitioning(sharding.mesh, sharding.partition(q.shape(), .h));
-        },
-        .flash_attention => b: {
-            zml.stdx.debug.assert(sharding.heads == sharding.kv_heads, "Attention kernels require matching query and KV head sharding", .{});
-            const Call = struct {
-                q: zml.Tensor,
-                k: zml.Tensor,
-                v: zml.Tensor,
-                token_index: zml.Tensor,
-                metadata: flash_attention.Metadata,
-                parameters: flash_attention.Parameters,
-
-                fn local(self: @This(), _: zml.Shape) zml.Tensor {
-                    return flash_attention.attention(self.q, self.k, self.v, self.token_index, self.metadata, self.parameters);
-                }
-            };
-            break :b zml.ops.manualComputation(Call.local, .{
-                .q = q,
-                .k = k,
-                .v = v,
-                .token_index = token_index,
-                .metadata = metadata.flash_attention,
-                .parameters = parameters.flash_attention,
-            }, q.shape(), .{
-                .mesh = sharding.mesh,
-                .in_specs = .{
-                    .q = sharding.partition(q.shape(), .h),
-                    .k = sharding.kvPartition(k.shape(), .h),
-                    .v = sharding.kvPartition(v.shape(), .h),
-                    .token_index = .replicated,
-                    .metadata = .replicated,
-                    .parameters = .replicated,
+        fn forward(args: @This(), _: zml.Shape) zml.Tensor {
+            return switch (args.parameters) {
+                .stablehlo => b: {
+                    const seq_len = args.k.dim(.k);
+                    var mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, args.q.dtype(), null);
+                    mask = mask.gatherSlices(zml.Shape.init(.{ .q = args.q.dim(.q) }, mask.dtype()), args.token_index.appendAxes(.{.coord}), .{});
+                    break :b zml.nn.sdpa(args.q, args.k, args.v, .{ .attn_mask = mask });
                 },
-                .out_specs = sharding.partition(q.shape(), .h),
-            });
-        },
+                .flash_attention => flash_attention.attention(args.q, args.k, args.v, args.token_index, args.metadata.flash_attention, args.parameters.flash_attention),
+            };
+        }
     };
+    const args: Call = .{ .q = q, .k = k, .v = v, .token_index = token_index, .metadata = metadata, .parameters = parameters };
+    if (@TypeOf(partitioning) == @TypeOf(null)) {
+        zml.stdx.debug.assert(parameters == .stablehlo, "Attention kernels require explicit mesh and partition specs", .{});
+        return args.forward(q.shape());
+    }
+    return zml.ops.manualComputation(Call.forward, args, q.shape(), partitioning);
 }
 
-test "attention backends preserve the same output sharding" {
+test "attention honors caller specs and keeps unconstrained StableHLO open" {
     const mlir = @import("mlir");
     const platform = zml.testing.env();
     const mesh = zml.testing.tpMesh();
@@ -190,7 +151,6 @@ test "attention backends preserve the same output sharding" {
     const scope = compiler.pushBlock(block);
     defer scope.pop();
 
-    // Trace CuTe on any platform: no device kernel is compiled or executed here.
     for ([_]bool{ false, true }) |batched| {
         const q_shape: zml.Shape = if (batched)
             .init(.{ .b = 2, .q = 1, .h = 4 * partitions, .hd = 64 }, .bf16)
@@ -200,14 +160,31 @@ test "attention backends preserve the same output sharding" {
             .init(.{ .b = 2, .k = 8, .h = 2 * partitions, .hd = 64 }, .bf16)
         else
             .init(.{ .k = 8, .h = 2 * partitions, .hd = 64 }, .bf16);
-        for ([_]?zml.Shape.Tag{ null, "model" }) |axis| {
-            const sharding: Sharding = .{ .mesh = mesh, .heads = axis, .kv_heads = axis };
-            const expected = q_shape.withPartitioning(mesh, sharding.partition(q_shape, .h));
-            for ([_]Backend{ .{ .stablehlo = {} }, .{ .flash_attention = .cute } }) |backend| {
-                const output = attention(.zeroes(q_shape), .zeroes(k_shape), .zeroes(k_shape), .scalar(0, .u32), .init(.fromBackend(backend)), .init(.fromBackend(backend)), sharding);
-                try std.testing.expect(output.shape().eql(q_shape));
-                try std.testing.expectEqualDeep(expected._sharding, output.shape()._sharding);
-            }
+        const q: zml.Tensor = .zeroes(q_shape);
+        const k: zml.Tensor = .zeroes(k_shape);
+        const v: zml.Tensor = .zeroes(k_shape);
+        const output = attention(
+            q.withPartitioning(mesh, .{ .h = .model }),
+            k.withPartitioning(mesh, .{ .h = .model }),
+            v.withPartitioning(mesh, .{ .h = .model }),
+            .scalar(0, .u32),
+            .{ .stablehlo = {} },
+            .{ .stablehlo = {} },
+            null,
+        );
+        try std.testing.expect(output.shape().eql(q_shape));
+        try std.testing.expectEqualDeep(zml.Sharding.open, output.shape()._sharding);
+
+        // Trace CuTe on any platform; no device kernel is compiled or executed.
+        for ([_]Backend{ .stablehlo, .{ .flash_attention = .cute } }) |backend| {
+            const constrained = attention(q, k, v, .scalar(0, .u32), .init(.fromBackend(backend)), .init(.fromBackend(backend)), .{
+                .mesh = mesh,
+                .in_specs = .{ .q = .{ .h = .model }, .k = .{ .h = .model }, .v = .{ .h = .model }, .token_index = .replicated, .metadata = .replicated },
+                .out_specs = .{ .h = .model },
+            });
+            try std.testing.expect(constrained.shape().eql(q_shape));
+            try std.testing.expectEqualDeep(q_shape.withPartitioning(mesh, .{ .h = .model })._sharding, constrained.shape()._sharding);
+            try std.testing.expectEqualStrings("sdy.manual_computation", compiler.currentScope().value(constrained).owner().name());
         }
     }
 }

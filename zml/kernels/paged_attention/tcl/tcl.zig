@@ -36,7 +36,7 @@ pub const paged = struct {
     /// `{.page, .k_chunk, .hkv, .hd}`. Sinks are one logit per query head.
     /// Unwritten cache entries are excluded before the contractions; callers
     /// need only populate the tokens covered by their sequence lengths.
-    pub fn pagedAttention(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: paged_attention.LocalOptions) Tensor {
+    pub fn pagedAttention(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: paged_attention.AttentionOptions) Tensor {
         if (opts.mask == .indices) @panic("Sparse attention masks are not supported by TCL paged attention");
         stdx.debug.assert(q.rank() == 4 and k_cache.rank() == 4 and v_cache.rank() == 4 and k_cache.shape().eqlDims(v_cache.shape()), "TCL attention requires matching rank-four split K/V caches", .{});
         stdx.debug.assert(q.dtype().isFloat() and k_cache.dtype().isFloat() and v_cache.dtype().isFloat(), "TCL attention requires floating-point queries and caches", .{});
@@ -1173,11 +1173,14 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
         const q_t: Tensor = .init(.{ .b = tokens, .hkv = hkv, .hg = g, .hd = d }, dims.dtype);
         const Mod = struct {
             pub fn forward(p: paged.Parameters, q: Tensor, k: Tensor, v: Tensor, opts: paged_attention.AttentionOptions) Tensor {
-                return paged_attention.pagedAttention(.{ .tcl = p }, q, k, v, .{ .split = .{ .k = k, .v = v } }, opts);
+                return paged_attention.pagedAttention(.{ .tcl = p }, q, k, v, .{ .split = .{ .k = k, .v = v } }, opts, .{
+                    .mesh = zml.Compiler.current().platform.replicated_mesh,
+                    .in_specs = .replicated,
+                    .out_specs = .replicated,
+                });
             }
         };
         const opts: paged_attention.AttentionOptions = .{
-            .sharding = .{ .mesh = platform.replicated_mesh, .heads = null, .kv_heads = null },
             .mask = .{ .standard = .{
                 .causal = case.opts.is_causal,
                 .sliding_window = if (case.opts.sliding_window > 0) @intCast(case.opts.sliding_window) else null,

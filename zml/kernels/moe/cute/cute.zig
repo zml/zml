@@ -17,7 +17,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub fn validateOptions(opts: zml.moe.LocalOptions) void {
+pub fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(opts.activation == .swiglu, "cute backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
@@ -28,7 +28,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.LocalOptions,
+    options: zml.moe.Options,
 ) zml.Tensor {
     validateOptions(options);
     stdx.debug.assert(input.dtype() == .bf16, "cute backend only supports bf16 inputs, got {}", .{input.dtype()});

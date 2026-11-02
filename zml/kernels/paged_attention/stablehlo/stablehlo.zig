@@ -1,6 +1,6 @@
 const zml = @import("../../../zml.zig");
 const KvCache = @import("../paged_attention.zig").KvCache;
-const AttentionOptions = @import("../paged_attention.zig").LocalOptions;
+const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
 const triton = @import("../triton/triton.zig");
 
 pub fn pagedAttention(

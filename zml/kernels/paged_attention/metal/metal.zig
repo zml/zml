@@ -4,7 +4,7 @@ const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 
-const AttentionOptions = @import("../paged_attention.zig").LocalOptions;
+const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
 const paged_attn = @import("paged_attn.zig");
 
 const log = std.log.scoped(.@"zml/attention/metal");

@@ -64,7 +64,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major > 8 or (cc.major == 8 and cc.minor >= 9);
 }
 
-pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.LocalOptions) zml.Tensor {
+pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.AttentionOptions) zml.Tensor {
     stdx.debug.assert(isAvailable(zml.Compiler.current().platform), "CuTe paged attention requires SM89 or newer", .{});
     stdx.debug.assert(q.dtype() == k.dtype() and q.dtype() == v.dtype() and (q.dtype() == .bf16 or q.dtype() == .f16), "CuTe paged attention requires matching BF16 or FP16 Q/K/V", .{});
     stdx.debug.assert(q.dim(.hd) == 32 or q.dim(.hd) == 64 or q.dim(.hd) == 128 or q.dim(.hd) == 256 or q.dim(.hd) == 512, "CuTe paged attention supports head dimensions 32, 64, 128, 256 and 512", .{});
@@ -80,7 +80,7 @@ const Context = struct {
     k: zml.Tensor,
     v: zml.Tensor,
     parameters: Parameters,
-    opts: paged.LocalOptions,
+    opts: paged.AttentionOptions,
 
     fn body(self: Context, output_shape: zml.Shape) zml.Tensor {
         const q = self.q.transpose(.{ .b, .hkv, .hg, .hd });

@@ -21,7 +21,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.LocalOptions,
+    opts: zml.moe.Options,
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)

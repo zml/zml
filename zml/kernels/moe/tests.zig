@@ -21,16 +21,21 @@ const Case = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
-    sharding: ?zml.moe.Sharding = null,
+    expert_mesh: ?*const zml.Mesh = null,
+
+    fn inputShape(c: Case) Shape {
+        const shape = Shape.init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
+        return if (c.expert_mesh) |mesh| shape.withPartitioning(mesh, .{ .t = .data }) else shape;
+    }
 
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
-        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
-        return platform.compileFn(allocator, io, forward, .{ x, c }, .{ .meshes = if (c.sharding) |sharding| &.{ platform.replicated_mesh, sharding.mesh } else &.{platform.replicated_mesh} });
+        const x: Tensor = .fromShape(c.inputShape());
+        return platform.compileFn(allocator, io, forward, .{ x, c }, .{ .meshes = if (c.expert_mesh) |mesh| &.{ platform.replicated_mesh, mesh } else &.{platform.replicated_mesh} });
     }
 
     pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
-        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
+        const x: Tensor = .fromShape(c.inputShape());
 
         var host = try zml.Slice.alloc(allocator, x.shape());
         defer host.free(allocator);
@@ -52,7 +57,11 @@ const Case = struct {
         var output: zml.Bufferized(Outputs) = undefined;
         runner.run(io, .{input}, .{&output}, .{ .wait = true });
         defer zml.Buffer.deinitAll(Outputs, &output);
-        try std.testing.expect(output.actual.shape().isFullyReplicated());
+        if (c.expert_mesh != null) {
+            try std.testing.expectEqualDeep(c.inputShape()._sharding, output.actual.shape()._sharding);
+        } else {
+            try std.testing.expect(output.actual.shape().isFullyReplicated());
+        }
 
         // BF16 intermediate rounding and different GEMM reduction orders. Every
         // element must pass; near-zero values use the absolute bound.
@@ -251,14 +260,31 @@ fn forward(input: Tensor, c: Case) Outputs {
 
     const weights = route.remainder(Tensor.scalar(3, .i32)).convert(.f32).addConstant(1).scale(0.25);
     const options: zml.moe.Options = .{
-        .sharding = c.sharding orelse .{ .mesh = zml.Compiler.current().platform.replicated_mesh, .experts = null },
         .activation = c.activation,
         .quantize_input = c.quantize_input,
         .routing_weight_placement = c.placement,
     };
 
-    const actual = zml.moe.forwardMoe(input, ids, weights, prepared.gate_up, prepared.down, c.backend, options);
-    const expected = reference.reference(input, ids, weights, canonical.gate_up, canonical.down, .{
+    const actual = if (c.expert_mesh) |mesh|
+        zml.moe.forwardMoe(input, ids, weights, prepared.gate_up, prepared.down, c.backend, options, .{
+            .mesh = mesh,
+            .in_specs = .{
+                .input = .{ .t = .data },
+                .ids = .{ .t = .data },
+                .weights = .{ .t = .data },
+                .gate_up = .{ .expert = .experts },
+                .down = .{ .expert = .experts },
+            },
+            .out_specs = .{ .t = .data },
+        })
+    else
+        zml.moe.forwardMoe(input, ids, weights, prepared.gate_up, prepared.down, c.backend, options, .{
+            .mesh = zml.Compiler.current().platform.replicated_mesh,
+            .in_specs = .replicated,
+            .out_specs = .replicated,
+        });
+    // Keep the oracle input replicated so token sharding does not change its GEMM rounding.
+    const expected = reference.reference(input.replicate(), ids, weights, canonical.gate_up, canonical.down, .{
         .activation = c.activation,
         .quantize_input = c.quantize_input,
         .routing_weight_placement = c.placement,
@@ -679,16 +705,33 @@ test "Mosaic TPU compatibility matrix" {
     }, .{});
 }
 
-test "MoE explicit expert layouts survive generated and packed weights" {
+test "MoE expert parallelism composes with data parallelism for generated and packed weights" {
     const platform = zml.testing.env();
     if (platform.devices.len < 4) return error.SkipZigTest;
     const logical = try zml.Sharding.LogicalMesh.init(.{ .data, .experts, .pipeline }, &.{ .balanced, .balanced, .balanced }, &.{ 2, 2, -1 });
     const mesh: zml.Mesh = try .init("manual_experts", &platform.physical_mesh, logical, .suggest(logical, &platform.physical_mesh));
+    // Top-k spans both shards even though each owns only one expert. Bias must
+    // contribute only on the owning shard, including with before_down routing.
+    for ([_]Placement{ .before_down, .after_down }) |placement| {
+        const case: Case = .{
+            .backend = .stablehlo,
+            .tokens = 2,
+            .experts = 2,
+            .topk = 2,
+            .bias = true,
+            .placement = placement,
+            .expert_mesh = &mesh,
+        };
+        const exe = try case.compile(std.testing.allocator, std.testing.io, platform);
+        defer exe.deinit();
+        try case.check(std.testing.allocator, std.testing.io, platform, &exe);
+    }
     for ([_]zml.moe.Backend{ .stablehlo, .triton, .fly, .mosaic_tpu }) |backend| {
         if (!backend.isAvailable(platform)) continue;
         for ([_]?zml.Quantization.Scheme{ null, .mxfp4 }) |scheme| {
             if (backend == .mosaic_tpu and scheme != null) continue;
             if (backend == .fly and scheme != .mxfp4) continue;
+            errdefer std.log.err("MoE data/expert parallelism failed: backend={t}, scheme={any}", .{ backend, scheme });
             const case: Case = .{
                 .backend = backend,
                 .scheme = scheme,
@@ -698,7 +741,7 @@ test "MoE explicit expert layouts survive generated and packed weights" {
                 .intermediate = if (backend == .fly) 2304 else 128,
                 .experts = if (backend == .fly) 2 else 8,
                 .placement = if (backend == .fly) .before_down else .after_down,
-                .sharding = .{ .mesh = &mesh, .experts = "experts" },
+                .expert_mesh = &mesh,
             };
             const exe = try case.compile(std.testing.allocator, std.testing.io, platform);
             defer exe.deinit();

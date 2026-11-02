@@ -20,7 +20,7 @@ pub const Options = struct {
     /// obtain the first valid GEMM2 index.
     gemm2_tactic: i32,
 
-    pub fn fromLocalOptions(opts: zml.moe.LocalOptions) Options {
+    pub fn fromOptions(opts: zml.moe.Options) Options {
         return .{
             .workspace_query_device = 0,
             .activation = opts.activation,
@@ -31,7 +31,7 @@ pub const Options = struct {
     }
 };
 
-pub fn validateOptions(opts: zml.moe.LocalOptions) void {
+pub fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
     stdx.debug.assert(opts.activation == .swiglu, "flashinfer_cutlass backend only accepts swiglu activation, got {}", .{opts.activation});
@@ -667,7 +667,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.LocalOptions,
+    opts: zml.moe.Options,
 ) zml.Tensor {
     if (comptime !platforms.isEnabled(.cuda)) {
         @panic("FlashInfer CUTLASS MoE is only supported on CUDA platforms");
@@ -681,7 +681,7 @@ pub fn fusedExperts(
     // The runner ignores routes whose local expert id is -1.
     const topk_weights = topk_ids.cmp(.GE, .scalar(0, .i32)).select(routing.weights, .scalar(-1, routing.weights.dtype()));
 
-    const runner_options: Options = .fromLocalOptions(opts);
+    const runner_options: Options = .fromOptions(opts);
 
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
 

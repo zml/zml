@@ -19,7 +19,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.LocalOptions) zml.Tensor {
+pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.AttentionOptions) zml.Tensor {
     return (Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }).body(q.shape());
 }
 
@@ -28,7 +28,7 @@ const Context = struct {
     k: zml.Tensor,
     v: zml.Tensor,
     parameters: Parameters,
-    opts: paged.LocalOptions,
+    opts: paged.AttentionOptions,
 
     fn body(self: Context, output_shape: zml.Shape) zml.Tensor {
         const q = self.q.transpose(.{ .b, .hkv, .hg, .hd });

@@ -235,7 +235,7 @@ fn partitionShape(shape: Shape, mesh: *const Sharding.Mesh, spec: anytype) !Shap
     return partitioned;
 }
 
-fn applySpecs(comptime Leaf: type, arena: std.mem.Allocator, mesh: *const Sharding.Mesh, value: anytype, specs: anytype) !@TypeOf(value) {
+pub fn applySpecs(comptime Leaf: type, arena: std.mem.Allocator, mesh: *const Sharding.Mesh, value: anytype, specs: anytype) !@TypeOf(value) {
     const T = @TypeOf(value);
     if (T == Leaf) {
         if (Leaf == Shape) return partitionShape(value, mesh, specs);

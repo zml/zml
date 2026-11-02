@@ -4,6 +4,7 @@ const platforms = @import("platforms");
 
 const zml = @import("../../zml.zig");
 const stdx = zml.stdx;
+const manual = @import("../../ops/manual_computation.zig");
 pub const tcl = @import("tcl/tcl.zig");
 pub const stablehlo = @import("stablehlo/stablehlo.zig");
 pub const cute = @import("cute/cute.zig");
@@ -178,74 +179,9 @@ pub const Backend = enum {
     }
 };
 
-/// Caller-selected expert parallelism. `experts = null` explicitly replicates.
-pub const Sharding = struct {
-    mesh: *const zml.Mesh,
-    experts: ?zml.Shape.Tag,
-
-    pub fn partition(self: Sharding, shape: zml.Shape) zml.Sharding.Partitioning {
-        const replicated: zml.Sharding.Partitioning = .replicated(shape.rank());
-        const axis = self.experts orelse return replicated;
-        const mesh_axis = self.mesh.resolveLogicalAxis(axis) orelse
-            std.debug.panic("MoE mesh '{s}' has no logical axis '{s}'", .{ self.mesh.name, axis });
-        return replicated.set(shape.axis(.expert), .sharded(@intCast(mesh_axis)));
-    }
-
-    pub fn auxiliaryPartition(self: Sharding, tensor: ?zml.Tensor, num_experts: i64) zml.Sharding.Partitioning {
-        const t = tensor orelse return .replicated(0);
-        if (t.count() == 1 or self.experts == null) return .replicated(t.rank());
-        // Packed scale buffers can be untagged; their first dimension is experts.
-        const expert_dim = t.shape().hasTag(.expert) orelse 0;
-        stdx.debug.assert(t.dim(expert_dim) == num_experts, "MoE scale/bias must be scalar or contain {} experts, got {f}", .{ num_experts, t.shape() });
-        return self.partition(t.shape().setTag(expert_dim, .expert));
-    }
-
-    const LinearSpecs = struct {
-        weight: zml.Sharding.Partitioning,
-        bias: zml.Sharding.Partitioning,
-        quantization: struct {
-            scales: zml.Sharding.Partitioning,
-            global_scale: struct { value: zml.Sharding.Partitioning },
-            input_scale: struct { value: zml.Sharding.Partitioning },
-        },
-    };
-
-    pub fn linearSpecs(self: Sharding, linear: zml.nn.Linear) LinearSpecs {
-        const q = linear.quantization;
-        return .{
-            .weight = self.partition(linear.weight.shape()),
-            .bias = self.auxiliaryPartition(linear.bias, linear.weight.dim(.expert)),
-            .quantization = .{
-                .scales = self.auxiliaryPartition(if (q) |v| v.scales else null, linear.weight.dim(.expert)),
-                .global_scale = .{ .value = self.auxiliaryPartition(if (q) |v| if (v.global_scale) |scale| scale.value else null else null, linear.weight.dim(.expert)) },
-                .input_scale = .{ .value = self.auxiliaryPartition(if (q) |v| if (v.input_scale) |scale| scale.value else null else null, linear.weight.dim(.expert)) },
-            },
-        };
-    }
-
-    pub fn constrainLinear(self: Sharding, linear: zml.nn.Linear) zml.nn.Linear {
-        var result = linear;
-        result.weight = linear.weight.withPartitioning(self.mesh, self.partition(linear.weight.shape()));
-        if (result.bias) |*bias| bias.* = bias.withPartitioning(self.mesh, self.auxiliaryPartition(bias.*, linear.weight.dim(.expert)));
-        if (result.quantization) |*q| {
-            q.scales = q.scales.withPartitioning(self.mesh, self.auxiliaryPartition(q.scales, linear.weight.dim(.expert)));
-            if (q.global_scale) |*scale| scale.value = scale.value.withPartitioning(self.mesh, self.auxiliaryPartition(scale.value, linear.weight.dim(.expert)));
-            if (q.input_scale) |*scale| scale.value = scale.value.withPartitioning(self.mesh, self.auxiliaryPartition(scale.value, linear.weight.dim(.expert)));
-        }
-        return result;
-    }
-};
-
-/// Numerical options for kernels operating on local expert weights.
-pub const LocalOptions = struct {
-    activation: Activation,
-    quantize_input: bool,
-    routing_weight_placement: RoutingWeightPlacement,
-};
-
 /// Global routing with the expert range owned by this local computation.
 /// Kernels select local ids or a global-to-local map to match their routing algorithm.
-/// Their result is this range's contribution; the shared operator sums contributions.
+/// Kernels return this range's contribution; `forwardMoe` sums contributions.
 pub const LocalRouting = struct {
     ids: zml.Tensor,
     weights: zml.Tensor,
@@ -268,7 +204,6 @@ pub const LocalRouting = struct {
 };
 
 pub const Options = struct {
-    sharding: Sharding,
     activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,
@@ -288,7 +223,15 @@ pub fn validateRoutingInputs(input: zml.Tensor, ids: zml.Tensor, weights: zml.Te
 
 /// Input has shape {.t, .d}; routing IDs and weights have shape {.t, .topk}.
 /// Returns {.t, .d}. Flatten batched input with merge(.{ .t = .{ .b, .s } }).
-/// Expert weights follow `opts.sharding`; activations and the result are replicated.
+/// `partitioning` is null for unconstrained StableHLO, or declares `mesh`,
+/// `in_specs` and `out_specs`. Input specs cover input, ids, weights, gate_up and
+/// down; projection specs describe the weight tensor. Bias and quantization
+/// scales follow their projection's expert partitioning automatically.
+/// A declaration supports token and expert parallelism: token specs must agree,
+/// expert weights may split on the expert dimension, and feature/top-k dimensions
+/// are replicated. Tokens must be replicated along the expert axis.
+/// With a declaration, every backend runs in a manual region with local experts.
+/// The shared operator routes tokens to those experts and sums their contributions.
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
@@ -297,25 +240,44 @@ pub fn forwardMoe(
     down: zml.nn.Linear,
     backend: Backend,
     opts: Options,
+    partitioning: anytype,
 ) zml.Tensor {
     validateRoutingInputs(input, topk_ids, topk_weights);
-    const sharding = opts.sharding;
-    const local_opts: LocalOptions = .{ .activation = opts.activation, .quantize_input = opts.quantize_input, .routing_weight_placement = opts.routing_weight_placement };
-    if (backend == .stablehlo) {
-        const output = stablehlo.fusedExperts(
-            input.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(input.rank())),
-            topk_ids.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(topk_ids.rank())),
-            topk_weights.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(topk_weights.rank())),
-            sharding.constrainLinear(gate_up),
-            sharding.constrainLinear(down),
-            local_opts,
-        );
-        return output.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(output.rank()));
+    if (@TypeOf(partitioning) == @TypeOf(null)) {
+        stdx.debug.assert(backend == .stablehlo, "MoE kernels require explicit mesh and partition specs", .{});
+        return stablehlo.fusedExperts(input, .{
+            .ids = topk_ids,
+            .weights = topk_weights,
+            .global_num_experts = gate_up.weight.dim(.expert),
+            .local_num_experts = gate_up.weight.dim(.expert),
+        }, gate_up, down, opts);
     }
-    const partitions = if (sharding.experts) |axis| sharding.mesh.numPartitionsForLogicalAxis(axis) else 1;
-    if (backend == .metal or backend == .tcl) {
-        stdx.debug.assert(partitions == 1, "This MoE backend does not support expert parallelism", .{});
+    const compiler = zml.Compiler.current();
+    const mesh: *const zml.Mesh = if (@TypeOf(partitioning.mesh) == @EnumLiteral()) compiler.mesh(partitioning.mesh) else partitioning.mesh;
+    const shapes = manual.applySpecs(zml.Shape, compiler.arena.allocator(), mesh, .{
+        .input = input.shape(),
+        .ids = topk_ids.shape(),
+        .weights = topk_weights.shape(),
+        .gate_up = gate_up.weight.shape(),
+        .down = down.weight.shape(),
+    }, partitioning.in_specs) catch |err| stdx.debug.panic("Invalid MoE input partitioning: {s}", .{@errorName(err)});
+    const output_shape = manual.applySpecs(zml.Shape, compiler.arena.allocator(), mesh, input.shape(), partitioning.out_specs) catch |err|
+        stdx.debug.panic("Invalid MoE output partitioning: {s}", .{@errorName(err)});
+
+    const tokens = shapes.input.partition(.t);
+    const experts = shapes.gate_up.partition(.expert);
+    stdx.debug.assert(shapes.input.partition(.d) == .replicated and shapes.ids.partition(.topk) == .replicated and shapes.weights.partition(.topk) == .replicated, "MoE feature and top-k dimensions must be replicated", .{});
+    stdx.debug.assert(shapes.ids.partition(.t) == tokens and shapes.weights.partition(.t) == tokens and output_shape.partition(.t) == tokens and output_shape.partition(.d) == .replicated, "MoE input, routing and output must have matching token partitioning", .{});
+    stdx.debug.assert(shapes.down.partition(.expert) == experts and (!experts.isSharded() or experts != tokens), "MoE projections must agree on expert partitioning; tokens must be replicated along the expert axis", .{});
+    for ([_]zml.Shape{ shapes.gate_up, shapes.down }) |shape| {
+        for (0..shape.rank()) |axis| {
+            stdx.debug.assert(axis == shape.axis(.expert) or shape.partition(axis) == .replicated, "MoE kernel weights can only be partitioned along experts", .{});
+        }
     }
+    const expert_axis = experts.meshAxis();
+    const parallel = if (expert_axis) |axis| mesh.grid.axis_sizes[axis] > 1 else false;
+    if (backend == .metal or backend == .tcl) stdx.debug.assert(!parallel, "This MoE backend does not support expert parallelism", .{});
+
     const Call = struct {
         input: zml.Tensor,
         ids: zml.Tensor,
@@ -323,55 +285,89 @@ pub fn forwardMoe(
         gate_up: zml.nn.Linear,
         down: zml.nn.Linear,
         backend: Backend,
-        opts: LocalOptions,
-        sharding: Sharding,
-        global_num_experts: i64,
-        parallel: bool,
+        opts: Options,
+        mesh: *const zml.Mesh,
+        expert_axis: ?u3,
+        global_experts: i64,
 
-        fn local(self: @This(), _: zml.Shape) zml.Tensor {
-            const local_experts = self.gate_up.weight.dim(.expert);
+        fn forward(args: @This(), _: zml.Shape) zml.Tensor {
             const routing: LocalRouting = .{
-                .ids = self.ids,
-                .weights = self.weights,
-                .global_num_experts = self.global_num_experts,
-                .local_num_experts = local_experts,
-                .expert_start = if (self.parallel) zml.ops.axisIndex(self.sharding.mesh, self.sharding.experts.?).convert(.i32).scale(local_experts) else null,
+                .ids = args.ids,
+                .weights = args.weights,
+                .global_num_experts = args.global_experts,
+                .local_num_experts = args.gate_up.weight.dim(.expert),
+                .expert_start = if (args.expert_axis) |axis| zml.ops.axisIndex(args.mesh, args.mesh.logical.axes.get(axis)).convert(.i32).scale(args.gate_up.weight.dim(.expert)) else null,
             };
-            const output = switch (self.backend) {
-                .stablehlo => unreachable,
-                .cute => cute.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
-                .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
-                .triton => triton.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
-                .fly => fly.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
-                .mosaic_tpu => mosaic_tpu.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
-                .metal => metal.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
-                .tcl => tcl.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+            const output = switch (args.backend) {
+                .stablehlo => stablehlo.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .cute => cute.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .triton => triton.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .fly => fly.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .mosaic_tpu => mosaic_tpu.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .metal => metal.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .tcl => tcl.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
             };
-            return if (self.parallel) zml.ops.allReduceOnAxis(output, zml.Tensor.add, self.sharding.mesh, self.sharding.experts.?) else output;
+            return if (args.expert_axis) |axis| zml.ops.allReduceOnAxis(output, zml.Tensor.add, args.mesh, args.mesh.logical.axes.get(axis)) else output;
         }
     };
-    return zml.ops.manualComputation(Call.local, .{
+    const args: Call = .{
         .input = input,
         .ids = topk_ids,
         .weights = topk_weights,
         .gate_up = gate_up,
         .down = down,
         .backend = backend,
-        .opts = local_opts,
-        .sharding = sharding,
-        .global_num_experts = gate_up.weight.dim(.expert),
-        .parallel = partitions > 1,
-    }, input.shape(), .{
-        .mesh = sharding.mesh,
-        .in_specs = .{
-            .input = .replicated,
-            .ids = .replicated,
-            .weights = .replicated,
-            .gate_up = sharding.linearSpecs(gate_up),
-            .down = sharding.linearSpecs(down),
-        },
-        .out_specs = .replicated,
+        .opts = opts,
+        .mesh = mesh,
+        .expert_axis = if (parallel) expert_axis else null,
+        .global_experts = gate_up.weight.dim(.expert),
+    };
+    const in_specs = .{
+        .input = shapes.input._sharding.partition,
+        .ids = shapes.ids._sharding.partition,
+        .weights = shapes.weights._sharding.partition,
+        .gate_up = linearSpecs(gate_up, shapes.gate_up._sharding.partition),
+        .down = linearSpecs(down, shapes.down._sharding.partition),
+    };
+    return zml.ops.manualComputation(Call.forward, args, output_shape, .{
+        .mesh = mesh,
+        .in_specs = in_specs,
+        .out_specs = output_shape._sharding.partition,
     });
+}
+
+// Packed scales may be untagged. Their first dimension identifies experts;
+// scalar scales apply to every expert and remain replicated.
+fn auxiliarySpec(tensor: ?zml.Tensor, experts: i64, spec: zml.Sharding.PartitionSpec) zml.Sharding.Partitioning {
+    const t = tensor orelse return .replicated(0);
+    const replicated = zml.Sharding.Partitioning.replicated(t.rank());
+    if (t.count() == 1 or spec == .replicated) return replicated;
+    stdx.debug.assert(t.dim(0) == experts, "MoE bias/scale must be scalar or contain {} experts, got {f}", .{ experts, t.shape() });
+    return replicated.set(0, spec);
+}
+
+fn linearSpecs(linear: zml.nn.Linear, partition: zml.Sharding.Partitioning) struct {
+    weight: zml.Sharding.Partitioning,
+    bias: zml.Sharding.Partitioning,
+    quantization: struct {
+        scales: zml.Sharding.Partitioning,
+        global_scale: struct { value: zml.Sharding.Partitioning },
+        input_scale: struct { value: zml.Sharding.Partitioning },
+    },
+} {
+    const experts = linear.weight.dim(.expert);
+    const spec = partition.get(linear.weight.axis(.expert));
+    const q = linear.quantization;
+    return .{
+        .weight = partition,
+        .bias = auxiliarySpec(linear.bias, experts, spec),
+        .quantization = .{
+            .scales = auxiliarySpec(if (q) |v| v.scales else null, experts, spec),
+            .global_scale = .{ .value = auxiliarySpec(if (q) |v| if (v.global_scale) |scale| scale.value else null else null, experts, spec) },
+            .input_scale = .{ .value = auxiliarySpec(if (q) |v| if (v.input_scale) |scale| scale.value else null else null, experts, spec) },
+        },
+    };
 }
 
 pub fn unpackedWeight(linear: zml.nn.Linear) zml.Tensor {

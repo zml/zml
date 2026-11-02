@@ -22,7 +22,7 @@ pub const Options = struct {
     w2_bias: ?Tensor = null,
 };
 
-fn validateOptions(opts: zml.moe.LocalOptions) void {
+fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
     // TODO(Corentin): find where to put that
@@ -228,7 +228,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.LocalOptions,
+    opts: zml.moe.Options,
 ) zml.Tensor {
     validateOptions(opts);
 

@@ -4,7 +4,7 @@ const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 const triton = zml.kernel.triton;
-const AttentionOptions = @import("../paged_attention.zig").LocalOptions;
+const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
 const kernels = @import("unified_attention.zig");
 const kernels_sparse = @import("sparse_unified_attention.zig");
 const kernels_oneapi = @import("unified_attention_oneapi.zig");

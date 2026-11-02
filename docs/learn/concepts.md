@@ -177,17 +177,41 @@ retain this explicit sharding, including when returned directly from the
 executable. Subsequent ordinary graph operations leave their results open for
 the partitioner to infer; an unspecified executable output defaults to replication.
 
-Attention accepts a `zml.attention.Sharding` with a mesh and separate `heads`
-and `kv_heads` logical axes. MoE takes `Options.sharding` with a mesh and an
-`experts` logical axis. An axis value of `null` explicitly requests replication.
-These choices define the operator's sharding independently of intermediate tensor annotations.
-Mesh construction maps the logical axes onto the physical topology; the two
-meshes can have different ranks.
+Attention, paged attention, and MoE keep numerical options separate from
+partitioning. Their shared entry points accept a final partitioning declaration
+using the same `mesh`, `in_specs` and `out_specs` machinery:
 
-The shared attention, paged attention, and MoE operators own the manual
-computation boundaries for their kernel backends. Kernels receive local tensors
-and numerical options without mesh selection. MoE routing describes each shard's
-expert range, and the shared operator sums the kernels' partial contributions.
-StableHLO implementations use ordinary graph constraints, keeping intermediate
-operations open. Both paths return the operator's declared output sharding:
-query-head sharding for attention and replication for expert-parallel MoE.
+```zig
+const output = zml.attention.attention(q, k, v, position, metadata, parameters, .{
+    .mesh = .model,
+    .in_specs = .{
+        .q = .{ .h = .model },
+        .k = .{ .h = .model },
+        .v = .{ .h = .model },
+        .token_index = .replicated,
+        .metadata = .replicated,
+    },
+    .out_specs = .{ .h = .model },
+});
+```
+
+The shared operator creates a manual region around the selected implementation,
+including StableHLO. Each backend computes on its shard's local tensors.
+Models declare partitioning without implementing callbacks or dispatching local
+kernels. The declaration remains effective after casts and cache updates that
+leave frontend sharding unspecified. Kernel implementations require an explicit
+declaration; they never infer replication from missing annotations.
+
+StableHLO also accepts `null` to leave sharding open for the partitioner. Supplying
+a declaration selects the same manual computation semantics as kernel backends;
+page indices and query offsets must then refer to each shard's local tensors.
+
+For MoE, `in_specs` covers `input`, `ids`, `weights`, `gate_up` and `down`.
+Projection specs describe the weight tensors; bias and quantization scales follow
+the expert partition automatically. `forwardMoe` handles local expert routing and
+reduces contributions only along the declared expert axis. Token sharding on a
+separate data axis is preserved. Models do not need to describe packed scales or
+implement these collectives.
+
+Mesh construction maps logical axes onto the physical topology; the two meshes
+can have different ranks.

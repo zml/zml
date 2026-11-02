@@ -38,7 +38,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.LocalOptions,
+    options: zml.moe.Options,
 ) zml.Tensor {
     // HACK(Corentin): only rely on the scheme of gate_up for now.
 
@@ -57,7 +57,7 @@ pub fn fusedExpertsBase(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.LocalOptions,
+    opts: zml.moe.Options,
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
@@ -831,7 +831,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub fn validateOptions(opts: zml.moe.LocalOptions) void {
+pub fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(opts.activation == .swiglu, "triton backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.limit != null, "triton backend requires swiglu limit to be set", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "triton backend requires swiglu bias to be null", .{});
@@ -845,7 +845,7 @@ pub fn fusedExpertsMxfp4(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.LocalOptions,
+    options: zml.moe.Options,
 ) zml.Tensor {
     validateOptions(options);
     stdx.debug.assert(input.dtype() == .bf16, "triton backend only supports bf16 inputs, got {}", .{input.dtype()});
