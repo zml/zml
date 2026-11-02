@@ -308,6 +308,14 @@ pub const Tensor = struct {
             },
             ctx.location,
         ).appendTo(currentBlock());
+        // The copy has side effects, so it outlives an unused result, and the
+        // SPMD partitioner then needs a sharding that no user propagated. Set
+        // once in the module, where the sharding's mesh resolves.
+        const sharding = ctx.tensorShardingAttr(ctx.allocator, self._shape) catch @panic("OOM");
+        switch (ctx.partitioner) {
+            .shardy => op.setAttributeByName("sdy.sharding", shardy.TensorShardingPerValueAttr.get(ctx.mlir_ctx, &.{sharding.isA(shardy.TensorShardingAttr).?}).attribute()),
+            .gspmd => op.setAttributeByName("mhlo.sharding", sharding),
+        }
 
         var res = _result(self._shape, op.result(0));
         res._shape._sharding = self._shape._sharding;
