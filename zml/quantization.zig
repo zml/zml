@@ -129,6 +129,8 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
         .fp8_block32, .fp8_block128 => blk: {
             const dtype: DataType = switch (platform.target) {
                 .cuda => .f8e4m3fn,
+                // RNGD contracts matching FP8 pairs in 128-wide K blocks.
+                .furiosa => if (quantization.scheme == .fp8_block128) .f8e4m3fn else return null,
                 .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
                     .cdna4, .rdna4 => .f8e4m3fn,
                     .cdna3 => .f8e4m3fnuz,
