@@ -221,6 +221,29 @@ pub const TensorStore = struct {
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
+        /// Creates a zml.Tensor reading an entry's bytes as `shape`, a reshape of the stored
+        /// shape, to partition an axis the stored layout merges with another.
+        pub fn createTensorAs(self: View, subkey: []const u8, shape: Shape, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+            const source = self.store.dupeSource(key) orelse stdx.debug.panic("Checkpoint has no tensor named {s}", .{key});
+            stdx.debug.assert(source.shape.dtype() == shape.dtype() and source.shape.count() == shape.count(), "tensor {s} from store has shape {f}, which {f} does not reshape", .{ key, source.shape, shape });
+
+            const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            sources[0] = source;
+
+            const resolved_mesh = self.store.mesh(mesh_);
+            const partition: Sharding.Partitioning = .parse(shape.tags(), resolved_mesh, .replicated, partitioning);
+            var sharded = shape;
+            sharded._sharding = .{ .mesh = resolved_mesh, .partition = partition };
+            sharded = sharded.withPartitioning(resolved_mesh, partition);
+
+            const tensor: Tensor = .fromShape(sharded);
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
+
+            return tensor;
+        }
+
         fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding: Sharding) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
