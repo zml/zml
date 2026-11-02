@@ -1,6 +1,6 @@
 const zml = @import("../../../zml.zig");
 const KvCache = @import("../paged_attention.zig").KvCache;
-const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
+const AttentionOptions = @import("../paged_attention.zig").LocalOptions;
 const triton = @import("../triton/triton.zig");
 
 pub fn pagedAttention(
@@ -19,10 +19,10 @@ pub fn pagedAttention(
     const final_state = zml.ops.@"while"(
         AttentionLoop,
         .{
-            .q = q.withPartitioning(opts.sharding.mesh, opts.sharding.partition(q.shape(), .hkv)),
+            .q = q,
             .kv_cache = .{ .split = .{
-                .k = kv_cache.split.k.withPartitioning(opts.sharding.mesh, opts.sharding.kvPartition(kv_cache.split.k.shape(), .hkv)),
-                .v = kv_cache.split.v.withPartitioning(opts.sharding.mesh, opts.sharding.kvPartition(kv_cache.split.v.shape(), .hkv)),
+                .k = kv_cache.split.k,
+                .v = kv_cache.split.v,
             } },
             .parameters = parameters,
             .opts = opts,

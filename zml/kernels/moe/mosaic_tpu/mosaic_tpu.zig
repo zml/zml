@@ -22,7 +22,7 @@ pub const Options = struct {
     w2_bias: ?Tensor = null,
 };
 
-fn validateOptions(opts: zml.moe.Options) void {
+fn validateOptions(opts: zml.moe.LocalOptions) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
     // TODO(Corentin): find where to put that
@@ -225,108 +225,26 @@ pub fn callGmmEp(
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: zml.moe.LocalOptions,
 ) zml.Tensor {
     validateOptions(opts);
 
     const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
     const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
 
-    if (opts.sharding.experts != null) {
-        const global_num_experts = down.weight.dim(.expert);
-        const partial_output = zml.ops.manualComputation(
-            (struct {
-                input: zml.Tensor,
-                topk_ids: zml.Tensor,
-                topk_weights: zml.Tensor,
-                weights_gate_up: zml.Tensor,
-                weights_down: zml.Tensor,
-                activation: zml.moe.Activation,
-                global_num_experts: i64,
-                sharding: zml.moe.Sharding,
-                gate_up_scales: ?zml.Tensor,
-                bias_gate_up: ?zml.Tensor,
-                down_scales: ?zml.Tensor,
-                bias_down: ?zml.Tensor,
-
-                fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                    const local_num_experts = self.weights_gate_up.dim(.expert);
-                    const partition_id = self.sharding.expertIndex();
-                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                    const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                    const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                        .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                    const expert_map = local_expert_mask.select(
-                        global_expert_ids.sub(expert_start),
-                        zml.Tensor.scalar(-1, .i32),
-                    );
-                    const local_output = fusedExpertsImpl(
-                        self.input,
-                        self.weights_gate_up,
-                        self.weights_down,
-                        self.topk_weights,
-                        self.topk_ids,
-                        .{
-                            .activation = self.activation,
-                            .global_num_experts = self.global_num_experts,
-                            .expert_map = expert_map,
-                            .w1_scale = self.gate_up_scales,
-                            .w2_scale = self.down_scales,
-                            .w1_bias = self.bias_gate_up,
-                            .w2_bias = self.bias_down,
-                        },
-                    );
-                    return self.sharding.sum(local_output.reshape(self.input.shape()).withTags(.{ .t, .d }));
-                }
-            }).body,
-            .{
-                .input = input,
-                .topk_ids = topk_ids,
-                .topk_weights = topk_weights,
-                .weights_gate_up = gate_up.weight,
-                .weights_down = down.weight,
-                .activation = opts.activation,
-                .global_num_experts = global_num_experts,
-                .sharding = opts.sharding,
-                .gate_up_scales = gate_up_scales,
-                .bias_gate_up = gate_up.bias,
-                .down_scales = down_scales,
-                .bias_down = down.bias,
-            },
-            input.shape(),
-            .{
-                .mesh = opts.sharding.mesh,
-                .in_specs = .{
-                    .input = .replicated,
-                    .topk_ids = .replicated,
-                    .topk_weights = .replicated,
-                    .weights_gate_up = opts.sharding.partition(gate_up.weight.shape()),
-                    .weights_down = opts.sharding.partition(down.weight.shape()),
-                    .gate_up_scales = opts.sharding.auxiliaryPartition(gate_up_scales, gate_up.weight.dim(.expert)),
-                    .down_scales = opts.sharding.auxiliaryPartition(down_scales, down.weight.dim(.expert)),
-                    .bias_gate_up = opts.sharding.auxiliaryPartition(gate_up.bias, gate_up.weight.dim(.expert)),
-                    .bias_down = opts.sharding.auxiliaryPartition(down.bias, down.weight.dim(.expert)),
-                },
-                .out_specs = .replicated,
-            },
-        );
-        return partial_output;
-    }
-
     return fusedExpertsImpl(
         input,
         gate_up.weight,
         down.weight,
-        topk_weights,
-        topk_ids,
+        routing.weights,
+        routing.ids,
         .{
             .activation = opts.activation,
-            .global_num_experts = gate_up.weight.dim(.expert),
+            .global_num_experts = routing.global_num_experts,
+            .expert_map = routing.expertMap(),
             .w1_scale = gate_up_scales,
             .w2_scale = down_scales,
             .w1_bias = gate_up.bias,

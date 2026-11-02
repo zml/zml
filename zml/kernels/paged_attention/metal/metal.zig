@@ -4,7 +4,7 @@ const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 
-const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
+const AttentionOptions = @import("../paged_attention.zig").LocalOptions;
 const paged_attn = @import("paged_attn.zig");
 
 const log = std.log.scoped(.@"zml/attention/metal");
@@ -59,7 +59,6 @@ pub const Parameters = struct {
 };
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-    zml.stdx.debug.assert(opts.sharding.heads == null or opts.sharding.mesh.numPartitionsForLogicalAxis(opts.sharding.heads.?) == 1, "Metal paged attention does not support head parallelism", .{});
     if (opts.mask == .indices) @panic("Sparse Attention is not implemented on Metal");
 
     const num_kv_heads = q.dim(.hkv);

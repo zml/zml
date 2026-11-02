@@ -20,7 +20,7 @@ pub const Options = struct {
     /// obtain the first valid GEMM2 index.
     gemm2_tactic: i32,
 
-    pub fn fromGlobalOptions(opts: zml.moe.Options) Options {
+    pub fn fromLocalOptions(opts: zml.moe.LocalOptions) Options {
         return .{
             .workspace_query_device = 0,
             .activation = opts.activation,
@@ -31,7 +31,7 @@ pub const Options = struct {
     }
 };
 
-pub fn validateOptions(opts: zml.moe.Options) void {
+pub fn validateOptions(opts: zml.moe.LocalOptions) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
     stdx.debug.assert(opts.activation == .swiglu, "flashinfer_cutlass backend only accepts swiglu activation, got {}", .{opts.activation});
@@ -664,11 +664,10 @@ pub fn fusedExpertsBf16(
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: zml.moe.LocalOptions,
 ) zml.Tensor {
     if (comptime !platforms.isEnabled(.cuda)) {
         @panic("FlashInfer CUTLASS MoE is only supported on CUDA platforms");
@@ -678,7 +677,11 @@ pub fn fusedExperts(
         @panic("FlashInfer CUTLASS MoE does not support bias in gate_up or down linear layers");
     }
 
-    const runner_options: Options = .fromGlobalOptions(opts);
+    const topk_ids = routing.localIds();
+    // The runner ignores routes whose local expert id is -1.
+    const topk_weights = topk_ids.cmp(.GE, .scalar(0, .i32)).select(routing.weights, .scalar(-1, routing.weights.dtype()));
+
+    const runner_options: Options = .fromLocalOptions(opts);
 
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
 
@@ -688,113 +691,6 @@ pub fn fusedExperts(
 
         // TODO(Corentin): Do error checking on nvfp4
         // Also, maybe pass `zml.nn.Linear` directly
-        if (opts.sharding.experts != null) {
-            return zml.ops.manualComputation(
-                (struct {
-                    input: zml.Tensor,
-                    topk_ids: zml.Tensor,
-                    topk_weights: zml.Tensor,
-                    gate_up_weight_unpacked: zml.Tensor,
-                    down_weight_unpacked: zml.Tensor,
-                    gate_up_input_scale: zml.Tensor,
-                    gate_up_scales: zml.Tensor,
-                    gate_up_global_scale: zml.Tensor,
-                    down_input_scale: zml.Tensor,
-                    down_scales: zml.Tensor,
-                    down_global_scale: zml.Tensor,
-                    activation: zml.moe.Activation,
-                    enable_pdl: bool,
-                    gemm1_tactic: i32,
-                    gemm2_tactic: i32,
-                    workspace_query_device: i32,
-                    sharding: zml.moe.Sharding,
-
-                    fn body(
-                        self: @This(),
-                        _: zml.Shape,
-                    ) zml.Tensor {
-                        const local_num_experts = self.gate_up_weight_unpacked.dim(.expert);
-                        const partition_id = self.sharding.expertIndex();
-                        const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                        const expert_end = expert_start.addConstant(local_num_experts);
-
-                        const local_route_mask = self.topk_ids
-                            .cmp(.GE, expert_start)
-                            .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
-                        const local_topk_ids = local_route_mask.select(
-                            self.topk_ids.sub(expert_start),
-                            zml.Tensor.scalar(-1, .i32),
-                        );
-                        const local_topk_weights = local_route_mask.select(
-                            self.topk_weights,
-                            zml.Tensor.scalar(-1, self.topk_weights.dtype()),
-                        );
-
-                        const local_output = fusedExpertsNvfp4(
-                            self.input,
-                            self.gate_up_weight_unpacked,
-                            self.down_weight_unpacked,
-                            local_topk_weights,
-                            local_topk_ids,
-                            self.gate_up_input_scale,
-                            self.gate_up_scales,
-                            self.gate_up_global_scale,
-                            self.down_input_scale,
-                            self.down_scales,
-                            self.down_global_scale,
-                            .{
-                                .workspace_query_device = self.workspace_query_device,
-                                .activation = self.activation,
-                                .enable_pdl = self.enable_pdl,
-                                .gemm1_tactic = self.gemm1_tactic,
-                                .gemm2_tactic = self.gemm2_tactic,
-                            },
-                        );
-                        const local_reshaped = local_output
-                            .reshape(self.input.shape().dims())
-                            .withTags(.{ .t, .d });
-                        return self.sharding.sum(local_reshaped);
-                    }
-                }).body,
-                .{
-                    .input = input,
-                    .topk_ids = topk_ids,
-                    .topk_weights = topk_weights,
-                    .gate_up_weight_unpacked = gate_up_weight_unpacked,
-                    .down_weight_unpacked = down_weight_unpacked,
-                    .gate_up_input_scale = gate_up.quantization.?.input_scale.?.asMultiplier(),
-                    .gate_up_scales = gate_up.quantization.?.scales,
-                    .gate_up_global_scale = gate_up.quantization.?.global_scale.?.asMultiplier(),
-                    .down_input_scale = down.quantization.?.input_scale.?.asMultiplier(),
-                    .down_scales = down.quantization.?.scales,
-                    .down_global_scale = down.quantization.?.global_scale.?.asMultiplier(),
-                    .activation = runner_options.activation,
-                    .enable_pdl = runner_options.enable_pdl,
-                    .gemm1_tactic = runner_options.gemm1_tactic,
-                    .gemm2_tactic = runner_options.gemm2_tactic,
-                    .workspace_query_device = runner_options.workspace_query_device,
-                    .sharding = opts.sharding,
-                },
-                input.shape(),
-                .{
-                    .mesh = opts.sharding.mesh,
-                    .in_specs = .{
-                        .input = .replicated,
-                        .topk_ids = .replicated,
-                        .topk_weights = .replicated,
-                        .gate_up_weight_unpacked = opts.sharding.partition(gate_up_weight_unpacked.shape()),
-                        .down_weight_unpacked = opts.sharding.partition(down_weight_unpacked.shape()),
-                        .gate_up_input_scale = opts.sharding.auxiliaryPartition(gate_up.quantization.?.input_scale.?.value, gate_up.weight.dim(.expert)),
-                        .gate_up_scales = opts.sharding.auxiliaryPartition(gate_up.quantization.?.scales, gate_up.weight.dim(.expert)),
-                        .gate_up_global_scale = opts.sharding.auxiliaryPartition(gate_up.quantization.?.global_scale.?.value, gate_up.weight.dim(.expert)),
-                        .down_input_scale = opts.sharding.auxiliaryPartition(down.quantization.?.input_scale.?.value, down.weight.dim(.expert)),
-                        .down_scales = opts.sharding.auxiliaryPartition(down.quantization.?.scales, down.weight.dim(.expert)),
-                        .down_global_scale = opts.sharding.auxiliaryPartition(down.quantization.?.global_scale.?.value, down.weight.dim(.expert)),
-                    },
-                    .out_specs = .replicated,
-                },
-            );
-        }
 
         return fusedExpertsNvfp4(
             input,
@@ -809,90 +705,6 @@ pub fn fusedExperts(
             down.quantization.?.scales,
             down.quantization.?.global_scale.?.asMultiplier(),
             runner_options,
-        );
-    }
-
-    if (opts.sharding.experts != null) {
-        return zml.ops.manualComputation(
-            (struct {
-                input: zml.Tensor,
-                topk_ids: zml.Tensor,
-                topk_weights: zml.Tensor,
-                weights_gate_up: zml.Tensor,
-                weights_down: zml.Tensor,
-                activation: zml.moe.Activation,
-                enable_pdl: bool,
-                gemm1_tactic: i32,
-                gemm2_tactic: i32,
-                workspace_query_device: i32,
-                sharding: zml.moe.Sharding,
-
-                fn body(
-                    self: @This(),
-                    _: zml.Shape,
-                ) zml.Tensor {
-                    const local_num_experts = self.weights_gate_up.dim(.expert);
-                    const partition_id = self.sharding.expertIndex();
-                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                    const expert_end = expert_start.addConstant(local_num_experts);
-
-                    const local_route_mask = self.topk_ids
-                        .cmp(.GE, expert_start)
-                        .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
-                    const local_topk_ids = local_route_mask.select(
-                        self.topk_ids.sub(expert_start),
-                        zml.Tensor.scalar(-1, .i32),
-                    );
-                    const local_topk_weights = local_route_mask.select(
-                        self.topk_weights,
-                        zml.Tensor.scalar(-1, self.topk_weights.dtype()),
-                    );
-
-                    const local_output = fusedExpertsBf16(
-                        self.input,
-                        self.weights_gate_up,
-                        self.weights_down,
-                        local_topk_weights,
-                        local_topk_ids,
-                        .{
-                            .workspace_query_device = self.workspace_query_device,
-                            .activation = self.activation,
-                            .enable_pdl = self.enable_pdl,
-                            .gemm1_tactic = self.gemm1_tactic,
-                            .gemm2_tactic = self.gemm2_tactic,
-                        },
-                    );
-                    const local_reshaped = local_output
-                        .reshape(self.input.shape().dims())
-                        .withTags(.{ .t, .d });
-                    return self.sharding.sum(local_reshaped);
-                }
-            }).body,
-            .{
-                .input = input,
-                .topk_ids = topk_ids,
-                .topk_weights = topk_weights,
-                .weights_gate_up = gate_up.weight,
-                .weights_down = down.weight,
-                .activation = runner_options.activation,
-                .enable_pdl = runner_options.enable_pdl,
-                .gemm1_tactic = runner_options.gemm1_tactic,
-                .gemm2_tactic = runner_options.gemm2_tactic,
-                .workspace_query_device = runner_options.workspace_query_device,
-                .sharding = opts.sharding,
-            },
-            input.shape(),
-            .{
-                .mesh = opts.sharding.mesh,
-                .in_specs = .{
-                    .input = .replicated,
-                    .topk_ids = .replicated,
-                    .topk_weights = .replicated,
-                    .weights_gate_up = opts.sharding.partition(gate_up.weight.shape()),
-                    .weights_down = opts.sharding.partition(down.weight.shape()),
-                },
-                .out_specs = .replicated,
-            },
         );
     }
 

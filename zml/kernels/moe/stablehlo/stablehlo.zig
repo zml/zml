@@ -180,8 +180,8 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
         .sum(.topk).squeeze(.topk).convert(input.dtype());
 }
 
-pub fn fusedExperts(input: Tensor, ids: Tensor, weights: Tensor, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: zml.moe.Options) Tensor {
-    return reference(input.replicate(), ids.replicate(), weights.replicate(), opts.sharding.constrainLinear(gate_up), opts.sharding.constrainLinear(down), .{
+pub fn fusedExperts(input: Tensor, ids: Tensor, weights: Tensor, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: zml.moe.LocalOptions) Tensor {
+    return reference(input, ids, weights, gate_up, down, .{
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,
         .routing_weight_placement = opts.routing_weight_placement,

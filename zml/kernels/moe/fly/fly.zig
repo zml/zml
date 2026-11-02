@@ -18,11 +18,10 @@ test {
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: zml.moe.LocalOptions,
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
@@ -34,59 +33,15 @@ pub fn fusedExperts(
         .hidden_states = input,
         .gate_up = gate_up,
         .down = down,
-        .topk_weights = topk_weights,
-        .topk_ids = topk_ids,
+        .topk_weights = routing.weights,
+        .topk_ids = routing.ids,
+        .expert_map = routing.expertMap(),
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,
         .gate_up_layout = layout.gate_up,
         .routing_weight_placement = opts.routing_weight_placement,
     };
-    if (opts.sharding.experts == null) {
-        return fusedExpertsImpl(args);
-    }
-
-    return zml.ops.manualComputation(
-        (struct {
-            args: FusedExpertsArgs,
-            global_num_experts: i64,
-            sharding: zml.moe.Sharding,
-
-            fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                const local_args = self.args;
-                const local_num_experts = local_args.gate_up.weight.dim(.expert);
-                const partition_id = self.sharding.expertIndex();
-                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                // Map global expert ids to local ids, or -1 for experts outside this partition.
-                const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                    .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                var mapped_args = local_args;
-                mapped_args.expert_map = local_expert_mask.select(
-                    global_expert_ids.sub(expert_start),
-                    zml.Tensor.scalar(-1, .i32),
-                );
-
-                const local_output = fusedExpertsImpl(mapped_args);
-                const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
-                return self.sharding.sum(local_reshaped);
-            }
-        }).call,
-        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert), .sharding = opts.sharding },
-        input.shape(),
-        .{
-            .mesh = opts.sharding.mesh,
-            .in_specs = .{ .args = .{
-                .hidden_states = .replicated,
-                .gate_up = opts.sharding.linearSpecs(gate_up),
-                .down = opts.sharding.linearSpecs(down),
-                .topk_weights = .replicated,
-                .topk_ids = .replicated,
-                .expert_map = .replicated,
-            } },
-            .out_specs = .replicated,
-        },
-    );
+    return fusedExpertsImpl(args);
 }
 
 pub const FusedExpertsArgs = struct {

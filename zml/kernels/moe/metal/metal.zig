@@ -15,7 +15,7 @@ pub const Options = struct {
     w2_global_scale: ?Tensor = null,
 };
 
-fn validateOptions(opts: zml.moe.Options) void {
+fn validateOptions(opts: zml.moe.LocalOptions) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
 }
@@ -73,14 +73,14 @@ fn applyDownGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tenso
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: zml.moe.LocalOptions,
 ) zml.Tensor {
+    const topk_ids = routing.ids;
+    const topk_weights = routing.weights;
     validateOptions(opts);
-    stdx.debug.assert(opts.sharding.experts == null or opts.sharding.mesh.numPartitionsForLogicalAxis(opts.sharding.experts.?) == 1, "Metal MoE does not support expert parallelism", .{});
     stdx.debug.assert(gate_up.bias == null, "metal backend doesn't support gate_up bias", .{});
     stdx.debug.assert(down.bias == null, "metal backend doesn't support down bias", .{});
 

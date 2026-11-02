@@ -146,8 +146,8 @@ corresponding types.
 
 ## Manual computations and sharding
 
-Ordinary graph results leave their sharding open for Shardy to infer. A manual
-computation declares the layouts its local kernel requires, independently of
+Ordinary graph results leave their sharding open for the partitioner to infer. A manual
+computation declares the sharding its local kernel requires, independently of
 annotations on earlier tensors:
 
 ```zig
@@ -175,11 +175,19 @@ are rejected. Specs follow nested tensor fields, including optional values;
 `out_specs` describes how local results form the global result. Returned tensors
 retain this explicit sharding, including when returned directly from the
 executable. Subsequent ordinary graph operations leave their results open for
-Shardy to infer; an unspecified executable output defaults to replication.
+the partitioner to infer; an unspecified executable output defaults to replication.
 
 Attention accepts a `zml.attention.Sharding` with a mesh and separate `heads`
 and `kv_heads` logical axes. MoE takes `Options.sharding` with a mesh and an
 `experts` logical axis. An axis value of `null` explicitly requests replication.
-These choices reach the backend without reading intermediate tensor sharding.
+These choices define the operator's sharding independently of intermediate tensor annotations.
 Mesh construction maps the logical axes onto the physical topology; the two
 meshes can have different ranks.
+
+The shared attention, paged attention, and MoE operators own the manual
+computation boundaries for their kernel backends. Kernels receive local tensors
+and numerical options without mesh selection. MoE routing describes each shard's
+expert range, and the shared operator sums the kernels' partial contributions.
+StableHLO implementations use ordinary graph constraints, keeping intermediate
+operations open. Both paths return the operator's declared output sharding:
+query-head sharding for attention and replication for expert-parallel MoE.

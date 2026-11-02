@@ -35,31 +35,29 @@ test {
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.Options,
+    options: zml.moe.LocalOptions,
 ) zml.Tensor {
     // HACK(Corentin): only rely on the scheme of gate_up for now.
 
     if (gate_up.quantization) |q| switch (q.scheme) {
         .mxfp4 => if (zml.Compiler.current().platform.target == .cuda) {
-            return fusedExpertsMxfp4(input, ids, weights, gate_up, down, options);
+            return fusedExpertsMxfp4(input, routing, gate_up, down, options);
         },
         else => {},
     };
 
-    return fusedExpertsBase(input, ids, weights, gate_up, down, options);
+    return fusedExpertsBase(input, routing, gate_up, down, options);
 }
 
 pub fn fusedExpertsBase(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: zml.moe.LocalOptions,
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
@@ -71,59 +69,15 @@ pub fn fusedExpertsBase(
         .hidden_states = input,
         .gate_up = gate_up,
         .down = down,
-        .topk_weights = topk_weights,
-        .topk_ids = topk_ids,
+        .topk_weights = routing.weights,
+        .topk_ids = routing.ids,
+        .expert_map = routing.expertMap(),
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,
         .gate_up_layout = layout.gate_up,
         .routing_weight_placement = opts.routing_weight_placement,
     };
-    if (opts.sharding.experts == null) {
-        return fusedExpertsImpl(args);
-    }
-
-    return zml.ops.manualComputation(
-        (struct {
-            args: FusedExpertsArgs,
-            global_num_experts: i64,
-            sharding: zml.moe.Sharding,
-
-            fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                const local_args = self.args;
-                const local_num_experts = local_args.gate_up.weight.dim(.expert);
-                const partition_id = self.sharding.expertIndex();
-                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                // Map global expert ids to local ids, or -1 for experts outside this partition.
-                const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                    .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                var mapped_args = local_args;
-                mapped_args.expert_map = local_expert_mask.select(
-                    global_expert_ids.sub(expert_start),
-                    zml.Tensor.scalar(-1, .i32),
-                );
-
-                const local_output = fusedExpertsImpl(mapped_args);
-                const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
-                return self.sharding.sum(local_reshaped);
-            }
-        }).call,
-        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert), .sharding = opts.sharding },
-        input.shape(),
-        .{
-            .mesh = opts.sharding.mesh,
-            .in_specs = .{ .args = .{
-                .hidden_states = .replicated,
-                .gate_up = opts.sharding.linearSpecs(gate_up),
-                .down = opts.sharding.linearSpecs(down),
-                .topk_weights = .replicated,
-                .topk_ids = .replicated,
-                .expert_map = .replicated,
-            } },
-            .out_specs = .replicated,
-        },
-    );
+    return fusedExpertsImpl(args);
 }
 
 pub const FusedExpertsArgs = struct {
@@ -877,7 +831,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub fn validateOptions(opts: zml.moe.Options) void {
+pub fn validateOptions(opts: zml.moe.LocalOptions) void {
     stdx.debug.assert(opts.activation == .swiglu, "triton backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.limit != null, "triton backend requires swiglu limit to be set", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "triton backend requires swiglu bias to be null", .{});
@@ -888,11 +842,10 @@ pub fn validateOptions(opts: zml.moe.Options) void {
 /// BF16 activations are quantized on the GPU to FP8 with per-32 E8M0 scales.
 pub fn fusedExpertsMxfp4(
     input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.Options,
+    options: zml.moe.LocalOptions,
 ) zml.Tensor {
     validateOptions(options);
     stdx.debug.assert(input.dtype() == .bf16, "triton backend only supports bf16 inputs, got {}", .{input.dtype()});
@@ -906,40 +859,21 @@ pub fn fusedExpertsMxfp4(
     stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "triton expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
     stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "triton expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
-    const expert_parallelism = options.sharding.experts != null;
-
     const context: Context = .{
         .input = input,
-        .ids = ids,
-        .weights = weights,
+        .ids = routing.localIds(),
+        .weights = routing.weights,
         .w1 = gate_up.weight.bitCast(.u8),
         .s1 = gq.scales,
         .w2 = down.weight.bitCast(.u8),
         .s2 = dq.scales,
-        .global_experts = gate_up.weight.dim(.expert),
-        .topk = ids.dim(.topk),
+        .global_experts = routing.global_num_experts,
+        .topk = routing.ids.dim(.topk),
         .limit = options.activation.swiglu.limit.?,
         .routing_weight_placement = options.routing_weight_placement,
-        .expert_parallel = expert_parallelism,
-        .sharding = options.sharding,
     };
 
-    return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape(), .{
-            .mesh = options.sharding.mesh,
-            .in_specs = .{
-                .input = .replicated,
-                .ids = .replicated,
-                .weights = .replicated,
-                .w1 = options.sharding.partition(context.w1.shape()),
-                .s1 = options.sharding.auxiliaryPartition(context.s1, gate_up.weight.dim(.expert)),
-                .w2 = options.sharding.partition(context.w2.shape()),
-                .s2 = options.sharding.auxiliaryPartition(context.s2, down.weight.dim(.expert)),
-            },
-            .out_specs = .replicated,
-        })
-    else
-        context.body(input.shape());
+    return context.body(input.shape());
 }
 
 pub const Config = struct {
@@ -1020,19 +954,14 @@ const Context = struct {
     topk: i64,
     limit: f32,
     routing_weight_placement: RoutingWeightPlacement,
-    expert_parallel: bool,
-    sharding: zml.moe.Sharding,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {
         const experts = self.w1.dim(.expert);
         const hidden = self.w2.dim(1);
         const intermediate = self.w2.dim(2) * 2;
-        var ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
+        const ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
         const tokens = ids.dim(.token);
-        if (self.expert_parallel) {
-            const partition_id = self.sharding.expertIndex();
-            ids = ids.sub(partition_id.scale(experts));
-        }
+
         const x = self.input.reshape(.{ tokens, hidden });
         const scales = self.weights.convert(.f32).reshape(.{ tokens, self.topk });
 
@@ -1178,9 +1107,6 @@ const Context = struct {
             },
         ).y.reshape(self.input.shape().dims()).withTags(self.input.shape());
 
-        return if (self.expert_parallel)
-            self.sharding.sum(result)
-        else
-            result;
+        return result;
     }
 };

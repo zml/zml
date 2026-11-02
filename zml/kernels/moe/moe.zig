@@ -234,13 +234,36 @@ pub const Sharding = struct {
         }
         return result;
     }
+};
 
-    pub fn expertIndex(self: Sharding) zml.Tensor {
-        return zml.ops.axisIndex(self.mesh, self.experts.?).convert(.i32);
+/// Numerical options for kernels operating on local expert weights.
+pub const LocalOptions = struct {
+    activation: Activation,
+    quantize_input: bool,
+    routing_weight_placement: RoutingWeightPlacement,
+};
+
+/// Global routing with the expert range owned by this local computation.
+/// Kernels select local ids or a global-to-local map to match their routing algorithm.
+/// Their result is this range's contribution; the shared operator sums contributions.
+pub const LocalRouting = struct {
+    ids: zml.Tensor,
+    weights: zml.Tensor,
+    global_num_experts: i64,
+    local_num_experts: i64,
+    expert_start: ?zml.Tensor = null,
+
+    pub fn localIds(self: LocalRouting) zml.Tensor {
+        const start = self.expert_start orelse return self.ids;
+        const local = self.ids.cmp(.GE, start).logical(.AND, self.ids.cmp(.LT, start.addConstant(self.local_num_experts)));
+        return local.select(self.ids.sub(start), .scalar(-1, .i32));
     }
 
-    pub fn sum(self: Sharding, input: zml.Tensor) zml.Tensor {
-        return zml.ops.allReduceOnAxis(input, zml.Tensor.add, self.mesh, self.experts.?);
+    pub fn expertMap(self: LocalRouting) ?zml.Tensor {
+        const start = self.expert_start orelse return null;
+        const ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
+        const local = ids.cmp(.GE, start).logical(.AND, ids.cmp(.LT, start.addConstant(self.local_num_experts)));
+        return local.select(ids.sub(start), .scalar(-1, .i32));
     }
 };
 
@@ -265,6 +288,7 @@ pub fn validateRoutingInputs(input: zml.Tensor, ids: zml.Tensor, weights: zml.Te
 
 /// Input has shape {.t, .d}; routing IDs and weights have shape {.t, .topk}.
 /// Returns {.t, .d}. Flatten batched input with merge(.{ .t = .{ .b, .s } }).
+/// Expert weights follow `opts.sharding`; activations and the result are replicated.
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
@@ -275,16 +299,79 @@ pub fn forwardMoe(
     opts: Options,
 ) zml.Tensor {
     validateRoutingInputs(input, topk_ids, topk_weights);
-    return switch (backend) {
-        .stablehlo => stablehlo.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .cute => cute.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .triton => triton.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .fly => fly.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .mosaic_tpu => mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .metal => metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .tcl => tcl.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+    const sharding = opts.sharding;
+    const local_opts: LocalOptions = .{ .activation = opts.activation, .quantize_input = opts.quantize_input, .routing_weight_placement = opts.routing_weight_placement };
+    if (backend == .stablehlo) {
+        const output = stablehlo.fusedExperts(
+            input.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(input.rank())),
+            topk_ids.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(topk_ids.rank())),
+            topk_weights.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(topk_weights.rank())),
+            sharding.constrainLinear(gate_up),
+            sharding.constrainLinear(down),
+            local_opts,
+        );
+        return output.withPartitioning(sharding.mesh, zml.Sharding.Partitioning.replicated(output.rank()));
+    }
+    const partitions = if (sharding.experts) |axis| sharding.mesh.numPartitionsForLogicalAxis(axis) else 1;
+    if (backend == .metal or backend == .tcl) {
+        stdx.debug.assert(partitions == 1, "This MoE backend does not support expert parallelism", .{});
+    }
+    const Call = struct {
+        input: zml.Tensor,
+        ids: zml.Tensor,
+        weights: zml.Tensor,
+        gate_up: zml.nn.Linear,
+        down: zml.nn.Linear,
+        backend: Backend,
+        opts: LocalOptions,
+        sharding: Sharding,
+        global_num_experts: i64,
+        parallel: bool,
+
+        fn local(self: @This(), _: zml.Shape) zml.Tensor {
+            const local_experts = self.gate_up.weight.dim(.expert);
+            const routing: LocalRouting = .{
+                .ids = self.ids,
+                .weights = self.weights,
+                .global_num_experts = self.global_num_experts,
+                .local_num_experts = local_experts,
+                .expert_start = if (self.parallel) zml.ops.axisIndex(self.sharding.mesh, self.sharding.experts.?).convert(.i32).scale(local_experts) else null,
+            };
+            const output = switch (self.backend) {
+                .stablehlo => unreachable,
+                .cute => cute.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+                .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+                .triton => triton.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+                .fly => fly.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+                .mosaic_tpu => mosaic_tpu.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+                .metal => metal.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+                .tcl => tcl.fusedExperts(self.input, routing, self.gate_up, self.down, self.opts),
+            };
+            return if (self.parallel) zml.ops.allReduceOnAxis(output, zml.Tensor.add, self.sharding.mesh, self.sharding.experts.?) else output;
+        }
     };
+    return zml.ops.manualComputation(Call.local, .{
+        .input = input,
+        .ids = topk_ids,
+        .weights = topk_weights,
+        .gate_up = gate_up,
+        .down = down,
+        .backend = backend,
+        .opts = local_opts,
+        .sharding = sharding,
+        .global_num_experts = gate_up.weight.dim(.expert),
+        .parallel = partitions > 1,
+    }, input.shape(), .{
+        .mesh = sharding.mesh,
+        .in_specs = .{
+            .input = .replicated,
+            .ids = .replicated,
+            .weights = .replicated,
+            .gate_up = sharding.linearSpecs(gate_up),
+            .down = sharding.linearSpecs(down),
+        },
+        .out_specs = .replicated,
+    });
 }
 
 pub fn unpackedWeight(linear: zml.nn.Linear) zml.Tensor {

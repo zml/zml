@@ -2068,7 +2068,7 @@ pub const DeviceGrid = struct {
                         for (strategy.foldSources(part.axis) orelse &.{part.axis}) |source| {
                             if (used.contains(source)) continue;
                             used.insert(source);
-                            const info = mesh_.physical.axisInfo(source) orelse continue;
+                            const info = mesh_.physical.axisInfo(source) orelse return error.InvalidPhysicalAxis;
                             try grid.appendAxis(mesh_, logical_axis, source, 1, @intCast(info.size));
                         }
                     }

@@ -180,6 +180,13 @@ pub const AttentionMask = union(enum) {
     }
 };
 
+/// Options used by a kernel operating on local tensors.
+pub const LocalOptions = struct {
+    mask: AttentionMask = .{ .standard = .{} },
+    scale: ?f32 = null,
+    sink: ?zml.Tensor = null,
+};
+
 pub const AttentionOptions = struct {
     sharding: zml.attention.Sharding,
     mask: AttentionMask = .{ .standard = .{} },
@@ -248,9 +255,55 @@ pub const KvCache = union(enum) {
     }
 };
 
+/// Computes attention over cached KV pages. The result uses `opts.sharding.heads`
+/// on the query's `.hkv` dimension on every backend.
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
     _ = k;
     _ = v;
+    const sharding = opts.sharding;
+    var local_opts: LocalOptions = .{ .mask = opts.mask, .scale = opts.scale, .sink = opts.sink };
+    const q_spec = sharding.partition(q.shape(), .hkv);
+    const cache_shape = switch (kv_cache) {
+        .split => |split| split.k.shape(),
+        .dense => |dense| dense.shape(),
+    };
+    const kv_spec = sharding.kvPartition(cache_shape, .hkv);
+    const sink_spec = if (opts.sink) |sink| sharding.partition(sink.shape(), 0) else zml.Sharding.Partitioning.replicated(0);
+    if (parameters == .stablehlo) {
+        if (local_opts.sink) |sink| local_opts.sink = sink.withPartitioning(sharding.mesh, sink_spec);
+        const cache: KvCache = switch (kv_cache) {
+            .split => |split| .{ .split = .{ .k = split.k.withPartitioning(sharding.mesh, kv_spec), .v = split.v.withPartitioning(sharding.mesh, kv_spec) } },
+            .dense => @panic("StableHLO paged attention requires split KV pages"),
+        };
+        return pagedAttentionLocal(parameters, q.withPartitioning(sharding.mesh, q_spec), cache, local_opts).withPartitioning(sharding.mesh, q_spec);
+    }
+    stdx.debug.assert(sharding.heads == sharding.kv_heads, "Paged attention kernels require matching query and KV head sharding", .{});
+    if (parameters == .metal or parameters == .tcl) {
+        stdx.debug.assert(sharding.heads == null or sharding.mesh.numPartitionsForLogicalAxis(sharding.heads.?) == 1, "This paged attention backend does not support head parallelism", .{});
+    }
+    const Call = struct {
+        parameters: Parameters,
+        q: zml.Tensor,
+        kv_cache: KvCache,
+        opts: LocalOptions,
+
+        fn local(self: @This(), _: zml.Shape) zml.Tensor {
+            return pagedAttentionLocal(self.parameters, self.q, self.kv_cache, self.opts);
+        }
+    };
+    return zml.ops.manualComputation(Call.local, .{ .parameters = parameters, .q = q, .kv_cache = kv_cache, .opts = local_opts }, q.shape(), .{
+        .mesh = sharding.mesh,
+        .in_specs = .{
+            .parameters = .replicated,
+            .q = q_spec,
+            .kv_cache = .{ .split = .{ .k = kv_spec, .v = kv_spec }, .dense = kv_spec },
+            .opts = .{ .mask = .replicated, .sink = sink_spec },
+        },
+        .out_specs = q_spec,
+    });
+}
+
+fn pagedAttentionLocal(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, opts: LocalOptions) zml.Tensor {
     return switch (parameters) {
         .cute => |p| switch (kv_cache) {
             .split => |split| cute.pagedAttention(p, q, split.k, split.v, opts),
@@ -489,6 +542,7 @@ test pagedAttention {
 
             var output_d = try exe.eval(allocator, io, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{ .mask = .{ .standard = {} }, .sink = null } });
             defer output_d.deinit();
+            try std.testing.expectEqualDeep(tensors.q.shape()._sharding, output_d.shape()._sharding);
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }
 

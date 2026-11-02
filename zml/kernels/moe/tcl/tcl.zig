@@ -19,10 +19,12 @@ const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const tcl = zml.kernel.tcl;
 
-/// `input` is `{.t, .d}`, `topk_ids` and `topk_weights` `{.t, .topk}`, `gate_up` `{.expert, .dout = 2 * inter (gate then up), .d}`
+/// `input` is `{.t, .d}`, routing IDs and weights `{.t, .topk}`, `gate_up` `{.expert, .dout = 2 * inter (gate then up), .d}`
 /// and `down` `{.expert, .d, .dout = inter}`, all bf16 but the ids (i32).
 /// SwiGLU, routing weights applied after the down projection.
-pub fn fusedExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: zml.moe.Options) Tensor {
+pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: zml.moe.LocalOptions) Tensor {
+    const topk_ids = routing.ids;
+    const topk_weights = routing.weights;
     stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL MoE applies routing weights after the down projection, without FP8 input quantization", .{});
     stdx.debug.assert(opts.activation == .swiglu and std.meta.eql(opts.activation.swiglu, .{}), "TCL MoE supports SwiGLU without limit, scale or bias", .{});
     stdx.debug.assert(gate_up_linear.quantization == null and down_linear.quantization == null, "TCL MoE takes bf16 experts", .{});
@@ -277,7 +279,7 @@ test "tcl fused experts run on furiosa" {
         const dn: Tensor = .init(.{ .expert = e, .d = d, .dout = i }, .bf16);
         const Mod = struct {
             pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor, sharding: zml.moe.Sharding) Tensor {
-                return fusedExperts(x_, ids_, w_, .init(gu_, null, .dout), .init(dn_, null, .dout), .{
+                return zml.moe.forwardMoe(x_, ids_, w_, .init(gu_, null, .dout), .init(dn_, null, .dout), .tcl, .{
                     .sharding = sharding,
                     .activation = .{ .swiglu = .{} },
                     .quantize_input = false,

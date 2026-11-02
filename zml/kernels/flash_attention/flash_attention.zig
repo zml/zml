@@ -115,7 +115,8 @@ pub const Metadata = union(Backend) {
     }
 };
 
-/// Causal attention as used in transformers.
+/// Causal attention on local tensors inside a manual computation.
+/// Use `zml.attention.attention` to apply global sharding.
 ///
 /// **Shapes**:
 ///   - q, result: .{ .q, .h, .hd }
@@ -126,11 +127,11 @@ pub const Metadata = union(Backend) {
 ///   - .q is the number of queries
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, sharding: zml.attention.Sharding) zml.Tensor {
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
     return switch (parameters) {
-        .cute => cute.attention(q, k, v, token_index, sharding),
-        .nki => nki.attention(q, k, v, token_index, parameters.nki, sharding),
-        .metal => metal.attention(q.withPartitioning(sharding.mesh, sharding.partition(q.shape(), .h)), k.withPartitioning(sharding.mesh, sharding.kvPartition(k.shape(), .h)), v.withPartitioning(sharding.mesh, sharding.kvPartition(v.shape(), .h)), token_index, metadata.metal),
+        .cute => cute.attention(q, k, v, token_index),
+        .nki => nki.attention(q, k, v, token_index, parameters.nki),
+        .metal => metal.attention(q, k, v, token_index, metadata.metal),
     };
 }
 
@@ -240,18 +241,19 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     var reference_d = try reference_exe.eval(allocator, io, .{ q, k, v, token_index, reference_metadata });
     defer reference_d.deinit();
     try reference_d.await(io);
+    try std.testing.expectEqualDeep(q_shape.withPartitioning(sharding.mesh, sharding.partition(q_shape, .h))._sharding, reference_d.shape()._sharding);
     const reference_h: zml.Slice = try reference_d.toSliceAlloc(allocator, io);
     defer reference_h.free(allocator);
 
     for (backends) |backend| {
         if (!backend.isAvailable(platform)) continue;
 
-        const metadata: Metadata = .init(.fromBackend(backend));
-        const parameters: Parameters = .init(.fromBackend(backend));
+        const metadata: zml.attention.Metadata = .{ .flash_attention = .init(.fromBackend(backend)) };
+        const parameters: zml.attention.Parameters = .{ .flash_attention = .init(.fromBackend(backend)) };
         const exe = try platform.compileFn(
             allocator,
             io,
-            attention,
+            zml.attention.attention,
             .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters, sharding },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
@@ -261,11 +263,12 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
         defer exe.deinit();
 
         var metadata_d = try metadata.initBuffer(io, platform);
-        defer Metadata.deinitBuffer(&metadata_d);
+        defer zml.attention.Metadata.deinitBuffer(&metadata_d);
 
         var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, metadata_d });
         defer output_d.deinit();
         try output_d.await(io);
+        try std.testing.expectEqualDeep(reference_d.shape()._sharding, output_d.shape()._sharding);
         const output_h = try output_d.toSliceAlloc(allocator, io);
         defer output_h.free(allocator);
 

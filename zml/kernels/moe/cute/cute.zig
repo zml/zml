@@ -17,7 +17,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub fn validateOptions(opts: zml.moe.Options) void {
+pub fn validateOptions(opts: zml.moe.LocalOptions) void {
     stdx.debug.assert(opts.activation == .swiglu, "cute backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
@@ -25,11 +25,10 @@ pub fn validateOptions(opts: zml.moe.Options) void {
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.Options,
+    options: zml.moe.LocalOptions,
 ) zml.Tensor {
     validateOptions(options);
     stdx.debug.assert(input.dtype() == .bf16, "cute backend only supports bf16 inputs, got {}", .{input.dtype()});
@@ -43,7 +42,6 @@ pub fn fusedExperts(
     stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
     stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
-    const expert_parallelism = options.sharding.experts != null;
     const hidden = down.weight.dim(1);
     const intermediate = down.weight.dim(2) * 2;
 
@@ -56,33 +54,16 @@ pub fn fusedExperts(
     stdx.debug.assert(options.routing_weight_placement == .before_down, "cute backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
     const context: Context = .{
         .input = input,
-        .ids = ids,
-        .weights = weights,
+        .ids = routing.localIds(),
+        .weights = routing.weights,
         .w1 = gate_up.weight,
         .s1 = gq.scales,
         .w2 = down.weight,
         .s2 = dq.scales,
-        .topk = ids.dim(.topk),
+        .topk = routing.ids.dim(.topk),
         .swiglu_limit = options.activation.swiglu.limit,
-        .expert_parallel = expert_parallelism,
-        .sharding = options.sharding,
     };
-    return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape(), .{
-            .mesh = options.sharding.mesh,
-            .in_specs = .{
-                .input = .replicated,
-                .ids = .replicated,
-                .weights = .replicated,
-                .w1 = options.sharding.partition(context.w1.shape()),
-                .s1 = options.sharding.auxiliaryPartition(context.s1, gate_up.weight.dim(.expert)),
-                .w2 = options.sharding.partition(context.w2.shape()),
-                .s2 = options.sharding.auxiliaryPartition(context.s2, down.weight.dim(.expert)),
-            },
-            .out_specs = .replicated,
-        })
-    else
-        context.body(input.shape());
+    return context.body(input.shape());
 }
 
 const Context = struct {
@@ -95,24 +76,15 @@ const Context = struct {
     s2: zml.Tensor,
     topk: i64,
     swiglu_limit: ?f32,
-    expert_parallel: bool,
-    sharding: zml.moe.Sharding,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {
         const experts = self.w1.dim(.expert);
         const hidden = self.w2.dim(1);
         const intermediate = self.w2.dim(2) * 2;
-        var ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
+        const ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
         const tokens = ids.dim(.token);
         const routing_weights = self.weights.convert(.f32).reshape(.{ tokens, self.topk });
-        if (self.expert_parallel) {
-            const partition_id = self.sharding.expertIndex();
-            const expert_start = partition_id.scale(experts);
-            const expert_end = expert_start.addConstant(experts);
-            // Routes of other ranks get expert -1 and are not computed here.
-            const local = ids.cmp(.GE, expert_start).logical(.AND, ids.cmp(.LT, expert_end));
-            ids = local.select(ids.sub(expert_start), .scalar(-1, .i32));
-        }
+
         const result = kernels.forward(tokens, hidden, intermediate, experts, self.topk, self.swiglu_limit, .{
             .x = self.input.reshape(.{ tokens, hidden }),
             .routing_weights = routing_weights,
@@ -123,9 +95,6 @@ const Context = struct {
             .ids = ids,
         }).reshape(self.input.shape().dims()).withTags(self.input.shape());
 
-        return if (self.expert_parallel)
-            self.sharding.sum(result)
-        else
-            result;
+        return result;
     }
 };

@@ -52,6 +52,7 @@ const Case = struct {
         var output: zml.Bufferized(Outputs) = undefined;
         runner.run(io, .{input}, .{&output}, .{ .wait = true });
         defer zml.Buffer.deinitAll(Outputs, &output);
+        try std.testing.expect(output.actual.shape().isFullyReplicated());
 
         // BF16 intermediate rounding and different GEMM reduction orders. Every
         // element must pass; near-zero values use the absolute bound.
