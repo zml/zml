@@ -65,6 +65,7 @@ const LoadSpec = backend.LoadSpec;
 const DeviceBytes = backend.DeviceBytes;
 const direct_loader = @import("direct_loader.zig");
 const load_log = @import("log.zig").load;
+const ShardGrid = @import("ShardGrid.zig");
 const TensorStore = @import("TensorStore.zig");
 
 const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
@@ -143,7 +144,7 @@ pub const Loader = struct {
         /// one. The direct backend may lower it to fit its pinned memory
         /// (logged at debug).
         read_parallelism: ?usize = null,
-        /// The direct backend's DMA block, at most 32 MiB, and at least
+        /// The direct backend's DMA block, at most 32 MiB, and a multiple of
         /// `VFS.direct_io_alignment` when `io` is a VFS and `direct_io` is
         /// not `off`. Null: calibration picks one of
         /// `dma_calibration.default_block_sizes`, which suits every measured
@@ -179,9 +180,11 @@ pub const Loader = struct {
     /// pinned pre-growth) run on a task of the loader's own, or here when
     /// `io` has no concurrency; the first `start` waits for that task and
     /// returns its error. A read width or a block size out of range, a
-    /// checkpoint whose scheme the VFS does not serve, a read chunk that a
-    /// block calibration may select does not divide, or a request too short
-    /// for a widened direct read is `InvalidOptions`, logged.
+    /// block that is not a multiple of the direct-I/O alignment
+    /// (`Options.dma_block_size`), a checkpoint whose scheme the VFS does
+    /// not serve, a block calibration may select whose request (the read
+    /// chunk rounded up to whole blocks) passes 32 MiB, or a request too
+    /// short for a widened direct read is `InvalidOptions`, logged.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -284,11 +287,12 @@ pub const Loader = struct {
     /// bytes (an empty checkpoint tensor among them), a source that this
     /// loader cannot assemble (a run that starts or ends inside a byte,
     /// strided parts into host memory, a slice along an inner axis, a
-    /// broadcast or a transpose whose source range does not fit one of the
-    /// direct backend's reads), a sub-byte last dimension that does not
-    /// pack into whole bytes, a placement its mesh does not divide or on
-    /// devices the platform lacks, and a host kind the platform cannot take
-    /// are `error.InvalidBinding`.
+    /// broadcast or a transpose whose source range does not fit the direct
+    /// backend's smallest read: the checkpoint's read chunk (8 MiB locally),
+    /// rounded up to whole blocks of a pinned `dma_block_size`), a sub-byte
+    /// last dimension that does not pack into whole bytes, a placement its
+    /// mesh does not divide or on devices the platform lacks, and a host
+    /// kind the platform cannot take are `error.InvalidBinding`.
     ///
     /// `buffers` is `mem.bufferize` of `model`, whose buffers are empty. A
     /// tree of another structure (other union arms, optionals or slice
@@ -425,7 +429,7 @@ pub const Loader = struct {
                 try specs.append(arena.allocator(), spec);
             }
             const compiled = try self.compiledProgram(store, item.compute, item.shape);
-            call.* = .{ .program = compiled, .inputs = inputs, .output = item.output };
+            call.* = .{ .path = try arena.allocator().dupe(u8, item.path), .program = compiled, .inputs = inputs, .output = item.output };
             prepared += 1;
         }
         return .{ .calls = calls, .specs = specs.items, .arena = arena, .progress = progress };
@@ -623,7 +627,8 @@ pub const Loader = struct {
         if (!execute) return;
         for (oldest.calls) |*call| {
             call.execute(self.allocator, self.io) catch |err| {
-                load_log.failure(err, "run program {s}: inputs={d}, output={f}", .{ call.program.name(), call.inputs.len, call.program.output });
+                const target: Target = .{ .path = call.path, .shape = call.program.output };
+                load_log.failure(err, "run program {s} computing {f}: inputs={d}", .{ call.program.name(), target, call.inputs.len });
                 return err;
             };
         }
@@ -801,6 +806,9 @@ const CompiledProgram = struct {
 /// input shells the group's submission fills, and the model's buffer it
 /// computes.
 const Call = struct {
+    /// The tensor's field path, in the group's arena: `prepareModel`'s
+    /// arena may be freed before the call runs.
+    path: []const u8,
     program: *CompiledProgram,
     inputs: []Buffer,
     output: *Buffer,
@@ -875,15 +883,14 @@ test "admits needs room on every device" {
     try std.testing.expect(admission.admits(&.{}, &.{}, &.{}, &.{}));
 }
 
-/// Adds the bytes `shape` occupies on each device it is placed on, as the
-/// direct backend allocates them. `shape` places on the platform's devices
+/// Adds the bytes `shape` occupies per device: its box on each device it
+/// is placed on, as the direct backend's `countSealed` counts them; an
+/// empty shape takes none. `shape` places on the platform's devices
 /// (`checkPlacement`).
 fn addPlacementBytes(out: *DeviceBytes, platform: *const Platform, shape: Shape) void {
-    const placed = platform.placedShape(shape).packedShape();
-    const placement = Sharding.Placement.init(&placed) catch |err|
-        std.debug.panic("loader: {f} does not place, though checked: {s}", .{ shape, @errorName(err) });
-    const bytes: u64 = placement.localShape(placed).byteSize();
-    for (placement.mesh().?.devicesInCanonicalOrder()) |device| out[device.id] += bytes;
+    if (shape.byteSize() == 0) return;
+    const grid: ShardGrid = .init(platform, shape);
+    for (grid.devices) |device| out[device.id] += grid.box_bytes;
 }
 
 /// A tensor a program computes, at `path` in the model, the buffer it
@@ -1175,10 +1182,6 @@ const LoaderTestFixture = struct {
     const second_contents = [_]u8{ 5, 6, 7, 8 };
 
     tmp: std.testing.TmpDir,
-    path_buffer: [1024]u8,
-    path_len: usize,
-    missing_buffer: [1024]u8,
-    missing_len: usize,
     store: TensorStore,
     platform: *const Platform,
     value: Tensor,
@@ -1191,11 +1194,12 @@ const LoaderTestFixture = struct {
         errdefer self.tmp.cleanup();
         const file = try self.tmp.dir.createFile(io, "weights.bin", .{ .read = true });
         try file.writePositionalAll(io, &(contents ++ second_contents), 0);
-        self.path_len = try file.realPath(io, &self.path_buffer);
+        var path_buffer: [1024]u8 = undefined;
+        const path_len = try file.realPath(io, &path_buffer);
         file.close(io);
-        const path = self.path_buffer[0..self.path_len];
-        const missing_path = try std.fmt.bufPrint(&self.missing_buffer, "{s}.missing", .{path});
-        self.missing_len = missing_path.len;
+        const path = path_buffer[0..path_len];
+        var missing_buffer: [1024]u8 = undefined;
+        const missing_path = try std.fmt.bufPrint(&missing_buffer, "{s}.missing", .{path});
 
         var registry: safetensors.TensorRegistry = .init(allocator);
         defer registry.deinit();
@@ -1589,6 +1593,8 @@ test "the direct backend allocates what it was submitted once everything landed"
     try fixture.init(allocator, io);
     defer fixture.deinit();
     var placed: DeviceBytes = @splat(0);
+    // An empty tensor takes no bytes.
+    addPlacementBytes(&placed, fixture.platform, .init(.{ 0, 4 }, .f32));
     addPlacementBytes(&placed, fixture.platform, fixture.value.shape());
     for (placed[0..fixture.platform.devices.len]) |bytes| try std.testing.expectEqual(LoaderTestFixture.contents.len, bytes);
 
@@ -1624,9 +1630,6 @@ test "init checks every option and returns InvalidOptions" {
         .{ .io = io, .opts = .{ .read_parallelism = Loader.max_read_parallelism + 1 } },
         .{ .io = io, .opts = .{ .dma_block_size = 0 } },
         .{ .io = io, .opts = .{ .dma_block_size = backend.max_read_request_size + 1 } },
-        // The local hints read 8 MiB at least: not a whole number of
-        // 3 MiB blocks.
-        .{ .io = io, .opts = .{ .dma_block_size = 3 << 20 } },
         // No backend of the VFS serves the scheme.
         .{ .io = vfs.io(), .opts = .{ .checkpoint = "missing://bucket/model" } },
     };
@@ -1637,10 +1640,10 @@ test "init checks every option and returns InvalidOptions" {
             return error.TestUnexpectedResult;
         } else |err| try std.testing.expectEqual(error.InvalidOptions, err);
     }
-    // Under a VFS, a local file may be read directly: a block holds an
-    // alignment unit at least.
+    // Under a VFS, a local file may be read directly: a block is a whole
+    // number of alignment units, reads landing in blocks.
     if (VFS.direct_io_alignment != 0) {
-        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "/model.safetensors", .dma_block_size = VFS.direct_io_alignment / 2 })) |value| {
+        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "/model.safetensors", .dma_block_size = (8 << 20) + VFS.direct_io_alignment / 2 })) |value| {
             var loader = value;
             loader.deinit();
             return error.TestUnexpectedResult;
@@ -2304,8 +2307,8 @@ test "bindings the loader cannot fill fail it before submission" {
     const rejected = [_]Tensor{
         // Nothing to read: an empty tensor padded.
         rows(view, "empty").pad(0, .{ .row = Source.Pad{ .high = 8 } }).withPartitioning(.replicated, .{}).bind(),
-        // Twelve bits: its one run ends inside a byte (since R10; no known
-        // checkpoint has one).
+        // Twelve bits: its one run ends inside a byte (no known checkpoint
+        // has one).
         view.createReplicatedTensor("nibbles", null),
         // Strided parts into host memory.
         host: {

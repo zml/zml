@@ -23,6 +23,7 @@
 const std = @import("std");
 
 const constants = @import("../constants.zig");
+const Platform = @import("../platform.zig").Platform;
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 
@@ -52,35 +53,40 @@ writers: [max_boxes]u64 = @splat(0),
 /// One box: the shape each device holds.
 local: Shape,
 /// The devices in canonical order, which the `writers` masks index;
-/// borrowed from the shape's mesh.
+/// borrowed from the placed shape's mesh (the platform's when `shape` names
+/// none).
 devices: []const Sharding.Device,
 
-/// `shape`'s sharding must name a mesh (`Platform.placedShape`) and place
-/// on it, as the loader's front end checked.
-pub fn init(shape: Shape) ShardGrid {
-    const placement = Sharding.Placement.init(&shape) catch |err|
-        std.debug.panic("ShardGrid: {f} does not place, though checked: {s}", .{ shape, @errorName(err) });
-    const local = placement.localShape(shape);
+/// The grid of `shape` placed on `platform` (`Platform.placedShape`), its
+/// sub-byte storage packed (`Shape.packedShape`): what PJRT allocates.
+/// `shape` must be non-empty and place on the platform's devices, as the
+/// loader's front end checked.
+pub fn init(platform: *const Platform, shape: Shape) ShardGrid {
+    const placed = platform.placedShape(shape).packedShape();
+    std.debug.assert(placed.byteSize() != 0);
+    const placement = Sharding.Placement.init(&placed) catch |err|
+        std.debug.panic("ShardGrid: {f} does not place, though checked: {s}", .{ placed, @errorName(err) });
+    const local = placement.localShape(placed);
     const devices = placement.mesh().?.devicesInCanonicalOrder();
     std.debug.assert(devices.len <= max_boxes);
-    const element: u64 = shape.dtype().sizeOf();
+    const element: u64 = placed.dtype().sizeOf();
     var grid: ShardGrid = .{
-        .rank = shape.rank(),
+        .rank = placed.rank(),
         .element = element,
-        .total = shape.byteSize(),
+        .total = placed.byteSize(),
         .box_bytes = local.byteSize(),
-        .run = shape.byteSize(),
+        .run = placed.byteSize(),
         .box_count = 1,
         .local = local,
         .devices = devices,
     };
-    const strides = shape.computeByteStrides();
+    const strides = placed.computeByteStrides();
     var box_stride = element;
     var index_stride: u64 = 1;
     var axis = grid.rank;
     while (axis > 0) {
         axis -= 1;
-        const dim: u64 = @intCast(shape.dim(axis));
+        const dim: u64 = @intCast(placed.dim(axis));
         const shard: u64 = @intCast(local.dim(axis));
         grid.dims[axis] = dim;
         grid.shard[axis] = shard;
@@ -97,7 +103,7 @@ pub fn init(shape: Shape) ShardGrid {
     std.debug.assert(index_stride <= devices.len);
     grid.box_count = @intCast(index_stride);
     for (0..devices.len) |writer| {
-        const slices = placement.slices(writer, shape);
+        const slices = placement.slices(writer, placed);
         var box: u64 = 0;
         for (slices.constSlice(), 0..) |slice, i| box += @as(u64, @intCast(slice.start)) / grid.shard[i] * grid.index_strides[i];
         grid.writers[@intCast(box)] |= @as(u64, 1) << @intCast(writer);
@@ -153,11 +159,7 @@ pub fn replicas(self: *const ShardGrid) usize {
 }
 
 const testing = struct {
-    const platform_mod = @import("../platform.zig");
-    const CreateOptions = platform_mod.CreateOptions;
-    const Device = platform_mod.Device;
-    const Platform = platform_mod.Platform;
-    const Target = platform_mod.Target;
+    const CreateOptions = @import("../platform.zig").CreateOptions;
 
     const Scenario = struct {
         name: []const u8,
@@ -168,30 +170,7 @@ const testing = struct {
         strategy: Sharding.Strategy,
         /// Logical ranges are cut every `step` bytes, unaligned to rows.
         step: u64,
-        packed_storage: bool = false,
     };
-
-    fn buildMesh2x2(allocator: std.mem.Allocator, target: Target, devices: []const Device) !Sharding.PhysicalMesh {
-        if (devices.len < 4) return error.NotEnoughDevices;
-        return .fromTree(allocator, target, .axis(.link_x, .{ .mesh = .torus }, &.{
-            .axis(.link_y, .{ .mesh = .torus }, &.{ .device(devices[0]), .device(devices[1]) }),
-            .axis(.link_y, .{ .mesh = .torus }, &.{ .device(devices[2]), .device(devices[3]) }),
-        }));
-    }
-
-    fn buildMesh2x2x2(allocator: std.mem.Allocator, target: Target, devices: []const Device) !Sharding.PhysicalMesh {
-        if (devices.len < 8) return error.NotEnoughDevices;
-        return .fromTree(allocator, target, .axis(.link_x, .{ .mesh = .torus }, &.{
-            .axis(.link_y, .{ .mesh = .torus }, &.{
-                .axis(.link_z, .{ .mesh = .torus }, &.{ .device(devices[0]), .device(devices[1]) }),
-                .axis(.link_z, .{ .mesh = .torus }, &.{ .device(devices[2]), .device(devices[3]) }),
-            }),
-            .axis(.link_y, .{ .mesh = .torus }, &.{
-                .axis(.link_z, .{ .mesh = .torus }, &.{ .device(devices[4]), .device(devices[5]) }),
-                .axis(.link_z, .{ .mesh = .torus }, &.{ .device(devices[6]), .device(devices[7]) }),
-            }),
-        }));
-    }
 
     fn run(scenario: Scenario, partitioning: anytype) !void {
         const allocator = std.testing.allocator;
@@ -202,17 +181,17 @@ const testing = struct {
         }) catch return error.SkipZigTest;
         defer platform.deinit(allocator, io);
         const mesh: Sharding.Mesh = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
-        const partitioned = scenario.shape.withPartitioning(&mesh, partitioning);
-        try expectPlaces(allocator, if (scenario.packed_storage) partitioned.packedShape() else partitioned, scenario.step);
+        try expectPlaces(allocator, platform, scenario.shape.withPartitioning(&mesh, partitioning), scenario.step);
     }
 
     /// Walks the runs of every `step`-byte range into the writers' boxes and
     /// compares with each device's slices, element by element; checks that
     /// `rankIn` bounds the range's bytes on each box and that `runCount`
     /// counts the runs.
-    fn expectPlaces(allocator: std.mem.Allocator, shape: Shape, step: u64) !void {
-        const grid: ShardGrid = .init(shape);
-        const placement: Sharding.Placement = try .init(&shape);
+    fn expectPlaces(allocator: std.mem.Allocator, platform: *const Platform, shape: Shape, step: u64) !void {
+        const grid: ShardGrid = .init(platform, shape);
+        const placed = platform.placedShape(shape).packedShape();
+        const placement: Sharding.Placement = try .init(&placed);
         const box_bytes: usize = @intCast(grid.box_bytes);
         const total: usize = @intCast(grid.total);
         const source = try allocator.alloc(u8, total);
@@ -223,7 +202,7 @@ const testing = struct {
         defer allocator.free(expected);
         const element: usize = @intCast(grid.element);
         for (0..grid.devices.len) |writer| {
-            const slices = placement.slices(writer, shape);
+            const slices = placement.slices(writer, placed);
             var index: [max_rank]u64 = @splat(0);
             var cursor: usize = 0;
             while (cursor < box_bytes) : (cursor += element) {
@@ -298,7 +277,6 @@ test "a grid places packed sub-byte storage" {
         .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
         .strategy = .parseBindings(.{ .x = .link_x }),
         .step = 131,
-        .packed_storage = true,
     }, .{ .rows = .replicated, .cols = .x });
 }
 
@@ -306,7 +284,7 @@ test "a grid places 1D mirrored and folded sharding" {
     try testing.run(.{
         .name = "mirrored_1d",
         .device_count = 4,
-        .physical_mesh = .{ .custom = testing.buildMesh2x2 },
+        .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
         .shape = Shape.init(.{ .rows = 7, .model = 1024 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
@@ -315,7 +293,7 @@ test "a grid places 1D mirrored and folded sharding" {
     try testing.run(.{
         .name = "folded_1d",
         .device_count = 4,
-        .physical_mesh = .{ .custom = testing.buildMesh2x2 },
+        .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
         .shape = Shape.init(.{ .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
@@ -331,7 +309,7 @@ test "a grid places 2D and 3D sharding" {
     try testing.run(.{
         .name = "batch_model_2d",
         .device_count = 4,
-        .physical_mesh = .{ .custom = testing.buildMesh2x2 },
+        .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
         .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32),
         .logical_mesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
@@ -340,7 +318,7 @@ test "a grid places 2D and 3D sharding" {
     try testing.run(.{
         .name = "folded_model_3d",
         .device_count = 8,
-        .physical_mesh = .{ .custom = testing.buildMesh2x2x2 },
+        .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus3d },
         .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth }),
         .strategy = blk: {
@@ -354,7 +332,7 @@ test "a grid places 2D and 3D sharding" {
     try testing.run(.{
         .name = "middle_and_last_3d",
         .device_count = 4,
-        .physical_mesh = .{ .custom = testing.buildMesh2x2 },
+        .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
         .shape = Shape.init(.{ .a = 3, .b = 4, .c = 8 }, .u16),
         .logical_mesh = .mesh(.{ .x = .low_bandwidth, .y = .high_bandwidth }),
         .strategy = .parseBindings(.{ .x = .link_x, .y = .link_y }),

@@ -11,20 +11,20 @@
 //!
 //! Errors of a remote path, alike on every backend: opening, stat-ing or
 //! probing it (`access`) fails with `FileNotFound` for a missing object
-//! (404, 410), `PermissionDenied` for a denied one (401, 403),
-//! `Canceled` for a canceled task, and `SystemResources` for a failed
-//! allocation. Any other failure is logged at err with the backend and
-//! the path, and surfaces as `Unexpected`. On S3 a
-//! principal without `s3:ListBucket` gets 403 for a missing key too, so a
-//! probe of an optional object treats both as absent. A positional read
-//! that still fails after its retries is logged at err and surfaces as
-//! `Unexpected`; a streaming read as `InputOutput`. A throttled backend
-//! holds its requests rather than failing them, until its throttle budget
-//! runs out (`request.Retry`). A remote path is read-only: creating or
-//! deleting a file or a directory there, or opening a file for writing, is
-//! logged at err and fails with `ReadOnlyFileSystem`. A local file fails as
-//! the inner io does (a denied one is `AccessDenied` there); it may be read
-//! past the page cache (`useDirectIo`).
+//! (404, 410), `PermissionDenied` for a denied one (401, 403), `Canceled`
+//! for a canceled task, and `SystemResources` when a request cannot
+//! allocate. Any other failure of a request is logged at err with the
+//! backend and the path, and surfaces as `Unexpected`. On S3 a principal
+//! without `s3:ListBucket` gets 403 for a missing key too, so a probe of an
+//! optional object treats both as absent. A positional read that still
+//! fails after its retries is logged at err and surfaces as `Unexpected`; a
+//! streaming read as `InputOutput`. A throttled backend holds its requests
+//! rather than failing them, until its throttle budget runs out
+//! (`request.Retry`). A remote path is read-only: creating or deleting a
+//! file or a directory there, or opening a file for writing, is logged at
+//! err and fails with `ReadOnlyFileSystem`. A local file fails as the inner
+//! io does (a denied one is `AccessDenied` there); it may be read past the
+//! page cache (`useDirectIo`).
 //! Each remote backend logs its read totals at debug from its `deinit`.
 const std = @import("std");
 

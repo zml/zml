@@ -7,7 +7,7 @@ const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 
-const log = @import("base.zig").scopedLog(.@"zml/vfs/s3");
+const log = std.log.scoped(.@"zml/vfs/s3");
 
 pub const AwsSigV4 = struct {
     access_key: ?[]const u8,
@@ -735,11 +735,8 @@ pub const S3 = struct {
         return request.perform(u64, &self.governor, .{ .target = url, .key = request.authorityOf(uri) }, &head, SizeRequest.attempt);
     }
 
-    /// The object's size: one signed HEAD. An absent object is
-    /// `FileNotFound` and a denied one `PermissionDenied`
-    /// (`ExchangeOptions.open`). A principal without `s3:ListBucket` gets 403
-    /// for a missing key too, so on S3 `PermissionDenied` may mean absent: a
-    /// caller probing an optional object treats both as absent.
+    /// The object's size: one signed HEAD (`ExchangeOptions.open`; S3's 403
+    /// for a missing key: vfs.zig's header).
     const SizeRequest = struct {
         s3: *S3,
         uri: std.Uri,

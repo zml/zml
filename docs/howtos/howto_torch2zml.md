@@ -234,8 +234,7 @@ Python script. Alternatively, Huggingface's web-interface allows to peek into
 ## Loading an individual layer
 
 Currently, the layer is initialized but the weights are still on the disk.
-`zml.io.Loader` loads the weights of an initialized model into device buffers.
-Each tensor is placed as its shape says (here replicated):
+ZML provides a convenience to load weights from an initialized model in a test:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -243,15 +242,8 @@ pub fn main(init: std.process.Init) !void {
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-
-    var mlp_weights = try zml.mem.bufferize(allocator, &mlp);
+    var mlp_weights = try zml.testing.load(allocator, io, platform, &mlp, &model_store);
     defer zml.mem.deinitBufferized(allocator, &mlp_weights);
-    {
-        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
-        defer loader.deinit();
-        try loader.start(&mlp, &mlp_weights, &model_store, .none);
-        try loader.wait();
-    }
 }
 ```
 

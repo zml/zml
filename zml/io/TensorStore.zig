@@ -162,7 +162,7 @@ pub const Program = struct {
     }
 
     /// Whether `a` and `b` are programs of one type with equal values.
-    pub fn eql(a: Program, b: Program) bool {
+    fn eql(a: Program, b: Program) bool {
         return a.vtable == b.vtable and a.vtable.eql(a.value, b.value);
     }
 
@@ -214,7 +214,7 @@ pub const Source = @import("Source.zig");
 
 registry: safetensors.TensorRegistry,
 meshes: []const *const Sharding.Mesh,
-quantization: Quantization.Target,
+quantization: ?Quantization.Target,
 id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
 allocator: std.mem.Allocator,
 arena: std.heap.ArenaAllocator,
@@ -224,8 +224,9 @@ pub const Options = struct {
     /// is copied; the meshes must outlive the store.
     meshes: []const *const Sharding.Mesh = &.{},
     /// How the platform's FP8 GEMMs want block-FP8 weights, for the code
-    /// that binds them (`View.quantization`): usually `.of(platform)`.
-    quantization: Quantization.Target = .{},
+    /// that binds them (`View.quantization`): `.of(platform)`. Required to
+    /// bind block-FP8 weights.
+    quantization: ?Quantization.Target = null,
 };
 
 /// A store over the entries of `registry`, which must be complete: add
@@ -263,16 +264,6 @@ pub fn deinit(self: *TensorStore) void {
 /// did not bind it.
 pub fn bindingOf(self: *const TensorStore, id: Tensor.Id) ?Binding {
     return self.id_to_sources.get(id);
-}
-
-/// A new tensor of `shape`, bound to `binding`. Model code binds through
-/// `Source` (`Placed.bind`, `bindProgram`), whose pieces are disjoint by
-/// construction; the loader relies on it and does not check a hand-built
-/// binding's.
-pub fn bindNew(self: *TensorStore, shape: Shape, binding: Binding) Tensor {
-    const tensor: Tensor = .fromShape(shape);
-    self.id_to_sources.putNoClobber(self.allocator, tensor.id, binding) catch @panic("OOM");
-    return tensor;
 }
 
 /// The root view, with no prefix. It points to this store, which must not
@@ -414,9 +405,11 @@ pub const View = struct {
         return self.store.mesh(name);
     }
 
-    /// See `Options.quantization`.
+    /// See `Options.quantization`. Panics when the store has none: binding
+    /// block-FP8 weights requires it.
     pub fn quantization(self: View) Quantization.Target {
-        return self.store.quantization;
+        return self.store.quantization orelse
+            stdx.debug.panic("TensorStore.Options.quantization is unset: block-FP8 weights bind for a platform; pass .of(platform)", .{});
     }
 
     /// The checkpoint tensor `subkey` as a `Source`, with `tags` (null keeps

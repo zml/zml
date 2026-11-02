@@ -374,8 +374,10 @@ pub const Workspace = struct {
     /// allocation. The workspace owns the list and the memory.
     pub fn carve(self: *Workspace, block_size: usize, first_blocks: usize, total_blocks: usize) Allocator.Error![]const Block {
         std.debug.assert(self.blocks == null and block_size != 0);
-        try self.growToBlocks(block_size, first_blocks);
-        try self.growToBlocks(block_size, total_blocks);
+        for ([_]usize{ first_blocks, total_blocks }) |target_blocks| {
+            const missing_blocks = target_blocks -| self.usableBlocks(block_size);
+            if (missing_blocks != 0) _ = try self.allocate(missing_blocks * block_size);
+        }
         const blocks = try self.allocator.alloc(Block, self.usableBlocks(block_size));
         var next: usize = 0;
         for (self.arenas.items) |arena| {
@@ -394,13 +396,6 @@ pub const Workspace = struct {
         var usable: usize = 0;
         for (self.arenas.items) |arena| usable += arena.bytes.len / block_size;
         return usable;
-    }
-
-    /// Maps the blocks missing below `target_blocks` as one arena. Requires a
-    /// nonzero block_size; the workspace has one coordinating owner.
-    fn growToBlocks(self: *Workspace, block_size: usize, target_blocks: usize) Allocator.Error!void {
-        const missing_blocks = target_blocks -| self.usableBlocks(block_size);
-        if (missing_blocks != 0) _ = try self.allocate(missing_blocks * block_size);
     }
 
     /// Creates ordinary allocator-backed arenas for tests without a PJRT platform.
@@ -490,41 +485,43 @@ test "parseNodeList accepts kernel node lists" {
     try std.testing.expectEqual(@as(u64, 0b1), parseNodeList("0,64"));
 }
 
-test "Workspace capacity counts retained arenas and the room under the ceiling, past which growth refuses" {
+test "Workspace capacity counts whole blocks under the mapped ceiling, and carve refuses one more" {
     const allocator = std.testing.allocator;
     var workspace: Workspace = .initForTesting(allocator, std.testing.io);
     defer workspace.deinit();
     const ceiling = Workspace.mapped_bytes_ceiling;
 
     try std.testing.expectEqual(ceiling / 64, workspace.capacity(64));
-    _ = try workspace.allocate(128);
-    _ = try workspace.allocate(64);
-    try std.testing.expectEqual(@as(usize, 192), workspace.mappedBytes());
-    // Whole blocks only: the arenas hold one block of 100 bytes and their
-    // tails none, beside those of the room left under the ceiling.
-    try std.testing.expectEqual(1 + (ceiling - 192) / 100, workspace.capacity(100));
-    try std.testing.expectEqual(ceiling / 64, workspace.capacity(64));
-    // Growth refuses one block past capacity; reaching it would map 16 GiB.
-    try std.testing.expectError(error.OutOfMemory, workspace.growToBlocks(100, workspace.capacity(100) + 1));
-    try std.testing.expectError(error.OutOfMemory, workspace.growToBlocks(64, workspace.capacity(64) + 1));
-    try std.testing.expectEqual(@as(usize, 192), workspace.mappedBytes());
-    // The first step is already mapped; the second maps the last block.
-    const blocks = try workspace.carve(64, 3, 4);
-    try std.testing.expectEqual(@as(usize, 4), blocks.len);
-    try std.testing.expectEqual(@as(usize, 256), workspace.mappedBytes());
-    try std.testing.expectEqual(@as(usize, 3), workspace.arenas.items.len);
+    _ = try workspace.allocate(150);
+    _ = try workspace.allocate(127);
+    // Whole blocks only: the arenas hold three, their tails none.
+    try std.testing.expectEqual(3 + (ceiling - 277) / 64, workspace.capacity(64));
+    // Capacity is tight, as direct `create` sizes its carve from it: one
+    // block more crosses the ceiling (reaching it would map 16 GiB).
+    try std.testing.expectError(error.OutOfMemory, workspace.allocate(ceiling - 277 + 1));
+    try std.testing.expectError(error.OutOfMemory, workspace.carve(64, workspace.capacity(64) + 1, 0));
+    try std.testing.expectEqual(@as(usize, 277), workspace.mappedBytes());
 }
 
-test "Workspace carve maps the first blocks as their own arena, then the rest" {
+test "Workspace carve maps each step's missing blocks as one arena and leaves tails out" {
     const allocator = std.testing.allocator;
     var workspace: Workspace = .initForTesting(allocator, std.testing.io);
     defer workspace.deinit();
+    const first = try workspace.allocate(150);
+    const second = try workspace.allocate(127);
 
-    const blocks = try workspace.carve(64, 2, 4);
-    try std.testing.expectEqual(@as(usize, 4), blocks.len);
-    try std.testing.expectEqual(@as(usize, 2), workspace.arenas.items.len);
-    try std.testing.expectEqual(@as(usize, 128), workspace.arenas.items[0].bytes.len);
-    try std.testing.expectEqual(@as(usize, 128), workspace.arenas.items[1].bytes.len);
+    // Three blocks are mapped: two more make the first five, three more the
+    // eight.
+    const blocks = try workspace.carve(64, 5, 8);
+    try std.testing.expectEqual(@as(usize, 8), blocks.len);
+    try std.testing.expectEqual(@as(usize, 4), workspace.arenas.items.len);
+    try std.testing.expectEqual(@as(usize, 2 * 64), workspace.arenas.items[2].bytes.len);
+    try std.testing.expectEqual(@as(usize, 3 * 64), workspace.arenas.items[3].bytes.len);
+    for (blocks) |block| try std.testing.expectEqual(@as(usize, 64), block.len);
+    // Tails stay mapped without contributing a block.
+    try std.testing.expectEqual(first.ptr, blocks[0].ptr);
+    try std.testing.expectEqual(first.ptr + 64, blocks[1].ptr);
+    try std.testing.expectEqual(second.ptr, blocks[2].ptr);
 }
 
 test "Workspace arena ownership cleans up allocation failures" {
@@ -535,52 +532,13 @@ test "Workspace arena ownership cleans up allocation failures" {
 
             _ = try workspace.allocate(64);
             _ = try workspace.allocate(128);
-            try std.testing.expectEqual(@as(usize, 192), workspace.mappedBytes());
-            try std.testing.expectError(error.OutOfMemory, workspace.allocate(Workspace.mapped_bytes_ceiling - 192 + 1));
-            try std.testing.expectEqual(@as(usize, 192), workspace.mappedBytes());
-            try std.testing.expectEqual(@as(usize, 2), workspace.arenas.items.len);
-            try std.testing.expectEqual(@as(usize, 3), workspace.usableBlocks(64));
-            try workspace.growToBlocks(64, 4);
+            // The first step is already mapped, as calibration's ring covers
+            // one device's reserve; the second maps the last block.
+            const blocks = try workspace.carve(64, 3, 4);
+            try std.testing.expectEqual(@as(usize, 4), blocks.len);
             try std.testing.expectEqual(@as(usize, 256), workspace.mappedBytes());
-            try workspace.growToBlocks(64, 4);
-            try std.testing.expectEqual(@as(usize, 256), workspace.mappedBytes());
-            try std.testing.expectError(error.OutOfMemory, workspace.growToBlocks(64, workspace.capacity(64) + 1));
-            try std.testing.expectEqual(@as(usize, 256), workspace.mappedBytes());
+            try std.testing.expectEqual(@as(usize, 3), workspace.arenas.items.len);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
-}
-
-test "Workspace growth maps missing blocks as one arena" {
-    const allocator = std.testing.allocator;
-    var workspace: Workspace = .initForTesting(allocator, std.testing.io);
-    defer workspace.deinit();
-
-    _ = try workspace.allocate(3 * 64);
-    try workspace.growToBlocks(64, 13);
-    try std.testing.expectEqual(@as(usize, 13), workspace.usableBlocks(64));
-    try std.testing.expectEqual(@as(usize, 2), workspace.arenas.items.len);
-    try std.testing.expectEqual(@as(usize, 10 * 64), workspace.arenas.items[1].bytes.len);
-    try workspace.growToBlocks(64, 14);
-    try std.testing.expectEqual(@as(usize, 3), workspace.arenas.items.len);
-}
-
-test "blocks are carved from retained arenas of unequal size, tails left out" {
-    const allocator = std.testing.allocator;
-    var workspace: Workspace = .initForTesting(allocator, std.testing.io);
-    defer workspace.deinit();
-    const first = try workspace.allocate(150);
-    _ = try workspace.allocate(70);
-    _ = try workspace.allocate(65);
-    // Tails stay mapped without contributing a block: 127 bytes hold one.
-    _ = try workspace.allocate(127);
-    _ = try workspace.allocate(127);
-
-    const blocks = try workspace.carve(64, 0, 0);
-    // Two blocks from the first arena, one from each of the others.
-    try std.testing.expectEqual(@as(usize, 6), blocks.len);
-    try std.testing.expectEqual(@as(usize, 539), workspace.mappedBytes());
-    for (blocks) |block| try std.testing.expectEqual(@as(usize, 64), block.len);
-    try std.testing.expectEqual(first.ptr, blocks[0].ptr);
-    try std.testing.expectEqual(first.ptr + 64, blocks[1].ptr);
 }

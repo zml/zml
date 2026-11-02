@@ -7,7 +7,7 @@ const Backend = @import("base.zig").Backend;
 const range_read = @import("range_read.zig");
 const request = @import("request.zig");
 
-const log = @import("base.zig").scopedLog(.@"zml/vfs/http");
+const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
     pub const Options = struct {

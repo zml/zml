@@ -80,7 +80,7 @@ view.setMemory(rows, .host_mapped);
 `count()` the number of keys under the view's prefix. Binding cannot fail:
 `createTensor` and `source` panic on a missing key, `maybeCreateTensor` and
 `maybeSource` return null. `TensorStore.Options.quantization`
-(`Quantization.Target.of(platform)`) is for code binding block-FP8 weights.
+(`Quantization.Target.of(platform)`) is required to bind block-FP8 weights.
 
 ## Composite tensors
 

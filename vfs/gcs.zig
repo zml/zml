@@ -8,7 +8,7 @@ const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 
-const log = @import("base.zig").scopedLog(.@"zml/vfs/gcs");
+const log = std.log.scoped(.@"zml/vfs/gcs");
 
 const MetadataUrl = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 

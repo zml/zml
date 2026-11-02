@@ -222,20 +222,9 @@ fn selectCandidate(
     }
 
     // A borderline candidate's ratio is its confirmation's against the peak.
-    for (candidates, 0..) |_, candidate_index| {
-        if (isCloseToPeak(
-            candidates,
-            candidate_index,
-            peak_index,
-            opts.block_selection_tolerance,
-        )) {
-            ratios[candidate_index] = try confirmCandidateAgainstPeak(
-                session,
-                &candidates[candidate_index],
-                &candidates[peak_index],
-                source,
-            );
-        }
+    for (candidates, ratios, 0..) |*candidate, *ratio, index| {
+        if (index != peak_index and isBorderline(candidates, index, ratio.*, opts.block_selection_tolerance))
+            ratio.* = try confirmCandidateAgainstPeak(session, candidate, &candidates[peak_index], source);
     }
     return pick(candidates, ratios, opts.block_selection_tolerance);
 }
@@ -257,37 +246,24 @@ fn pick(candidates: []const Candidate, ratios: []const f64, tolerance: f64) usiz
     return selected_index;
 }
 
-fn isCloseToPeak(
-    candidates: []const Candidate,
-    candidate_index: usize,
-    peak_index: usize,
-    tolerance: f64,
-) bool {
-    if (candidate_index == peak_index) return false;
-    const candidate = candidates[candidate_index];
-    const peak = candidates[peak_index];
-
+/// Whether `candidates[index]`, at screen `ratio` to the peak, gets
+/// confirmation windows (`confirmation_margin`).
+fn isBorderline(candidates: []const Candidate, index: usize, ratio: f64, tolerance: f64) bool {
     // Whether the candidate is near-peak in one round but fails in others.
     var qualified_once = false;
     var rejected_once = false;
-    for (candidate.metrics, 0..) |metric, round| {
+    for (candidates[index].metrics, 0..) |metric, round| {
         var round_peak_rate: f64 = 0;
         for (candidates) |round_candidate| {
             round_peak_rate = @max(round_peak_rate, round_candidate.metrics[round].bytesPerSecond());
         }
-        const ratio = if (round_peak_rate == 0) 0 else metric.bytesPerSecond() / round_peak_rate;
-        if (ratio >= 1.0 - tolerance)
+        const round_ratio = if (round_peak_rate == 0) 0 else metric.bytesPerSecond() / round_peak_rate;
+        if (round_ratio >= 1.0 - tolerance)
             qualified_once = true
         else
             rejected_once = true;
     }
-    if (qualified_once and rejected_once) return true;
-
-    // Whether the candidate's ratio is close enough overall.
-    const candidate_rate = candidate.median().bytesPerSecond();
-    const peak_rate = peak.median().bytesPerSecond();
-    const ratio = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
-    return @abs(ratio - (1.0 - tolerance)) <= confirmation_margin;
+    return (qualified_once and rejected_once) or @abs(ratio - (1.0 - tolerance)) <= confirmation_margin;
 }
 
 /// The median, over `sample_count` paired windows, of `candidate`'s rate
@@ -393,11 +369,7 @@ fn runWindow(
     try group.await(io);
     const elapsed = start_at.durationTo(.now(io, .awake));
     if (session.first_error.get()) |err| return err;
-    return .{
-        .bytes = metrics.bytes.load(.acquire),
-        .transfers = metrics.transfers.load(.acquire),
-        .elapsed = elapsed,
-    };
+    return .{ .bytes = metrics.bytes.load(.acquire), .elapsed = elapsed };
 }
 
 /// One block size and its screen measurements. Its slots are the session's
@@ -526,7 +498,6 @@ const Counters = struct {
 
 const Measurement = struct {
     bytes: u64,
-    transfers: u64,
     elapsed: std.Io.Duration,
 
     fn bytesPerSecond(self: Measurement) f64 {
@@ -562,14 +533,15 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
     };
     for (&candidates, rates) |*candidate, candidate_rates| {
         for (&candidate.metrics, candidate_rates) |*metric, rate| {
-            metric.* = .{ .bytes = rate, .transfers = 1, .elapsed = .fromSeconds(1) };
+            metric.* = .{ .bytes = rate, .elapsed = .fromSeconds(1) };
         }
     }
     const winner = candidates[try selectCandidate(&session, opts, &candidates, &.{})];
     try std.testing.expectEqual(@as(usize, 4), winner.block_size);
     try std.testing.expectEqual(@as(f64, 98), winner.median().bytesPerSecond());
 
-    // A dip between two near-peak values must not end the scan early.
+    // A larger block near the peak in every round is neither confirmed nor
+    // picked.
     var bimodal = [_]Candidate{
         .{ .block_size = 2, .buffer_offset = undefined },
         .{ .block_size = 4, .buffer_offset = undefined },
@@ -578,7 +550,7 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
     };
     const bimodal_rates = [_]u64{ 80, 100, 70, 99 };
     for (&bimodal, bimodal_rates) |*candidate, rate| {
-        candidate.metrics = @splat(.{ .bytes = rate, .transfers = 1, .elapsed = .fromSeconds(1) });
+        candidate.metrics = @splat(.{ .bytes = rate, .elapsed = .fromSeconds(1) });
     }
     try std.testing.expectEqual(@as(usize, 4), bimodal[try selectCandidate(&session, opts, &bimodal, &.{})].block_size);
 }
@@ -600,20 +572,17 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
         .{ .block_size = 8, .buffer_offset = undefined },
     };
     const rates = [_][sample_count]u64{
-        .{ 96, 80, 97 },
+        .{ 99, 80, 70 },
         .{ 100, 100, 100 },
     };
     for (&candidates, rates) |*candidate, candidate_rates| {
         for (&candidate.metrics, candidate_rates) |*metric, rate| {
-            metric.* = .{ .bytes = rate, .transfers = 1, .elapsed = .fromSeconds(1) };
+            metric.* = .{ .bytes = rate, .elapsed = .fromSeconds(1) };
         }
     }
-    try std.testing.expect(isCloseToPeak(
-        &candidates,
-        0,
-        1,
-        0.05,
-    ));
+    // The median ratio, 0.80, is far from the 0.95 floor: only the rounds
+    // make it borderline.
+    try std.testing.expect(isBorderline(&candidates, 0, 0.80, 0.05));
 }
 
 test "measure refuses a knob out of range before it touches the platform" {
@@ -621,7 +590,6 @@ test "measure refuses a knob out of range before it touches the platform" {
         .{ .block_sizes = &.{} },
         .{ .block_sizes = &.{0} },
         .{ .block_sizes = &.{backend.max_read_request_size + 1} },
-        .{ .block_sizes = &.{host_memory.Workspace.mapped_bytes_ceiling / 8 + 1} },
         .{ .block_parallelism = 0 },
         .{ .block_parallelism = max_block_parallelism + 1 },
         .{ .minimum_duration = .zero },

@@ -59,7 +59,7 @@ _Module_. For compilation, only the _Tensors_ are required. No actual tensor dat
 is needed at this step. This is important for large models: we can compile them 
 while the actual weight data is being fetched from disk.
 
-To accomplish this, ZML uses a _TensorStore_. The _TensorStore_ reads the shapes
+To accomplish this, ZML uses a _TensorStore_. The _TensorStore_ holds the shapes
 of a checkpoint's tensors, so that we can make _Tensors_, and the _Loader_ later
 materializes them to _Buffers_. At first we won't use them: we will directly
 create tensors using their shape and data type, and fill their buffers from

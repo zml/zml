@@ -167,7 +167,9 @@ pub const TensorRegistry = struct {
     /// directory or entrypoint `PermissionDenied`; a file opened by name,
     /// the one given or one an index lists, fails as `io`'s open does (a
     /// denied local file is `AccessDenied`). A malformed header, such as
-    /// one whose offsets leave the file in a truncated download, is
+    /// one whose offsets leave the file in a truncated download or one
+    /// shorter than its 8-byte length field, or an index without a
+    /// `weight_map` from tensor names to file names, is
     /// `InvalidSafetensorsHeader`, and a name two of its files repeat
     /// `DuplicateTensor`, both logged.
     pub fn fromPath(
@@ -268,18 +270,27 @@ fn addCheckpoint(
             defer arena.deinit();
             const scratch = arena.allocator();
 
+            var index_uri_buf: [1024]u8 = undefined;
+            const index_uri = index_uri_buf[0..try entrypoint.realPath(io, &index_uri_buf)];
+
             var index_reader = entrypoint.reader(io, try scratch.alloc(u8, 64 * 1024));
             var json_reader: std.json.Reader = .init(scratch, &index_reader.interface);
-            const index = try std.json.parseFromTokenSourceLeaky(std.json.Value, scratch, &json_reader, .{ .allocate = .alloc_if_needed });
-            const weight_map = index.object.get("weight_map") orelse {
-                log.warn("No weight_map attribute found in index", .{});
-                return;
+            // The default allocation, `.alloc_always` over a `json.Reader`,
+            // copies every string out of `index_reader`'s buffer, which the
+            // next refill overwrites.
+            const Index = struct { weight_map: std.json.ArrayHashMap([]const u8) };
+            const index = std.json.parseFromTokenSourceLeaky(Index, scratch, &json_reader, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                error.ReadFailed => return index_reader.err orelse err,
+                else => {
+                    log.warn("Invalid safetensors index {s}: needs a weight_map from tensor names to file names ({t})", .{ index_uri, err });
+                    return error.InvalidSafetensorsHeader;
+                },
             };
 
             // The files the weight map names, each read once.
             var files: std.StringArrayHashMapUnmanaged(void) = .empty;
-            var it = weight_map.object.iterator();
-            while (it.next()) |entry| try files.put(scratch, entry.value_ptr.string, {});
+            for (index.weight_map.map.values()) |file_name| try files.put(scratch, file_name, {});
             for (files.keys()) |file_name| {
                 const file = try repo.openFile(io, file_name, .{});
                 defer file.close(io);
@@ -310,7 +321,15 @@ pub fn parseSafetensors(
     const file_uri_len = try file.realPath(io, &file_uri_buf);
     const file_uri = file_uri_buf[0..file_uri_len];
 
-    const json_header_length: u64 = try reader.interface.takeInt(u64, .little);
+    // `File.Reader` returns `ReadFailed` with its cause in `err`, which a
+    // failed seek leaves unset.
+    const json_header_length: u64 = reader.interface.takeInt(u64, .little) catch |err| switch (err) {
+        error.EndOfStream => {
+            log.warn("Invalid safetensors header in {s}: shorter than its {d}-byte header length", .{ file_uri, BYTES_HEADER });
+            return error.InvalidSafetensorsHeader;
+        },
+        error.ReadFailed => return reader.err orelse err,
+    };
     // The header and every tensor's data must lie inside the file.
     const file_length = try file.length(io);
     if (json_header_length > file_length -| BYTES_HEADER) {
@@ -320,7 +339,10 @@ pub fn parseSafetensors(
     const data_start_offset = BYTES_HEADER + json_header_length;
     const json_data = try arena.allocator().alloc(u8, @intCast(json_header_length));
 
-    try reader.interface.readSliceAll(json_data);
+    reader.interface.readSliceAll(json_data) catch |err| return switch (err) {
+        error.ReadFailed => reader.err orelse err,
+        error.EndOfStream => err,
+    };
 
     const headers = std.json.parseFromSliceLeaky(std.json.ArrayHashMap(std.json.Value), arena.allocator(), json_data, .{}) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
@@ -349,10 +371,13 @@ pub fn parseSafetensors(
         };
 
         if (entry.shape.len > Shape.MAX_RANK) {
-            log.warn("Can't load tensor {s}, too many dims: {}", .{ key, entry.shape.len });
+            log.warn("Cannot load {s}: tensor {s} has {d} dims, more than {d}", .{ file_uri, key, entry.shape.len, Shape.MAX_RANK });
             return error.TooManyDimensions;
         }
-        const dtype = try stringToDtype(entry.dtype);
+        const dtype = stringToDtype(entry.dtype) orelse {
+            log.warn("Cannot load {s}: tensor {s} has dtype {s}, which zml does not support", .{ file_uri, key, entry.dtype });
+            return error.UnsupportedDataType;
+        };
 
         const start, const end = entry.data_offsets;
         const byte_size = checkedByteSize(entry.shape, dtype);
@@ -500,6 +525,62 @@ test "fromPath opens a file, an index or a directory by a path relative to the c
     }
 }
 
+test "fromPath refuses a file shorter than its header length or an index without a weight_map" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const files = [_]struct { []const u8, []const u8 }{
+        .{ "short.safetensors", &.{ 1, 2, 3 } },
+        .{ "list.safetensors.index.json", "[]" },
+        .{ "unmapped.safetensors.index.json", "{\"metadata\":{\"total_size\":4}}" },
+        .{ "unnamed.safetensors.index.json", "{\"weight_map\":{\"w\":4}}" },
+    };
+    for (files) |file| {
+        const name, const data = file;
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = data });
+        // `tmpDir` is `.zig-cache/tmp/<sub_path>` under the cwd.
+        var path_buffer: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ &tmp.sub_path, name });
+        try std.testing.expectError(error.InvalidSafetensorsHeader, TensorRegistry.fromPath(allocator, io, path));
+    }
+}
+
+test "fromRepo reads every file an index longer than its read buffer names" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    // About 90 KiB of weight map, read through a 64 KiB buffer: file names
+    // straddle refills.
+    const shards = 16;
+    const tensors_per_shard = 64;
+    var index: std.Io.Writer.Allocating = .init(scratch);
+    try index.writer.writeAll("{\"metadata\":{\"total_size\":1024},\"weight_map\":{");
+    for (0..shards) |shard| {
+        const file_name = try std.fmt.allocPrint(scratch, "model-{d:0>5}-of-{d:0>5}.safetensors", .{ shard + 1, shards });
+        var tensors: [tensors_per_shard]testing.TensorBytes = undefined;
+        for (&tensors, 0..) |*tensor, expert| {
+            const name = try std.fmt.allocPrint(scratch, "model.layers.{d}.mlp.experts.{d}.down_proj.weight", .{ shard, expert });
+            tensor.* = .{ .name = name, .dtype = "U8", .dims = &.{1}, .bytes = &.{0} };
+            try index.writer.print("{s}\"{s}\":\"{s}\"", .{ if (shard + expert == 0) "" else ",", name, file_name });
+        }
+        try testing.writeSafetensorsFile(allocator, io, tmp.dir, file_name, &tensors);
+    }
+    try index.writer.writeAll("}}");
+    try std.testing.expect(index.written().len > 64 * 1024);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.written() });
+
+    var registry: TensorRegistry = try .fromRepo(allocator, io, tmp.dir);
+    defer registry.deinit();
+    // Each file holds its own tensors: a misread file name would lose some.
+    try std.testing.expectEqual(@as(usize, shards * tensors_per_shard), registry.tensors.count());
+}
+
 pub const ModelPathResolutionError = error{
     FileNotFound,
     PermissionDenied,
@@ -587,7 +668,7 @@ test "resolveModelEntrypoint falls back past a denied index and reports a denied
     try std.testing.expectError(error.FileNotFound, resolveModelEntrypoint(io, tmp.dir));
 }
 
-fn stringToDtype(safetensor_type: []const u8) !DataType {
+fn stringToDtype(safetensor_type: []const u8) ?DataType {
     const map = std.StaticStringMap(DataType).initComptime(.{
         .{ "F64", .f64 },
         .{ "F32", .f32 },
@@ -607,8 +688,5 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
         .{ "BOOL", .bool },
     });
 
-    return map.get(safetensor_type) orelse {
-        log.err("Unsupported safetensor data type: {s}", .{safetensor_type});
-        return error.UnsupportedDataType;
-    };
+    return map.get(safetensor_type);
 }

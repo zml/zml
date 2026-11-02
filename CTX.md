@@ -78,8 +78,8 @@ the guide. This section points to them and keeps the reasons:
 ### Source and VFS data plane
 
 - The direct backend's pinned reads go through its private
-  `readFilePositionalAllV`, the one exact positional scatter (short-read
-  resumption, local `IOV_MAX` batching). `Tensor.readRange` validates the
+  `readFilePositionalAllV`, the one positional scatter (short-read
+  resumption up to `minimum`). `Tensor.readRange` validates the
   range and reads with std's `readPositionalAll` over a shared open file.
   The direct backend opens each distinct safetensor object once
   (`SourceSlot`) and keeps it open until the loader's `deinit`.
@@ -132,10 +132,12 @@ the guide. This section points to them and keeps the reasons:
   `max_positional_iovecs` (`IOV_MAX`, 1024 on Linux) non-adjacent ranges
   (`Scatter.flush`); a landing job's other extents are one read each, into
   the worker's bounce buffer. A fill job reads nothing. Within one read,
-  `readFilePositionalAllV` adds physical calls only for short reads,
-  retries or `IOV_MAX`. The loader counts read operations (`readGated`
-  calls), not physical calls: a remote source's request count is in its
-  backend's totals; a local file has none.
+  `readFilePositionalAllV` adds physical calls only where the io takes
+  fewer ranges per call than the read has (VFS's direct read `IOV_MAX`,
+  std's and zio's 8) or reads short, and stops once `minimum` is in. The
+  loader counts read operations (`readSlot` calls), not physical calls: a
+  remote source's request count is in its backend's totals; a local file
+  has none.
 
 ### Coalesced source planner
 
@@ -212,7 +214,7 @@ delays the first claim (Llama: 4 plans, 1-2 ms in total).
 - Reads and DMA complete in any order: PJRT makes a buffer ready once every
   transfer submitted to it completed and one carried the last-transfer
   flag, so the pump flags the piece that completes the target's bytes
-  (`TensorTransfer.Target.nextIsLast`) and no piece waits for another
+  (`DestinationState.Target.nextIsLast`) and no piece waits for another
   (fifth pass: a tail that waited for its prefixes could hold every credit
   while the prefixes stayed unclaimed). `awaitBatch` panics if a batch
   that completed without error left a target short, a bookkeeping bug.
@@ -236,15 +238,12 @@ delays the first claim (Llama: 4 plans, 1-2 ms in total).
   reaches zero and sets `done`. A job's unit is released exactly once: by
   `ReadRequest.release` at its last reference (last DMA callback, a host
   job's end, or abandonment) or by `Scheduler.fail` for an unclaimed job.
-  Memory-order rule (the ready callback and `Dma.submitOne`'s failure
-  path): copy the fields into locals, call `eventCompleted` (which may pump
-  on that thread), hand the context to the pump (`retireEvent`, callback
-  only), then call `request.release()` last, because the release may free
-  the batch.
+  `Dma.finishPiece` owns the completion order: the release goes last
+  because it may free the batch.
 - `recordError` keeps the first error (`first_error`,
   `stdx.FirstError(anyerror)`), logs it once, retires the unclaimed jobs
   (`Scheduler.fail`) and releases the queued pieces (`Dma.abortReady`);
-  requests in flight stop at their next read (`readGated`, after the
+  requests in flight stop at their next read (`readSlot`, after the
   permit) or enqueue. The error is sticky: every await returns it and
   later submissions are refused with it. A planning failure, before or
   after the first publish, fails the loader too (a partial submission can
@@ -301,12 +300,11 @@ delays the first claim (Llama: 4 plans, 1-2 ms in total).
   tensors keeps the bytes moving (fourth pass). No global DMA cap.
 - DMA event lifetime: a ready callback pushes its `EventContext` onto its
   device pump's intrusive `retired` stack under the pump's mutex
-  (`retireEvent`), after its own `eventCompleted` and before
-  `request.release()`; `pump` destroys the stack at the top of every
-  iteration (`destroyRetired`), so an event is destroyed by a later pump
-  or by `retireBatch`, never inside its own callback. Live PJRT events are
-  bounded by devices x 64 plus one pump batch. Every shipped plugin
-  accepts destruction outside the callback (PLAN.md task 9;
+  (`retireEvent`, from `Dma.finishPiece`); `pump` destroys the stack at
+  the top of every iteration (`destroyRetired`), so an event is destroyed
+  by a later pump or by `retireBatch`, never inside its own callback. Live
+  PJRT events are bounded by devices x 64 plus one pump batch. Every
+  shipped plugin accepts destruction outside the callback (PLAN.md task 9;
   `DevicePump.retired`).
 
 ### DMA memory and calibration
@@ -5831,11 +5829,137 @@ Left:
 - HF's token branch of `hubAuthorization` (no token on this host); the
   direct-I/O cold read on CPU after B2.
 
+## Fifty-ninth pass: the 2026-11-02 review's moves, on the B70, mi300 and gb300-1 (2026-11-02)
+
+`LOADER_REVIEW_2026-11-02.md` (round 2, kept outside both repos) applied
+in full. Its section C is in too: C2-1 to C2-3 finish round 1's B28, A1
+and A3, while round 1's section C stays. Decisions taken: 1 (a request
+rounds up to whole blocks), 2 (the last pass ids left code comments), 3
+("Current design" names `readSlot`, `DestinationState`, `finishPiece`), 4
+(E2-1 as written). Committed on top of 176e247b / 4eb2b41d. Three
+worktree lanes (io, misc, llmd; twelve steps, both gates after each) were
+each reviewed read-only and fixed (10 findings, all held), merged with one
+conflict (CTX's reads paragraph: B2-1's sentence beside Decision 3's
+rename), then a whole-diff review (zml, llmd, completeness) gave 5
+findings, all held and fixed. zml shrinks by 184 lines (+464/-648;
+direct_loader.zig 5,091 to 4,929 lines); the monorepo grows by 50
+(+213/-163), the new refusals and their tests. zml:test on CPU goes from
+392 passed, 29 skipped to 390/29 (8 tests went with B2-1 and B2-3, 6 came
+with E2-2, B2-1, B2-3 and E2-3); llmd's 10 test targets pass.
+
+Behavior a reviewer should know:
+- A2-2: `TensorStore.Options.quantization` is `?Quantization.Target`,
+  null by default, and `View.quantization()` panics without one: binding
+  block-FP8 needs `.of(platform)` (llmd's main and zoo pass it, tests
+  `.{}`). llmd's `bindQuantized` reads it only for block-FP8. A2-1:
+  `bindNew` is private to Source.zig, the one maker of bindings.
+- E2-2 and Decision 1: `requestSize` rounds the read chunk up to whole
+  blocks and refuses a block that is not a nonzero multiple of the
+  direct-I/O alignment (any block of one unit or more passed, and `carve`
+  then started every block after the first misaligned). A 3 MiB block,
+  refused before, loads with 9 MiB requests.
+- E2-1: a strided part's one-read limit is the request of the smallest
+  block calibration may pick (8 MiB locally, 32 MiB over hf://), so
+  whether a binding is refused no longer follows calibration's pick. On
+  mi300's tp example it drops from 16 to 8 MiB; nothing is refused.
+- B2-1: `readFilePositionalAllV` is one loop that hands the io every
+  remaining buffer, consumes them in place and stops once `minimum` is in.
+- B2-9: `ShardGrid.init(platform, shape)` places and packs, and
+  admission's `addPlacementBytes` counts through it; an empty shape takes
+  no bytes (the lane review's fix: the grid divides 0 by 0 per axis, so
+  `init` asserts a non-empty shape). D2-3: a failed program run logs the
+  field it computes.
+- E2-3: the safetensors index parses as `{ weight_map: name -> file }`
+  with every string copied out of the reader (`.alloc_always`; a test
+  reads a 90 KiB index through the 64 KiB buffer). An index that is not an
+  object, has no `weight_map` or maps a name to a non-string is
+  `InvalidSafetensorsHeader`, logged with the index path (it panicked on
+  an inactive union field, or loaded an empty registry); so is a file
+  shorter than its 8-byte length (a bare `EndOfStream`). An unsupported
+  dtype logs its file and tensor.
+- B2-5: llmd refuses checkpoint defects at bind instead of asserting:
+  projections of unequal shapes (`stackExpert`), global or input scales of
+  more than one value (`detect`, `stackExpertScalars`), a fused component
+  or scale grid its devices do not split (`fusedSource`, MiMo's `Qkv`).
+  The fifty-eighth pass's "a scale grid that does not split is refused at
+  bind" now holds for column splits too, which bound unswizzled and failed
+  `start` as InvalidBinding; `swizzledScaleShape` cannot fail.
+- E2-4: `linear.checkBlocks` refuses (UnsupportedQuantization) a
+  block-FP8 grid with an axis of several blocks that ends in a partial
+  one, and fused members whose blocks differ in rows; an axis of one block
+  is read whole. It checks the whole checkpoint tensor, not each view:
+  `View.split` cuts the grid at rows over grid rows, so a 130-row tensor
+  with a 2-row grid splits into two "blocks" of 65. A scan of every
+  block-FP8 header on the three hosts finds no served Linear it refuses:
+  MiMo's qkv_proj ([13568, 4096], grid [108, 32]) is padded by mimo26
+  outside `fuse`; GLM-5.2/5.3's kv_a_proj_with_mqa ([576, 6144], grid
+  [5, 48]) would be refused, but llmd has no GLM model.
+- C2-2: llmd opens the registry and the drafter before the tokenizer and
+  platform again (master's order); on gb300-1 this shows only as 218
+  threads pinned instead of 219.
+
+B70 (one Arc Pro B70, `level_zero:1`, oneAPI release builds of
+176e247b / 4eb2b41d and of this tree, interleaved):
+- examples/io, Llama-3.1-8B-Instruct, local, warm: 686-715 ms before and
+  685-686 ms after; direct I/O on, 1.602 against 1.606 s; buffered, 682
+  against 683 ms; load check 291/291 in both, 7,929 submissions.
+- examples/io, `hf://Qwen/Qwen3.5-9B`: 17.98 GiB in 20.4-23.1 s before
+  and 19.6-19.7 s after, 603 requests, no retries (network bound).
+- The full registries of seven checkpoints (Laguna-XS-2.1's 2.76 MB, 14
+  shard index and `hf://Qwen/Qwen3.5-9B` among them) are byte-identical in
+  both trees and equal each index's weight_map as Python reads it.
+- llmd local Qwen3.5-9B with DFlash, `--io-impl=threaded`: 19.08 GiB in
+  2.02-2.05 s on both, 108.6-109.0 tok/s, and all six 1,024-token
+  generations hash bd19c39441 on both trees; without the drafter, 16.68
+  GiB in 1.78 s, 32.7 tok/s, identical hashes.
+- Qwen3.8-27B-FP8 at TP 2 binds and loads (27.44 GiB in 2.93 s), then runs
+  out of memory at its first execute on both trees.
+
+mi300 (worktrees of 176e247b / 4eb2b41d and of this tree, since removed;
+binaries in `~/phase10/bin/{before,after}`, scripts and logs in
+`~/phase10`; a shared host, runs interleaved):
+- llmd Qwen3.8-27B-FP8 + DFlash2, GPUs 0,1 (FN to FNUZ through the
+  store's target): 33.40 GiB in 2.75-3.42 s before and 2.81-2.83 s after;
+  39.0-39.6 ms and 3.37 tokens per step on both; every generation hashes
+  48cf3a399a on both, as in earlier passes.
+- MiMo-V2.6-Flash-MOPD, GPUs 4,5: 158.11 GiB in 7.99 against 7.85 s,
+  14.55 against 14.56 ms per step, "Paris" and "391".
+- examples/io Llama on four GPUs: sharded 1.14-1.16 s and tp 1.12-1.24 s
+  on both; direct I/O with the load check 4.53-4.55 s, 291/291 ok.
+- zml:test on four GPUs: the known Fly MoE matrix failure on both; every
+  io and safetensors test passes.
+
+gb300-1 (GPUs 2 and 3, TP 2; `~/phase8/bin/rv1` against `rv2`, scripts
+and logs in `~/phase10`; checkouts restored):
+- Qwen3.8-27B-FP8: 27.44 GiB in 0.90-1.07 s before and 0.91-0.93 s
+  after; 8.68-8.83 against 8.55-9.04 ms per step.
+- Qwen3.8-Flash-Next-FP8: 169.41 GiB in 3.54-3.80 against 3.54-3.82 s;
+  8.67-9.04 against 8.68-8.91 ms per step.
+- MiMo-V2.6-Flash-MOPD: 158.11 GiB in 3.42-3.47 against 3.32-3.42 s;
+  5.68-5.72 against 5.63-5.66 ms per step; 141 tensors computed by 3
+  programs in 16 groups on both.
+- "Paris" and "391" on every run, coherent text, the same two warnings,
+  no refusal, the same peak memory per device.
+- zml:test on GPUs 2,3: the same 7 failures on both trees. Two are known
+  (GSPMD's CPU-plugin test, the FlashInfer MoE matrix); five io tests fail
+  with FileNotFound because `testing.Devices.init` falls back to a CPU
+  platform for four devices when two GPUs are visible, and aarch64 has no
+  CPU plugin.
+
+Left:
+- No served checkpoint has e8m0 scales, so `swizzledScaleShape` ran only
+  in CPU tests; NVFP4 still never ran on a GPU.
+- E2-2's misaligned-block refusal ran only in its unit test
+  (examples/io's block knob takes whole MiB); A2-2's panic is unreachable
+  from llmd, whose stores all carry a target.
+
 ## Open work
 
-Status on 2026-11-02: the 2026-10-31 API review's moves (all but section
-C) are committed on top of 1691f807 / cdbc0253, and ran on a B70
-(fifty-eighth pass, block-FP8 on gb300-1 too); its Left list is open.
+Status on 2026-11-03: the 2026-10-31 API review's moves (all but section
+C) are committed on top of 1691f807 / cdbc0253 (fifty-eighth pass); the
+2026-11-02 review's moves are committed on top of 176e247b / 4eb2b41d and
+ran on the B70, mi300 and gb300-1 (fifty-ninth pass). Both passes' Left
+lists are open.
 
 Status on 2026-10-31: wave 1 is committed as `rework` (zml 8af7fd3c,
 monorepo b791da11); waves 2 and 3 (M11-M19), F1 and W2F are in the tree,

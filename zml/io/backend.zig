@@ -20,17 +20,20 @@ const dma_calibration = @import("dma_calibration.zig");
 /// a whole number of blocks, at least one.
 pub const max_read_request_size: usize = 32 * 1024 * 1024;
 
-/// The source request for DMA blocks of `block_size`: the larger of the
-/// read chunk and the block. Null unless the block is nonzero and holds an
-/// `alignment` unit (`readAlignment`), and the request is a whole number of
-/// blocks, at most `max_read_request_size` and, with an alignment, longer
-/// than two units, so a read widened by a unit at each end fits.
-/// `zml.io.Loader.init` refuses options for which a block calibration may
-/// select has none.
+/// The source request for DMA blocks of `block_size`: the read chunk
+/// rounded up to whole blocks, one block at least. Null unless the block is
+/// a nonzero multiple of `alignment` (`readAlignment`: reads land in
+/// blocks), and the request is at most `max_read_request_size` and, with an
+/// alignment, longer than two units, so a read widened by a unit at each
+/// end fits. `zml.io.Loader.init` refuses options for which a block
+/// calibration may select has none.
 pub fn requestSize(read_chunk_size: usize, block_size: usize, alignment: usize) ?usize {
-    if (block_size < @max(alignment, 1)) return null;
-    const request = @max(read_chunk_size, block_size);
-    if (request > max_read_request_size or request % block_size != 0) return null;
+    if (block_size == 0 or block_size % @max(alignment, 1) != 0) return null;
+    // Bounded before the rounding, which then cannot overflow.
+    const least = @max(read_chunk_size, block_size);
+    if (least > max_read_request_size) return null;
+    const request = std.mem.alignForwardAnyAlign(usize, least, block_size);
+    if (request > max_read_request_size) return null;
     if (alignment != 0 and request <= 2 * alignment) return null;
     return request;
 }
@@ -429,12 +432,16 @@ pub const Backend = union(enum) {
         };
     }
 
-    /// `read`, the most source bytes one job of `part` may read, and `limit`,
+    /// `read`, the source bytes every job of `part` reads whole, widened to
+    /// its file's alignment (0 when its jobs read only their own range:
+    /// source runs back to back, a contiguous part included), and `limit`,
     /// the most one read takes: the front end refuses a part whose `read`
-    /// passes `limit`. Needs `checkParts`. The direct backend counts the
-    /// whole source range of a strided part whose source runs are not back
-    /// to back (`direct_loader.Loader.stridedRead`); the buffered backend
-    /// reads any part.
+    /// passes `limit`. Needs `checkParts`. The direct backend's limit is its
+    /// smallest read, whichever block calibration picks: the checkpoint's
+    /// read chunk (8 MiB locally) rounded up to whole blocks of the smallest
+    /// it may pick, 2 MiB or a pinned `dma_block_size`
+    /// (`direct_loader.Loader.stridedRead`); the buffered backend reads any
+    /// part.
     pub fn stridedRead(self: Backend, part: LoadPart) StridedRead {
         return switch (self) {
             .direct => |loader| loader.stridedRead(part),
@@ -565,4 +572,17 @@ test "checkParts refuses parts outside their source or destination, out of order
         &.{.whole(&last)},
     };
     for (accepted) |parts| try std.testing.expect(checkParts(parts, 32));
+}
+
+test "requestSize rounds the read chunk up to whole blocks of whole alignment units" {
+    const mib: usize = 1 << 20;
+    // One block at least, the chunk rounded up to whole blocks, and a
+    // rounded request past the largest refused.
+    try std.testing.expectEqual(16 * mib, requestSize(8 * mib, 16 * mib, 4096));
+    try std.testing.expectEqual(9 * mib, requestSize(8 * mib, 3 * mib, 4096));
+    try std.testing.expectEqual(null, requestSize(32 * mib, 24 * mib, 0));
+    // Without an alignment any nonzero block; with one, only its multiples.
+    try std.testing.expectEqual(8 * mib + 2048, requestSize(8 * mib, 8 * mib + 2048, 0));
+    try std.testing.expectEqual(null, requestSize(8 * mib, 8 * mib + 2048, 4096));
+    try std.testing.expectEqual(null, requestSize(8 * mib, 0, 0));
 }

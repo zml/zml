@@ -62,8 +62,6 @@ const Dim = struct {
 
 /// `pad`'s per-axis options, as for `Tensor.pad`.
 pub const Pad = Tensor.Pad;
-/// `slice`'s range, as for `Tensor.slice`.
-pub const Slice = Tensor.Slice;
 
 /// The checkpoint tensor `subkey` of `view`, with `tags` (null keeps the
 /// checkpoint's); null when the checkpoint has no such tensor.
@@ -491,7 +489,7 @@ pub fn bindProgram(inputs: []const Placed, output: Shape, program: anytype) Tens
     const arena = store.arena.allocator();
     const kept = arena.dupe(Placed, inputs) catch oom();
     const erased = TensorStore.Program.init(arena, program) catch oom();
-    return store.bindNew(output, .{ .compute = .{ .program = erased, .inputs = kept } });
+    return bindNew(store, output, .{ .compute = .{ .program = erased, .inputs = kept } });
 }
 
 /// A source with its placement (`withPartitioning`, `as`): the only thing
@@ -507,7 +505,7 @@ pub const Placed = struct {
     /// memory unless `View.setMemory` names another. The binding keeps the
     /// source as it is; the loader lowers it to bytes (`lower`).
     pub fn bind(self: Placed) Tensor {
-        return self.store.bindNew(self.shape, .{ .load = .{ .source = self } });
+        return bindNew(self.store, self.shape, .{ .load = .{ .source = self } });
     }
 
     /// This source without its placement, for code that takes a placed
@@ -544,6 +542,15 @@ pub const Placed = struct {
         return parts;
     }
 };
+
+/// A new tensor of `shape_`, bound to `binding`: the one maker of
+/// `store`'s bindings (`Placed.bind`, `bindProgram`), whose pieces are
+/// disjoint by construction: the loader relies on that and does not check.
+fn bindNew(store: *TensorStore, shape_: Shape, binding: TensorStore.Binding) Tensor {
+    const tensor: Tensor = .fromShape(shape_);
+    store.id_to_sources.putNoClobber(store.allocator, tensor.id, binding) catch oom();
+    return tensor;
+}
 
 /// `piece` of a source placed in `shape_` as one part (`Placed.lower`), its
 /// dimensions allocated with `allocator`, none for one run.
@@ -950,10 +957,6 @@ fn interleave(comptime T: type, members: []const T, groups: i64) T {
 const qkv_inputs = .{ .{ .row = 4, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
 const expert_inputs = .{ .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
 
-fn inputShape(comptime dims_: anytype) Shape {
-    return Shape.init(dims_, .u16);
-}
-
 /// `build(T, x)` builds a tensor from `x` with shape ops only, the same code
 /// for `Tensor` and `Source`; `inputs` holds the dims of each `u16` input.
 fn expectCase(comptime inputs: anytype, comptime build: anytype) !void {
@@ -966,7 +969,7 @@ fn expectCase(comptime inputs: anytype, comptime build: anytype) !void {
     var entries: [n]TestCheckpoint.Entry = undefined;
     inline for (inputs, 0..) |dims_, i| {
         names[i] = try std.fmt.bufPrint(&name_buffers[i], "input{d}", .{i});
-        shapes[i] = inputShape(dims_);
+        shapes[i] = Shape.init(dims_, .u16);
         entries[i] = .{ .name = names[i], .shape = shapes[i] };
     }
     var checkpoint: TestCheckpoint = undefined;
@@ -974,7 +977,7 @@ fn expectCase(comptime inputs: anytype, comptime build: anytype) !void {
     defer checkpoint.deinit();
 
     var sources: [n]Source = undefined;
-    for (&sources, names, shapes) |*s, input_name, shape_| s.* = checkpoint.store.view().source(input_name, null).withTags(shape_);
+    for (&sources, names) |*s, input_name| s.* = checkpoint.store.view().source(input_name, null);
     const bound = build(Source, &sources).withPartitioning(.replicated, .{}).bind();
     const assembled = try checkpoint.assemble(bound);
     defer allocator.free(assembled);
@@ -1280,7 +1283,7 @@ test "assembling fails on a byte two pieces write" {
     // Only a hand-built binding can repeat a piece.
     const q = checkpoint.store.view().source("q", .{ .row, .col });
     const pieces = try checkpoint.store.arena.allocator().dupe(Piece, &.{ q._pieces[0], q._pieces[0] });
-    const tensor = checkpoint.store.bindNew(q.shape(), .{ .load = .{ .source = .{ .store = &checkpoint.store, .shape = q.shape(), ._pieces = pieces } } });
+    const tensor = bindNew(&checkpoint.store, q.shape(), .{ .load = .{ .source = .{ .store = &checkpoint.store, .shape = q.shape(), ._pieces = pieces } } });
     try std.testing.expectError(error.DoubleWrite, checkpoint.assemble(tensor));
 }
 

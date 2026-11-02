@@ -30,8 +30,8 @@ pub const ReadHints = struct {
     pub const local: ReadHints = .{ .read_chunk_size = 8 * 1024 * 1024 };
 
     /// Smallest source request expected to avoid excessive per-request cost
-    /// or backend rate limiting. The loader may increase it to match the
-    /// calibrated DMA block size (zml/io/backend.zig's `requestSize`).
+    /// or backend rate limiting. The loader rounds it up to whole calibrated
+    /// DMA blocks (zml/io/backend.zig's `requestSize`).
     read_chunk_size: usize = 16 * 1024 * 1024,
     /// The backend benefits from opening enough source calls to hide request
     /// latency before the first response arrives.
