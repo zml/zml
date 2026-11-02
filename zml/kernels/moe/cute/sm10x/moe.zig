@@ -1,17 +1,20 @@
-//! SM100 CuTe MXFP8 x MXFP4 MoE, the Zig port of the CuTe DSL `NativeMoE`:
-//! routing, routed MXFP8 input quantization, persistent up GEMM with a fused
-//! SwiGLU + MXFP8 epilogue, persistent down GEMM storing rows in route order,
-//! and the top-k reduction. Routing weights are applied before the down
-//! projection, with the reference model's BF16 rounding.
+//! SM100 CuTe MoE, MXFP8 x MXFP4 (the Zig port of the CuTe DSL `NativeMoE`)
+//! and NVFP4 x NVFP4: routing, routed input quantization, persistent up GEMM
+//! with a fused SwiGLU + quantization epilogue, persistent down GEMM storing
+//! rows in route order, and the top-k reduction. MXFP4 applies routing weights
+//! before the down projection, with the reference model's BF16 rounding.
 const std = @import("std");
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
-pub const boundary = @import("mxfp4.zig");
-pub const persistent = @import("persistent_mxfp4.zig");
-const triton_kernels = @import("../triton/moe.zig");
+const zml = @import("../../../../zml.zig");
+pub const mxfp4 = @import("mxfp4.zig");
+pub const mxfp4_persistent = @import("persistent_mxfp4.zig");
+pub const nvfp4 = @import("nvfp4.zig");
+pub const nvfp4_persistent = @import("persistent_nvfp4.zig");
+const reduce = @import("reduce.zig");
+const triton_kernels = @import("../../triton/moe.zig");
 
-pub const Inputs = struct {
+pub const Mxfp4Inputs = struct {
     /// `[tokens, hidden]` BF16.
     x: zml.Tensor,
     /// `[tokens, topk]` FP32.
@@ -28,7 +31,7 @@ pub const Inputs = struct {
 
 /// The boundary quantizer handles four 128-column tiles per CTA. The GEMMs
 /// support 128-column tiles and a fixed set of reduction tile counts.
-pub fn validateShapes(hidden: i64, intermediate: i64) void {
+pub fn validateMxfp4Shapes(hidden: i64, intermediate: i64) void {
     stdx.debug.assert(hidden > 0 and @rem(hidden, 4 * 128) == 0, "cute backend requires hidden dimension to be a positive multiple of 512, got {}", .{hidden});
     stdx.debug.assert(intermediate > 0 and @rem(intermediate, 128) == 0, "cute backend requires intermediate dimension to be a positive multiple of 128, got {}", .{intermediate});
     stdx.debug.assert(supportedReductionTiles(@divTrunc(hidden, 128)), "cute backend does not support hidden reduction tile count {}, got hidden dimension {}", .{ @divTrunc(hidden, 128), hidden });
@@ -167,20 +170,15 @@ fn route(tokens: i64, experts: i64, topk: i64, n: i64, direct: bool, ids: zml.Te
     return .{ .groups = capacity, .route_map = s.perm, .route_inverse = s.map, .schedule = s.sched };
 }
 
-/// `[tokens, hidden]` BF16 output of the MoE layer.
-pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: ?f32, a: Inputs) zml.Tensor {
-    return forwardWithTile(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, null);
-}
-
-/// `forward` with an explicit GEMM tile N, for tuning. `null` selects it from
-/// the batch size.
-pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: ?f32, a: Inputs, tile_n: ?i64) zml.Tensor {
+/// `[tokens, hidden]` BF16 output of the MXFP4 MoE layer. `tile_n` is the
+/// GEMM tile N, for tuning; null selects it from the batch size.
+pub fn forwardMxfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: ?f32, a: Mxfp4Inputs, tile_n: ?i64) zml.Tensor {
     const n = tile_n orelse tileN(tokens, experts, topk);
     const direct = isDirect(tokens);
     const routing = route(tokens, experts, topk, n, direct, a.ids);
     const routes = tokens * topk;
 
-    const up_cfg: persistent.Config = .{
+    const up_cfg: mxfp4_persistent.Config = .{
         .experts = experts,
         .m = 2 * intermediate,
         .n = n,
@@ -197,7 +195,7 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
     down_cfg.k = intermediate;
     down_cfg.epilogue = .route_rows;
 
-    const q1 = boundary.groupedQuantize(a.x, routing.route_map orelse routing.schedule, .{
+    const q1 = mxfp4.groupedQuantize(a.x, routing.route_map orelse routing.schedule, .{
         .tokens = tokens,
         .hidden = hidden,
         .topk = topk,
@@ -205,29 +203,141 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
         .capacity = routing.groups,
         .direct = direct,
     });
-    const q2 = persistent.upQuantized(up_cfg, .{
+    const q2 = mxfp4_persistent.upQuantized(up_cfg, .{
         .weight = a.w1,
         .schedule = routing.schedule,
         .input_quant = q1.q,
         .weight_scale = a.s1.bitCast(.u8),
         .input_scale = q1.s,
     }, routing.route_inverse, a.routing_weights.reshape(.{routes}));
-    const down = persistent.downRows(down_cfg, .{
+    const down = mxfp4_persistent.downRows(down_cfg, .{
         .weight = a.w2,
         .schedule = routing.schedule,
         .input_quant = q2.q,
         .weight_scale = a.s2.bitCast(.u8),
         .input_scale = q2.s,
     }, routing.route_inverse);
-    return boundary.combine(down, routing.route_map orelse routing.schedule, .{
+    return reduce.topk(down, routing.route_map orelse routing.schedule, .{
         .tokens = tokens,
         .hidden = hidden,
         .topk = topk,
-        .columns_per_cta = boundary.combineColumns(tokens, hidden),
+        .columns_per_cta = reduce.columnsPerCta(tokens, hidden),
+    });
+}
+
+pub const Nvfp4Inputs = struct {
+    /// `[tokens, hidden]` BF16.
+    x: zml.Tensor,
+    /// `[tokens, topk]` FP32.
+    routing_weights: zml.Tensor,
+    /// `[tokens, topk]` local expert ids, -1 for routes of other ranks.
+    ids: zml.Tensor,
+    /// `[experts, 2 * intermediate, hidden / 2]` packed FP4, gate/up rows interleaved.
+    w1: zml.Tensor,
+    /// `w1` E4M3 scales `[experts, 2 * intermediate, hidden / 16]` in the 128x4 layout.
+    s1: zml.Tensor,
+    /// `[experts, hidden, intermediate / 2]` packed FP4.
+    w2: zml.Tensor,
+    /// `w2` E4M3 scales `[experts, hidden, intermediate / 16]` in the 128x4 layout.
+    s2: zml.Tensor,
+    /// `[experts]` FP32 dequantization scale of each GEMM output, which folds
+    /// in the inverse of the GEMM input's global scale.
+    alpha1: zml.Tensor,
+    alpha2: zml.Tensor,
+    /// `[experts]` FP32 global scale each GEMM's input is multiplied by
+    /// before NVFP4 quantization.
+    act1: zml.Tensor,
+    act2: zml.Tensor,
+};
+
+pub const Nvfp4Options = struct {
+    swiglu_limit: ?f32 = null,
+    routing_weight_placement: zml.moe.RoutingWeightPlacement = .after_down,
+    /// GEMM tile N; null selects it from the batch size.
+    tile_n: ?i64 = null,
+};
+
+pub fn validateNvfp4Shapes(hidden: i64, intermediate: i64) void {
+    const k_tile = nvfp4_persistent.k_tile;
+    stdx.debug.assert(@rem(hidden, k_tile) == 0, "cute NVFP4 backend expects hidden to be a multiple of {}, got {}", .{ k_tile, hidden });
+    stdx.debug.assert(@rem(intermediate, k_tile) == 0, "cute NVFP4 backend expects intermediate to be a multiple of {}, got {}", .{ k_tile, intermediate });
+}
+
+/// NVFP4 GEMM tile N: the expected routes of one expert, so that each
+/// expert's weight tiles are read once per group instead of once per few rows.
+fn nvfp4TileN(tokens: i64, experts: i64, topk: i64) i64 {
+    if (isDirect(tokens)) return 8;
+    const per_expert = std.math.divCeil(i64, tokens * topk, experts) catch unreachable;
+    return @intCast(std.math.clamp(std.math.ceilPowerOfTwoAssert(u64, @intCast(per_expert)), 16, 128));
+}
+
+/// `[tokens, hidden]` BF16 output of the NVFP4 MoE layer.
+pub fn forwardNvfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, a: Nvfp4Inputs, opts: Nvfp4Options) zml.Tensor {
+    validateNvfp4Shapes(hidden, intermediate);
+    const n = opts.tile_n orelse nvfp4TileN(tokens, experts, topk);
+    const direct = isDirect(tokens);
+    const routes = tokens * topk;
+    const flat_ids = a.ids.convert(.i32).reshape(.{routes});
+    const routing = route(tokens, experts, topk, n, direct, a.ids);
+    const route_map = routing.route_map orelse flat_ids;
+    const weights = a.routing_weights.convert(.f32).reshape(.{routes});
+
+    const up_cfg: nvfp4_persistent.Config = .{
+        .experts = experts,
+        .m = 2 * intermediate,
+        .n = n,
+        .k = hidden,
+        .groups = routing.groups,
+        .persistent_ctas = persistentCtas(),
+        .epilogue = .swiglu_nvfp4,
+        .routes = routes,
+        .direct = direct,
+        .swiglu_limit = opts.swiglu_limit,
+        .routing_weights = opts.routing_weight_placement == .before_down,
+    };
+    var down_cfg = up_cfg;
+    down_cfg.m = hidden;
+    down_cfg.k = intermediate;
+    down_cfg.epilogue = .route_rows;
+    down_cfg.routing_weights = opts.routing_weight_placement == .after_down;
+
+    const q1 = nvfp4.groupedQuantize(a.x, route_map, flat_ids, a.act1, .{
+        .tokens = tokens,
+        .hidden = hidden,
+        .topk = topk,
+        .experts = experts,
+        .group_size = up_cfg.groupRows(),
+        .capacity = routing.groups,
+        .direct = direct,
+    });
+    const q2 = nvfp4_persistent.upQuantized(up_cfg, .{
+        .weight = a.w1,
+        .schedule = routing.schedule,
+        .input_quant = q1.q,
+        .weight_scale = a.s1.bitCast(.u8),
+        .input_scale = q1.s,
+        .alpha = a.alpha1,
+    }, routing.route_inverse, weights, a.act2);
+    const down = nvfp4_persistent.downRows(down_cfg, .{
+        .weight = a.w2,
+        .schedule = routing.schedule,
+        .input_quant = q2.q,
+        .weight_scale = a.s2.bitCast(.u8),
+        .input_scale = q2.s,
+        .alpha = a.alpha2,
+    }, routing.route_inverse, weights);
+    return reduce.topk(down, route_map, .{
+        .tokens = tokens,
+        .hidden = hidden,
+        .topk = topk,
+        .columns_per_cta = reduce.columnsPerCta(tokens, hidden),
     });
 }
 
 test {
-    _ = boundary;
-    _ = persistent;
+    _ = mxfp4;
+    _ = mxfp4_persistent;
+    _ = nvfp4;
+    _ = nvfp4_persistent;
+    _ = reduce;
 }

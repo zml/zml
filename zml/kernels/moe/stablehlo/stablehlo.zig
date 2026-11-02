@@ -104,11 +104,12 @@ fn roundedInput(x: Tensor, linear: zml.nn.Linear, opts: Options, dtype: zml.Data
     if (scheme == .nvfp4) {
         const global = if (q.input_scale) |scale| scale.asMultiplier() else Tensor.scalar(1, .f32);
         stdx.debug.assert(global.count() == 1, "reference NVFP4 input scale must be global", .{});
-        const grouped = x.convert(.bf16).convert(.f32).div(global.asScalar())
+        // Keep both stored rounding boundaries when XLA fuses the quantizer.
+        const grouped = x.convert(.bf16).optimizationBarrier().convert(.f32).div(global.asScalar())
             .splitAxis(.in, .{ .group = @divExact(x.dim(.in), 16), .element = 16 });
         const scale = grouped.abs().max(.element).scale(1.0 / 6.0)
             .minimum(Tensor.scalar(448, .f32))
-            .convert(.f8e4m3fn).convert(.f32).broad(grouped.shape());
+            .convert(.f8e4m3fn).optimizationBarrier().convert(.f32).broad(grouped.shape());
         const divisor = scale.cmp(.NE, Tensor.scalar(0, .f32)).select(scale, Tensor.scalar(1, .f32).broad(scale.shape()));
         return roundFp4(grouped.mul(Tensor.scalar(1, .f32).div(divisor))).mul(scale)
             .reshape(x.shape().withDtype(.f32)).mul(global.asScalar());

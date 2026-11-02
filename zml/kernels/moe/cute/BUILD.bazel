@@ -4,8 +4,6 @@ filegroup(
     name = "cute",
     srcs = [
         "cute.zig",
-        "moe.zig",
-        "mxfp4.zig",
-        "persistent_mxfp4.zig",
+        "//zml/kernels/moe/cute/sm10x",
     ],
 )
