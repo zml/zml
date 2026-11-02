@@ -160,12 +160,9 @@ pub const HTTP = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (err) {
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (self.governor.readFailure(handle.uri, handle.pos, err)) {
                     error.Canceled => return error.Canceled,
-                    else => {
-                        log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                        return .{ .file_read_streaming = error.InputOutput };
-                    },
+                    error.Unexpected => return .{ .file_read_streaming = error.InputOutput },
                 };
 
                 if (total == 0) {
@@ -307,15 +304,7 @@ pub const HTTP = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| switch (err) {
-            // A cancelled task must not surface as an I/O failure: every
-            // wait in the governed loop is a cancellation point.
-            error.Canceled => return error.Canceled,
-            else => {
-                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-                return std.Io.File.ReadPositionalError.Unexpected;
-            },
-        };
+        return self.performRead(handle, data, offset) catch |err| self.governor.readFailure(handle.uri, offset, err);
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
@@ -343,81 +332,30 @@ pub const HTTP = struct {
     }
 
     /// The size of the object at `url` (a resolved path without its scheme),
-    /// from a HEAD. std hands a HEAD its redirect unfollowed, so this walks
-    /// the chain itself, as far as a read's GET follows it
-    /// (`request.max_redirects`).
+    /// from a HEAD of the end of its redirect chain, as far as a read's GET
+    /// follows it (`request.max_redirects`).
     fn fetchSize(self: *HTTP, url: []const u8) !u64 {
-        // Three buffers in rotation: the current URL, the location being
-        // resolved against it, and the formatted result.
-        var url_buffers: [3][8 * 1024]u8 = undefined;
-        var current: usize = 0;
-        const full_url = try std.fmt.bufPrint(&url_buffers[current], "{s}://{s}", .{ @tagName(self.protocol), url });
-        var uri = std.Uri.parse(full_url) catch return std.Io.File.OpenError.BadPathName;
-        var remaining_redirects: usize = request.max_redirects;
-        while (true) {
-            // Each hop is one governed request: a server that rate limits
-            // the HEAD holds this backend as a throttled GET would.
-            var hop: SizeHop = .{ .uri = uri };
-            const outcome = try request.perform(SizeHop.Result, &self.governor, .{ .target = url, .key = request.authorityOf(uri) }, &hop, SizeHop.attempt);
-            const location = switch (outcome) {
-                .size => |size| return size,
-                .redirect => |location| location,
-            };
-
-            if (remaining_redirects == 0) return error.TooManyHttpRedirects;
-            remaining_redirects -= 1;
-            const scratch = (current + 1) % url_buffers.len;
-            const output = (current + 2) % url_buffers.len;
-            if (location.len > url_buffers[scratch].len) return error.HttpRedirectLocationOversize;
-            @memcpy(url_buffers[scratch][0..location.len], location);
-            var aux: []u8 = url_buffers[scratch][0..];
-            const resolved = try uri.resolveInPlace(location.len, &aux);
-            uri = try .parse(try std.fmt.bufPrint(&url_buffers[output], "{f}", .{resolved}));
-            current = output;
-        }
+        var url_buffer: [8 * 1024]u8 = undefined;
+        const full_url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), url });
+        var chain: request.HeadChain = .{};
+        const end = try chain.resolve(&self.governor, url, full_url, request.max_redirects, {}, urlAuthorization);
+        return end.size orelse error.MissingContentLength;
     }
 
-    /// One HEAD of the redirect chain: the size, or the `Location` to
-    /// follow, copied into the hop's own storage because the head buffer
-    /// dies with the response. An absent or denied object fails the request
-    /// (`ExchangeOptions.open`).
-    const SizeHop = struct {
-        const Result = union(enum) { size: u64, redirect: []const u8 };
-
-        uri: std.Uri,
-        location: [8 * 1024]u8 = undefined,
-
-        fn attempt(self: *SizeHop, current: request.Attempt) anyerror!request.Outcome(Result) {
-            var head_buffer: [8 * 1024]u8 = undefined;
-            return request.exchange(Result, current, self.uri, .{
-                .method = .HEAD,
-                .headers = .{ .accept_encoding = .{ .override = "identity" } },
-                .open = true,
-                .redirects = .surface,
-                .head_buffer = &head_buffer,
-            }, self, SizeHop.consume);
-        }
-
-        fn consume(self: *SizeHop, res: *std.http.Client.Response) anyerror!Result {
-            if (res.head.status.class() == .success) return .{ .size = res.head.content_length orelse return error.MissingContentLength };
-            const location = res.head.location orelse return error.HttpRedirectLocationMissing;
-            if (location.len > self.location.len) return error.HttpRedirectLocationOversize;
-            @memcpy(self.location[0..location.len], location);
-            return .{ .redirect = self.location[0..location.len] };
-        }
-    };
+    /// Only what the URL carries: std's basic authorization from its
+    /// userinfo, as on every GET.
+    fn urlAuthorization(_: void, _: []const u8) std.http.Client.Request.Headers.Value {
+        return .default;
+    }
 
     fn performRead(self: *HTTP, handle: *Handle, data: []const []u8, offset: u64) !usize {
         var url_buffer: [8 * 1024]u8 = undefined;
         const url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), handle.uri });
         const uri: std.Uri = try .parse(url);
-        var prepared: range_read.PreparedRequest = .{ .uri = uri };
         return range_read.performRangeRead(&self.governor, .{
             .request = .{ .target = url, .key = request.authorityOf(uri) },
-            .context = &prepared,
-            .prepare = range_read.prepareStatic,
             // The object `fetchSize` found at the end of the chain.
             .redirects = .follow,
-        }, data, offset, range_read.readSize(handle.size, offset, data));
+        }, &uri, range_read.static, data, offset, handle.size);
     }
 };

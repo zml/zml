@@ -334,15 +334,10 @@ pub const HF = struct {
         uri: std.Uri,
 
         fn attempt(self: *TreeFetch, current: request.Attempt) anyerror!request.Outcome(std.ArrayList(TreeNode)) {
-            var head_buffer: [8 * 1024]u8 = undefined;
             return request.exchange(std.ArrayList(TreeNode), current, self.uri, .{
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = self.hf.authorization,
-                },
+                .authorization = self.hf.authorization,
                 .open = true,
                 .redirects = .follow,
-                .head_buffer = &head_buffer,
             }, self, TreeFetch.consume);
         }
 
@@ -371,73 +366,24 @@ pub const HF = struct {
         }
     };
 
+    /// The URL the file's bytes are read from, copied into `out_buffer`:
+    /// where the Hub's redirect chain ends, a signed CDN URL for an LFS file.
     fn resolveDownloadUrl(self: *HF, repo: Repo, out_buffer: []u8) ![]const u8 {
-        // `std.http.Client.Request.receiveHead` returns every HEAD response
-        // before its redirect handling, so the Hub's 307 to its CDN must be
-        // followed here. Credentials only travel to the Hub itself.
-        // Three rotating buffers: the current URL string, the redirect
-        // location being resolved against it, and the formatted result.
-        var url_buffers: [3][8 * 1024]u8 = undefined;
-        var url: []const u8 = try std.fmt.bufPrint(&url_buffers[0], API.LFS_FILE_URL_TEMPLATE, repo);
+        var url_buffer: [8 * 1024]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
         // Logs name the file: past the first hop the URL is a signed one,
         // which is a credential.
         var target_buffer: [1024]u8 = undefined;
         const target = std.fmt.bufPrint(&target_buffer, "{s}/{s}@{s}/{s}", .{ repo.repo, repo.model, repo.rev, repo.path }) catch repo.path;
-        var current: usize = 0;
-        var remaining_redirects: usize = 8;
-        while (true) {
-            const uri: std.Uri = try .parse(url);
-            var hop: ResolveHop = .{ .hf = self, .uri = uri, .url = url };
-            // Each hop is one governed request: a CDN that rate limits the
-            // HEAD holds the backend exactly as a throttled GET does.
-            const location = try request.perform(?[]const u8, &self.governor, .{ .target = target, .key = request.authorityOf(uri) }, &hop, ResolveHop.attempt) orelse
-                return std.fmt.bufPrint(out_buffer, "{s}", .{url});
-
-            if (remaining_redirects == 0) return error.TooManyHttpRedirects;
-            remaining_redirects -= 1;
-            const scratch = (current + 1) % url_buffers.len;
-            const output = (current + 2) % url_buffers.len;
-            if (location.len > url_buffers[scratch].len) return error.HttpRedirectLocationOversize;
-            @memcpy(url_buffers[scratch][0..location.len], location);
-            var aux: []u8 = url_buffers[scratch][0..];
-            const resolved = try uri.resolveInPlace(location.len, &aux);
-            url = try std.fmt.bufPrint(&url_buffers[output], "{f}", .{resolved});
-            current = output;
-        }
+        var chain: request.HeadChain = .{};
+        const end = try chain.resolve(&self.governor, target, url, 8, self, hubAuthorization);
+        return std.fmt.bufPrint(out_buffer, "{s}", .{end.url});
     }
 
-    /// One HEAD of the redirect chain: null when this URL is the file,
-    /// otherwise the `Location` it names, copied into the hop's own storage
-    /// because the head buffer dies with the response.
-    const ResolveHop = struct {
-        hf: *HF,
-        uri: std.Uri,
-        url: []const u8,
-        location: [8 * 1024]u8 = undefined,
-
-        fn attempt(self: *ResolveHop, current: request.Attempt) anyerror!request.Outcome(?[]const u8) {
-            var head_buffer: [16 * 1024]u8 = undefined;
-            return request.exchange(?[]const u8, current, self.uri, .{
-                .method = .HEAD,
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    // Credentials only travel to the Hub itself.
-                    .authorization = if (std.mem.startsWith(u8, self.url, "https://huggingface.co/")) self.hf.authorization else .omit,
-                },
-                .open = true,
-                .redirects = .surface,
-                .head_buffer = &head_buffer,
-            }, self, ResolveHop.consume);
-        }
-
-        fn consume(self: *ResolveHop, res: *std.http.Client.Response) anyerror!?[]const u8 {
-            if (res.head.status.class() == .success) return null;
-            const location = res.head.location orelse return error.HttpRedirectLocationMissing;
-            if (location.len > self.location.len) return error.HttpRedirectLocationOversize;
-            @memcpy(self.location[0..location.len], location);
-            return self.location[0..location.len];
-        }
-    };
+    /// Credentials only travel to the Hub itself, never to its CDN.
+    fn hubAuthorization(self: *HF, url: []const u8) std.http.Client.Request.Headers.Value {
+        return if (std.mem.startsWith(u8, url, "https://huggingface.co/")) self.authorization else .omit;
+    }
 
     fn findDirChildren(tree_items: []const TreeNode, dir_path: []const u8) ?[]const TreeNode {
         if (dir_path.len == 0) {
@@ -572,12 +518,9 @@ pub const HF = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (err) {
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (self.governor.readFailure(handle.uri, handle.pos, err)) {
                     error.Canceled => return error.Canceled,
-                    else => {
-                        log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                        return .{ .file_read_streaming = error.InputOutput };
-                    },
+                    error.Unexpected => return .{ .file_read_streaming = error.InputOutput },
                 };
 
                 if (total == 0) {
@@ -786,15 +729,7 @@ pub const HF = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| switch (err) {
-            // A cancelled task must not surface as an I/O failure: every
-            // wait in the governed loop is a cancellation point.
-            error.Canceled => return error.Canceled,
-            else => {
-                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-                return std.Io.File.ReadPositionalError.Unexpected;
-            },
-        };
+        return self.performRead(handle, data, offset) catch |err| self.governor.readFailure(handle.uri, offset, err);
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
@@ -822,7 +757,7 @@ pub const HF = struct {
     }
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        if (range_read.readSize(handle.size, offset, data) == 0) return 0;
+        if (offset >= handle.size) return 0;
 
         // Another read of the file may replace the handle's URL
         // (`DataRequest.reresolve`): each read sends its own copy.
@@ -845,9 +780,7 @@ pub const HF = struct {
                 // general but is here, once, after re-resolving it.
                 .retry_once = &.{ .unauthorized, .forbidden },
             },
-            .context = &download,
-            .prepare = DataRequest.prepare,
-        }, data, offset, range_read.readSize(handle.size, offset, data));
+        }, &download, DataRequest.prepare, data, offset, handle.size);
     }
 
     const DataRequest = struct {
@@ -861,18 +794,17 @@ pub const HF = struct {
         /// one per read.
         re_resolved: ?[]const u8 = null,
 
-        fn prepare(context: *anyopaque, attempt: request.Attempt, _: std.http.Header) anyerror!range_read.PreparedRequest {
-            const self: *DataRequest = @ptrCast(@alignCast(context));
+        fn prepare(self: *DataRequest, attempt: request.Attempt, _: std.http.Header) anyerror!range_read.PreparedRequest {
             if (attempt.previous_status) |status| switch (status) {
                 .unauthorized, .forbidden => {
-                    if (self.re_resolved != null) return error.RequestFailed;
+                    if (self.re_resolved != null) return error.PermissionDenied;
                     try self.reresolve();
                 },
                 else => {},
             };
             return .{
                 .uri = self.uri,
-                .authorization = if (std.mem.startsWith(u8, self.url, "https://huggingface.co/")) self.hf.authorization else .omit,
+                .authorization = self.hf.hubAuthorization(self.url),
             };
         }
 

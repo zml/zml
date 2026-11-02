@@ -72,7 +72,7 @@ All three tasks landed, each with a CPU playground run and a gb300-2 run.
 
 ## Group C: sound, but needs a measurement or a decision first
 
-- [ ] 19. Merge `ReadyTransfer` and `EventContext` into one plan-owned node
+- [ ] 19. Merge `Dma.Piece` and `EventContext` into one plan-owned node
   (C15, about 50 lines). One `Submission` node per DMA piece in the plan:
   target, block, source and destination offsets, len, `pjrt_event` (null
   until submitted and once destroyed), `err`, `submitted_ns`, `next`; the
@@ -81,7 +81,7 @@ All three tasks landed, each with a CPU playground run and a gb300-2 run.
   `next`), submits and registers the callback, the callback relinks the node
   into `retired`; `abortReady` reads `next` before `block.complete()`. Let the
   planner store `Job.event_start` beside `transfer_start` so `events_used`
-  goes. Deletes `ReadyTransfer`, `ReadyQueue`, the deques, the catch in
+  goes. Deletes `Dma.Piece`, `ReadyQueue`, the deques, the catch in
   `ReadRequest.run`, `Scratch.queue_counts` (a device mask suffices for
   kicks); `ready_entries` went in the sixteenth pass, `abandonSubmissions`
   and `Job.block_start` in the thirty-first. Keep `err` destroyed by the pump or
@@ -97,8 +97,8 @@ All three tasks landed, each with a CPU playground run and a gb300-2 run.
   supports: a block option that skips the screen when set (still warming
   allocators and pre-growing), giving llmd its 0.3 to 1.1 s of startup back
   on a known host (half of the open item at CTX 3362-3364). The loader's
-  one DMA knob is now `Loader.Options.dma_block_sizes`, and a list of one
-  block is still screened. Demoting the confirmation tunables is done for
+  one DMA knob is now `Loader.Options.dma_block_size`, and that one block
+  is still screened. Demoting the confirmation tunables is done for
   the loader (thirty-eighth pass, R5): `Loader.Options` no longer has them,
   and only `dma_calibration.measure` takes `confirmation_duration`,
   `confirmation_minimum_transfers` and `confirmation_margin`. Needs the

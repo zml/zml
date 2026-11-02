@@ -4,7 +4,8 @@
 //! - io/loader.zig: options and their checks, the set-up task, starts,
 //!   program compiles and groups, admission, and the one check of every
 //!   binding before the backends see it (`LoadSpec`).
-//! - io/backend.zig: backend selection and the `LoadSpec` contract.
+//! - io/backend.zig: backend selection, the request size rule and the
+//!   `LoadSpec` contract.
 //! - io/TensorStore.zig, io/Source.zig: bindings, views, and the sources
 //!   that describe a tensor's checkpoint bytes.
 //! - io/direct_loader.zig: sizing, per-file planning, FIFO claims, source

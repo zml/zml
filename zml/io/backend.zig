@@ -1,6 +1,9 @@
+//! The seam between the front end (loader.zig) and its backends: the
+//! `LoadSpec` contract they trust, its parts' byte runs (`Lattice`), the
+//! source request size (`requestSize`), and which backend and memory kinds
+//! a platform takes (`loadsDirect`, `supportsMemory`).
 const std = @import("std");
 
-const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
@@ -17,6 +20,21 @@ const dma_calibration = @import("dma_calibration.zig");
 /// a whole number of blocks, at least one.
 pub const max_read_request_size: usize = 32 * 1024 * 1024;
 
+/// The source request for DMA blocks of `block_size`: the larger of the
+/// read chunk and the block. Null unless the block is nonzero and holds an
+/// `alignment` unit (`readAlignment`), and the request is a whole number of
+/// blocks, at most `max_read_request_size` and, with an alignment, longer
+/// than two units, so a read widened by a unit at each end fits.
+/// `zml.io.Loader.init` refuses options for which a block calibration may
+/// select has none.
+pub fn requestSize(read_chunk_size: usize, block_size: usize, alignment: usize) ?usize {
+    if (block_size < @max(alignment, 1)) return null;
+    const request = @max(read_chunk_size, block_size);
+    if (request > max_read_request_size or request % block_size != 0) return null;
+    if (alignment != 0 and request <= 2 * alignment) return null;
+    return request;
+}
+
 /// What the direct backend widens the reads of a file read directly to:
 /// the VFS's alignment when `io` is a VFS and `direct_io` is not `off`, else
 /// 0, every read exact. The VFS decides per local file whether it is read
@@ -26,23 +44,25 @@ pub fn readAlignment(io: std.Io, direct_io: VFS.DirectIo) usize {
     return VFS.direct_io_alignment;
 }
 
-/// The most block sizes `Options.dma_block_sizes` holds; `Loader.init`
-/// refuses a longer `Loader.Options.dma_block_sizes`.
-pub const max_dma_block_sizes = 16;
-pub const DmaBlockSizes = stdx.BoundedArray(usize, max_dma_block_sizes);
-
-/// `Loader.Options` as `Loader.init` checked them, the checkpoint resolved
-/// to its VFS backend's read hints and the read width to its default. See
-/// `Loader.Options` for each field.
+/// `zml.io.Loader.Options` as `zml.io.Loader.init` checked them, the
+/// checkpoint resolved to its VFS backend's read hints and the read width to
+/// its default. See `zml.io.Loader.Options` for each field.
 pub const Options = struct {
     read_parallelism: usize,
     read_hints: VFS.ReadHints = .local,
-    dma_block_sizes: DmaBlockSizes = .init(&dma_calibration.default_block_sizes),
+    dma_block_size: ?usize = null,
     direct_io: VFS.DirectIo = .auto,
+
+    /// The blocks calibration may select: `dma_block_size`, else
+    /// `dma_calibration.default_block_sizes`.
+    pub fn dmaBlockSizes(self: *const Options) []const usize {
+        return if (self.dma_block_size) |*block_size| block_size[0..1] else &dma_calibration.default_block_sizes;
+    }
 };
 
 /// One destination, its caller-owned output and the source ranges that fill
-/// it, as the front end checked them (`checkParts`): backends trust them.
+/// it, as the front end checked them (`checkParts`, `Backend.stridedRead`):
+/// backends trust them.
 /// Everything a spec names (its parts, their dimensions, the sources, the
 /// output) stays alive until its await; backends borrow it.
 pub const LoadSpec = struct {
@@ -51,7 +71,8 @@ pub const LoadSpec = struct {
     /// replicated over every device (`Platform.placedShape`).
     shape: Shape,
     /// Where the bytes go, from the source's `TensorStore` binding. The
-    /// front end only submits kinds `supportsMemory` accepts.
+    /// front end only submits kinds `supportsMemory` accepts, and a host
+    /// kind only with contiguous parts (`Lattice.dims` empty).
     memory: Memory = .default,
     /// Written whole once the destination's buffers exist, and not touched
     /// before: a failure leaves it as it was or holding those buffers.
@@ -323,10 +344,12 @@ pub const Lattice = struct {
 /// `destination_bytes`: there is at least one, each is non-empty and inside
 /// its source and the destination, and they come in ascending destination
 /// order, each starting at or after the previous contiguous part's end or
-/// strided part's start. Strided parts must land in index order
-/// (`Lattice.dstOrdered`); interleaving ones are only checked against each
-/// other by the bytes they cover together, since only `Source` makes them,
-/// disjoint by construction.
+/// strided part's start. Each part's bytes end in their file at least
+/// `VFS.direct_io_alignment` below `maxInt(u64)`, so a read of them widened
+/// to the alignment does not overflow. Strided parts must land in index
+/// order (`Lattice.dstOrdered`); interleaving ones are only checked against
+/// each other by the bytes they cover together, since only `Source` makes
+/// them, disjoint by construction.
 pub fn checkParts(parts: []const LoadPart, destination_bytes: u64) bool {
     if (parts.len == 0) return false;
     var floor: u64 = 0;
@@ -336,8 +359,10 @@ pub fn checkParts(parts: []const LoadPart, destination_bytes: u64) bool {
         if (lattice.width == 0 or lattice.dims.len > max_part_dims or !lattice.dstOrdered()) return false;
         const spans = lattice.spans() orelse return false;
         const source_end = std.math.add(u64, lattice.src_offset, spans.src) catch return false;
+        const file_end = std.math.add(u64, part.source.offset, source_end) catch return false;
         const end = std.math.add(u64, lattice.dst_offset, spans.dst) catch return false;
-        if (source_end > part.source.byteSize() or end > destination_bytes or lattice.dst_offset < floor) return false;
+        if (source_end > part.source.byteSize() or file_end > std.math.maxInt(u64) - VFS.direct_io_alignment) return false;
+        if (end > destination_bytes or lattice.dst_offset < floor) return false;
         floor = if (lattice.dims.len == 0) end else lattice.dst_offset;
         covered +|= lattice.runs() * lattice.width;
     }
@@ -346,16 +371,13 @@ pub fn checkParts(parts: []const LoadPart, destination_bytes: u64) bool {
 
 /// Whether `platform` loads through the direct backend. Transfer-manager
 /// support and host pinning are independent. CPU implements byte-range
-/// transfers from ordinary pages but not DmaMap, so it can share coalescing
+/// transfers from ordinary pages but not DmaMap, so it shares coalescing
 /// and bounded blocks without DMA support. The whole-tensor buffered path
-/// lacked those benefits: on one B70, interleaved HF Qwen3.5-4B loads took
-/// 10.9/16.3 s direct versus 48.3/47.6 s buffered; coalescing reduced
-/// roughly 900 source calls to 278. Both coalescing and blind width growth
-/// changed, and network results varied between days. Furiosa stages in its
+/// has neither: on one B70, interleaved HF Qwen3.5-4B loads took 10.9 to
+/// 16.3 s direct against about 48 s buffered. Furiosa stages in its
 /// plugin's `.host_pinned` buffers (SDK dma-buf memory, which the SDK
-/// transfers without pinning pages per request). TPU symbols alone did not
-/// prove a working transfer implementation; TPU, neuron and metal keep the
-/// buffered path pending runtime checks.
+/// transfers without pinning pages per request). TPU, neuron and metal
+/// stay buffered until their transfer path is checked on hardware.
 pub fn loadsDirect(platform: *const Platform) bool {
     return switch (platform.target) {
         .cuda, .rocm, .oneapi, .cpu, .furiosa => true,
@@ -364,10 +386,9 @@ pub fn loadsDirect(platform: *const Platform) bool {
 }
 
 /// Whether the loader can deliver into `kind` on `platform`. The host
-/// kinds need the direct pipeline, as on master, where TPU, neuron and
-/// metal refused host-pinned delivery, and a pinned host memory space
-/// on every device. CPU takes the direct pipeline here, so it accepts them
-/// (its plugin resolves every kind to its one memory space).
+/// kinds need the direct pipeline and a pinned host memory space on every
+/// device. CPU loads through the direct backend, so it accepts them (its
+/// plugin resolves every kind to its one memory space).
 pub fn supportsMemory(platform: *const Platform, kind: Memory) bool {
     if (kind == .default) return true;
     if (!loadsDirect(platform)) return false;
@@ -376,6 +397,10 @@ pub fn supportsMemory(platform: *const Platform, kind: Memory) bool {
     }
     return true;
 }
+
+/// Bytes per device, by `platform.devices` index: `Platform.init` refuses
+/// more devices than it holds.
+pub const DeviceBytes = [Platform.MAX_NUM_DEVICES]u64;
 
 /// The transfer implementation selected for the platform (`loadsDirect`).
 pub const Backend = union(enum) {
@@ -394,15 +419,30 @@ pub const Backend = union(enum) {
             .{ .buffered = try buffered_loader.Loader.create(allocator, io, platform, opts) };
     }
 
-    /// Fails with what the backend detected, logged there (a plain
-    /// allocation failure is `OutOfMemory`, unlogged): a binding it cannot
-    /// assemble is `InvalidBinding`; the rest comes from the files, host
-    /// memory and PJRT.
+    /// Publishes `specs`, and completes one item of `progress` per spec.
+    /// Fails with what the backend detected in the files, host memory and
+    /// PJRT, logged there (a plain allocation failure is `OutOfMemory`,
+    /// unlogged).
     pub fn submit(self: Backend, specs: []const LoadSpec, progress: std.Progress.Node) !Submission {
         return switch (self) {
             inline else => |loader, tag| @unionInit(Submission, @tagName(tag), try loader.submit(specs, progress)),
         };
     }
+
+    /// `read`, the most source bytes one job of `part` may read, and `limit`,
+    /// the most one read takes: the front end refuses a part whose `read`
+    /// passes `limit`. Needs `checkParts`. The direct backend counts the
+    /// whole source range of a strided part whose source runs are not back
+    /// to back (`direct_loader.Loader.stridedRead`); the buffered backend
+    /// reads any part.
+    pub fn stridedRead(self: Backend, part: LoadPart) StridedRead {
+        return switch (self) {
+            .direct => |loader| loader.stridedRead(part),
+            .buffered => .{ .read = 0, .limit = std.math.maxInt(u64) },
+        };
+    }
+
+    pub const StridedRead = struct { read: u64, limit: u64 };
 
     /// Waits for and retires `submission`, which this backend published.
     /// Its batch is dangling afterwards.
@@ -483,15 +523,21 @@ test "copyRuns lands every run of a range where the cursor does" {
 test "checkParts refuses parts outside their source or destination, out of order or overlapping" {
     // A source of 16 bytes into a destination of 32.
     const source: safetensors.Tensor = .{ .file_uri = "memory", .name = "s", .shape = .init(.{16}, .u8), .offset = 0 };
+    // Sixteen bytes ending at the largest file offset a read widened to the
+    // alignment can reach, and one byte later.
+    const last: safetensors.Tensor = .{ .file_uri = "memory", .name = "s", .shape = .init(.{16}, .u8), .offset = std.math.maxInt(u64) - VFS.direct_io_alignment - 16 };
+    const past_last: safetensors.Tensor = .{ .file_uri = "memory", .name = "s", .shape = .init(.{16}, .u8), .offset = last.offset + 1 };
     // Runs of 4 bytes, every other 4 bytes of the destination.
     const every_other: []const Lattice.Dim = &.{.{ .count = 4, .src_stride = 4, .dst_stride = 8 }};
     const refused = [_][]const LoadPart{
         &.{},
         &.{.{ .source = &source, .lattice = .{ .width = 0 } }},
-        // Past the source, past the destination, and an overflow.
+        // Past the source, past the destination, an overflow, and past the
+        // largest file offset.
         &.{.{ .source = &source, .lattice = .{ .src_offset = 8, .width = 9 } }},
         &.{.{ .source = &source, .lattice = .{ .dst_offset = 24, .width = 9 } }},
         &.{.{ .source = &source, .lattice = .{ .src_offset = std.math.maxInt(u64), .width = 1 } }},
+        &.{.whole(&past_last)},
         // Overlapping, and descending.
         &.{ .{ .source = &source, .lattice = .{ .width = 8 } }, .{ .source = &source, .lattice = .{ .dst_offset = 4, .width = 8 } } },
         &.{ .{ .source = &source, .lattice = .{ .dst_offset = 8, .width = 4 } }, .{ .source = &source, .lattice = .{ .width = 4 } } },
@@ -515,6 +561,8 @@ test "checkParts refuses parts outside their source or destination, out of order
         &.{ .{ .source = &source, .lattice = .{ .width = 4, .dims = every_other } }, .{ .source = &source, .lattice = .{ .dst_offset = 4, .width = 4, .dims = every_other } } },
         // A contiguous part, then a strided one.
         &.{ .{ .source = &source, .lattice = .{ .width = 8 } }, .{ .source = &source, .lattice = .{ .dst_offset = 8, .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 8 }} } } },
+        // Ending at the largest file offset.
+        &.{.whole(&last)},
     };
     for (accepted) |parts| try std.testing.expect(checkParts(parts, 32));
 }

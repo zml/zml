@@ -143,21 +143,22 @@ pub fn main(init: std.process.Init) !void {
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
 
+            const defaults: zml.io.dma_calibration.Options = .{};
             const option_allocator = init.arena.allocator();
             const block_sizes = try envMibList(
                 option_allocator,
                 init.environ_map,
                 "ZML_DMA_BENCH_BLOCK_MIB",
-                &zml.io.dma_calibration.default_block_sizes,
+                defaults.block_sizes,
             );
-            const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
-            const block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", zml.io.dma_calibration.depth);
+            const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", @intCast(defaults.minimum_duration.toMilliseconds()));
+            const block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", defaults.block_parallelism);
             const block_size = try zml.io.dma_calibration.measure(allocator, io, platform, .{
                 .block_sizes = block_sizes,
                 .block_parallelism = block_parallelism,
                 .minimum_duration = .fromMilliseconds(std.math.cast(i64, window_ms) orelse return error.Overflow),
-                .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
-                .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
+                .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", defaults.minimum_transfers),
+                .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", defaults.block_selection_tolerance),
             });
             try stdout_writer.interface.print(
                 "dma_benchmark block_bytes={d} parallelism={d}\n",
@@ -192,12 +193,6 @@ pub fn main(init: std.process.Init) !void {
             const platform: *zml.Platform = try .auto(allocator, io, platform_options);
             defer platform.deinit(allocator, io);
 
-            const load_dma_block_sizes = try envMibList(
-                init.arena.allocator(),
-                init.environ_map,
-                "ZML_DMA_BENCH_BLOCK_MIB",
-                &zml.io.dma_calibration.default_block_sizes,
-            );
             const tensor_parallel: *const zml.Mesh = try platform.registerMesh(
                 "tp",
                 .mesh(.{ .model = .high_bandwidth }),
@@ -223,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
                 .checkpoint = path,
                 // Null takes the checkpoint's default width (16 locally, 32 remote).
                 .read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM"),
-                .dma_block_sizes = load_dma_block_sizes,
+                .dma_block_size = if (try envOptionalUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_MIB")) |mib| try std.math.mul(usize, mib, zml.MiB) else null,
                 .direct_io = std.meta.stringToEnum(zml.io.VFS.DirectIo, init.environ_map.get("ZML_DIRECT_IO") orelse "auto") orelse {
                     log.err("ZML_DIRECT_IO must be off, on or auto", .{});
                     return error.InvalidArgument;
@@ -232,8 +227,9 @@ pub fn main(init: std.process.Init) !void {
             });
             defer loader.deinit();
 
-            const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
-            var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{tensor_parallel} });
+            var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+            defer registry.deinit();
+            var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{tensor_parallel} });
             defer store.deinit();
 
             const pack_plan = try planPacks(init.arena.allocator(), platform, &store, pack_options);

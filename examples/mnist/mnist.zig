@@ -73,9 +73,10 @@ pub fn main(init: std.process.Init) !void {
     var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = model_path });
     defer loader.deinit();
 
-    // Read model shapes. The store owns the registry.
-    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
-    var store: zml.io.TensorStore = .init(allocator, registry, .{});
+    // Read model shapes.
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{});
     defer store.deinit();
 
     // Init model

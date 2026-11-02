@@ -1,4 +1,5 @@
-//! Generic buffer storage and conversion from tensor models to buffer models.
+//! Buffer trees for tensor models: `Bufferized`, `bufferize`,
+//! `pairBufferized` and `deinitBufferized`.
 
 const std = @import("std");
 
@@ -23,27 +24,27 @@ pub inline fn bufferize(allocator: std.mem.Allocator, model: anytype) !Bufferize
     return bufferized;
 }
 
-/// A tensor of a model and the buffer at its place in the model's buffers.
-pub const Pair = struct { tensor: *const Tensor, buffer: *Buffer };
+/// A tensor of a model, the buffer at its place in the model's buffers, and
+/// its field path from the root, as `.layers[1].ffn.weight`.
+pub const Pair = struct { tensor: *const Tensor, buffer: *Buffer, path: []const u8 };
 
 /// Pairs each tensor of the model `model` points to with the buffer at its
 /// place in `bufferized`, in the order `meta.visit` finds the tensors. The
-/// caller frees the pairs. The two trees must have the structure `bufferize`
-/// gives: the same union arms, the same optionals set, slices of the same
-/// lengths. At the first place they differ the walk stops and returns
-/// `error.Mismatch`, and `report` (a fixed writer, cut short when full) ends
-/// with the field path from the root, as `.layers[1].ffn`, and what differs
-/// there.
+/// pairs and their paths live in `arena`. The two trees must have the
+/// structure `bufferize` gives: the same union arms, the same optionals set,
+/// slices of the same lengths. `report`, an empty fixed writer, builds the
+/// paths and cuts them short when full. At the first place the trees differ
+/// the walk stops and returns `error.Mismatch`, and `report` ends with the
+/// path there and what differs.
 pub fn pairBufferized(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     model: anytype,
     bufferized: *Bufferized(@TypeOf(model.*)),
     report: *std.Io.Writer,
 ) error{ Mismatch, OutOfMemory }![]Pair {
-    var pairs: std.ArrayList(Pair) = try .initCapacity(allocator, meta.count(Tensor, model));
-    errdefer pairs.deinit(allocator);
-    try pairBufferizedInner(model, bufferized, report, &pairs);
-    return pairs.toOwnedSlice(allocator);
+    var pairs: std.ArrayList(Pair) = try .initCapacity(arena, meta.count(Tensor, model));
+    try pairBufferizedInner(arena, model, bufferized, report, &pairs);
+    return pairs.items;
 }
 
 /// The field of `Bufferized(Model)` that holds the struct `Model`'s field
@@ -164,28 +165,39 @@ pub fn deinitBufferized(allocator: std.mem.Allocator, value: anytype) void {
                 for (value.*) |*element| deinitBufferized(allocator, element);
                 allocator.free(value.*);
             },
-            else => unreachable,
+            else => @compileError("mem.deinitBufferized takes the buffers bufferize returns, not " ++ @typeName(T)),
         },
         .array => for (&value.*) |*element| deinitBufferized(allocator, element),
-        .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
-        else => unreachable,
+        // What `Bufferized` makes of a union arm or a whole tree without a tensor.
+        .void => {},
+        else => @compileError("mem.deinitBufferized takes the buffers bufferize returns, not " ++ @typeName(T)),
     }
 }
 
-/// `report.end` is restored after each part that pairs, so on a mismatch the
-/// report holds the path down to it.
-fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writer, pairs: *std.ArrayList(Pair)) error{Mismatch}!void {
+/// `report.end` is restored after each part that pairs, so at a tensor or a
+/// mismatch the report holds the path down to it.
+fn pairBufferizedInner(
+    arena: std.mem.Allocator,
+    model: anytype,
+    bufferized: anytype,
+    report: *std.Io.Writer,
+    pairs: *std.ArrayList(Pair),
+) error{ Mismatch, OutOfMemory }!void {
     const Model = @typeInfo(@TypeOf(model)).pointer.child;
     if (comptime !meta.Contains(Model, Tensor)) return;
-    // `bufferize` allocates every slice mutable, a `[]const` one included.
-    if (Model == Tensor) return pairs.appendAssumeCapacity(.{ .tensor = model, .buffer = @constCast(bufferized) });
+    if (Model == Tensor) return pairs.appendAssumeCapacity(.{
+        .tensor = model,
+        // `bufferize` allocates every slice mutable, a `[]const` one included.
+        .buffer = @constCast(bufferized),
+        .path = try arena.dupe(u8, report.buffered()),
+    });
 
     const depth = report.end;
     switch (@typeInfo(Model)) {
         .@"struct" => |info| inline for (info.field_names) |name| {
             if (comptime bufferizedField(Model, name)) |buffer_field| {
                 report.print(".{s}", .{name}) catch {};
-                try pairBufferizedInner(&@field(model, name), &@field(bufferized, buffer_field), report, pairs);
+                try pairBufferizedInner(arena, &@field(model, name), &@field(bufferized, buffer_field), report, pairs);
                 report.end = depth;
             }
         },
@@ -198,7 +210,7 @@ fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writ
             switch (model.*) {
                 inline else => |*payload, arm| {
                     report.print(".{s}", .{@tagName(arm)}) catch {};
-                    try pairBufferizedInner(payload, &@field(bufferized, @tagName(arm)), report, pairs);
+                    try pairBufferizedInner(arena, payload, &@field(bufferized, @tagName(arm)), report, pairs);
                     report.end = depth;
                 },
             }
@@ -208,7 +220,7 @@ fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writ
                 report.print(": {s} in the model, {s} in the buffers", .{ if (model.* == null) "null" else "set", if (bufferized.* == null) "null" else "set" }) catch {};
                 return error.Mismatch;
             }
-            if (model.*) |*payload| try pairBufferizedInner(payload, &bufferized.*.?, report, pairs);
+            if (model.*) |*payload| try pairBufferizedInner(arena, payload, &bufferized.*.?, report, pairs);
         },
         .pointer => |info| {
             if (info.size != .slice) @compileError("mem.pairBufferized: " ++ @typeName(Model) ++ " is not a slice");
@@ -218,13 +230,13 @@ fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writ
             }
             for (model.*, bufferized.*, 0..) |*element, *buffer, i| {
                 report.print("[{d}]", .{i}) catch {};
-                try pairBufferizedInner(element, buffer, report, pairs);
+                try pairBufferizedInner(arena, element, buffer, report, pairs);
                 report.end = depth;
             }
         },
         .array => for (model, bufferized, 0..) |*element, *buffer, i| {
             report.print("[{d}]", .{i}) catch {};
-            try pairBufferizedInner(element, buffer, report, pairs);
+            try pairBufferizedInner(arena, element, buffer, report, pairs);
             report.end = depth;
         },
         else => @compileError("mem.pairBufferized: cannot walk " ++ @typeName(Model)),
@@ -309,10 +321,11 @@ test "pairBufferized pairs tensors and buffers in visit order" {
     var bufferized = try bufferize(std.testing.allocator, &model);
     defer deinitBufferized(std.testing.allocator, &bufferized);
 
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     var report_buffer: [64]u8 = undefined;
     var report: std.Io.Writer = .fixed(&report_buffer);
-    const pairs = try pairBufferized(std.testing.allocator, &model, &bufferized, &report);
-    defer std.testing.allocator.free(pairs);
+    const pairs = try pairBufferized(arena.allocator(), &model, &bufferized, &report);
     try std.testing.expectEqual(0, report.end);
 
     const Visited = struct {
@@ -334,13 +347,23 @@ test "pairBufferized pairs tensors and buffers in visit order" {
             out.buffer_count += 1;
         }
     }.call, .{&visited});
-    try std.testing.expectEqual(7, pairs.len);
+    const paths = [_][]const u8{
+        ".ffns[0].dense.weights[0]",
+        ".ffns[0].dense.scale",
+        ".ffns[1].experts[0].weights[0]",
+        ".ffns[1].experts[1].weights[0]",
+        ".ffns[1].experts[1].weights[1]",
+        ".ffns[1].experts[1].scale",
+        ".head",
+    };
+    try std.testing.expectEqual(paths.len, pairs.len);
     try std.testing.expectEqual(pairs.len, visited.tensor_count);
     try std.testing.expectEqual(pairs.len, visited.buffer_count);
     // Not `expectEqualSlices`: printing a `*Buffer` reaches code a CPU test build lacks.
-    for (pairs, 0..) |pair, i| {
+    for (pairs, paths, 0..) |pair, path, i| {
         try std.testing.expect(pair.tensor == visited.tensors[i]);
         try std.testing.expect(pair.buffer == visited.buffers[i]);
+        try std.testing.expectEqualStrings(path, pair.path);
     }
 }
 
@@ -366,14 +389,15 @@ test "pairBufferized stops at the first place the trees differ and names it" {
             .report = ".ffns[0].dense.weights: a slice of 1 in the model, of 2 in the buffers",
         },
     };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
     for (cases) |case| {
         var ffns = case.ffns;
         const model: Model = .{ .ffns = &ffns, .head = undefined };
         var report_buffer: [128]u8 = undefined;
         var report: std.Io.Writer = .fixed(&report_buffer);
         // Not `expectError`: printing a `*Buffer` reaches code a CPU test build lacks.
-        if (pairBufferized(std.testing.allocator, &model, &bufferized, &report)) |pairs| {
-            std.testing.allocator.free(pairs);
+        if (pairBufferized(arena.allocator(), &model, &bufferized, &report)) |_| {
             return error.TestExpectedMismatch;
         } else |err| try std.testing.expectEqual(error.Mismatch, err);
         try std.testing.expectEqualStrings(case.report, report.buffered());

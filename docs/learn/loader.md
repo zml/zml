@@ -27,9 +27,10 @@ defer platform.deinit(allocator, io);
 var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = path });
 defer loader.deinit();
 
-// The checkpoint's headers. The store owns the registry from here on.
-const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
-var store: zml.io.TensorStore = .init(allocator, registry, .{});
+// The checkpoint's headers.
+var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+defer registry.deinit();
+var store: zml.io.TensorStore = .init(allocator, &registry, .{});
 defer store.deinit();
 
 const model: Model = .init(store.view()); // binds every tensor
@@ -67,7 +68,7 @@ views against device memory: give their size on one device,
 
 ```zig
 const tp = try platform.registerMesh("tp", .mesh(.{ .model = .high_bandwidth }));
-var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{tp} });
+var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{tp} });
 const view = store.view();
 const w = view.createTensor("w", .{ .out, .in }, .tp, .{ .out = .model });
 const b = view.createReplicatedTensor("b", .{.out});
@@ -138,12 +139,12 @@ const weight = Source.bindProgram(&.{ w.as(placed), s.as(scales) }, placed.withD
 `Source.Placed` and lands placed by its own shape, so every device reads
 only its slice; a whole checkpoint tensor, replicated, is
 `view.source(key, null).withPartitioning(.replicated, .{})`. `start`
-starts one compile, on a task of its own, for all the tensors of an equal
-program (same type, equal value) over the same placed shapes. `wait` lands
-the inputs in groups of at most `Loader.Options.program_group_bytes` of
-outputs (8 GiB), each once the devices have room for it, runs the programs
-on the calling task and frees the inputs. A program's output lands in
-default device memory: `setMemory` panics on it.
+starts one compile for all the tensors of an equal program (same type,
+equal value) over the same placed shapes. `wait` lands the inputs in groups
+of at most `Loader.Options.program_group_bytes` of outputs (8 GiB), each
+once the devices have room for it, runs the programs on the calling task
+and frees the inputs. A program's output lands in default device memory:
+`setMemory` panics on it.
 
 ## Lifetime and failure
 
@@ -151,7 +152,7 @@ default device memory: `setMemory` panics on it.
 | --- | --- | --- |
 | `Loader` | the platform; `io`, and the VFS behind it, through which it keeps its source files open | its `deinit` |
 | `Loader.start` | the store, the buffers and the progress node | `wait` or `cancel` returns |
-| `TensorStore` | the meshes; it owns the registry, the bindings, sources and programs | its `deinit` |
+| `TensorStore` | the meshes; it owns the registry's entries, the bindings, sources and programs | its `deinit` |
 | `View`, `Source`, `Source.Placed` | their store, which must not move | their last use |
 | `VFS.Remotes` | the VFS; it must not move | its `deinit`, once every file opened through it is closed |
 | Loaded buffers | the platform | `deinitBufferized` |
@@ -169,7 +170,7 @@ wait on one task: the backend reads and transfers concurrently.
 
 Every error of `start` or `wait` fails the loader: everything started is
 canceled, and every later call returns the first error. `cancel` gives up on
-what is started without running its programs; `deinit` cancels first.
+what is started without running its programs.
 Whatever failed, each buffer is empty or holds shards whose contents are
 unspecified: read none, and free the tree with `zml.mem.deinitBufferized`.
 That holds for the buffers `bufferize` made, which `start` empties again.
@@ -182,40 +183,11 @@ refuses; an error of the backend's set-up is returned by the first `start`.
 name, and that is where it is logged, once, at err, with what explains it;
 a plain allocation failure and `Canceled` are returned unlogged.
 
-A model whose bindings are wrong is `InvalidBinding`, whichever rule it
-breaks; the log names the tensor, the checkpoint key its source reads and
-the rule:
+A model whose bindings are wrong is `InvalidBinding`; the log names the
+tensor (for a program's output, the program), the key its source reads and
+the rule it breaks (`Loader.start`, `Loader.wait`).
 
-- buffers shaped unlike the model: another union arm, optional or slice
-  length (the log names the field path instead);
-- a tensor the store did not bind;
-- a source that reads no bytes, such as an empty checkpoint tensor (the log
-  names the tensor, not the key);
-- a source whose bytes differ from its tensor's;
-- a source the loader cannot assemble: a run that starts or ends inside a
-  byte (sub-byte dtypes; the log names the tensor and its source's shape,
-  not the key), strided parts into host memory, or a broadcast or transpose
-  whose source range does not fit one request (8 to 32 MiB);
-- a placement its mesh does not divide, or on devices the platform lacks;
-- a memory kind the platform cannot take;
-- a program that does not return its tensor's shape, placed alike.
-
-The errors a caller can act on:
-
-| Error | Meaning |
-| --- | --- |
-| `FileNotFound` | A checkpoint file is missing |
-| `AccessDenied`, `PermissionDenied` | A file is denied: `AccessDenied` locally, `PermissionDenied` remotely (on S3, a missing key without `s3:ListBucket` too) |
-| `UnexpectedEndOfFile` | A file ends inside a tensor: it changed after its header was read, or the tensor's shape needs more bytes than its `data_offsets` give |
-| `OutOfMemory` | Host memory the backend cannot allocate, pin or fit under its mapped ceiling, which the log explains; or a plain allocation that failed, unlogged |
-| `ResourceExhausted` | Device memory ran out, for a buffer or a program's run (from PJRT) |
-| `ConcurrencyUnavailable` | An `io` that cannot run the loader's tasks concurrently |
-| `Canceled` | The load was canceled |
-
-PJRT and compile errors pass through. A platform with more devices than ZML
-addresses (`Platform.MAX_NUM_DEVICES`) fails before the loader:
-`Platform.init` returns `InvalidDeviceCount`, logged. A remote failure other
-than a missing or denied object is logged by the VFS and surfaces as
-`Unexpected`. A truncated checkpoint fails before the loader:
-`TensorRegistry.fromPath` returns `InvalidSafetensorsHeader`, logged with
-the file.
+The other errors a caller can act on are listed in `Loader`'s doc comment:
+a missing or denied file, a file that ends inside a tensor, host or device
+memory that runs out, an `io` without concurrency, and `Canceled`. PJRT,
+compile and remote failures pass through as their source names them.

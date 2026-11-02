@@ -436,7 +436,8 @@ pub const Platform = struct {
     /// is released immediately; caching allocators retain their initialized
     /// pools for subsequent allocations. Calling this more than once is safe.
     /// Devices are warmed concurrently: a serial pass over eight GPUs costs
-    /// measurable milliseconds ahead of a load.
+    /// measurable milliseconds ahead of a load. A device whose task `io`
+    /// cannot spawn is warmed in place.
     pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) !void {
         const Worker = struct {
             platform: *const Platform,
@@ -460,13 +461,10 @@ pub const Platform = struct {
         };
         var first_error: stdx.FirstError(pjrt.ApiError) = .{};
         var group: std.Io.Group = .init;
-        // A failed spawn leaves the earlier tasks writing `first_error`.
-        errdefer group.cancel(io);
-        for (self.devices, 0..) |_, device_index| try group.concurrent(io, Worker.run, .{Worker{
-            .platform = self,
-            .device_index = device_index,
-            .first_error = &first_error,
-        }});
+        for (self.devices, 0..) |_, device_index| {
+            const worker: Worker = .{ .platform = self, .device_index = device_index, .first_error = &first_error };
+            group.concurrent(io, Worker.run, .{worker}) catch worker.run();
+        }
         try group.await(io);
         if (first_error.get()) |err| return err;
     }

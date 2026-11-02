@@ -90,9 +90,10 @@ pub fn main(init: std.process.Init) !void {
     var profiler = try platform.profiler(allocator, io, .{ .session_id = "mnist" });
     defer profiler.deinit();
 
-    // Read model shapes. The store owns the registry.
-    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
-    var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{dp_mp} });
+    // Read model shapes.
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{dp_mp} });
     defer store.deinit();
     const mnist_model: Mnist = .init(store.view());
 

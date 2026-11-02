@@ -1,15 +1,15 @@
 //! DMA sizing for the direct backend: the block size, decided once when the
-//! backend is created. It screens the blocks of
-//! `Loader.Options.dma_block_sizes` (2 to 32 MiB by default) on one
+//! backend is created. It screens `default_block_sizes` (2 to 32 MiB), or
+//! the one block `zml.io.Loader.Options.dma_block_size` gives, on one
 //! representative device, at `depth` transfers per device and over fixed
 //! windows, and keeps the smallest block within 8% of the measured peak;
 //! borderline candidates get longer, alternating confirmation windows. The
 //! ring it measures in stays mapped as the load's first pinned capacity.
-//! CPU returns `cpu_block_size` without measuring: its plugin's transfer is
-//! a memcpy, and a load takes the same time at every block size. The
-//! buffered backend has nothing to size. `measure` runs the same warm-up
-//! and screen without a loader, with every knob, for `examples/io`'s
-//! `dma-bench`.
+//! CPU returns the smallest candidate without measuring: its plugin's
+//! transfer is a memcpy, and a load takes the same time at every block
+//! size. The buffered backend has nothing to size. `measure` runs the same
+//! warm-up and screen without a loader, with every knob, for
+//! `examples/io`'s `dma-bench`.
 const std = @import("std");
 
 const pjrt = @import("pjrt");
@@ -24,21 +24,13 @@ const log = @import("log.zig").io;
 /// default `Options.block_parallelism`), and the direct backend's DMA
 /// budget is `depth` blocks per device, in bytes (`DevicePump.hasRoom` in
 /// direct_loader.zig). Eight repeatedly won or tied on MI300X; wider stages
-/// mostly increased callback latency and pinned memory. Adaptive DMA width
-/// added state with little load benefit, so source width is the only
-/// runtime search.
+/// mostly increased callback latency and pinned memory, and an adaptive DMA
+/// width added state with little load benefit. At 32, four GB300 loaded
+/// DeepSeek 9% faster for 2.5x the pinned memory.
 pub const depth: usize = 8;
 
-/// The block CPU loads with, unmeasured (`calibrate`).
-pub const cpu_block_size: usize = 4 * 1024 * 1024;
-
-/// Keep a block screen rather than adopting one accelerator's preferred size.
-/// Historical loads on one MI300X measured 23.84/24.90/25.43 GiB/s at
-/// 8/16/32 MiB; replicated Gemma (58.25 GiB logical) on eight MI300X took
-/// 10.694 s at 8 MiB versus 7.829 s at 16 MiB. One B70 instead favored the
-/// 8 MiB neighborhood; using the 16 MiB preference cost about 10.5% goodput.
-/// These older-plugin results motivate screening, not fixed performance
-/// targets.
+/// Screened, not fixed: eight MI300X loaded replicated Gemma in 7.83 s at
+/// 16 MiB against 10.69 s at 8, whereas one B70 lost 10.5% at 16 MiB.
 pub const default_block_sizes = [_]usize{
     2 * 1024 * 1024,
     4 * 1024 * 1024,
@@ -56,11 +48,10 @@ pub const Options = struct {
     block_parallelism: usize = depth,
     /// A screen window runs for at least this long and, unless the target is
     /// zero, until the representative device completes the transfer target.
-    /// Reducing 10 ms/128 transfers to 2 ms/32 shortened calibration with
-    /// eight MI300X from 4.834 to 0.956 s while still selecting 16 MiB and
-    /// width eight. Short screens sometimes selected the wrong block under
-    /// noise, hence the longer borderline confirmation windows
-    /// (`confirmation_duration`).
+    /// On eight MI300X, 2 ms/32-transfer windows calibrate in 0.96 s against
+    /// 4.83 s at 10 ms/128, selecting the same block. Short screens sometimes
+    /// selected the wrong block under noise, hence the longer borderline
+    /// confirmation windows (`confirmation_duration`).
     minimum_duration: std.Io.Duration = .fromMilliseconds(2),
     minimum_transfers: u64 = 32,
     /// Prefer the smallest block within this tolerance of the measured peak
@@ -82,7 +73,7 @@ const confirmation_margin: f64 = 0.02;
 /// Measures as the direct loader's creation does, without a loader and with
 /// every knob of `opts`, and returns the block it selects: warms the device
 /// allocators, then screens the blocks in a workspace of its own, released
-/// before it returns. CPU returns `cpu_block_size` without measuring; a
+/// before it returns. CPU returns the smallest block without measuring; a
 /// platform that loads through the buffered backend (`backend.loadsDirect`)
 /// returns `UnsupportedPlatform`. A knob out of range is `InvalidOptions`,
 /// logged. For `examples/io`'s `dma-bench`.
@@ -98,9 +89,9 @@ pub fn measure(allocator: std.mem.Allocator, io: std.Io, platform: *const Platfo
     return calibrate(&workspace, platform, opts);
 }
 
-/// A block is at most the largest source request, the bound `Loader.init`
-/// puts on its own block sizes, so every candidate's ring of
-/// `block_parallelism` blocks fits the workspace's mapped ceiling.
+/// A block is at most the largest source request, the bound
+/// `zml.io.Loader.init` puts on its own block sizes, so every candidate's
+/// ring of `block_parallelism` blocks fits the workspace's mapped ceiling.
 fn validate(opts: Options) error{InvalidOptions}!void {
     comptime std.debug.assert(backend.max_read_request_size * max_block_parallelism <= host_memory.Workspace.mapped_bytes_ceiling);
     if (opts.block_parallelism == 0 or opts.block_parallelism > max_block_parallelism) {
@@ -129,26 +120,23 @@ fn validate(opts: Options) error{InvalidOptions}!void {
 }
 
 /// Measures one representative device into the direct loader's workspace
-/// and returns the block it selects; CPU returns `cpu_block_size` without
+/// and returns the block it selects; CPU returns the smallest without
 /// measuring. On a platform mixing device kinds, device 0's block serves
 /// every device: it is a tuning choice, valid for all of them. `opts` were
-/// checked (`validate`, or `Loader.init` for the loader's block sizes). The
-/// rate the `dma_bench` line logs is that one device's synthetic H2D rate,
-/// not the platform's nor a prediction of a checkpoint's load speed.
+/// checked (`validate`, or `zml.io.Loader.init` for the loader's block
+/// sizes). The rate the `dma_bench` line logs is that one device's
+/// synthetic H2D rate, not the platform's nor a prediction of a
+/// checkpoint's load speed.
 pub fn calibrate(
     workspace: *host_memory.Workspace,
     platform: *const Platform,
     opts: Options,
 ) !usize {
-    // Nothing to measure on CPU: the plugin's `transferData` is a memcpy on
-    // the submitting thread. With four PJRT CPU devices, warm sharded Llama took
-    // 1.55-1.60 s at 2, 8 and 16 MiB blocks, so the default stands and the
-    // loader grows its own arenas. Calibration spent 607 ms measuring
-    // 102 GiB/s into a reused ring; the load instead first-touched fresh
-    // device buffers in 4 KiB pages (3.94M minor faults for 14.96 GiB).
-    // The synthetic bandwidth was not the load's bottleneck; other
-    // page-size/THP configurations were not measured.
-    if (platform.target == .cpu) return cpu_block_size;
+    // Every candidate loads alike on CPU: four PJRT CPU devices loaded warm
+    // sharded Llama in 1.55-1.60 s at 2, 8 and 16 MiB, so the smallest,
+    // which maps the least, is taken unmeasured and the loader grows its
+    // own arenas.
+    if (platform.target == .cpu) return std.mem.min(usize, opts.block_sizes);
 
     const allocator = workspace.allocator;
     const io = workspace.io;
@@ -171,15 +159,15 @@ pub fn calibrate(
         candidate.* = .{ .block_size = block_size, .buffer_offset = index * opts.block_parallelism };
     }
     try measureAllCandidates(&session, opts, candidates, calibration_source);
-    const winner = try selectCandidate(&session, opts, candidates, calibration_source);
+    const winner = candidates[try selectCandidate(&session, opts, candidates, calibration_source)];
 
-    log.debug("dma_bench version=13 platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} duration={f} retained_mapped_bytes={d}", .{
+    log.debug("dma_bench platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} duration={f} retained_mapped_bytes={d}", .{
         @tagName(platform.target),
         platform.devices.len,
         platform.devices[0].kind(),
         winner.block_size,
         opts.block_parallelism,
-        winner.metrics.bytesPerSecond() / (1024 * 1024 * 1024),
+        winner.median().bytesPerSecond() / (1024 * 1024 * 1024),
         start.durationTo(.now(io, .awake)),
         workspace.mappedBytes(),
     });
@@ -194,11 +182,10 @@ fn measureAllCandidates(
     candidates: []Candidate,
     source: []const u8,
 ) !void {
-    for (0..sample_count) |start_offset| {
+    for (0..sample_count) |round| {
         for (0..candidates.len) |i| {
-            const index = (i + start_offset) % candidates.len;
-            const candidate = &candidates[index];
-            const metrics = try runWindow(
+            const candidate = &candidates[(i + round) % candidates.len];
+            candidate.metrics[round] = try runWindow(
                 session.io,
                 session,
                 candidate,
@@ -206,25 +193,19 @@ fn measureAllCandidates(
                 opts.minimum_duration,
                 opts.minimum_transfers,
             );
-            candidate.appendMetric(metrics);
         }
     }
 }
 
+/// Returns the index of the selected candidate (`pick`).
 fn selectCandidate(
     session: *Session,
     opts: Options,
     candidates: []Candidate,
     source: []const u8,
-) !struct {
-    block_size: usize,
-    metrics: Measurement,
-} {
+) !usize {
     const ratios = try session.allocator.alloc(f64, candidates.len);
     defer session.allocator.free(ratios);
-    const confirmed_metrics = try session.allocator.alloc(?Measurement, candidates.len);
-    defer session.allocator.free(confirmed_metrics);
-    @memset(confirmed_metrics, null);
 
     // Compute peak_rate and ratios for all candidates.
     var peak_index: usize = 0;
@@ -240,7 +221,7 @@ fn selectCandidate(
         ratio.* = if (peak_rate == 0) 0 else candidate.median().bytesPerSecond() / peak_rate;
     }
 
-    // Confirm all candidates again against peak with a new run.
+    // A borderline candidate's ratio is its confirmation's against the peak.
     for (candidates, 0..) |_, candidate_index| {
         if (isCloseToPeak(
             candidates,
@@ -248,30 +229,32 @@ fn selectCandidate(
             peak_index,
             opts.block_selection_tolerance,
         )) {
-            const confirmation = try confirmCandidateAgainstPeak(
+            ratios[candidate_index] = try confirmCandidateAgainstPeak(
                 session,
                 &candidates[candidate_index],
                 &candidates[peak_index],
                 source,
             );
-            ratios[candidate_index] = confirmation.ratio;
-            confirmed_metrics[candidate_index] = confirmation.metrics;
         }
     }
+    return pick(candidates, ratios, opts.block_selection_tolerance);
+}
 
-    // Take the candidate with the highest throughput, in case of ties use the smallest block size.
-    var maximum_ratio: f64 = 1;
-    for (ratios) |ratio| maximum_ratio = @max(maximum_ratio, ratio);
-    const floor = maximum_ratio * (1.0 - opts.block_selection_tolerance);
-    var selected_index = peak_index;
+/// The smallest block whose ratio is within `tolerance` of the best ratio,
+/// screened or confirmed. A confirmation can rate a block above the screen's
+/// peak, so the best ratio may belong to a larger block.
+fn pick(candidates: []const Candidate, ratios: []const f64, tolerance: f64) usize {
+    var best_index: usize = 0;
+    for (ratios, 0..) |ratio, index| {
+        if (ratio > ratios[best_index]) best_index = index;
+    }
+    const floor = ratios[best_index] * (1.0 - tolerance);
+    var selected_index = best_index;
     for (candidates, ratios, 0..) |candidate, ratio, index| {
         if (ratio >= floor and candidate.block_size < candidates[selected_index].block_size)
             selected_index = index;
     }
-    return .{
-        .block_size = candidates[selected_index].block_size,
-        .metrics = confirmed_metrics[selected_index] orelse candidates[selected_index].median(),
-    };
+    return selected_index;
 }
 
 fn isCloseToPeak(
@@ -283,15 +266,13 @@ fn isCloseToPeak(
     if (candidate_index == peak_index) return false;
     const candidate = candidates[candidate_index];
     const peak = candidates[peak_index];
-    std.debug.assert(candidate.metrics_len == peak.metrics_len);
 
     // Whether the candidate is near-peak in one round but fails in others.
     var qualified_once = false;
     var rejected_once = false;
-    for (candidate.metricSlice(), 0..) |metric, round| {
+    for (candidate.metrics, 0..) |metric, round| {
         var round_peak_rate: f64 = 0;
         for (candidates) |round_candidate| {
-            std.debug.assert(round_candidate.metrics_len == candidate.metrics_len);
             round_peak_rate = @max(round_peak_rate, round_candidate.metrics[round].bytesPerSecond());
         }
         const ratio = if (round_peak_rate == 0) 0 else metric.bytesPerSecond() / round_peak_rate;
@@ -302,73 +283,44 @@ fn isCloseToPeak(
     }
     if (qualified_once and rejected_once) return true;
 
-    // Whether the candiate's ratio is close enough overall.
+    // Whether the candidate's ratio is close enough overall.
     const candidate_rate = candidate.median().bytesPerSecond();
     const peak_rate = peak.median().bytesPerSecond();
     const ratio = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
     return @abs(ratio - (1.0 - tolerance)) <= confirmation_margin;
 }
 
+/// The median, over `sample_count` paired windows, of `candidate`'s rate
+/// over `peak`'s.
 fn confirmCandidateAgainstPeak(
     session: *Session,
     candidate: *Candidate,
     peak: *Candidate,
     source: []const u8,
-) !struct { ratio: f64, metrics: Measurement } {
-    var candidate_runs: [sample_count]Measurement = undefined;
-    var baseline_runs: [sample_count]Measurement = undefined;
-    for (0..sample_count) |repeat| {
+) !f64 {
+    var ratios: [sample_count]f64 = undefined;
+    for (&ratios, 0..) |*ratio, repeat| {
         const order = if (repeat % 2 == 0)
             [_]*Candidate{ candidate, peak }
         else
             [_]*Candidate{ peak, candidate };
+        var candidate_rate: f64 = undefined;
+        var peak_rate: f64 = undefined;
         for (order) |measured| {
-            const metrics = try runWindow(
+            const rate = (try runWindow(
                 session.io,
                 session,
                 measured,
                 source,
                 confirmation_duration,
                 confirmation_minimum_transfers,
-            );
-            if (measured == candidate)
-                candidate_runs[repeat] = metrics
-            else
-                baseline_runs[repeat] = metrics;
+            )).bytesPerSecond();
+            if (measured == candidate) candidate_rate = rate else peak_rate = rate;
         }
+        ratio.* = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
     }
-    const index = medianThroughputRatioIndex(
-        &candidate_runs,
-        &baseline_runs,
-    );
-    const metrics = candidate_runs[index];
-    const baseline_rate = baseline_runs[index].bytesPerSecond();
-    return .{
-        .ratio = if (baseline_rate == 0) 0 else metrics.bytesPerSecond() / baseline_rate,
-        .metrics = metrics,
-    };
-}
-
-fn medianThroughputRatioIndex(
-    candidates: []const Measurement,
-    baselines: []const Measurement,
-) usize {
-    var ordered_indices: [sample_count]usize = undefined;
-    for (&ordered_indices, 0..) |*index, i| index.* = i;
-    const Context = struct {
-        candidates: []const Measurement,
-        baselines: []const Measurement,
-    };
-    std.mem.sort(usize, &ordered_indices, Context{ .candidates = candidates, .baselines = baselines }, struct {
-        fn lessThan(context: Context, lhs: usize, rhs: usize) bool {
-            const lhs_baseline = context.baselines[lhs].bytesPerSecond();
-            const rhs_baseline = context.baselines[rhs].bytesPerSecond();
-            const lhs_ratio = if (lhs_baseline == 0) 0 else context.candidates[lhs].bytesPerSecond() / lhs_baseline;
-            const rhs_ratio = if (rhs_baseline == 0) 0 else context.candidates[rhs].bytesPerSecond() / rhs_baseline;
-            return lhs_ratio < rhs_ratio;
-        }
-    }.lessThan);
-    return ordered_indices[ordered_indices.len / 2];
+    std.mem.sort(f64, &ratios, {}, std.sort.asc(f64));
+    return ratios[ratios.len / 2];
 }
 
 /// Runs one window of `candidate`'s transfers, `session.parallelism` at a
@@ -456,29 +408,17 @@ const Candidate = struct {
     /// Slots warmed so far (`Session.warmup`).
     warmed_buffers: usize = 0,
 
+    /// One window per screen round (`measureAllCandidates`).
     metrics: [sample_count]Measurement = undefined,
-    metrics_len: usize = 0,
-
-    fn appendMetric(self: *Candidate, metric: Measurement) void {
-        std.debug.assert(self.metrics_len < self.metrics.len);
-        self.metrics[self.metrics_len] = metric;
-        self.metrics_len += 1;
-    }
-
-    fn metricSlice(self: *const Candidate) []const Measurement {
-        return self.metrics[0..self.metrics_len];
-    }
 
     fn median(self: Candidate) Measurement {
-        std.debug.assert(self.metrics_len > 0);
-        var scratch = self.metrics;
-        const populated = scratch[0..self.metrics_len];
-        std.mem.sort(Measurement, populated, {}, struct {
+        var sorted = self.metrics;
+        std.mem.sort(Measurement, &sorted, {}, struct {
             fn lessThan(_: void, lhs: Measurement, rhs: Measurement) bool {
                 return lhs.bytesPerSecond() < rhs.bytesPerSecond();
             }
         }.lessThan);
-        return populated[populated.len / 2];
+        return sorted[sorted.len / 2];
     }
 
     /// The ring's bytes that `slot` transfers.
@@ -615,28 +555,19 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
         .{ .block_size = 4, .buffer_offset = undefined },
         .{ .block_size = 8, .buffer_offset = undefined },
     };
-    const rates = [_][3]u64{
+    const rates = [_][sample_count]u64{
         .{ 60, 10, 62 },
         .{ 98, 99, 97 },
         .{ 100, 101, 99 },
     };
     for (&candidates, rates) |*candidate, candidate_rates| {
-        for (candidate_rates) |rate| {
-            candidate.appendMetric(.{
-                .bytes = rate,
-                .transfers = 1,
-                .elapsed = .fromSeconds(1),
-            });
+        for (&candidate.metrics, candidate_rates) |*metric, rate| {
+            metric.* = .{ .bytes = rate, .transfers = 1, .elapsed = .fromSeconds(1) };
         }
     }
-    const decision = try selectCandidate(
-        &session,
-        opts,
-        &candidates,
-        &.{},
-    );
-    try std.testing.expectEqual(@as(usize, 4), decision.block_size);
-    try std.testing.expectEqual(@as(f64, 98), decision.metrics.bytesPerSecond());
+    const winner = candidates[try selectCandidate(&session, opts, &candidates, &.{})];
+    try std.testing.expectEqual(@as(usize, 4), winner.block_size);
+    try std.testing.expectEqual(@as(f64, 98), winner.median().bytesPerSecond());
 
     // A dip between two near-peak values must not end the scan early.
     var bimodal = [_]Candidate{
@@ -647,20 +578,20 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
     };
     const bimodal_rates = [_]u64{ 80, 100, 70, 99 };
     for (&bimodal, bimodal_rates) |*candidate, rate| {
-        candidate.appendMetric(.{
-            .bytes = rate,
-            .transfers = 1,
-            .elapsed = .fromSeconds(1),
-        });
+        candidate.metrics = @splat(.{ .bytes = rate, .transfers = 1, .elapsed = .fromSeconds(1) });
     }
-    const bimodal_decision = try selectCandidate(
-        &session,
-        opts,
-        &bimodal,
-        &.{},
-    );
-    try std.testing.expectEqual(@as(usize, 4), bimodal_decision.block_size);
-    try std.testing.expectEqual(@as(f64, 100), bimodal_decision.metrics.bytesPerSecond());
+    try std.testing.expectEqual(@as(usize, 4), bimodal[try selectCandidate(&session, opts, &bimodal, &.{})].block_size);
+}
+
+test "DMA benchmark picks the smallest block within the tolerance of the best ratio" {
+    const candidates = [_]Candidate{
+        .{ .block_size = 16 * 1024 * 1024, .buffer_offset = undefined },
+        .{ .block_size = 32 * 1024 * 1024, .buffer_offset = undefined },
+    };
+    // 16 MiB is the screen's peak; a confirmation rates 32 MiB more than the
+    // tolerance above it, then within it.
+    try std.testing.expectEqual(1, pick(&candidates, &.{ 1.0, 1.10 }, 0.08));
+    try std.testing.expectEqual(0, pick(&candidates, &.{ 1.0, 1.05 }, 0.08));
 }
 
 test "DMA benchmark confirms a candidate when round qualification disagrees" {
@@ -668,16 +599,14 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
         .{ .block_size = 4, .buffer_offset = undefined },
         .{ .block_size = 8, .buffer_offset = undefined },
     };
-    const rates = [_][3]u64{
+    const rates = [_][sample_count]u64{
         .{ 96, 80, 97 },
         .{ 100, 100, 100 },
     };
     for (&candidates, rates) |*candidate, candidate_rates| {
-        for (candidate_rates) |rate| candidate.appendMetric(.{
-            .bytes = rate,
-            .transfers = 1,
-            .elapsed = .fromSeconds(1),
-        });
+        for (&candidate.metrics, candidate_rates) |*metric, rate| {
+            metric.* = .{ .bytes = rate, .transfers = 1, .elapsed = .fromSeconds(1) };
+        }
     }
     try std.testing.expect(isCloseToPeak(
         &candidates,
@@ -706,13 +635,13 @@ test "measure refuses a knob out of range before it touches the platform" {
     }
 }
 
-test "measure needs no loader and selects the CPU block" {
+test "measure needs no loader and selects the smallest block on CPU" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
         return error.SkipZigTest;
     defer platform.deinit(allocator, io);
-    try std.testing.expectEqual(cpu_block_size, try measure(allocator, io, platform, .{}));
+    try std.testing.expectEqual(4 << 20, try measure(allocator, io, platform, .{ .block_sizes = &.{ 8 << 20, 4 << 20 } }));
 }
 
 test "DMA benchmark shares one manager across candidate sizes and slots" {

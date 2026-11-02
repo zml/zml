@@ -1,7 +1,7 @@
 //! Loader-owned host arenas, cut into blocks once. The direct backend owns
 //! its workspace for its whole life: calibration maps its ring there, the
-//! backend grows the set to what its load holds and carves it, and
-//! `Loader.deinit` releases every arena. Callers never supply a workspace, a
+//! backend grows the set to what its load holds and carves it, and its
+//! `destroy` releases every arena. Callers never supply a workspace, a
 //! budget, a NUMA policy or a calibration result.
 //!
 //! The memory depends on the target: CUDA and oneAPI take page-backed arenas
@@ -43,7 +43,7 @@ const Arena = struct {
 
 /// How arenas are mapped and unmapped; each strategy keeps only the state
 /// it uses.
-const Backend = union(enum) {
+const ArenaKind = union(enum) {
     /// With eight MI300X visible, hipHostRegister took ~6.3 s for 1 GiB
     /// versus 0.6-0.7 s through hipHostMalloc. KFD/IOMMU registration maps
     /// pages to every GPU; huge-page advice helped only ~9%, and touching
@@ -58,11 +58,9 @@ const Backend = union(enum) {
     /// there is one (`dma_map` in the arena log) and left pageable for CPU
     /// transfers when not (`pageable`), with huge-page alignment and advice.
     /// Registration only avoids staging if the plugin recognizes the range as
-    /// pinned, including subranges. Older oneAPI plugins treated SYCL imports
-    /// as unknown; checking both ends against the same imported base removed
-    /// the userspace copy. On one B70, DMA caps two/eight then measured
-    /// 26.86/26.90 GiB/s instead of 21.17/11.01. More DMA credits had amplified
-    /// staging, not improved DMA.
+    /// pinned, including subranges. The oneAPI plugin must implement
+    /// IsHostMemoryPinned for SYCL imports: without it, one B70 staged
+    /// transfers at 11.01 GiB/s instead of 26.90 (eight DMA caps).
     pages: struct {
         platform: ?*const Platform,
         /// Zero leaves placement to the kernel. Automatic placement can
@@ -77,7 +75,7 @@ const Backend = union(enum) {
         allocator: Allocator,
         io: std.Io,
         platform: *const Platform,
-    ) Allocator.Error!Backend {
+    ) Allocator.Error!ArenaKind {
         // Interleave memory-bearing nodes, not just device-associated nodes.
         // On four GB300, per-device local H2D was ~176-184 GiB/s versus ~110
         // remote, yet strict locality could put page-cache copies and DMA on
@@ -118,7 +116,7 @@ const Backend = union(enum) {
     }
 
     /// Call after every arena is unmapped.
-    fn deinit(self: *Backend, allocator: Allocator) void {
+    fn deinit(self: *ArenaKind, allocator: Allocator) void {
         switch (self.*) {
             .pjrt_host => |*host| host.host_nodes.deinit(allocator),
             .pages => {},
@@ -126,7 +124,7 @@ const Backend = union(enum) {
     }
 
     /// Maps one arena of `bytes`.
-    fn map(self: *Backend, allocator: Allocator, io: std.Io, bytes: usize) Allocator.Error!Arena {
+    fn map(self: *ArenaKind, allocator: Allocator, io: std.Io, bytes: usize) Allocator.Error!Arena {
         const started: std.Io.Timestamp = .now(io, .awake);
         switch (self.*) {
             .pjrt_host => |*host| {
@@ -135,8 +133,8 @@ const Backend = union(enum) {
                 // all arenas came from device zero (1.27-1.45 s). Device rotation
                 // left a 61/39 byte split and took 0.98-1.33 s; byte-balanced
                 // allocation recovered 0.84-1.05 s over six runs, with 1.52 GiB
-                // mapped versus 2.03 GiB for the former per-node pools. Host
-                // contention affected both arms.
+                // mapped versus 2.03 GiB for per-node pools. Host contention
+                // affected both arms.
                 var host_node = &host.host_nodes.items[0];
                 for (host.host_nodes.items[1..]) |*candidate| {
                     if (candidate.total_allocated_bytes < host_node.total_allocated_bytes) host_node = candidate;
@@ -147,11 +145,8 @@ const Backend = union(enum) {
                 // allocation-owned memory breaks the eventual hipHostFree. The
                 // buffer and its external reference both live until `unmap`,
                 // after all reads and DMA finish.
-                // The ROCm plugin must also recognize pinned ranges. On one
-                // MI300X, a recognized pinned-host path measured 46.6 GiB/s
-                // while a stale plugin allocated just as quickly but staged
-                // transfers at 6.5 GiB/s. The later apparent degradation was
-                // traced to missing IsHostMemoryPinned support, not the hardware.
+                // The ROCm plugin must implement IsHostMemoryPinned: without
+                // it, one MI300X staged transfers at 6.5 GiB/s instead of 46.6.
                 const api = host.platform.pjrt_api;
                 const memory = host.platform.devices[device_index].memory(.host_pinned).?;
                 const buffer = host.platform.pjrt_client.createUninitializedBuffer(api, .{
@@ -182,7 +177,7 @@ const Backend = union(enum) {
                 });
                 // Counted once mapped: the workspace retains every mapped arena.
                 host_node.total_allocated_bytes += bytes;
-                log.info("DMA arena kind=pjrt_host device={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
+                log.debug("DMA arena kind=pjrt_host device={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
                     device_index,
                     @intFromPtr(ptr),
                     bytes,
@@ -205,7 +200,7 @@ const Backend = union(enum) {
                     return error.OutOfMemory;
                 };
                 const finished: std.Io.Timestamp = .now(io, .awake);
-                log.info("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
+                log.debug("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
                     if (pages.platform != null) "dma_map" else "pageable",
                     if (pages.numa_mask == 0) "unplaced" else "interleave",
                     pages.numa_mask,
@@ -218,7 +213,7 @@ const Backend = union(enum) {
         }
     }
 
-    fn unmap(self: *const Backend, allocator: Allocator, arena: Arena) void {
+    fn unmap(self: *const ArenaKind, allocator: Allocator, arena: Arena) void {
         switch (self.*) {
             .pjrt_host => |host| {
                 const api = host.platform.pjrt_api;
@@ -305,11 +300,11 @@ pub const Workspace = struct {
 
     allocator: Allocator,
     io: std.Io,
-    backend: Backend,
+    kind: ArenaKind,
     /// Every arena mapped, in mapping order, until `deinit`.
     arenas: std.ArrayList(Arena) = .empty,
-    /// Set by `carve`: nothing maps after it.
-    carved: bool = false,
+    /// The arenas cut into blocks, set by `carve`: nothing maps after it.
+    blocks: ?[]Block = null,
 
     pub fn init(
         allocator: Allocator,
@@ -319,7 +314,7 @@ pub const Workspace = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .backend = try .init(allocator, io, platform),
+            .kind = try .init(allocator, io, platform),
         };
     }
 
@@ -327,9 +322,10 @@ pub const Workspace = struct {
         const io = self.io;
         const mapped_bytes = self.mappedBytes();
         const started: std.Io.Timestamp = .now(io, .awake);
-        for (self.arenas.items) |arena| self.backend.unmap(self.allocator, arena);
+        if (self.blocks) |blocks| self.allocator.free(blocks);
+        for (self.arenas.items) |arena| self.kind.unmap(self.allocator, arena);
         self.arenas.deinit(self.allocator);
-        self.backend.deinit(self.allocator);
+        self.kind.deinit(self.allocator);
         const elapsed_ns = elapsedNanoseconds(started, .now(io, .awake));
         log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
             mapped_bytes,
@@ -347,7 +343,7 @@ pub const Workspace = struct {
 
     /// Retains one new arena within the mapped-byte ceiling, before `carve`.
     pub fn allocate(self: *Workspace, bytes: usize) Allocator.Error![]u8 {
-        std.debug.assert(!self.carved);
+        std.debug.assert(self.blocks == null);
         const mapped = self.mappedBytes();
         if (bytes > mapped_bytes_ceiling - mapped) {
             log.err("host memory allocation exceeds mapped ceiling: requested={Bi:.2}, mapped={Bi:.2}, ceiling={Bi:.2}: OutOfMemory", .{ bytes, mapped, mapped_bytes_ceiling });
@@ -356,7 +352,7 @@ pub const Workspace = struct {
         // Reserved first, so a mapped arena is always retained: the ROCm
         // balancer counts the bytes it maps.
         try self.arenas.ensureUnusedCapacity(self.allocator, 1);
-        const arena = try self.backend.map(self.allocator, self.io, bytes);
+        const arena = try self.kind.map(self.allocator, self.io, bytes);
         self.arenas.appendAssumeCapacity(arena);
         return arena.bytes;
     }
@@ -375,10 +371,9 @@ pub const Workspace = struct {
     /// smaller than one block stay mapped and unused. Blocks are not split
     /// per NUMA node: strict per-node pools duplicated source reserves and
     /// constrained reads to the smallest node; placement belongs to arena
-    /// allocation. The caller owns the list, allocated with the workspace's
-    /// allocator; the workspace owns the memory.
-    pub fn carve(self: *Workspace, block_size: usize, first_blocks: usize, total_blocks: usize) Allocator.Error![]Block {
-        std.debug.assert(!self.carved and block_size != 0);
+    /// allocation. The workspace owns the list and the memory.
+    pub fn carve(self: *Workspace, block_size: usize, first_blocks: usize, total_blocks: usize) Allocator.Error![]const Block {
+        std.debug.assert(self.blocks == null and block_size != 0);
         try self.growToBlocks(block_size, first_blocks);
         try self.growToBlocks(block_size, total_blocks);
         const blocks = try self.allocator.alloc(Block, self.usableBlocks(block_size));
@@ -390,7 +385,7 @@ pub const Workspace = struct {
             }
         }
         std.debug.assert(next == blocks.len);
-        self.carved = true;
+        self.blocks = blocks;
         return blocks;
     }
 
@@ -404,25 +399,16 @@ pub const Workspace = struct {
     /// Maps the blocks missing below `target_blocks` as one arena. Requires a
     /// nonzero block_size; the workspace has one coordinating owner.
     fn growToBlocks(self: *Workspace, block_size: usize, target_blocks: usize) Allocator.Error!void {
-        const usable_blocks = self.usableBlocks(block_size);
-        const missing_blocks = target_blocks -| usable_blocks;
-        if (missing_blocks == 0) return;
-        const mapped = self.mappedBytes();
-        if (missing_blocks > (mapped_bytes_ceiling - mapped) / block_size) {
-            log.err("host memory growth exceeds mapped ceiling: block_size={Bi:.2}, target_blocks={d}, usable_blocks={d}, mapped={Bi:.2}, ceiling={Bi:.2}: OutOfMemory", .{ block_size, target_blocks, usable_blocks, mapped, mapped_bytes_ceiling });
-            return error.OutOfMemory;
-        }
-
-        _ = try self.allocate(missing_blocks * block_size);
+        const missing_blocks = target_blocks -| self.usableBlocks(block_size);
+        if (missing_blocks != 0) _ = try self.allocate(missing_blocks * block_size);
     }
 
     /// Creates ordinary allocator-backed arenas for tests without a PJRT platform.
-    pub fn initForTesting(allocator: Allocator, io: std.Io) !Workspace {
-        if (!builtin.is_test) @compileError("initForTesting is only available in tests");
+    fn initForTesting(allocator: Allocator, io: std.Io) Workspace {
         return .{
             .allocator = allocator,
             .io = io,
-            .backend = .{ .pages = .{ .platform = null, .numa_mask = 0 } },
+            .kind = .{ .pages = .{ .platform = null, .numa_mask = 0 } },
         };
     }
 };
@@ -506,7 +492,7 @@ test "parseNodeList accepts kernel node lists" {
 
 test "Workspace capacity counts retained arenas and the room under the ceiling, past which growth refuses" {
     const allocator = std.testing.allocator;
-    var workspace = try Workspace.initForTesting(allocator, std.testing.io);
+    var workspace: Workspace = .initForTesting(allocator, std.testing.io);
     defer workspace.deinit();
     const ceiling = Workspace.mapped_bytes_ceiling;
 
@@ -524,20 +510,17 @@ test "Workspace capacity counts retained arenas and the room under the ceiling, 
     try std.testing.expectEqual(@as(usize, 192), workspace.mappedBytes());
     // The first step is already mapped; the second maps the last block.
     const blocks = try workspace.carve(64, 3, 4);
-    defer allocator.free(blocks);
     try std.testing.expectEqual(@as(usize, 4), blocks.len);
     try std.testing.expectEqual(@as(usize, 256), workspace.mappedBytes());
     try std.testing.expectEqual(@as(usize, 3), workspace.arenas.items.len);
-    try std.testing.expect(workspace.carved);
 }
 
 test "Workspace carve maps the first blocks as their own arena, then the rest" {
     const allocator = std.testing.allocator;
-    var workspace = try Workspace.initForTesting(allocator, std.testing.io);
+    var workspace: Workspace = .initForTesting(allocator, std.testing.io);
     defer workspace.deinit();
 
     const blocks = try workspace.carve(64, 2, 4);
-    defer allocator.free(blocks);
     try std.testing.expectEqual(@as(usize, 4), blocks.len);
     try std.testing.expectEqual(@as(usize, 2), workspace.arenas.items.len);
     try std.testing.expectEqual(@as(usize, 128), workspace.arenas.items[0].bytes.len);
@@ -547,7 +530,7 @@ test "Workspace carve maps the first blocks as their own arena, then the rest" {
 test "Workspace arena ownership cleans up allocation failures" {
     const AllocationTest = struct {
         fn run(allocator: Allocator) !void {
-            var workspace = try Workspace.initForTesting(allocator, std.testing.io);
+            var workspace: Workspace = .initForTesting(allocator, std.testing.io);
             defer workspace.deinit();
 
             _ = try workspace.allocate(64);
@@ -570,7 +553,7 @@ test "Workspace arena ownership cleans up allocation failures" {
 
 test "Workspace growth maps missing blocks as one arena" {
     const allocator = std.testing.allocator;
-    var workspace = try Workspace.initForTesting(allocator, std.testing.io);
+    var workspace: Workspace = .initForTesting(allocator, std.testing.io);
     defer workspace.deinit();
 
     _ = try workspace.allocate(3 * 64);
@@ -584,7 +567,7 @@ test "Workspace growth maps missing blocks as one arena" {
 
 test "blocks are carved from retained arenas of unequal size, tails left out" {
     const allocator = std.testing.allocator;
-    var workspace = try Workspace.initForTesting(allocator, std.testing.io);
+    var workspace: Workspace = .initForTesting(allocator, std.testing.io);
     defer workspace.deinit();
     const first = try workspace.allocate(150);
     _ = try workspace.allocate(70);
@@ -594,7 +577,6 @@ test "blocks are carved from retained arenas of unequal size, tails left out" {
     _ = try workspace.allocate(127);
 
     const blocks = try workspace.carve(64, 0, 0);
-    defer allocator.free(blocks);
     // Two blocks from the first arena, one from each of the others.
     try std.testing.expectEqual(@as(usize, 6), blocks.len);
     try std.testing.expectEqual(@as(usize, 539), workspace.mappedBytes());

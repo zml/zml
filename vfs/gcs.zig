@@ -317,17 +317,12 @@ pub const GCS = struct {
         }
 
         fn attempt(self: *TokenRequest, current: request.Attempt) anyerror!request.Outcome([]const u8) {
-            var head_buffer: [8 * 1024]u8 = undefined;
             return request.exchange([]const u8, current, self.uri, .{
                 .method = self.method,
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .content_type = self.content_type,
-                },
+                .content_type = self.content_type,
                 .extra_headers = self.extra_headers,
                 .payload = self.payload,
                 .redirects = .follow,
-                .head_buffer = &head_buffer,
             }, self, TokenRequest.consume);
         }
 
@@ -487,12 +482,9 @@ pub const GCS = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (err) {
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (self.governor.readFailure(handle.uri, handle.pos, err)) {
                     error.Canceled => return error.Canceled,
-                    else => {
-                        log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                        return .{ .file_read_streaming = error.InputOutput };
-                    },
+                    error.Unexpected => return .{ .file_read_streaming = error.InputOutput },
                 };
 
                 if (total == 0) {
@@ -681,15 +673,7 @@ pub const GCS = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| switch (err) {
-            // A cancelled task must not surface as an I/O failure: every
-            // wait in the governed loop is a cancellation point.
-            error.Canceled => return error.Canceled,
-            else => {
-                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-                return std.Io.File.ReadPositionalError.Unexpected;
-            },
-        };
+        return self.performRead(handle, data, offset) catch |err| self.governor.readFailure(handle.uri, offset, err);
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
@@ -774,18 +758,12 @@ pub const GCS = struct {
         authorization: [authorization_header_size]u8 = undefined,
 
         fn attempt(self: *Listing, current: request.Attempt) anyerror!request.Outcome([]u8) {
-            var head_buffer: [2 * 1024]u8 = undefined;
-            const authorization = try self.gcs.getOrRefreshToken(&self.authorization);
             return request.exchange([]u8, current, self.uri, .{
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = authorization,
-                },
+                .authorization = try self.gcs.getOrRefreshToken(&self.authorization),
                 .extra_headers = if (self.gcs.quotaProjectId()) |project|
                     &.{.{ .name = "x-goog-user-project", .value = project }}
                 else
                     &.{},
-                .head_buffer = &head_buffer,
             }, self, Listing.consume);
         }
 
@@ -862,16 +840,10 @@ pub const GCS = struct {
         authorization: [authorization_header_size]u8 = undefined,
 
         fn attempt(self: *SizeRequest, current: request.Attempt) anyerror!request.Outcome(u64) {
-            var head_buffer: [8 * 1024]u8 = undefined;
-            const authorization = try self.gcs.getOrRefreshToken(&self.authorization);
             return request.exchange(u64, current, self.uri, .{
                 .method = .HEAD,
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = authorization,
-                },
+                .authorization = try self.gcs.getOrRefreshToken(&self.authorization),
                 .open = true,
-                .head_buffer = &head_buffer,
             }, self, SizeRequest.consume);
         }
 
@@ -885,9 +857,7 @@ pub const GCS = struct {
         var bearer: BearerRequest = .{ .gcs = self, .uri = try self.gcsUri(handle.uri, &uri_path_buffer) };
         return range_read.performRangeRead(&self.governor, .{
             .request = .{ .target = handle.uri, .key = request.authorityOf(bearer.uri) },
-            .context = &bearer,
-            .prepare = BearerRequest.prepare,
-        }, data, offset, range_read.readSize(handle.size, offset, data));
+        }, &bearer, BearerRequest.prepare, data, offset, handle.size);
     }
 
     /// The bearer token is copied per attempt, so one that expired during a
@@ -897,8 +867,7 @@ pub const GCS = struct {
         uri: std.Uri,
         authorization: [authorization_header_size]u8 = undefined,
 
-        fn prepare(context: *anyopaque, _: request.Attempt, _: std.http.Header) anyerror!range_read.PreparedRequest {
-            const self: *BearerRequest = @ptrCast(@alignCast(context));
+        fn prepare(self: *BearerRequest, _: request.Attempt, _: std.http.Header) anyerror!range_read.PreparedRequest {
             return .{ .uri = self.uri, .authorization = try self.gcs.getOrRefreshToken(&self.authorization) };
         }
     };

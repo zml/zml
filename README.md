@@ -189,8 +189,9 @@ pub fn main(init: std.process.Init) !void {
     var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = path });
     defer loader.deinit();
 
-    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
-    var store: zml.io.TensorStore = .init(allocator, registry, .{});
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{});
     defer store.deinit();
     const model: Mnist = .init(store.view());
 

@@ -103,8 +103,9 @@ pub fn main(init: std.process.Init) !void {
     log.info("Initializing model..", .{});
     // Defines how the model's tensors are sharded across the available devices.
     const meshes: models.Meshes = try .init(platform);
-    const registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
-    var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &meshes.all() });
+    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &meshes.all() });
     defer store.deinit();
 
     const generation: models.GenerationOptions = .{

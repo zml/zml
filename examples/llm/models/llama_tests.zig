@@ -37,8 +37,9 @@ pub fn main(init: std.process.Init) !void {
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     defer repo.close(io);
     const meshes: common.Meshes = try .init(platform);
-    const registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
-    var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &meshes.all() });
+    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &meshes.all() });
     defer store.deinit();
 
     var repo_model = try llama.LoadedModel.init(allocator, io, repo, store.view(), .{});
@@ -68,8 +69,9 @@ fn run(
     model_buffers: *model.Buffers,
     meshes: []const *const zml.Mesh,
 ) !void {
-    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
-    var activation_store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = meshes });
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
+    defer registry.deinit();
+    var activation_store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = meshes });
     defer activation_store.deinit();
 
     try testLayer(allocator, io, platform, activation_store.view(), "embed_tokens", mdl.model.embed_tokens, model_buffers.model.embed_tokens, meshes, .{ .absolute_tolerance = 1e-3 });

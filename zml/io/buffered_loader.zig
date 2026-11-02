@@ -25,8 +25,8 @@ const log = @import("log.zig").load;
 /// largest staging request submitted (`stagingBytes`), for the buffers in
 /// use and those kept for reuse alike. Twelve rather than the read width:
 /// at a high-latency width of 32 the read width would nearly triple the
-/// host staging for nothing this path can use (a tensor already splits its
-/// reads across the width).
+/// host staging for nothing this path can use (on such a source a tensor
+/// splits its read across the free permits).
 const staging_tensors: usize = 12;
 
 pub const Loader = struct {
@@ -37,8 +37,9 @@ pub const Loader = struct {
     /// the read permits bound their reads and the staging budget their
     /// bytes, not their number.
     width: usize,
-    /// The read hints' minimum read size: one tensor becomes this many
-    /// bytes per positional read.
+    /// The smallest claim of a tensor's read split across helpers
+    /// (`ChunkedRead.claim`). A tensor is one positional read unless spare
+    /// permits split it on a high-latency source.
     read_chunk_size: usize,
     /// The widest fan-out one tensor may take. One on a source whose reads
     /// are bandwidth-bound rather than round-trip bound: splitting there only
@@ -46,9 +47,7 @@ pub const Loader = struct {
     /// transfers keep permits free, lost time to helpers it had no use for.
     tensor_workers: usize,
     permits: ReadPermits,
-    /// The staging budget in largest requests (`staging_tensors`).
-    staging_slots: usize,
-    staging: Staging = .{},
+    staging: Staging,
     first_error: stdx.FirstError(anyerror) = .{},
 
     pub fn create(
@@ -63,12 +62,12 @@ pub const Loader = struct {
             .io = io,
             .platform = platform,
             .width = opts.read_parallelism,
-            .staging_slots = @min(opts.read_parallelism, staging_tensors),
+            .staging = .{ .slots = @min(opts.read_parallelism, staging_tensors) },
             .read_chunk_size = opts.read_hints.read_chunk_size,
             // A high-latency source may use spare read permits to split a
             // tensor already staging: more concurrency without more host memory.
             .tensor_workers = if (opts.read_hints.high_latency) opts.read_parallelism else 1,
-            .permits = .init(opts.read_parallelism),
+            .permits = .{ .free = opts.read_parallelism },
         };
         return self;
     }
@@ -84,7 +83,7 @@ pub const Loader = struct {
         for (specs) |spec| largest = @max(largest, stagingBytes(spec));
         const batch = try self.allocator.create(Batch);
         batch.* = .{ .specs = specs, .progress = progress };
-        self.staging.widen(self.io, largest, self.staging_slots);
+        self.staging.widen(self.io, largest);
         // `concurrent`, never `async`: a busy Threaded io runs `async`
         // inline, and an inline first worker would drain the whole cursor
         // here.
@@ -213,8 +212,7 @@ pub const Loader = struct {
         file: std.Io.File,
         source_offset: u64,
         destination: []u8,
-    ) safetensors.ExactPositionalError!void {
-        if (destination.len == 0) return;
+    ) safetensors.Tensor.RangeError!void {
         var chunked: ChunkedRead = .{
             .io = self.io,
             .source = source,
@@ -236,10 +234,10 @@ pub const Loader = struct {
         var group: std.Io.Group = .init;
         while (true) {
             // Helpers only ever take permits that are already free, so a busy
-            // source sees exactly the one read per tensor it saw before. The
-            // check repeats between claims because the tensors that finish
-            // first hand their budget to the one still reading -- which is
-            // the long tensor that needed the help.
+            // source sees one read per tensor. The check repeats between
+            // claims because the tensors that finish first hand their budget
+            // to the one still reading -- which is the long tensor that
+            // needed the help.
             // Nothing unclaimed means a helper would only start and stop.
             if (held < useful_workers and chunked.next.load(.monotonic) < destination.len) {
                 const extra = self.permits.tryAcquire(self.io, useful_workers - held);
@@ -289,20 +287,14 @@ pub const Batch = struct {
     workers: std.Io.Group = .init,
 };
 
-/// Source reads in flight across every task of the buffered backend. A
-/// tensor wider than the hints' `read_chunk_size` splits into concurrent
-/// range reads, and these permits keep the split from putting more reads on
-/// the source than `read_parallelism`. A high-latency backend needs the
-/// split: on `hf://` the hints ask for 32 MiB chunks, so a one-gigabyte
-/// tensor read one chunk at a time is a chain of thirty-odd round trips.
+/// Source reads in flight across every task of the buffered backend, at most
+/// `read_parallelism`. On a high-latency source, a tensor wider than the
+/// hints' `read_chunk_size` may split its read across the permits that are
+/// free, for parallel streams.
 const ReadPermits = struct {
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
     free: usize,
-
-    fn init(count: usize) ReadPermits {
-        return .{ .free = @max(1, count) };
-    }
 
     fn acquire(self: *ReadPermits, io: std.Io) void {
         self.mutex.lockUncancelable(io);
@@ -338,8 +330,8 @@ const ReadPermits = struct {
 /// hints' `read_chunk_size` -- that field is a minimum request size, and
 /// on a high-latency source a request costs a round trip whether or not it
 /// runs beside another. So one worker takes the whole tensor in a single
-/// read, exactly as before this splitting existed, and only the concurrency
-/// the source can actually carry turns into extra requests.
+/// read, and only the concurrency the source can actually carry turns into
+/// extra requests.
 const ChunkedRead = struct {
     io: std.Io,
     source: *const safetensors.Tensor,
@@ -354,7 +346,7 @@ const ChunkedRead = struct {
     workers: std.atomic.Value(usize) = .init(1),
     /// Bytes already claimed.
     next: std.atomic.Value(usize) = .init(0),
-    failure: stdx.FirstError(safetensors.ExactPositionalError) = .{},
+    failure: stdx.FirstError(safetensors.Tensor.RangeError) = .{},
 
     fn run(self: *ChunkedRead) void {
         while (self.readOne()) {}
@@ -375,7 +367,7 @@ const ChunkedRead = struct {
     fn claim(self: *ChunkedRead) ?struct { offset: usize, bytes: []u8 } {
         var start = self.next.load(.monotonic);
         while (start < self.destination.len) {
-            const workers = @max(1, self.workers.load(.monotonic));
+            const workers = self.workers.load(.monotonic);
             const share = self.destination.len / workers +
                 @intFromBool(self.destination.len % workers != 0);
             const len = @min(@max(self.chunk_size, share), self.destination.len - start);
@@ -395,14 +387,16 @@ const ChunkedRead = struct {
 /// tensor's worth of pages for every tensor was half of a serial buffered
 /// load of a 14.96 GiB checkpoint, and a fifth of a concurrent one.
 ///
-/// The budget is `staging_slots` times the largest request submitted, so
-/// no request is wider than it. A request takes the smallest kept buffer
-/// that fits, which counts in full while it is held: small tensors run far
-/// wider than the slot count on small buffers, but once only large ones
-/// are kept they take those, and run about `staging_slots` wide.
+/// The budget is `slots` times the largest request submitted, so no
+/// request is wider than it. A request takes the smallest kept buffer that
+/// fits, which counts in full while it is held: small tensors run far wider
+/// than the slot count on small buffers, but once only large ones are kept
+/// they take those, and run about `slots` wide.
 const Staging = struct {
     mutex: std.Io.Mutex = .init,
     room: std.Io.Condition = .init,
+    /// The budget in largest requests (`staging_tensors`).
+    slots: usize,
     /// Zero until the first submission reports its largest request.
     budget: usize = 0,
     /// What the running tensors hold.
@@ -414,8 +408,8 @@ const Staging = struct {
     /// Raises the budget to `slots` of `largest`. Submissions only ever widen
     /// it: a later submission of smaller tensors cannot shrink what is
     /// already running.
-    fn widen(self: *Staging, io: std.Io, largest: usize, slots: usize) void {
-        const wanted = largest *| @max(1, slots);
+    fn widen(self: *Staging, io: std.Io, largest: usize) void {
+        const wanted = largest *| self.slots;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         if (wanted <= self.budget) return;
@@ -529,13 +523,13 @@ test "chunked read splits a tensor only as wide as it has workers" {
 test "staging holds live and retained bytes within one budget" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var staging: Staging = .{};
+    var staging: Staging = .{ .slots = 3 };
     defer staging.deinit(allocator);
 
     // Three slots of the largest request is the budget, and a later,
     // smaller submission cannot shrink it.
-    staging.widen(io, 16, 3);
-    staging.widen(io, 4, 3);
+    staging.widen(io, 16);
+    staging.widen(io, 4);
     try std.testing.expectEqual(@as(usize, 48), staging.budget);
 
     // With nothing kept, small requests run far wider than the slot count,
@@ -689,7 +683,7 @@ test "a worker waiting for its staging loads nothing once the loader failed" {
     defer loader.destroy();
     // The test holds the whole budget, one slot of the tensor, so the
     // worker waits for its staging until the loader failed.
-    loader.staging.widen(io, bytes.len, loader.staging_slots);
+    loader.staging.widen(io, bytes.len);
     const held = try loader.staging.acquire(allocator, io, bytes.len);
     var output: Buffer = .{ ._platform = devices.platform, ._shape = shape, ._shards = .empty };
     defer output.deinit();

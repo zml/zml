@@ -1,7 +1,7 @@
 //! Associates model tensors with checkpoint sources and prefixed views,
-//! over a checkpoint registry the store owns.
+//! over the entries it takes from a checkpoint registry.
 //!
-//! The store owns the registry, the bindings, and every source and program
+//! The store owns those entries, the bindings, and every source and program
 //! value (its arena). Views and sources point to it: once `view` was
 //! called it must not move, and it must outlive them and every load
 //! started from it (`Loader.start` borrows it until `wait` or `cancel`).
@@ -44,7 +44,10 @@ pub const Memory = enum {
 
     /// Whether the bytes live in host memory, written by the CPU.
     pub fn isHost(self: Memory) bool {
-        return self != .default;
+        return switch (self) {
+            .default => false,
+            .host_pinned, .host_mapped => true,
+        };
     }
 
     /// The memory space of each device's delivered buffer.
@@ -103,7 +106,8 @@ pub const Binding = union(enum) {
             const inputs = try allocator.alloc(Tensor, self.inputs.len);
             defer allocator.free(inputs);
             for (inputs, self.inputs) |*input, source| input.* = .fromShape(source.shape);
-            return self.program.compile(allocator, io, platform, meshes, output, inputs);
+            const opts: Compiler.Options = .{ .meshes = meshes, .program_name = self.program.name() };
+            return self.program.vtable.compile(self.program.value, allocator, io, platform, opts, output, inputs);
         }
     };
 };
@@ -160,19 +164,6 @@ pub const Program = struct {
     /// Whether `a` and `b` are programs of one type with equal values.
     pub fn eql(a: Program, b: Program) bool {
         return a.vtable == b.vtable and a.vtable.eql(a.value, b.value);
-    }
-
-    /// Compiles `forward(output, inputs)`, its module named after the program.
-    fn compile(
-        self: Program,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        meshes: []const *const Sharding.Mesh,
-        output: Shape,
-        inputs: []const Tensor,
-    ) Compiler.Error!Exe {
-        return self.vtable.compile(self.value, allocator, io, platform, .{ .meshes = meshes, .program_name = self.name() }, output, inputs);
     }
 
     /// The vtable of programs of type `T`, one per type.
@@ -237,28 +228,30 @@ pub const Options = struct {
     quantization: Quantization.Target = .{},
 };
 
-/// A store that owns `registry`, which must be complete: add every
-/// checkpoint first (`TensorRegistry.addRepo`). The caller's copy is moved
-/// in and must not be used or freed. The map stays locked until `deinit`,
-/// so a later insert panics in safe builds, and an entry's address is its
-/// checkpoint tensor's identity (`View.get`).
-pub fn init(allocator: std.mem.Allocator, registry: safetensors.TensorRegistry, opts: Options) TensorStore {
+/// A store over the entries of `registry`, which must be complete: add
+/// every checkpoint first (`TensorRegistry.addRepo`). It takes the entries
+/// and leaves `registry` empty. The store's map stays locked until
+/// `deinit`, so a later insert panics in safe builds, and an entry's
+/// address is its checkpoint tensor's identity (`View.get`).
+pub fn init(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, opts: Options) TensorStore {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     const meshes = arena.allocator().dupe(*const Sharding.Mesh, opts.meshes) catch @panic("OOM");
     var self: TensorStore = .{
-        .registry = registry,
+        .registry = registry.*,
         .meshes = meshes,
         .quantization = opts.quantization,
         .id_to_sources = .empty,
         .allocator = allocator,
         .arena = arena,
     };
+    registry.* = .init(registry.arena.child_allocator);
     self.registry.tensors.lockPointers();
     return self;
 }
 
-/// Frees the bindings, the sources and programs, then the registry. No load
-/// started from the store may still run: `wait` or `cancel` it first.
+/// Frees the bindings, the sources and programs, then the registry entries
+/// `init` took. No load started from the store may still run: `wait` or
+/// `cancel` it first.
 pub fn deinit(self: *TensorStore) void {
     self.id_to_sources.deinit(self.allocator);
     self.arena.deinit();
@@ -400,7 +393,7 @@ pub const View = struct {
     /// whatever this view's prefix; ask once every binding and `setMemory`
     /// is done. A tensor whose mesh partitions do not divide its dimensions
     /// is `IncompatibleSharding`, logged.
-    pub fn hostMappedBytes(self: View) error{IncompatibleSharding}!u64 {
+    pub fn hostMappedBytes(self: View) !u64 {
         var bytes: u64 = 0;
         var it = self.store.id_to_sources.iterator();
         while (it.next()) |entry| switch (entry.value_ptr.*) {
@@ -435,10 +428,9 @@ pub const View = struct {
 
     /// Like `source`, but null when the checkpoint has no such tensor.
     pub fn maybeSource(self: View, subkey: []const u8, comptime tags: anytype) ?Source {
-        const entry = self.get(subkey) orelse return null;
         const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
         const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-        return .init(self.store, entry, if (has_tags) parsed_tags.constSlice() else null);
+        return .init(self, subkey, if (has_tags) parsed_tags.constSlice() else null);
     }
 
     /// The checkpoint tensors under this view's prefix: a scan of every key.
@@ -463,12 +455,10 @@ pub const View = struct {
 };
 
 test "get finds exact keys, the registry's own entries, and count the keys under a prefix" {
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
-        errdefer registry.deinit();
-        try registry.registerTensor(.{ .file_uri = "weights", .name = "layer.experts.0.down_proj.weight", .shape = .init(.{4}, .u8), .offset = 0 });
-        break :store .init(std.testing.allocator, registry, .{});
-    };
+    var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "layer.experts.0.down_proj.weight", .shape = .init(.{4}, .u8), .offset = 0 });
+    var store: TensorStore = .init(std.testing.allocator, &registry, .{});
     defer store.deinit();
 
     const layer = store.view().withPrefix("layer");
@@ -487,12 +477,10 @@ test "get finds exact keys, the registry's own entries, and count the keys under
 }
 
 test "programs of one type and equal values over the same placed shapes share an executable" {
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
-        errdefer registry.deinit();
-        try registry.registerTensor(.{ .file_uri = "weights", .name = "t", .shape = .init(.{4}, .u8), .offset = 0 });
-        break :store .init(std.testing.allocator, registry, .{});
-    };
+    var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "t", .shape = .init(.{4}, .u8), .offset = 0 });
+    var store: TensorStore = .init(std.testing.allocator, &registry, .{});
     defer store.deinit();
     const Scale = struct {
         factor: u8,
@@ -527,12 +515,10 @@ test "programs of one type and equal values over the same placed shapes share an
 }
 
 test "setMemory changes where the loader delivers a bound tensor" {
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
-        errdefer registry.deinit();
-        try registry.registerTensor(.{ .file_uri = "weights", .name = "table", .shape = .init(.{ 4, 2 }, .u8), .offset = 0 });
-        break :store .init(std.testing.allocator, registry, .{});
-    };
+    var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "table", .shape = .init(.{ 4, 2 }, .u8), .offset = 0 });
+    var store: TensorStore = .init(std.testing.allocator, &registry, .{});
     defer store.deinit();
 
     const view_ = store.view();
@@ -550,15 +536,13 @@ test "hostMappedBytes counts one device's shard of each host_mapped tensor" {
     try devices.init(allocator, std.testing.io, 2);
     defer devices.deinit();
     const tp = try devices.mesh("tp");
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(allocator);
-        errdefer registry.deinit();
-        try registry.registerTensor(.{ .file_uri = "weights", .name = "rows", .shape = .init(.{ 8, 2 }, .u8), .offset = 0 });
-        try registry.registerTensor(.{ .file_uri = "weights", .name = "scale", .shape = .init(.{4}, .u8), .offset = 16 });
-        try registry.registerTensor(.{ .file_uri = "weights", .name = "dense", .shape = .init(.{4}, .u8), .offset = 20 });
-        try registry.registerTensor(.{ .file_uri = "weights", .name = "odd", .shape = .init(.{ 3, 2 }, .u8), .offset = 24 });
-        break :store .init(allocator, registry, .{ .meshes = &.{&tp} });
-    };
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "rows", .shape = .init(.{ 8, 2 }, .u8), .offset = 0 });
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "scale", .shape = .init(.{4}, .u8), .offset = 16 });
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "dense", .shape = .init(.{4}, .u8), .offset = 20 });
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "odd", .shape = .init(.{ 3, 2 }, .u8), .offset = 24 });
+    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{&tp} });
     defer store.deinit();
 
     const view_ = store.view();

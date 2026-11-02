@@ -7,7 +7,7 @@ const std = @import("std");
 
 const request = @import("request.zig");
 
-pub const ContentRange = struct {
+const ContentRange = struct {
     start: u64,
     end: u64,
     total: u64,
@@ -25,50 +25,75 @@ pub const PreparedRequest = struct {
 
 pub const max_extra_headers = 4;
 
-/// One range read: what identifies it, and the hook that prepares each
-/// attempt. The hook is called once per attempt: S3's SigV4 signature covers
-/// the `Range` header and a timestamp, a bearer token may have expired during
-/// a hold, and a signed download URL may need re-resolving after a 403.
+/// One range read: what identifies it, and whether it follows a redirect.
 pub const RangeSpec = struct {
     request: request.RequestSpec,
-    context: *anyopaque,
-    prepare: *const fn (
-        context: *anyopaque,
-        attempt: request.Attempt,
-        range: std.http.Header,
-    ) anyerror!PreparedRequest,
     /// The object stores and a resolved download URL never redirect a
     /// read; a plain HTTP server may.
     redirects: request.Redirects = .forbid,
 };
 
-/// `RangeSpec.prepare` for backends whose request is the same on every
-/// attempt; `context` points at the `PreparedRequest`.
-pub fn prepareStatic(context: *anyopaque, _: request.Attempt, _: std.http.Header) anyerror!PreparedRequest {
-    const prepared: *const PreparedRequest = @ptrCast(@alignCast(context));
-    return prepared.*;
+/// The `prepare` of a request that is the same on every attempt: a plain
+/// GET of `uri`.
+pub fn static(uri: *const std.Uri, _: request.Attempt, _: std.http.Header) anyerror!PreparedRequest {
+    return .{ .uri = uri.* };
 }
 
 /// One `GET` with `Range: bytes=offset-(offset+size-1)` per attempt through
-/// the governed loop.
-/// One caller owns one source credit through every retry, hold and sleep.
-/// Adding backend-local parallel readers would multiply the loader's chosen
-/// width and defeat its memory/backpressure bounds. Artificial S3Proxy tests
-/// with a per-request bandwidth cap rewarded very high concurrency (16 MiB at
-/// width 96 reached ~11.5 GiB/s), but real AWS plateaued near 950 MiB/s at
-/// widths 24-128; the proxy is not evidence for production defaults.
+/// the governed loop, where `size` is what `data` holds of the `file_size`
+/// bytes past `offset`; nothing is sent when it is 0. `prepare` is called
+/// once per attempt: S3's SigV4 signature covers the `Range` header and a
+/// timestamp, a bearer token may have expired during a hold, and a signed
+/// download URL may need re-resolving after a 403.
+/// The caller holds the loader's read permit through every retry, hold and
+/// sleep; backend-local parallel readers would multiply the loader's width
+/// and defeat its memory bounds.
 pub fn performRangeRead(
     governor: *request.Governor,
     spec: RangeSpec,
+    context: anytype,
+    comptime prepare: fn (@TypeOf(context), request.Attempt, std.http.Header) anyerror!PreparedRequest,
     data: []const []u8,
     offset: u64,
-    size: usize,
+    file_size: u64,
 ) !usize {
+    const size = readSize(file_size, offset, data);
     if (size == 0) return 0;
+
+    const RangeRead = struct {
+        context: @TypeOf(context),
+        redirects: request.Redirects,
+        range: std.http.Header,
+        data: []const []u8,
+        offset: u64,
+        size: usize,
+        progress: *std.atomic.Value(u64) = undefined,
+
+        fn attempt(self: *@This(), current: request.Attempt) anyerror!request.Outcome(void) {
+            self.progress = current.progress;
+            const prepared = try prepare(self.context, current, self.range);
+            std.debug.assert(prepared.extra_headers.len <= max_extra_headers);
+            var headers: [max_extra_headers + 1]std.http.Header = undefined;
+            @memcpy(headers[0..prepared.extra_headers.len], prepared.extra_headers);
+            headers[prepared.extra_headers.len] = self.range;
+            return request.exchange(void, current, prepared.uri, .{
+                .authorization = prepared.authorization,
+                .extra_headers = headers[0 .. prepared.extra_headers.len + 1],
+                .redirects = self.redirects,
+            }, self, consume);
+        }
+
+        fn consume(self: *@This(), res: *std.http.Client.Response) anyerror!void {
+            // The head bytes are released when the body reader is taken.
+            const content_range = contentRange(res.head);
+            return readResponse(res.reader(&.{}), res.head.status, content_range, self.offset, self.data, self.size, self.progress);
+        }
+    };
 
     var range_buffer: [64]u8 = undefined;
     var state: RangeRead = .{
-        .spec = spec,
+        .context = context,
+        .redirects = spec.redirects,
         .range = .{
             .name = "Range",
             .value = std.fmt.bufPrint(
@@ -86,43 +111,6 @@ pub fn performRangeRead(
     return size;
 }
 
-const RangeRead = struct {
-    spec: RangeSpec,
-    range: std.http.Header,
-    data: []const []u8,
-    offset: u64,
-    size: usize,
-    progress: *std.atomic.Value(u64) = undefined,
-
-    fn attempt(self: *RangeRead, current: request.Attempt) anyerror!request.Outcome(void) {
-        self.progress = current.progress;
-        const prepared = try self.spec.prepare(self.spec.context, current, self.range);
-        std.debug.assert(prepared.extra_headers.len <= max_extra_headers);
-        var headers: [max_extra_headers + 1]std.http.Header = undefined;
-        @memcpy(headers[0..prepared.extra_headers.len], prepared.extra_headers);
-        headers[prepared.extra_headers.len] = self.range;
-
-        // A followed redirect keeps each hop's Location and merged path
-        // here, as much as `fetchSize` resolves per hop, 8 KiB of each.
-        var head_buffer: [2 * request.max_redirects * 8 * 1024]u8 = undefined;
-        return request.exchange(void, current, prepared.uri, .{
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = prepared.authorization,
-            },
-            .extra_headers = headers[0 .. prepared.extra_headers.len + 1],
-            .redirects = self.spec.redirects,
-            .head_buffer = &head_buffer,
-        }, self, RangeRead.consume);
-    }
-
-    fn consume(self: *RangeRead, res: *std.http.Client.Response) anyerror!void {
-        // The head bytes are released when the body reader is taken.
-        const content_range = contentRange(res.head);
-        return readResponse(res.reader(&.{}), res.head.status, content_range, self.offset, self.data, self.size, self.progress);
-    }
-};
-
 fn contentRange(head: std.http.Client.Response.Head) ?ContentRange {
     var it = head.iterateHeaders();
     while (it.next()) |header| {
@@ -131,7 +119,7 @@ fn contentRange(head: std.http.Client.Response.Head) ?ContentRange {
     return null;
 }
 
-pub fn parseContentRange(value: []const u8) ?ContentRange {
+fn parseContentRange(value: []const u8) ?ContentRange {
     const prefix = "bytes ";
     if (value.len < prefix.len or !std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix)) return null;
     const range_and_total = value[prefix.len..];
@@ -149,7 +137,7 @@ pub fn parseContentRange(value: []const u8) ?ContentRange {
     return result;
 }
 
-pub fn readSize(file_size: u64, offset: u64, data: []const []u8) usize {
+fn readSize(file_size: u64, offset: u64, data: []const []u8) usize {
     if (offset >= file_size) return 0;
 
     var requested: usize = 0;
@@ -160,7 +148,7 @@ pub fn readSize(file_size: u64, offset: u64, data: []const []u8) usize {
 /// Validates the response against the requested range, discards the prefix
 /// of a `200` that ignored `Range`, then scatters `read_size` bytes, counting
 /// what it receives in `progress`.
-pub fn readResponse(
+fn readResponse(
     reader: *std.Io.Reader,
     status: std.http.Status,
     content_range: ?ContentRange,
@@ -169,7 +157,7 @@ pub fn readResponse(
     read_size: usize,
     progress: ?*std.atomic.Value(u64),
 ) !void {
-    if (read_size == 0) return error.EmptyRangeRead;
+    std.debug.assert(read_size != 0);
 
     const response_start = switch (status) {
         .partial_content => blk: {
@@ -199,7 +187,7 @@ fn count(progress: ?*std.atomic.Value(u64), len: u64) void {
     if (progress) |counter| _ = counter.fetchAdd(len, .monotonic);
 }
 
-pub fn readScatter(reader: *std.Io.Reader, data: []const []u8, len: usize, progress: ?*std.atomic.Value(u64)) !void {
+fn readScatter(reader: *std.Io.Reader, data: []const []u8, len: usize, progress: ?*std.atomic.Value(u64)) !void {
     var remaining = len;
     for (data) |buf| {
         var destination = buf[0..@min(remaining, buf.len)];

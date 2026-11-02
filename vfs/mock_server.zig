@@ -1,8 +1,7 @@
 //! A minimal HTTP origin for the VFS and loader tests: one object per path,
 //! range reads, and injectable failures and rate limiting. Exported as
-//! `VFS.MockServer` so tests above this layer (the loader's, safetensors')
-//! can serve a fixture over a real socket; nothing outside a test build
-//! references it.
+//! `VFS.MockServer` so tests above this layer (the loader's) can serve a
+//! fixture over a real socket; nothing outside a test build references it.
 
 const std = @import("std");
 
@@ -10,7 +9,7 @@ const stdx = @import("stdx");
 
 pub const MockServer = struct {
     /// How the server rate limits. A throttled answer carries the status
-    /// and whichever of the two delay headers the test asked for.
+    /// and, when the test names one, a `Retry-After`.
     const Throttle = struct {
         /// The first N GETs are throttled.
         first_gets: usize = 0,
@@ -20,7 +19,6 @@ pub const MockServer = struct {
         always: bool = false,
         status: std.http.Status = .too_many_requests,
         retry_after_s: ?u32 = null,
-        rate_limit_reset_s: ?u32 = null,
         /// At most `gets` GETs per `per_ms` milliseconds; the rest are
         /// throttled.
         window: ?struct { gets: usize, per_ms: i64 } = null,
@@ -35,7 +33,7 @@ pub const MockServer = struct {
     /// A path answered with a 302 to `location`, for HEAD and GET alike.
     pub const Redirect = struct { path: []const u8, location: []const u8 };
 
-    const Options = struct {
+    pub const Options = struct {
         fail_first_gets: usize = 0,
         barrier_gets: usize = 0,
         throttle: Throttle = .{},
@@ -156,28 +154,14 @@ pub const MockServer = struct {
 
     fn respondThrottled(self: *MockServer, io: std.Io, request: *std.http.Server.Request) !void {
         _ = self.first_throttle_ns.cmpxchgStrong(0, nowNs(io), .release, .monotonic);
-        var headers: [2]std.http.Header = undefined;
-        var header_count: usize = 0;
         var retry_after_buffer: [16]u8 = undefined;
-        var reset_buffer: [48]u8 = undefined;
-        if (self.throttle.retry_after_s) |seconds| {
-            headers[header_count] = .{
-                .name = "Retry-After",
-                .value = try std.fmt.bufPrint(&retry_after_buffer, "{d}", .{seconds}),
-            };
-            header_count += 1;
-        }
-        if (self.throttle.rate_limit_reset_s) |seconds| {
-            headers[header_count] = .{
-                .name = "RateLimit",
-                .value = try std.fmt.bufPrint(&reset_buffer, "\"default\"; r=0; t={d}", .{seconds}),
-            };
-            header_count += 1;
-        }
         try request.respond("slow down", .{
             .status = self.throttle.status,
             .keep_alive = false,
-            .extra_headers = headers[0..header_count],
+            .extra_headers = if (self.throttle.retry_after_s) |seconds| &.{.{
+                .name = "Retry-After",
+                .value = try std.fmt.bufPrint(&retry_after_buffer, "{d}", .{seconds}),
+            }} else &.{},
         });
     }
 

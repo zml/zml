@@ -167,7 +167,7 @@ the classes), the fill jobs last (sixteenth pass: a byte-fair order across
 destination devices made no difference). No job depends on another: every
 DMA piece is submitted as soon as its job is read (fifth pass), so a
 tensor's tail may land before its head. The plan holds each job's
-transfers (`Batch.Plan.Transfer`: destination, landing offset in the job's
+transfers (`Plan.Transfer`: destination, landing offset in the job's
 blocks, writer mask, destination offset, length) and the landing jobs'
 extents and items; nothing else dispatches at runtime (no order
 indirection or suffix arrays). Staging by destination box and gathering
@@ -187,7 +187,7 @@ delays the first claim (Llama: 4 plans, 1-2 ms in total).
   transfers to `Dma.enqueue`. Pieces were merged during planning; workers
   neither walk sharding spans nor rebuild a transfer list. A host-resident
   destination (`Memory.isHost`) is written in place by the worker that
-  reads it, not through DMA (`Batch.Plan.Job.Kind`), and created ahead of
+  reads it, not through DMA (`Plan.Job.Kind`), and created ahead of
   its reads by the batch's allocation task (`Loader.startAllocations`).
 - One block may feed several transfers and devices: a `ReadRequest` holds
   its scheduling reference plus one per queued piece, and its last
@@ -285,8 +285,8 @@ delays the first claim (Llama: 4 plans, 1-2 ms in total).
   bytes per allocation across host nodes), and cuts every arena into
   blocks. `create` computes the width once from the blocks the mapped
   ceiling leaves beside the reserve and returns `OutOfMemory`, logged at
-  err, when it fits no request. Four CPU devices, 4 MiB blocks, 8 MiB
-  requests and width 16 map 17 x 8 MiB + 33 x 4 MiB = 268 MiB. Nothing
+  err, when it fits no request. Four CPU devices, 2 MiB blocks, 8 MiB
+  requests and width 16 map 17 x 8 MiB + 33 x 2 MiB = 202 MiB. Nothing
   maps inside a load (146-230 ms of hipHostMalloc on MI300X when it did);
   `Workspace.allocate` asserts it. The "host workspace pregrown" line logs
   `retained`, `pregrown` and `pregrowth_ms`.
@@ -315,13 +315,16 @@ delays the first claim (Llama: 4 plans, 1-2 ms in total).
   ceiling `Workspace.mapped_bytes_ceiling`, `OutOfMemory`): the
   host_memory.zig header. The direct backend owns its workspace and maps
   it once, before the first read.
-- Calibration (the screen, CPU's `cpu_block_size`, `measure` for
+- Calibration (the screen, CPU's smallest candidate, `measure` for
   dma-bench): the dma_calibration.zig header. `calibrate` and `measure`
-  return the block. Screen defaults (`dma_calibration.Options`): 2 ms and
-  32 transfers per window; borderline confirmations run 25 ms and 256
-  transfers (private constants). One `dma_bench` debug line: platform,
-  devices, device kind, block, parallelism, GiB/s, duration, retained
-  mapped bytes.
+  return the block, always a candidate (`Loader.init` checks each with
+  `backend.requestSize`). CPU at 2 MiB against 4 MiB: warm sharded
+  Llama-3.1-8B on four CPU devices loaded in 1.62-1.65 against 1.61-1.64 s
+  (interleaved), pinning 202 against 268 MiB. Screen defaults
+  (`dma_calibration.Options`): 2 ms and 32 transfers per window;
+  borderline confirmations run 25 ms and 256 transfers (private
+  constants). One `dma_bench` debug line: platform, devices, device kind,
+  block, parallelism, GiB/s, duration, retained mapped bytes.
 - `Platform.warmupDeviceAllocators(io)` is the only allocator warm-up;
   `init`'s task (`setUp`) and `measure` run it first. Calibration measures
   one representative device (device 0); its block applies to every
@@ -5718,7 +5721,121 @@ measured: Llama-3.1-8B sharded on four CPU devices (opt) logs
 `retained=268.00MiB` in two pageable arenas of 128 and 140 MiB,
 `source_width=16, lifecycle_credits=33, workers=17`, 14.96 GiB in 1.798 s.
 
+## Fifty-eighth pass: the 2026-10-31 API review's moves, and the B70 A/B (2026-11-02)
+
+`LOADER_REVIEW_2026-10-31.md` (kept outside both repos) applied in full
+except section C: the churn stays until the rework has been reviewed.
+Decisions taken: 3 (loader.md's error table became four lines pointing at
+`Loader`'s doc), 4 (B36 phase 2, after the B70 drafter load below measured
+equal), 8 (B6's compact form); 5 skipped. Committed on top of 1691f807 /
+cdbc0253. Seven worktree lanes (P0 A1-A3, A6, A7; VFS; direct; front end;
+store; core; llmd) ran in parallel, every move implemented, reviewed
+read-only and finished by a fixer who first tried to refute each finding,
+with both gates after each. The lanes merged with three conflicts
+(`dma_calibration.depth`'s doc, loader.md's error table beside E2's
+clause, `readInto`'s error set). B1, A4+B2, B20 and B3 then ran serially,
+and a whole-diff review (four areas and a completeness critic) gave 22
+findings, all of which held and are fixed. The rework diff shrinks by 818
+lines in zml (26,676/10,221 to 25,910/10,273 against master) and 153 in
+the monorepo; direct_loader.zig 5,425 to 5,091 lines, loader.md 221 to 193.
+
+Behavior a reviewer should know:
+- A1: `TensorStore.init(allocator, &registry, opts)` takes the entries and
+  leaves the registry empty; callers keep `defer registry.deinit()`. A2:
+  `Loader.deinit` panics while a load is started (add `errdefer
+  loader.cancel()` after `start`). A3: `zml.testing.load` for tests.
+- A4+B2: `Options.dma_block_size: ?usize` replaces the list.
+  `backend.requestSize` is the one request-size rule; backendOptions
+  validates with it and direct `create` sizes with it. CPU calibration
+  returns the smallest candidate, so the CPU block is 2 MiB: Llama-3.1-8B
+  sharded on four CPU devices, warm, `ZML_DIRECT_IO=off`, 1.611-1.643 s at
+  4 MiB against 1.623-1.653 s, pinned 268 against 202 MiB.
+- B1: every binding check is in the front end. `checkParts` bounds each
+  part's file end below `maxInt(u64) - direct_io_alignment` (fixes E4), so
+  the planner's adds are plain; `Backend.stridedRead` replaces
+  `checkGatherReads`, and prepareSpec refuses a strided part that spans
+  more than one read before anything is published (M13 holds). A program
+  input with an oversized transpose fails at `start`. prepareSpec's
+  byte-size rule went, with its one test, which only a hand-written
+  `_shape` could reach; log.zig's InvalidBinding clause went.
+- B12: a local open failure while planning makes the read fail, logged by
+  `readSlot`; a file whose plan holds only zero-byte parts no longer fails
+  the load.
+- B28: one `Governor.readFailure`; `fatal` returns `RequestFailed`, so each
+  failed remote read logs once; an HF read still refused (401 or 403)
+  after re-resolving its URL fails as `PermissionDenied`, not an unlogged
+  `RequestFailed`. B30: one `HeadChain` for HTTP and HF.
+- E2: the safetensors parser checks each entry (`data_offsets` must span
+  the shape) and refuses a tensor name repeated across shards
+  (`DuplicateTensor`, logged; the last one used to win). addRepo logs its
+  prefix clash. E3: a sub-byte tensor whose last dimension does not pack is
+  InvalidBinding, checked before any compile starts.
+- E5-E7, B33, B38: `bindQuantized` cannot fail, `expertsLayout` refuses a
+  gate-up order or a cute backend it cannot bind, `linear.create` is a
+  one-member `fuse` (a per-tensor FP8 scale is rank 0; a scale grid that
+  does not split is refused at bind). D3's follow-up: DFlash's `fc` binds
+  through `linear.create`, so a biased or quantized fc loads as such.
+- B36: drafter models build `speculative.Weights` once and load base and
+  drafter in one `start`.
+- B3: the loader's counters are `Stats`; `measured: ?*direct_loader.Loader`
+  replaces `memory_supported` (the log key stays); `BoundExecutable` is
+  `Call`.
+
+B70 A/B (one Arc Pro B70, `level_zero:1`, oneAPI release builds of the
+review base and of this tree, interleaved, nothing else running):
+- examples/io, Llama-3.1-8B-Instruct, local, warm cache: 14.96 GiB in
+  677-694 ms before (4 runs) and 679-684 ms after; width 16, 8 MiB
+  requests, 256 MiB pinned, 7,929 DMA submissions in both.
+- examples/io, `hf://Qwen/Qwen3.5-9B`: 17.98 GiB in 20.58-20.67 s before
+  and 20.58-21.27 s after, 603 requests, no retries (network bound).
+- llmd `hf://Qwen/Qwen3.5-9B`, `--io-impl=threaded` (the default zio io
+  segfaults under oneAPI on both trees: NEO's SIGSEGV handler, fixed on
+  brabier/oneapi-zio-sigsegv): 16.68 GiB in 19.26 s before and 19.93 s
+  after; both answer "Paris" and "391".
+- llmd local Qwen3.5-9B with `--speculative-drafter-model` DFlash: 19.08
+  GiB in 2.017 s before, 2.027 s with two starts (B36 phase 1) and
+  2.034-2.037 s with one. Three greedy 1,024-token generations hash
+  identical before and after: 108.8-109.8 tok/s with the drafter, 32.7-32.8
+  without, so the drafter and its `fc` work as before.
+- CPU, unauthenticated: `examples/io cat hf://Qwen/Qwen3.5-9B/config.json`
+  (4 requests), `safetensors hf://Qwen/Qwen3.5-9B` (18 requests) and a
+  missing file (FileNotFound) after B28-B31.
+
+Block-FP8 on gb300-1 (GPUs 2 and 3, TP 2; llmd release_with_symbols for
+the review base, `rv0`, and this tree, `rv1`, in `~/phase8/bin/`; scripts
+and logs in `~/phase9/`), run9 runs alternating rv0 and rv1, two questions
+and three greedy 512-token generations each:
+- Qwen3.8-27B-FP8 (qwen3_5, dense, 128x128 blocks; B33's `linear.create`
+  path): 27.44 GiB in 0.94-1.03 s on both; decode 8.51-8.94 ms per step
+  on rv0 (four runs) against 8.74-8.98 on rv1.
+- Qwen3.8-Flash-Next-FP8 (qwen4_exp, block-FP8 experts through
+  `bindQuantized`, E5's Blackwell swizzle): 169.41 GiB in 3.64-4.62 s on
+  both; decode 8.70 and 9.64 ms (a run beside another user's load) on rv0
+  against 8.80-8.89 on rv1.
+- Both answer "Paris" and "391" on every run, with coherent long text; the
+  text differs between processes of one tree too.
+- XLA's HLO dumps (QUICK runs) show the decode gap is not the loader: every
+  module before optimization is identical between rv0 and rv1 (27B: only
+  the `pjrt_api`/`pjrt_client` addresses in custom-call configs differ),
+  and after optimization they differ only in fusion kinds (kInput against
+  kCustom) that swap both ways between modules, the autotuner's run-to-run
+  choice that also spreads rv0's own steps from 8.51 to 8.94 ms.
+
+Left:
+- NVFP4 never ran on a GPU (no supported NVFP4 checkpoint; Open work). On
+  the B70 the FP8 checkpoints fail on the review base too: Ministral-3-8B
+  FP8 runs out of memory at its first execute, and with
+  `--cache-memory-fraction=0.2` answers garbage on both trees;
+  Qwen3.8-27B-FP8 runs out of memory at TP 2 and 4; LFM3-1.7B-FP8 is
+  InvalidModelType.
+- HF's token branch of `hubAuthorization` (no token on this host); the
+  direct-I/O cold read on CPU after B2.
+
 ## Open work
+
+Status on 2026-11-02: the 2026-10-31 API review's moves (all but section
+C) are committed on top of 1691f807 / cdbc0253, and ran on a B70
+(fifty-eighth pass, block-FP8 on gb300-1 too); its Left list is open.
 
 Status on 2026-10-31: wave 1 is committed as `rework` (zml 8af7fd3c,
 monorepo b791da11); waves 2 and 3 (M11-M19), F1 and W2F are in the tree,

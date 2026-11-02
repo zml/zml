@@ -25,14 +25,13 @@ fn Scoped(comptime scope: @EnumLiteral()) type {
         }
 
         /// The first failure of a pipeline, with the error's name appended.
-        /// Cancellation is expected, an `InvalidBinding` was logged where
-        /// its rule was checked, and an `OutOfMemory` is a plain allocation
-        /// failure, returned unlogged, or was logged where it failed (host
-        /// memory): those log at `debug`.
+        /// Cancellation is expected, and an `OutOfMemory` is a plain
+        /// allocation failure, returned unlogged, or was logged where it
+        /// failed (host memory): those log at `debug`.
         pub fn failure(e: anyerror, comptime fmt: []const u8, args: anytype) void {
             const named_fmt = fmt ++ ": {s}";
             const named_args = args ++ .{@errorName(e)};
-            const logged = e == error.Canceled or e == error.Cancelled or e == error.InvalidBinding or e == error.OutOfMemory;
+            const logged = e == error.Canceled or e == error.Cancelled or e == error.OutOfMemory;
             if (logged) debug(named_fmt, named_args) else err(named_fmt, named_args);
         }
     };

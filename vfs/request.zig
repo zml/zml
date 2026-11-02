@@ -9,11 +9,7 @@
 
 const std = @import("std");
 
-const base = @import("base.zig");
-const AtomicReadStats = base.AtomicReadStats;
-const ReadFailure = base.ReadFailure;
-
-const log = std.log.scoped(.@"zml/vfs/request");
+const log = @import("base.zig").scopedLog(.@"zml/vfs/request");
 
 /// The retry knobs of one remote backend: its `Options.retry`.
 pub const Retry = struct {
@@ -39,14 +35,14 @@ pub const Retry = struct {
     stall_timeout: std.Io.Duration = .fromSeconds(60),
 };
 
-/// What a hold covers. Today one governor holds one scope, its backend
-/// instance; the authority is carried so that a per-authority map is a local
-/// change in `Governor.holdFor`.
+/// What a hold covers. One governor holds one scope, its backend instance;
+/// the authority is carried so that a per-authority map is a local change in
+/// `Governor.holdFor`.
 pub const Key = []const u8;
 
 /// The rate-limit scope of a request: its URI authority. Only the host is
-/// taken, since `Governor.holdFor` ignores the key today; a per-authority
-/// scope will want the port beside it.
+/// taken, since `Governor.holdFor` ignores the key; a per-authority scope
+/// would want the port beside it.
 pub fn authorityOf(uri: std.Uri) Key {
     const host = uri.host orelse return "";
     return switch (host) {
@@ -56,7 +52,7 @@ pub fn authorityOf(uri: std.Uri) Key {
 }
 
 /// One scope's rate-limit state, owned by the governor's mutex.
-pub const Hold = struct {
+const Hold = struct {
     /// When requests may go again; null when nothing is held.
     until: ?std.Io.Timestamp = null,
     /// The length of the current hold: a clean window that long ends the
@@ -73,6 +69,57 @@ pub const Hold = struct {
 /// One per backend instance: what each of its requests needs, its
 /// rate-limit state and its read statistics.
 pub const Governor = struct {
+    pub const Stats = struct {
+        physical_requests: std.atomic.Value(u64) = .init(0),
+        physical_bytes: std.atomic.Value(u64) = .init(0),
+        retries: std.atomic.Value(u64) = .init(0),
+        transient_retries: std.atomic.Value(u64) = .init(0),
+        timeouts: std.atomic.Value(u64) = .init(0),
+        server_failures: std.atomic.Value(u64) = .init(0),
+        throttles: std.atomic.Value(u64) = .init(0),
+        retry_delay_ns: std.atomic.Value(u64) = .init(0),
+        /// Backend-wide holds armed by rate limiting, and the time requests
+        /// spent waiting them out.
+        holds: std.atomic.Value(u64) = .init(0),
+        hold_wait_ns: std.atomic.Value(u64) = .init(0),
+
+        fn recordAttempt(self: *Stats) void {
+            _ = self.physical_requests.fetchAdd(1, .monotonic);
+        }
+
+        pub fn recordSuccess(self: *Stats, request_size: usize) void {
+            _ = self.physical_bytes.fetchAdd(@intCast(request_size), .monotonic);
+        }
+
+        fn recordFailure(self: *Stats, failure: ReadFailure) void {
+            switch (failure) {
+                .transient => _ = self.transient_retries.fetchAdd(1, .monotonic),
+                .timeout => _ = self.timeouts.fetchAdd(1, .monotonic),
+                .server_failure => _ = self.server_failures.fetchAdd(1, .monotonic),
+                .throttle => _ = self.throttles.fetchAdd(1, .monotonic),
+            }
+        }
+
+        fn recordRetry(self: *Stats) void {
+            _ = self.retries.fetchAdd(1, .monotonic);
+        }
+
+        fn recordRetryDelay(self: *Stats, delay: std.Io.Duration) void {
+            const delay_ns: u64 = @intCast(@max(delay.nanoseconds, 0));
+            _ = self.retry_delay_ns.fetchAdd(delay_ns, .monotonic);
+        }
+
+        /// One rate-limit hold armed over every request of this backend.
+        fn recordHold(self: *Stats) void {
+            _ = self.holds.fetchAdd(1, .monotonic);
+        }
+
+        /// Time one request spent waiting a hold out.
+        fn recordHoldWait(self: *Stats, waited: std.Io.Duration) void {
+            _ = self.hold_wait_ns.fetchAdd(@intCast(@max(waited.nanoseconds, 0)), .monotonic);
+        }
+    };
+
     io: std.Io,
     client: *std.http.Client,
     /// The backend's name, for log lines.
@@ -81,7 +128,7 @@ pub const Governor = struct {
     /// (AWS `SlowDown`, GCS), a server failure elsewhere.
     unavailable: ReadFailure,
     retry: Retry,
-    stats: AtomicReadStats = .{},
+    stats: Stats = .{},
     mutex: std.Io.Mutex = .init,
     hold: Hold = .{},
 
@@ -121,11 +168,27 @@ pub const Governor = struct {
             error.FileNotFound => error.FileNotFound,
             error.PermissionDenied => error.PermissionDenied,
             error.Canceled => error.Canceled,
-            // Logged by `exchange`, with the status head.
+            // Logged by `exchange`.
             error.RequestFailed => error.Unexpected,
             error.OutOfMemory => error.SystemResources,
             else => {
                 log.err("{s}: looking up {s} failed: {t}", .{ self.name, path, err });
+                return error.Unexpected;
+            },
+        };
+    }
+
+    /// A failed read of `target` at `offset` as a backend's read reports it:
+    /// a canceled task stays `Canceled`, since every wait in the governed
+    /// loop is a cancellation point; any other failure is logged once at
+    /// err, by `exchange` or here, and is `Unexpected`.
+    pub fn readFailure(self: *const Governor, target: []const u8, offset: u64, err: anyerror) error{ Canceled, Unexpected } {
+        return switch (err) {
+            error.Canceled => error.Canceled,
+            // Logged by `exchange`.
+            error.RequestFailed => error.Unexpected,
+            else => {
+                log.err("{s}: reading {s} at {d} failed: {t}", .{ self.name, target, offset, err });
                 return error.Unexpected;
             },
         };
@@ -170,6 +233,13 @@ pub const RequestSpec = struct {
     /// download URL that expired during a hold answers 401 or 403, and the
     /// hook re-resolves it. Charged to the retry budget.
     retry_once: []const std.http.Status = &.{},
+};
+
+pub const ReadFailure = enum {
+    transient,
+    timeout,
+    server_failure,
+    throttle,
 };
 
 pub const Failure = struct {
@@ -328,8 +398,8 @@ fn admit(governor: *Governor, spec: RequestSpec) error{ Canceled, RateLimited }!
 /// Arms or extends the scope's hold after a throttle. `named` is the delay
 /// the server asked for, if any; it is honoured up to `max_hold` and never
 /// below `initial_delay`, because `Retry-After: 0` and Hugging Face's
-/// `RateLimit; t=0` parse to zero and a zero hold is a hot loop now that a
-/// throttle does not charge a retry.
+/// `RateLimit; t=0` parse to zero, and a throttle charges no retry: a zero
+/// hold would be a hot loop.
 fn reportThrottle(governor: *Governor, spec: RequestSpec, named: ?std.Io.Duration) error{RateLimited}!void {
     const retry = governor.retry;
     governor.mutex.lockUncancelable(governor.io);
@@ -396,7 +466,7 @@ fn clampDelay(value: std.Io.Duration, low: std.Io.Duration, high: std.Io.Duratio
 pub const max_redirects = 3;
 
 /// What happens to a redirect: the client chases it (`max_redirects` hops),
-/// `consume` receives it because the caller walks the chain itself, or it
+/// `consume` receives it because `HeadChain` walks the chain itself, or it
 /// fails the request.
 pub const Redirects = enum {
     follow,
@@ -414,7 +484,8 @@ pub const Redirects = enum {
 
 pub const ExchangeOptions = struct {
     method: std.http.Method = .GET,
-    headers: std.http.Client.Request.Headers = .{ .accept_encoding = .{ .override = "identity" } },
+    authorization: std.http.Client.Request.Headers.Value = .default,
+    content_type: std.http.Client.Request.Headers.Value = .default,
     extra_headers: []const std.http.Header = &.{},
     /// Sent as the whole request body; the method must allow one. The
     /// writer uses it as its own buffer, so it must be mutable.
@@ -423,18 +494,15 @@ pub const ExchangeOptions = struct {
     /// request with its `OpenError` before `consume`, unlogged.
     open: bool = false,
     redirects: Redirects = .forbid,
-    /// Where `receiveHead` keeps a followed redirect's Locations and merged
-    /// paths, hop after hop (`Redirects.follow`); the head itself is in the
-    /// connection's buffer while `consume` runs.
-    head_buffer: []u8,
 };
 
 /// One HTTP exchange of `attempt`'s request: send, receive the head,
 /// classify it, and hand a 2xx (or a redirect `Redirects.surface` hands
-/// back) to `consume` while the request is alive. Connection, send and
-/// receive failures and every classified status become `.retry`; an
-/// unclassified status fails with `error.RequestFailed`, except that an open
-/// request (`ExchangeOptions.open`) fails an absent or denied object with
+/// back) to `consume` while the request is alive. Retryable connection,
+/// send and receive failures and every classified status become `.retry`;
+/// an unclassified status or any other connect or head failure fails with
+/// `error.RequestFailed`, logged at err, except that an open request
+/// (`ExchangeOptions.open`) fails an absent or denied object with
 /// `FileNotFound` or `PermissionDenied` first, unlogged. The exchange alone
 /// is watched (`Retry.stall_timeout`); a governed request its hook runs
 /// first (a re-resolve, a token refresh) is watched by its own exchange.
@@ -467,9 +535,17 @@ fn roundTrip(
     comptime consume: fn (@TypeOf(context), *std.http.Client.Response) anyerror!T,
 ) anyerror!Outcome(T) {
     const spec = attempt.spec;
+    // A followed redirect keeps each hop's Location and merged path here,
+    // 8 KiB of each, as much as a `HeadChain` URL; `req.uri` points into it.
+    var redirect_buffer: [2 * max_redirects * 8 * 1024]u8 = undefined;
     var req = attempt.governor.client.request(options.method, uri, .{
         .redirect_behavior = options.redirects.behavior(),
-        .headers = options.headers,
+        .headers = .{
+            // Range offsets and Content-Length count the stored bytes.
+            .accept_encoding = .{ .override = "identity" },
+            .authorization = options.authorization,
+            .content_type = options.content_type,
+        },
         .extra_headers = options.extra_headers,
     }) catch |err| switch (err) {
         error.Timeout => return retryable(T, attempt, "connect", err, .timeout),
@@ -507,7 +583,7 @@ fn roundTrip(
         };
     }
 
-    var res = req.receiveHead(options.head_buffer) catch |err| {
+    var res = req.receiveHead(if (options.redirects == .follow) &redirect_buffer else &.{}) catch |err| {
         // A failed read already closed it; a redirect re-sends on a new
         // connection that a failure leaves unusable too (or null).
         if (req.connection) |connection| connection.closing = true;
@@ -587,15 +663,95 @@ fn retryable(
     return .{ .retry = .{ .failure = failure } };
 }
 
-fn fatal(attempt: Attempt, stage: []const u8, err: anyerror) anyerror {
+fn fatal(attempt: Attempt, stage: []const u8, err: anyerror) error{RequestFailed} {
     log.err("{s}: {s} for {s} failed: {}", .{ attempt.governor.name, stage, attempt.spec.target, err });
-    return err;
+    return error.RequestFailed;
 }
+
+/// The URLs of a HEAD redirect chain walked by hand: std hands a HEAD its
+/// redirect unfollowed. Three buffers in rotation: the current URL, the
+/// `Location` it answered (copied out of a head that dies with the
+/// response) with the path merged against it, and the resolved next URL.
+pub const HeadChain = struct {
+    urls: [3][8 * 1024]u8 = undefined,
+
+    pub const End = struct {
+        /// `start_url` itself, or a URL in the chain's buffers.
+        url: []const u8,
+        /// Its `Content-Length`, when it sent one.
+        size: ?u64,
+    };
+
+    /// Follows `start_url` through at most `max_hops` redirects, absolute
+    /// or relative, to the URL that answers a 2xx. Each hop is one governed
+    /// HEAD, so a server that rate limits it holds the backend as a
+    /// throttled GET would. `authorize` names the credentials each URL is
+    /// sent. An absent or denied object fails the walk
+    /// (`ExchangeOptions.open`).
+    pub fn resolve(
+        self: *HeadChain,
+        governor: *Governor,
+        target: []const u8,
+        start_url: []const u8,
+        max_hops: usize,
+        context: anytype,
+        comptime authorize: fn (@TypeOf(context), url: []const u8) std.http.Client.Request.Headers.Value,
+    ) !End {
+        const Hop = struct {
+            context: @TypeOf(context),
+            url: []const u8,
+            uri: std.Uri,
+            /// Where a redirect's `Location` is copied.
+            location: []u8,
+
+            const Result = union(enum) { end: ?u64, redirect: usize };
+
+            fn attempt(hop: *@This(), current: Attempt) anyerror!Outcome(Result) {
+                return exchange(Result, current, hop.uri, .{
+                    .method = .HEAD,
+                    .authorization = authorize(hop.context, hop.url),
+                    .open = true,
+                    .redirects = .surface,
+                }, hop, consume);
+            }
+
+            fn consume(hop: *@This(), res: *std.http.Client.Response) anyerror!Result {
+                if (res.head.status.class() == .success) return .{ .end = res.head.content_length };
+                const location = res.head.location orelse return error.HttpRedirectLocationMissing;
+                if (location.len > hop.location.len) return error.HttpRedirectLocationOversize;
+                @memcpy(hop.location[0..location.len], location);
+                return .{ .redirect = location.len };
+            }
+        };
+
+        var url = start_url;
+        // `start_url` is in none of the buffers.
+        var current: usize = self.urls.len - 1;
+        var hops: usize = 0;
+        while (true) {
+            const uri: std.Uri = try .parse(url);
+            const scratch = (current + 1) % self.urls.len;
+            var hop: Hop = .{ .context = context, .url = url, .uri = uri, .location = &self.urls[scratch] };
+            const location_len = switch (try perform(Hop.Result, governor, .{ .target = target, .key = authorityOf(uri) }, &hop, Hop.attempt)) {
+                .end => |size| return .{ .url = url, .size = size },
+                .redirect => |len| len,
+            };
+
+            if (hops == max_hops) return error.TooManyHttpRedirects;
+            hops += 1;
+            const output = (current + 2) % self.urls.len;
+            var aux: []u8 = &self.urls[scratch];
+            const resolved = try uri.resolveInPlace(location_len, &aux);
+            url = try std.fmt.bufPrint(&self.urls[output], "{f}", .{resolved});
+            current = output;
+        }
+    }
+};
 
 /// Retry classification of a non-2xx status; null when the status is not
 /// retried. `unavailable` is what a 503 means for the backend: rate limiting
 /// on the object stores (AWS `SlowDown`, GCS), a server failure elsewhere.
-pub fn classifyStatus(status: std.http.Status, unavailable: ReadFailure) ?ReadFailure {
+fn classifyStatus(status: std.http.Status, unavailable: ReadFailure) ?ReadFailure {
     return switch (status) {
         .request_timeout => .timeout,
         .too_many_requests => .throttle,
@@ -624,7 +780,7 @@ fn openStatus(status: std.http.Status) ?error{ FileNotFound, PermissionDenied } 
 /// The retry delay the server names, if any: `Retry-After` delta-seconds
 /// (the HTTP-date form is not parsed and falls back to the jittered delay)
 /// or the `t=` reset of the `RateLimit` header Hugging Face sends.
-pub fn serverRetryDelay(head: std.http.Client.Response.Head) ?std.Io.Duration {
+fn serverRetryDelay(head: std.http.Client.Response.Head) ?std.Io.Duration {
     var it = head.iterateHeaders();
     while (it.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "Retry-After")) {
@@ -646,7 +802,7 @@ fn delaySeconds(value: []const u8) ?std.Io.Duration {
     return .fromSeconds(seconds);
 }
 
-pub fn fullJitterDelay(
+fn fullJitterDelay(
     io: std.Io,
     initial: std.Io.Duration,
     maximum: std.Io.Duration,
@@ -886,14 +1042,20 @@ test "absent and denied statuses map to one error each" {
         try std.testing.expect(openStatus(status) == null);
     }
 
-    // The contract's own errors pass through unlogged; any other is logged
-    // at err, which the test runner would count, so it is not exercised.
     const governor = testGovernor(10, 10, 1000, 300_000);
     try std.testing.expect(governor.openFailure("object", error.FileNotFound) == error.FileNotFound);
     try std.testing.expect(governor.openFailure("object", error.PermissionDenied) == error.PermissionDenied);
     try std.testing.expect(governor.openFailure("object", error.Canceled) == error.Canceled);
     try std.testing.expect(governor.openFailure("object", error.OutOfMemory) == error.SystemResources);
     try std.testing.expect(governor.openFailure("object", error.RequestFailed) == error.Unexpected);
+    try std.testing.expect(governor.openFailure("object", error.InvalidContentRange) == error.Unexpected);
+}
+
+test "a failed read is Canceled or Unexpected" {
+    const governor = testGovernor(10, 10, 1000, 300_000);
+    try std.testing.expect(governor.readFailure("object", 0, error.Canceled) == error.Canceled);
+    try std.testing.expect(governor.readFailure("object", 0, error.RequestFailed) == error.Unexpected);
+    try std.testing.expect(governor.readFailure("object", 0, error.InvalidContentRange) == error.Unexpected);
 }
 
 test "server retry delay comes from Retry-After seconds or a RateLimit reset" {
@@ -1012,10 +1174,8 @@ test "an exchange canceled while it waits for the head returns Canceled, not a r
         // Unwatched, so that the cancel lands in the read rather than in `watched`.
         fn run(governor_: *Governor, uri_: std.Uri, result: *anyerror!Outcome(void)) void {
             var progress: std.atomic.Value(u64) = .init(0);
-            var head_buffer: [1024]u8 = undefined;
             result.* = roundTrip(void, .{ .governor = governor_, .spec = test_spec, .progress = &progress }, uri_, .{
                 .extra_headers = &.{.{ .name = "Range", .value = "bytes=0-5" }},
-                .head_buffer = &head_buffer,
             }, {}, consume);
         }
 

@@ -428,6 +428,20 @@ pub fn writeSafetensors(
     registry: *zml.safetensors.TensorRegistry,
     tensors: []const TensorBytes,
 ) !void {
+    try writeSafetensorsFile(allocator, io, dir, sub_path, tensors);
+    const file = try dir.openFile(io, sub_path, .{});
+    defer file.close(io);
+    try zml.safetensors.parseSafetensors(io, registry, file, "");
+}
+
+/// Writes `tensors` as the safetensors file `sub_path` of `dir`, in order.
+pub fn writeSafetensorsFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    tensors: []const TensorBytes,
+) !void {
     var header: std.Io.Writer.Allocating = .init(allocator);
     defer header.deinit();
     const writer = &header.writer;
@@ -442,7 +456,7 @@ pub fn writeSafetensors(
     }
     try writer.writeByte('}');
 
-    const file = try dir.createFile(io, sub_path, .{ .read = true });
+    const file = try dir.createFile(io, sub_path, .{});
     defer file.close(io);
     var header_len: [8]u8 = undefined;
     std.mem.writeInt(u64, &header_len, header.written().len, .little);
@@ -454,16 +468,35 @@ pub fn writeSafetensors(
         try file.writePositionalAll(io, tensor.bytes, position);
         position += tensor.bytes.len;
     }
-    try zml.safetensors.parseSafetensors(io, registry, file, "");
 }
 
 /// A store over a copy of `registry`, for a test that builds several stores
-/// over one checkpoint: a store owns its registry.
+/// over one checkpoint: a store takes its registry's entries.
 pub fn storeOf(allocator: std.mem.Allocator, registry: *const zml.safetensors.TensorRegistry, opts: zml.io.TensorStore.Options) !zml.io.TensorStore {
     var copy: zml.safetensors.TensorRegistry = .init(allocator);
-    errdefer copy.deinit();
+    defer copy.deinit();
     for (registry.tensors.values()) |tensor| try copy.registerTensor(tensor);
-    return .init(allocator, copy, opts);
+    return .init(allocator, &copy, opts);
+}
+
+/// Loads `model` from `store` with a loader of its own and returns its
+/// buffers, which the caller frees with `mem.deinitBufferized`. For tests:
+/// production code creates its Loader before building the model, so
+/// calibration runs meanwhile.
+pub fn load(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    model: anytype,
+    store: *const zml.io.TensorStore,
+) !zml.Bufferized(@TypeOf(model.*)) {
+    var buffers = try zml.mem.bufferize(allocator, model);
+    errdefer zml.mem.deinitBufferized(allocator, &buffers);
+    var loader = try zml.io.Loader.init(allocator, io, platform, .{});
+    defer loader.deinit();
+    try loader.start(model, &buffers, store, .none);
+    try loader.wait();
+    return buffers;
 }
 
 /// Distinct, nonzero bytes for test tensor number `seed`.
@@ -593,14 +626,8 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.mem.bufferize(allocator, &args);
+    var args_buffers = try load(allocator, io, platform, &args, activation_store.store);
     defer zml.mem.deinitBufferized(allocator, &args_buffers);
-    {
-        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
-        defer loader.deinit();
-        try loader.start(&args, &args_buffers, activation_store.store, .none);
-        try loader.wait();
-    }
 
     exe_args.set(.{ layer_weights, args_buffers });
 
@@ -664,27 +691,19 @@ test testLayer {
     const output = [_]f32{ 2, -2, 1.5, 12 };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store: zml.io.TensorStore = store: {
-        var registry: zml.safetensors.TensorRegistry = .init(allocator);
-        errdefer registry.deinit();
-        try writeSafetensors(allocator, io, tmp.dir, "layer.safetensors", &registry, &.{
-            .{ .name = "scale.weight", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&weight) },
-            .{ .name = "x.in.0", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&input) },
-            .{ .name = "x.out.0", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&output) },
-        });
-        break :store .init(allocator, registry, .{});
-    };
+    var registry: zml.safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try writeSafetensors(allocator, io, tmp.dir, "layer.safetensors", &registry, &.{
+        .{ .name = "scale.weight", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&weight) },
+        .{ .name = "x.in.0", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&input) },
+        .{ .name = "x.out.0", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&output) },
+    });
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{});
     defer store.deinit();
 
     const layer: Scale = .{ .weight = store.view().withPrefix("scale").createReplicatedTensor("weight", null) };
-    var layer_weights = try zml.mem.bufferize(allocator, &layer);
+    var layer_weights = try load(allocator, io, platform, &layer, &store);
     defer zml.mem.deinitBufferized(allocator, &layer_weights);
-    {
-        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
-        defer loader.deinit();
-        try loader.start(&layer, &layer_weights, &store, .none);
-        try loader.wait();
-    }
     try testLayer(allocator, io, platform, layer, .forward, store.view(), "x", layer_weights, &.{}, .{});
 }
 

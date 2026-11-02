@@ -34,8 +34,7 @@ pub const GCS = @import("gcs.zig").GCS;
 pub const HF = @import("hf.zig").HF;
 pub const HTTP = @import("http.zig").HTTP;
 pub const S3 = @import("s3.zig").S3;
-/// A test-only HTTP origin, so a test above this layer (the loader's,
-/// safetensors') can exercise a real socket without its own server.
+/// A test-only HTTP origin for tests above this layer (mock_server.zig).
 pub const MockServer = @import("mock_server.zig").MockServer;
 const base_module = @import("base.zig");
 const direct_io = @import("direct_io.zig");
@@ -69,22 +68,11 @@ const Handle = struct {
     handle: u32,
     backend_idx: ?usize,
     flags: std.Io.File.Flags = .{ .nonblocking = false },
-    /// A local file's read mode (`useDirectIo`). Every transition happens
-    /// under the VFS mutex (`settle`, `leaveDirect`); reads only load it.
-    direct: std.atomic.Value(direct_io.State) = .init(.undecided),
+    /// A local file's read mode (`useDirectIo`).
+    direct: direct_io.Mode = .{},
 
     fn innerFile(self: *const Handle) std.Io.File {
         return .{ .handle = @intCast(self.handle), .flags = self.flags };
-    }
-
-    fn fd(self: *const Handle) std.posix.fd_t {
-        return @intCast(self.handle);
-    }
-
-    /// Whether reads of this handle go past the page cache right now.
-    fn isDirect(self: *const Handle) bool {
-        if (comptime !direct_io.supported) return false;
-        return self.direct.load(.acquire) == .direct;
     }
 };
 
@@ -284,139 +272,21 @@ fn getFileHandle(self: *VFS, file: std.Io.File) struct { *Handle, std.Io } {
 /// backend's file, `off`, a cached file under `auto`, a filesystem that
 /// refuses the flag, or a file whose direct read the kernel already
 /// rejected. The first call under `on` or `auto` decides for the handle's
-/// life, since `O_DIRECT` belongs to the open file description and a caller
-/// answered buffered plans exact reads that a direct descriptor would
-/// reject; the caller must ask before it reads. A read the kernel rejects
-/// afterwards is answered buffered, logged once, and the file stays
-/// buffered.
-/// The mechanism lives here because the VFS owns the real descriptor. A
-/// separate file backend formerly duplicated this handle table and mutex;
-/// moving direct reads into the loader instead would bypass the VFS. One
-/// descriptor is sufficient because planning chooses one mode per file.
-/// dup would not provide an independent buffered fallback: O_DIRECT belongs
-/// to the shared open file description.
+/// life (`direct_io.Mode`); the caller must ask before it reads. The
+/// mechanism lives in the VFS because it owns the descriptor; one
+/// descriptor suffices because planning chooses one mode per file.
 pub fn useDirectIo(self: *VFS, file: std.Io.File, policy: DirectIo) bool {
-    if (comptime !direct_io.supported) return false;
-    if (policy == .off) return false;
     const handle, _ = self.getFileHandle(file);
     if (handle.backend_idx != null) return false;
-    switch (handle.direct.load(.acquire)) {
-        .direct => return true,
-        .buffered => return false,
-        .undecided => {},
-    }
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const name = self.localName(handle, &path_buffer);
-    const stat = handle.innerFile().stat(self.base.inner) catch return self.settle(handle, false, name);
-    if (stat.kind != .file or stat.size < direct_io.alignment) return self.settle(handle, false, name);
-    if (policy == .auto) {
-        var shift: u64 = undefined;
-        self.base.inner.random(std.mem.asBytes(&shift));
-        const cached = direct_io.cachedFraction(handle.fd(), stat.size, shift) orelse {
-            log.debug("{s}: page cache residency unknown; reading buffered", .{name});
-            return self.settle(handle, false, name);
-        };
-        if (cached > direct_io.cold_fraction) {
-            log.debug("{s}: {d:.0}% cached; reading buffered", .{ name, cached * 100 });
-            return self.settle(handle, false, name);
-        }
-        log.debug("{s}: {d:.0}% cached", .{ name, cached * 100 });
-    }
-    return self.settle(handle, true, name);
+    return handle.direct.decide(self.base.inner, handle.innerFile(), policy);
 }
 
-/// Decides an undecided handle's read mode under the mutex, setting the
-/// flag first when `direct`, and returns whether the handle reads direct:
-/// the flag and the state change together, and a decision already taken
-/// (by a racing call, or a demotion) stands. A descriptor the flag cannot
-/// go on (`direct_io.enable`) is read buffered.
-fn settle(self: *VFS, handle: *Handle, direct: bool, name: []const u8) bool {
-    self.mutex.lockUncancelable(self.base.inner);
-    defer self.mutex.unlock(self.base.inner);
-    switch (handle.direct.load(.acquire)) {
-        .direct => return true,
-        .buffered => return false,
-        .undecided => {},
-    }
-    if (direct) {
-        const err = direct_io.enable(handle.fd());
-        if (err == .SUCCESS) {
-            handle.direct.store(.direct, .release);
-            log.debug("{s}: reading direct", .{name});
-            return true;
-        }
-        log.debug("{s}: O_DIRECT refused ({t}); reading buffered", .{ name, err });
-    }
-    handle.direct.store(.buffered, .release);
-    return false;
-}
-
-/// Takes a direct handle back to buffered: the flag comes off the
-/// descriptor before the state says buffered, under the mutex, so the inner
-/// `Io` never reads a descriptor with the flag on. True for the call that
-/// did it, which then says why.
-fn leaveDirect(self: *VFS, handle: *Handle) bool {
-    if (comptime !direct_io.supported) return false;
-    self.mutex.lockUncancelable(self.base.inner);
-    defer self.mutex.unlock(self.base.inner);
-    if (handle.direct.load(.acquire) != .direct) return false;
-    direct_io.disable(handle.fd());
-    handle.direct.store(.buffered, .release);
-    return true;
-}
-
-/// The path of a local handle, for a log line.
-fn localName(self: *VFS, handle: *Handle, buffer: []u8) []const u8 {
-    const len = handle.innerFile().realPath(self.base.inner, buffer) catch return "<local file>";
-    return buffer[0..len];
-}
-
-/// The kernel rejected a direct read. An aligned one is the filesystem
-/// refusing direct I/O it accepted the flag for, a warning; a misaligned
-/// one is the reader's, either its plan or a continuation after a short
-/// read (which a network filesystem may answer), an error. Either way the
-/// file is read buffered from now on.
-/// Demote rather than fail: a legitimate short direct read can leave an
-/// unaligned continuation. Clear the flag before using the inner Io, whose
-/// threaded preadv path treats EINVAL/EFAULT as programmer errors. The
-/// filesystem accepting O_DIRECT at open does not prove it accepts these
-/// buffers (including PJRT-pinned memory) at read time.
-fn refuseDirect(self: *VFS, handle: *Handle, err: std.os.linux.E, data: []const []u8, offset: u64) void {
-    if (!self.leaveDirect(handle)) return;
-    var total: usize = 0;
-    var aligned = offset % direct_io.alignment == 0;
-    for (data) |buffer| {
-        if (buffer.len == 0) continue;
-        aligned = aligned and @intFromPtr(buffer.ptr) % direct_io.alignment == 0;
-        total += buffer.len;
-    }
-    aligned = aligned and total % direct_io.alignment == 0;
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const name = self.localName(handle, &path_buffer);
-    if (aligned) {
-        log.warn("{s}: direct read refused ({t}) at offset={d} total={d}; reading the file buffered from now on", .{ name, err, offset, total });
-    } else {
-        log.err("{s}: misaligned read of a direct file ({t}) at offset={d} first_buffer=0x{x} total={d} alignment={d}; reading the file buffered from now on", .{
-            name,
-            err,
-            offset,
-            if (data.len != 0) @intFromPtr(data[0].ptr) else 0,
-            total,
-            direct_io.alignment,
-        });
-    }
-}
-
-/// A local file as the inner `Io` may read it. The inner `Io` treats the
-/// errno of a rejected direct read as a programmer error, so a read the VFS
-/// does not issue itself (streaming, or as the source of a file copy) takes
-/// the flag off a direct file first.
+/// A local file as the inner `Io` may read it, off direct reads
+/// (`direct_io.Mode.leave`).
 fn innerReadable(self: *VFS, handle: *Handle) std.Io.File {
-    if (handle.isDirect() and self.leaveDirect(handle)) {
-        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        log.warn("{s}: buffered read of a direct file; reading it buffered from now on", .{self.localName(handle, &path_buffer)});
-    }
-    return handle.innerFile();
+    const file = handle.innerFile();
+    handle.direct.leave(self.base.inner, file);
+    return file;
 }
 
 fn getDirHandle(self: *VFS, dir: std.Io.Dir) *Handle {
@@ -764,14 +634,7 @@ fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []c
 fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const handle, const backend = self.getFileHandle(file);
-    if (comptime direct_io.supported) {
-        if (handle.isDirect()) {
-            switch (try direct_io.readPositional(handle.fd(), data, offset)) {
-                .bytes => |bytes| return bytes,
-                .refused => |err| self.refuseDirect(handle, err, data, offset),
-            }
-        }
-    }
+    if (try handle.direct.read(self.base.inner, handle.innerFile(), data, offset)) |bytes| return bytes;
     return backend.vtable.fileReadPositional(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, data, offset);
 }
 
@@ -947,7 +810,7 @@ test "VFS reads the same bytes under every direct I/O policy" {
     defer writable.close(vfs_io);
     try std.testing.expect(!filesystem.useDirectIo(writable, .on));
     const writable_handle, _ = filesystem.getFileHandle(writable);
-    if (comptime direct_io.supported) try std.testing.expectEqual(std.os.linux.E.BADF, direct_io.enable(writable_handle.fd()));
+    if (comptime direct_io.supported) try std.testing.expectEqual(std.os.linux.E.BADF, direct_io.enable(writable_handle.innerFile().handle));
 }
 
 test "auto keeps reading a cold file direct after probing it" {
@@ -993,7 +856,7 @@ test "standard streams resolve to their own descriptors" {
     const fds = [_]std.posix.fd_t{ std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO, std.posix.STDERR_FILENO };
     for (files, fds) |file, fd| {
         const handle, const backend = vfs.getFileHandle(file);
-        try std.testing.expectEqual(fd, handle.fd());
+        try std.testing.expectEqual(fd, handle.innerFile().handle);
         try std.testing.expect(backend.vtable == vfs.base.inner.vtable);
     }
 }

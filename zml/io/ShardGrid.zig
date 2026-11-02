@@ -49,10 +49,14 @@ run: u64,
 box_count: usize,
 /// The canonical device indices holding each box.
 writers: [max_boxes]u64 = @splat(0),
+/// One box: the shape each device holds.
+local: Shape,
+/// The devices in canonical order, which the `writers` masks index;
+/// borrowed from the shape's mesh.
+devices: []const Sharding.Device,
 
 /// `shape`'s sharding must name a mesh (`Platform.placedShape`) and place
-/// on it, as the loader's front end checked: its devices, in canonical
-/// order, are the writers the masks index.
+/// on it, as the loader's front end checked.
 pub fn init(shape: Shape) ShardGrid {
     const placement = Sharding.Placement.init(&shape) catch |err|
         std.debug.panic("ShardGrid: {f} does not place, though checked: {s}", .{ shape, @errorName(err) });
@@ -67,6 +71,8 @@ pub fn init(shape: Shape) ShardGrid {
         .box_bytes = local.byteSize(),
         .run = shape.byteSize(),
         .box_count = 1,
+        .local = local,
+        .devices = devices,
     };
     const strides = shape.computeByteStrides();
     var box_stride = element;
@@ -207,17 +213,16 @@ const testing = struct {
     fn expectPlaces(allocator: std.mem.Allocator, shape: Shape, step: u64) !void {
         const grid: ShardGrid = .init(shape);
         const placement: Sharding.Placement = try .init(&shape);
-        const devices = placement.mesh().?.devicesInCanonicalOrder();
         const box_bytes: usize = @intCast(grid.box_bytes);
         const total: usize = @intCast(grid.total);
         const source = try allocator.alloc(u8, total);
         defer allocator.free(source);
         for (source, 0..) |*byte, i| byte.* = @truncate(i *% 131 +% 17);
 
-        const expected = try allocator.alloc(u8, devices.len * box_bytes);
+        const expected = try allocator.alloc(u8, grid.devices.len * box_bytes);
         defer allocator.free(expected);
         const element: usize = @intCast(grid.element);
-        for (0..devices.len) |writer| {
+        for (0..grid.devices.len) |writer| {
             const slices = placement.slices(writer, shape);
             var index: [max_rank]u64 = @splat(0);
             var cursor: usize = 0;

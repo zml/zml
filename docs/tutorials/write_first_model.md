@@ -453,7 +453,7 @@ argument:
 - the loader is created first: it returns at once and gets ready while the
   model compiles;
 - the registry reads the checkpoint's tensor names and shapes, and the store
-  takes it over;
+  takes its entries;
 - `bufferize` makes one empty buffer per tensor of the layer, the loader
   fills them (`start`, then `wait`), and `deinitBufferized` frees them.
 
@@ -518,9 +518,10 @@ pub fn main(init: std.process.Init) !void {
     var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = path });
     defer loader.deinit();
 
-    // The names and shapes of the checkpoint's tensors. The store owns them.
-    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
-    var store: zml.io.TensorStore = .init(allocator, registry, .{});
+    // The names and shapes of the checkpoint's tensors.
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{});
     defer store.deinit();
 
     const layer: Layer = .init(store.view());

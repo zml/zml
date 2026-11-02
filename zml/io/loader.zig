@@ -19,10 +19,9 @@
 //! `large_run_bytes`, becomes one part per run; a spec with any other
 //! strided part (row interleaves, transposes, broadcasts) goes to the
 //! backend as strided parts, which the direct backend gathers. Each
-//! `LoadSpec` is one destination: its placed shape, where it goes, the
-//! caller's output and the parts that fill it. The backends trust it. Only
-//! `Source` makes bindings and its pieces are disjoint by construction:
-//! nothing here checks that (Source's tests do).
+//! `LoadSpec` is one destination, which the backends trust as
+//! `backend.LoadSpec` states. Only `Source` makes bindings and its pieces are
+//! disjoint by construction: nothing here checks that (Source's tests do).
 //!
 //! Order and admission. The tensors the loader fills go out first, as one
 //! submission, so every program group is admitted with them counted. A
@@ -39,11 +38,6 @@
 //! group goes anyway (one warning). Where a device reports no limit (CPU)
 //! or the backend does not count its allocations (buffered), nothing is
 //! measured and one program group is in flight at a time.
-//!
-//! Accounting. Each spec is one progress item, which its backend
-//! completes; a program's output adds none. `wait`'s line counts each
-//! destination's bytes once: a composite counts its padding and not its
-//! sources, and a group counts its programs' inputs.
 const std = @import("std");
 
 const pjrt = @import("pjrt");
@@ -68,15 +62,12 @@ const backend = @import("backend.zig");
 const Backend = backend.Backend;
 const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
-const dma_calibration = @import("dma_calibration.zig");
+const DeviceBytes = backend.DeviceBytes;
+const direct_loader = @import("direct_loader.zig");
 const load_log = @import("log.zig").load;
 const TensorStore = @import("TensorStore.zig");
 
 const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
-
-/// Bytes per device, by `platform.devices` index: `Platform.init` refuses
-/// more devices than it holds.
-const DeviceBytes = [Platform.MAX_NUM_DEVICES]u64;
 
 /// Loads models from their checkpoint sources, and computes the tensors
 /// programs compute from theirs. A value: `init` returns at once.
@@ -92,7 +83,8 @@ const DeviceBytes = [Platform.MAX_NUM_DEVICES]u64;
 ///
 /// Start and wait serially on the owning task; source reads and transfers
 /// run concurrently inside the selected backend, compiles on tasks of
-/// their own. Submissions are retired in publish order.
+/// their own, or inline when `io` cannot run one concurrently. Submissions
+/// are retired in publish order.
 ///
 /// What fails. Every error of `start` and `wait` fails the loader:
 /// everything started is canceled (`cancel`), and every later call returns
@@ -100,18 +92,18 @@ const DeviceBytes = [Platform.MAX_NUM_DEVICES]u64;
 /// for a plain allocation failure (`OutOfMemory` from an allocator) and
 /// `Canceled`, the caller's own `cancel`, which are returned unlogged. A
 /// model whose bindings are wrong is `InvalidBinding`, logged with the
-/// tensor, the key its source reads (none for a source that reads nothing
-/// or a run inside a byte) and the rule it breaks; buffers shaped unlike
-/// the model (`mem.pairBufferized`) too, logged with the field path. The
-/// other errors a caller can act on: a missing checkpoint file is
-/// `FileNotFound`; a denied one `AccessDenied` locally and
-/// `PermissionDenied` remotely; a file that ends inside a tensor
-/// `UnexpectedEndOfFile`, because it changed after its header was read or
-/// the tensor's shape needs more bytes than its `data_offsets` give; host
-/// memory the backend cannot allocate, pin or fit under its mapped ceiling
-/// `OutOfMemory`; device memory that runs out PJRT's `ResourceExhausted`;
-/// an io that cannot run the loader's tasks concurrently
-/// `ConcurrencyUnavailable`; `cancel` `Canceled`. The rest
+/// tensor's field path, the key its source reads (none for a source that
+/// reads nothing or a run inside a byte) and the rule it breaks, or for a
+/// program whose output differs, the program's name and the shape it
+/// computes; buffers shaped unlike the model (`mem.pairBufferized`) too,
+/// logged with the field path where they differ. The other errors a caller
+/// can act on: a missing checkpoint file is `FileNotFound`; a denied one
+/// `AccessDenied` locally and `PermissionDenied` remotely; a file that ends
+/// inside a tensor `UnexpectedEndOfFile`, because it changed after its
+/// header was read; host memory the backend cannot allocate, pin or fit
+/// under its mapped ceiling `OutOfMemory`; device memory that runs out
+/// PJRT's `ResourceExhausted`; an io that cannot run the loader's tasks
+/// concurrently `ConcurrencyUnavailable`; `cancel` `Canceled`. The rest
 /// (PJRT, the compiler, a remote that failed) passes through as its source
 /// names it.
 pub const Loader = struct {
@@ -127,7 +119,7 @@ pub const Loader = struct {
     /// `Options.program_group_bytes`.
     program_group_bytes: usize,
     /// The programs of the loads started since the last `wait`, each
-    /// compiled once, on a task of its own.
+    /// compiled once.
     programs: std.ArrayList(*CompiledProgram) = .empty,
     /// Program groups started and not yet published, oldest first.
     queued: std.Deque(Group) = .empty,
@@ -135,68 +127,36 @@ pub const Loader = struct {
     pending: std.Deque(PendingSubmission) = .empty,
     /// The first error; every later call returns it.
     failure: ?anyerror = null,
-    /// When the first `start` since the last `wait` ran: `wait` logs the
-    /// load's time from there.
-    started_at: ?std.Io.Timestamp = null,
-    /// Logical bytes of the submissions retired with execution since that
-    /// `start`: each destination's shape once, so a composite tensor counts
-    /// its padding and not its sources one by one, and a program group
-    /// counts its inputs.
-    bytes_loaded: usize = 0,
-    /// Whether admission can measure the room: the backend counts its
-    /// allocations and every device reported an allocator limit at the
+    /// The direct backend when admission can measure the room: it counts
+    /// its allocations and every device reported an allocator limit at the
     /// first `start`. Otherwise one program group is in flight at a time.
-    memory_supported: bool = false,
-    submissions: usize = 0,
-    /// Submissions retired to admit a program group, bulk loads included.
-    admission_retires: usize = 0,
-    /// How long publishing waited for compiles since the last `wait`.
-    compile_wait_ns: u64 = 0,
-    min_room_seen: ?u64 = null,
-    oversized_logged: bool = false,
-    temp_unavailable_logged: bool = false,
+    measured: ?*direct_loader.Loader = null,
+    stats: Stats = .{},
 
     pub const Options = struct {
         /// The checkpoint's path or URI, read by `init` only. When `io` is a
-        /// VFS, the VFS backend serving that path sizes the reads
-        /// (`VFS.readHints`). Null, or a plain `io`: the local sizing.
+        /// VFS, the VFS backend serving it sizes the reads
+        /// (`VFS.readHints`). Null, or a plain `io`: local sizing.
         checkpoint: ?[]const u8 = null,
-        /// Concurrent source reads, 1 to `max_read_parallelism`. Null takes
-        /// the checkpoint's default, 16 locally and 32 on a high-latency
-        /// source. The direct backend clips it so `width + 1` requests fit
-        /// under the mapped ceiling beside its DMA reserve. Fixed for the
-        /// load: a source that rate limits holds the VFS instead
-        /// (`vfs/request.zig`).
+        /// Concurrent source reads, 1 to `max_read_parallelism`, fixed for
+        /// the load. Null: 16 for a local checkpoint, 32 for a high-latency
+        /// one. The direct backend may lower it to fit its pinned memory
+        /// (logged at debug).
         read_parallelism: ?usize = null,
-        /// The DMA block sizes calibration screens: 1 to
-        /// `backend.max_dma_block_sizes` of them, copied by `init`, each at
-        /// least the direct I/O alignment (`VFS.direct_io_alignment`, 4 KiB,
-        /// when `io` is a VFS and `direct_io` is not `off`; else 1) and at
-        /// most 32 MiB (`backend.max_read_request_size`). With that
-        /// alignment, a request (the larger of a block and the checkpoint's
-        /// read chunk) exceeds two units. Ignored by the buffered backend;
-        /// CPU takes the default sizing without measuring.
-        dma_block_sizes: []const usize = &dma_calibration.default_block_sizes,
-        /// Direct I/O for local source files, decided per file by the
-        /// VFS that opens it: `auto` reads a file past the page cache when it
-        /// is mostly not cached at the first decision, `on` whenever the
-        /// filesystem allows it, `off` never. The checkpoint plays no part:
-        /// a local file beside a remote checkpoint may be read directly, and
-        /// a remote file never is, nor opened to ask. The planner widens a
-        /// direct file's reads to `VFS.direct_io_alignment`, at most two
-        /// alignment units per request. A direct read never fills the page
-        /// cache, so under `auto` a cold file stays cold and comes from the
-        /// disk on every load; on a host whose warm buffered reads beat its
-        /// disk, a model loaded repeatedly is better served by `off`
-        /// (measurements in vfs/direct_io.zig). Nothing changes when `io` is
-        /// not a VFS. The loader keeps each file open until `deinit`, so a
-        /// file's decision holds for every load of this loader.
+        /// The direct backend's DMA block, at most 32 MiB, and at least
+        /// `VFS.direct_io_alignment` when `io` is a VFS and `direct_io` is
+        /// not `off`. Null: calibration picks one of
+        /// `dma_calibration.default_block_sizes`, which suits every measured
+        /// host. A tuning knob, ignored by the buffered backend; `init`
+        /// refuses a block the checkpoint's reads cannot use.
+        dma_block_size: ?usize = null,
+        /// Direct I/O for local source files, decided once per file per
+        /// loader (`VFS.DirectIo` for the page-cache trade-off). Nothing
+        /// changes when `io` is not a VFS.
         direct_io: VFS.DirectIo = .auto,
-        /// Output bytes of the program tensors one group publishes at most. A
-        /// group's inputs are planned together, so the weights and scales of
-        /// one layer's experts, adjacent in the checkpoint, coalesce into
-        /// full requests instead of one read per expert scale; they are freed
-        /// once the group's programs ran.
+        /// Output bytes of the program tensors one group holds at most, one
+        /// tensor at least. A group's inputs are read together and freed
+        /// once its programs ran.
         program_group_bytes: usize = 8 << 30,
 
         /// The default read widths by latency class, from the recorded width
@@ -218,11 +178,10 @@ pub const Loader = struct {
     /// creating the backend (for the direct one: DMA calibration and the
     /// pinned pre-growth) run on a task of the loader's own, or here when
     /// `io` has no concurrency; the first `start` waits for that task and
-    /// returns its error. A read width or a block size out of range, an
-    /// empty or too long block list, a checkpoint whose scheme the VFS does
-    /// not serve, a read chunk that a block calibration may select does not
-    /// divide, or a request too short for a widened direct read is
-    /// `InvalidOptions`, logged.
+    /// returns its error. A read width or a block size out of range, a
+    /// checkpoint whose scheme the VFS does not serve, a read chunk that a
+    /// block calibration may select does not divide, or a request too short
+    /// for a widened direct read is `InvalidOptions`, logged.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -257,7 +216,7 @@ pub const Loader = struct {
         const result = setup.await(self.io);
         self.setup = null;
         self.backend = try result;
-        self.memory_supported = self.probeMemory();
+        self.measured = self.probeMemory();
     }
 
     /// Gives up on everything started: drops the queued groups, aborts the
@@ -273,17 +232,13 @@ pub const Loader = struct {
         if (self.loadsStarted()) self.fail(error.Canceled);
     }
 
-    /// Cancels, with a warning, loads still started (`cancel`): a caller
-    /// that succeeded waited for them, and an error path failed the loader
-    /// or canceled it (`errdefer loader.cancel()`), so any left lack their
-    /// `wait`. Then cancels `init`'s task when no `start` awaited it,
-    /// destroying what it built, and destroys the backend: its pinned
-    /// memory, its workers and the files it keeps open, closed through
-    /// `io`. The buffers it loaded stay the caller's.
+    /// Cancels `init`'s task when no `start` awaited it, destroying what it
+    /// built, and destroys the backend: its pinned memory, its workers and
+    /// the files it keeps open, closed through `io`. The buffers it loaded
+    /// stay the caller's. Panics on loads neither waited for nor canceled.
     pub fn deinit(self: *Loader) void {
-        if (self.loadsStarted()) load_log.warn("Loader.deinit cancels loads started without a wait", .{});
-        self.cancel();
-        self.logAdmission();
+        if (self.loadsStarted()) std.debug.panic("Loader.deinit with loads started, whose store and buffers may be freed already: add `errdefer loader.cancel();` after `start`", .{});
+        self.stats.logAdmission(self.measured != null);
         self.queued.deinit(self.allocator);
         self.pending.deinit(self.allocator);
         self.programs.deinit(self.allocator);
@@ -299,14 +254,19 @@ pub const Loader = struct {
         return self.queued.len != 0 or self.pending.len != 0 or self.programs.items.len != 0;
     }
 
-    /// Decided once: the CPU plugin logs an unimplemented warning on every
-    /// stats call, so admission never asks a device that answered nothing.
-    fn probeMemory(self: *Loader) bool {
-        if (self.backend.? != .direct) return false;
+    /// The direct backend when every device reports an allocator limit
+    /// (`measured`). Decided once: the CPU plugin logs an unimplemented
+    /// warning on every stats call, so admission never asks a device that
+    /// answered nothing.
+    fn probeMemory(self: *const Loader) ?*direct_loader.Loader {
+        const direct = switch (self.backend.?) {
+            .direct => |direct| direct,
+            .buffered => return null,
+        };
         for (self.platform.devices) |device| {
-            if (device.memoryStats().bytes_limit == null) return false;
+            if (device.memoryStats().bytes_limit == null) return null;
         }
-        return true;
+        return direct;
     }
 
     /// Starts loading every tensor of `model` into its buffer in `buffers`,
@@ -321,15 +281,14 @@ pub const Loader = struct {
     ///
     /// Every tensor and program input is checked once, before anything is
     /// published: a tensor `store` did not bind, a source that reads no
-    /// bytes (an empty checkpoint tensor among them), a source that does
-    /// not fill its tensor's bytes or that this loader cannot assemble (a
-    /// run that starts or ends inside a byte, strided parts into host
-    /// memory), a placement its mesh does not divide or on devices the
-    /// platform lacks, and a host kind the platform cannot take are
-    /// `error.InvalidBinding`. On the direct backend, a broadcast or
-    /// transpose whose source range does not fit one read is
-    /// `InvalidBinding` when its submission is published: here for the
-    /// tensors the loader fills, in `wait` for a program's inputs.
+    /// bytes (an empty checkpoint tensor among them), a source that this
+    /// loader cannot assemble (a run that starts or ends inside a byte,
+    /// strided parts into host memory, a slice along an inner axis, a
+    /// broadcast or a transpose whose source range does not fit one of the
+    /// direct backend's reads), a sub-byte last dimension that does not
+    /// pack into whole bytes, a placement its mesh does not divide or on
+    /// devices the platform lacks, and a host kind the platform cannot take
+    /// are `error.InvalidBinding`.
     ///
     /// `buffers` is `mem.bufferize` of `model`, whose buffers are empty. A
     /// tree of another structure (other union arms, optionals or slice
@@ -368,14 +327,9 @@ pub const Loader = struct {
     ) !void {
         try self.awaitSetup();
         // The load's time starts once the set-up is done.
-        if (self.started_at == null) {
-            self.started_at = .now(self.io, .awake);
-            self.bytes_loaded = 0;
-        }
-        var prepared = try prepareModel(self.allocator, self.platform, store, model, buffers);
+        self.stats.begin(self.io);
+        var prepared = try prepareModel(self.allocator, self.platform, self.backend.?, store, model, buffers);
         errdefer prepared.arena.deinit();
-        // The backends complete one item per spec: one per tensor the loader
-        // fills and, in the groups, one per program input.
         var items = prepared.specs.len;
         for (prepared.computed) |item| items += item.compute.inputs.len;
         progress.increaseEstimatedTotalItems(items);
@@ -397,9 +351,8 @@ pub const Loader = struct {
     /// the programs computed and how long publishing waited for their
     /// compiles. A program that fails to compile or run fails it; one that
     /// does not return its tensor's shape, placed alike, is
-    /// `InvalidBinding`, and so is a program input the direct backend
-    /// cannot gather in one read (`start`). Idempotent: with nothing started
-    /// it returns at once and logs nothing.
+    /// `InvalidBinding`. Idempotent: with nothing started it returns at
+    /// once and logs nothing.
     pub fn wait(self: *Loader) !void {
         if (self.failure) |err| return err;
         self.drain() catch |err| {
@@ -413,31 +366,12 @@ pub const Loader = struct {
         var groups: usize = 0;
         var tensors: usize = 0;
         while (self.queued.popFront()) |group| {
-            tensors += group.executables.len;
+            tensors += group.calls.len;
             try self.publish(group);
             groups += 1;
         }
         while (self.pending.len != 0) try self.retireOldest(true);
-        if (self.started_at) |started_at| {
-            const took = started_at.untilNow(self.io, .awake);
-            const seconds = @as(f64, @floatFromInt(@max(took.nanoseconds, 1))) / std.time.ns_per_s;
-            const rate: u64 = @intFromFloat(@as(f64, @floatFromInt(self.bytes_loaded)) / seconds);
-            if (groups == 0) {
-                load_log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ self.bytes_loaded, took, rate });
-            } else {
-                load_log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s], computed {d} tensors with {d} programs in {d} groups, {d} ms waiting for compiles", .{
-                    self.bytes_loaded,
-                    took,
-                    rate,
-                    tensors,
-                    self.programs.items.len,
-                    groups,
-                    self.compile_wait_ns / std.time.ns_per_ms,
-                });
-            }
-        }
-        self.started_at = null;
-        self.compile_wait_ns = 0;
+        self.stats.end(self.io, tensors, self.programs.items.len, groups);
     }
 
     /// Records `err` unless the loader failed already, and gives up on
@@ -469,32 +403,32 @@ pub const Loader = struct {
 
     /// The group computing `computed`: each tensor's program, the input
     /// shells it runs over and the specs that fill them, one per input,
-    /// checked as `start` checks every spec (`prepareSpec`).
+    /// checked as `start` checks every spec (`prepareSpec`) before the
+    /// program's compile starts, which packs their shapes.
     fn prepareGroup(self: *Loader, store: *const TensorStore, computed: []const Computed, progress: std.Progress.Node) PrepareError!Group {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         errdefer arena.deinit();
-        const executables = try self.allocator.alloc(BoundExecutable, computed.len);
+        const calls = try self.allocator.alloc(Call, computed.len);
         var prepared: usize = 0;
         errdefer {
-            for (executables[0..prepared]) |*executable| executable.deinit(self.allocator);
-            self.allocator.free(executables);
+            for (calls[0..prepared]) |*call| call.deinit(self.allocator);
+            self.allocator.free(calls);
         }
         var specs: std.ArrayList(LoadSpec) = .empty;
-        for (computed, executables) |item, *executable| {
-            const compiled = try self.compiledProgram(store, item.compute, item.shape);
+        for (computed, calls) |item, *call| {
             const inputs = try self.allocator.alloc(Buffer, item.compute.inputs.len);
-            for (inputs, item.compute.inputs) |*input, source| {
-                input.* = .{ ._platform = self.platform, ._shape = source.shape, ._shards = .empty };
-            }
-            executable.* = .{ .program = compiled, .inputs = inputs, .output = item.output };
-            prepared += 1;
+            errdefer self.allocator.free(inputs);
             for (item.compute.inputs, inputs, 0..) |source, *input, index| {
-                const target: Target = .{ .id = item.id, .shape = item.shape, .input = .{ .index = index, .shape = source.shape } };
-                const spec = try prepareSpec(arena.allocator(), self.platform, target, source, .default, input);
+                input.* = .{ ._platform = self.platform, ._shape = source.shape, ._shards = .empty };
+                const target: Target = .{ .path = item.path, .shape = item.shape, .input = .{ .index = index, .shape = source.shape } };
+                const spec = try prepareSpec(arena.allocator(), self.platform, self.backend.?, target, source, .default, input);
                 try specs.append(arena.allocator(), spec);
             }
+            const compiled = try self.compiledProgram(store, item.compute, item.shape);
+            call.* = .{ .program = compiled, .inputs = inputs, .output = item.output };
+            prepared += 1;
         }
-        return .{ .executables = executables, .specs = specs.items, .arena = arena, .progress = progress };
+        return .{ .calls = calls, .specs = specs.items, .arena = arena, .progress = progress };
     }
 
     /// The compiled program computing a tensor of `output` from `compute`:
@@ -516,31 +450,31 @@ pub const Loader = struct {
     }
 
     /// Publishes `group` once its programs compiled and the devices have
-    /// room for it: its executables and its specs' arena move to the
-    /// pending submission, or are freed when this fails.
+    /// room for it: its calls and its specs' arena move to the pending
+    /// submission, or are freed when this fails.
     fn publish(self: *Loader, group: Group) !void {
         errdefer group.deinit(self.allocator);
         const started: std.Io.Timestamp = .now(self.io, .awake);
-        for (group.executables) |executable| try executable.program.await(self.io, self.platform);
-        self.compile_wait_ns +|= @intCast(started.untilNow(self.io, .awake).toNanoseconds());
-        const execution = try self.admit(group.executables);
-        try self.submit(group.specs, group.arena, group.executables, execution, group.progress);
+        for (group.calls) |call| try call.program.await(self.io, self.platform);
+        self.stats.compile_wait_ns +|= @intCast(started.untilNow(self.io, .awake).toNanoseconds());
+        const execution = try self.admit(group.calls);
+        try self.submit(group.specs, group.arena, group.calls, execution, group.progress);
     }
 
     /// Retires pending submissions, oldest first, until the group of
-    /// `executables` fits the measured room or no program group is pending:
-    /// a bulk load frees nothing, and once nothing can be retired for it the
+    /// `calls` fits the measured room or no program group is pending: a
+    /// bulk load frees nothing, and once nothing can be retired for it the
     /// group is admitted whatever its size. Without memory measurement one
     /// program group is in flight at a time. Returns the group's output and
     /// temporary bytes per device, zero while unmeasured.
-    fn admit(self: *Loader, executables: []const BoundExecutable) !DeviceBytes {
+    fn admit(self: *Loader, calls: []const Call) !DeviceBytes {
         var inputs: DeviceBytes = @splat(0);
         var execution: DeviceBytes = @splat(0);
         var room: ?DeviceBytes = null;
-        if (self.memory_supported) {
+        if (self.measured) |direct| {
             var temporaries: DeviceBytes = @splat(0);
-            for (executables) |executable| {
-                const exe = &executable.program.exe.?;
+            for (calls) |call| {
+                const exe = &call.program.exe.?;
                 for (exe.input_shapes) |shape| addPlacementBytes(&inputs, self.platform, shape);
                 // The output's memory space is the program's to choose; it is
                 // charged to the devices like the default space.
@@ -552,13 +486,13 @@ pub const Loader = struct {
                 for (output_mesh.devicesInCanonicalOrder()) |device| temporaries[device.id] = @max(temporaries[device.id], temp);
             }
             for (&execution, temporaries) |*bytes, temp| bytes.* +|= temp;
-            room = self.readRoom();
+            room = self.readRoom(direct);
         }
         var retired: usize = 0;
         while (room == null or !self.fits(&room.?, &inputs, &execution)) : (retired += 1) {
             if (!self.programGroupPending()) {
-                if (room != null and !self.oversized_logged) {
-                    self.oversized_logged = true;
+                if (room != null and !self.stats.oversized_logged) {
+                    self.stats.oversized_logged = true;
                     load_log.warn("program group exceeds the device room alone: inputs={Bi:.2} execution={Bi:.2} room={Bi:.2} (device 0); admitted anyway", .{
                         inputs[0],
                         execution[0],
@@ -568,22 +502,22 @@ pub const Loader = struct {
                 break;
             }
             try self.retireOldest(true);
-            if (self.memory_supported) room = self.readRoom();
+            if (self.measured) |direct| room = self.readRoom(direct);
         }
-        self.admission_retires += retired;
+        self.stats.admission_retires += retired;
         if (retired != 0) {
             // Unmeasured, the group's bytes are not computed: only the retires are logged.
-            if (self.memory_supported) {
+            if (self.measured != null) {
                 load_log.debug("execute admission: retired={d} before submission {d}: measured=true, device 0 room={Bi:.2} pending_execution={Bi:.2} inputs={Bi:.2} execution={Bi:.2}", .{
                     retired,
-                    self.submissions,
-                    if (room) |measured| measured[0] else 0,
+                    self.stats.submissions,
+                    if (room) |bytes| bytes[0] else 0,
                     self.pendingExecution()[0],
                     inputs[0],
                     execution[0],
                 });
             } else {
-                load_log.debug("execute admission: retired={d} before submission {d}: measured=false", .{ retired, self.submissions });
+                load_log.debug("execute admission: retired={d} before submission {d}: measured=false", .{ retired, self.stats.submissions });
             }
         }
         return execution;
@@ -613,23 +547,21 @@ pub const Loader = struct {
     fn programGroupPending(self: *const Loader) bool {
         var it = self.pending.iterator();
         while (it.nextPtr()) |submission| {
-            if (submission.executables.len != 0) return true;
+            if (submission.calls.len != 0) return true;
         }
         return false;
     }
 
     /// The room each device reports now; null when one reports no memory
-    /// limit. Only called when `memory_supported`, which implies the direct
-    /// backend (`probeMemory`).
-    fn readRoom(self: *Loader) ?DeviceBytes {
+    /// limit.
+    fn readRoom(self: *Loader, direct: *const direct_loader.Loader) ?DeviceBytes {
         const n = self.platform.devices.len;
-        var unlanded: DeviceBytes = undefined;
-        self.backend.?.direct.unlandedBytesPerDevice(unlanded[0..n]);
+        const unallocated = direct.unallocatedBytes();
         var room: DeviceBytes = undefined;
-        for (room[0..n], self.platform.devices, unlanded[0..n]) |*out, device, still_to_land| {
+        for (room[0..n], self.platform.devices, unallocated[0..n]) |*out, device, device_unallocated| {
             const reported = device.memoryStats();
-            out.* = admission.room(reported.bytes_limit, reported.bytes_in_use, still_to_land, admission.reserve_bytes) orelse return null;
-            self.min_room_seen = @min(self.min_room_seen orelse out.*, out.*);
+            out.* = admission.room(reported.bytes_limit, reported.bytes_in_use, device_unallocated, admission.reserve_bytes) orelse return null;
+            self.stats.min_room_seen = @min(self.stats.min_room_seen orelse out.*, out.*);
         }
         return room;
     }
@@ -639,29 +571,29 @@ pub const Loader = struct {
     /// the plugin cannot answer.
     fn compiledTempBytes(self: *Loader, exe: *const Exe) u64 {
         const api = self.platform.pjrt_api;
-        const executable = exe.exe.executable(api) catch |err| return self.tempUnavailable(err);
-        defer executable.deinit(api);
-        const stats = executable.getCompiledMemoryStats(api) catch |err| return self.tempUnavailable(err);
+        const pjrt_executable = exe.exe.executable(api) catch |err| return self.tempUnavailable(err);
+        defer pjrt_executable.deinit(api);
+        const stats = pjrt_executable.getCompiledMemoryStats(api) catch |err| return self.tempUnavailable(err);
         return stats.temp_size_in_bytes;
     }
 
     fn tempUnavailable(self: *Loader, err: pjrt.ApiError) u64 {
-        if (!self.temp_unavailable_logged) {
-            self.temp_unavailable_logged = true;
+        if (!self.stats.temp_unavailable_logged) {
+            self.stats.temp_unavailable_logged = true;
             load_log.debug("executable memory stats unavailable ({s}): temporaries counted as zero", .{@errorName(err)});
         }
         return 0;
     }
 
     /// One submission over `specs`, which live in `arena`. Takes `arena` and
-    /// `executables` once the submission is published; on failure the caller
-    /// still owns them. `execution` is a program group's output and
-    /// temporary bytes per device (`admit`), zero for a bulk load.
+    /// `calls` once the submission is published; on failure the caller still
+    /// owns them. `execution` is a program group's output and temporary
+    /// bytes per device (`admit`), zero for a bulk load.
     fn submit(
         self: *Loader,
         specs: []const LoadSpec,
         arena: std.heap.ArenaAllocator,
-        executables: []BoundExecutable,
+        calls: []Call,
         execution: DeviceBytes,
         progress: std.Progress.Node,
     ) !void {
@@ -674,11 +606,11 @@ pub const Loader = struct {
         self.pending.pushBackAssumeCapacity(.{
             .submission = submission,
             .arena = arena,
-            .executables = executables,
+            .calls = calls,
             .execution = execution,
             .logical_bytes = logical_bytes,
         });
-        self.submissions += 1;
+        self.stats.submissions += 1;
     }
 
     /// Retires the oldest pending submission: waits for its reads and DMA,
@@ -689,27 +621,89 @@ pub const Loader = struct {
         defer self.release(&oldest);
         try self.backend.?.await(oldest.submission);
         if (!execute) return;
-        for (oldest.executables) |*executable| {
-            executable.execute(self.allocator, self.io) catch |err| {
-                load_log.failure(err, "run program {s}: inputs={d}, output={f}", .{ executable.program.compute.program.name(), executable.inputs.len, executable.program.output });
+        for (oldest.calls) |*call| {
+            call.execute(self.allocator, self.io) catch |err| {
+                load_log.failure(err, "run program {s}: inputs={d}, output={f}", .{ call.program.name(), call.inputs.len, call.program.output });
                 return err;
             };
         }
-        self.bytes_loaded += oldest.logical_bytes;
+        self.stats.bytes_loaded += oldest.logical_bytes;
     }
 
     fn release(self: *Loader, oldest: *PendingSubmission) void {
         oldest.arena.deinit();
-        for (oldest.executables) |*executable| executable.deinit(self.allocator);
-        self.allocator.free(oldest.executables);
+        for (oldest.calls) |*call| call.deinit(self.allocator);
+        self.allocator.free(oldest.calls);
+    }
+};
+
+/// The loader's counters: read only by logs and tests; nothing here
+/// decides.
+const Stats = struct {
+    /// When the first `start` since the last `wait` ran: `wait` logs the
+    /// load's time from there.
+    started_at: ?std.Io.Timestamp = null,
+    /// Logical bytes of the submissions retired with execution since that
+    /// `start`: each destination's shape once, so a composite tensor counts
+    /// its padding and not its sources one by one, and a program group
+    /// counts its inputs.
+    bytes_loaded: usize = 0,
+    /// How long publishing waited for compiles since the last `wait`.
+    compile_wait_ns: u64 = 0,
+    /// Submissions published since `init`.
+    submissions: usize = 0,
+    /// Submissions retired to admit a program group, bulk loads included.
+    admission_retires: usize = 0,
+    /// The least room a device reported since `init`; null while nothing
+    /// was measured.
+    min_room_seen: ?u64 = null,
+    /// Whether `admit` warned of a group beyond the room: once per loader.
+    oversized_logged: bool = false,
+    /// Whether `tempUnavailable` logged that the plugin gives no compiled
+    /// memory stats: once per loader.
+    temp_unavailable_logged: bool = false,
+
+    /// Times and counts a load from the first `start` since the last
+    /// `wait`; later starts add to it.
+    fn begin(self: *Stats, io: std.Io) void {
+        if (self.started_at != null) return;
+        self.started_at = .now(io, .awake);
+        self.bytes_loaded = 0;
     }
 
-    fn logAdmission(self: *const Loader) void {
+    /// Logs `wait`'s info line, unless nothing was started, and ends the
+    /// load's timing. `programs` programs computed `tensors` tensors in
+    /// `groups` groups.
+    fn end(self: *Stats, io: std.Io, tensors: usize, programs: usize, groups: usize) void {
+        const started_at = self.started_at orelse return;
+        const took = started_at.untilNow(io, .awake);
+        const seconds = @as(f64, @floatFromInt(@max(took.nanoseconds, 1))) / std.time.ns_per_s;
+        const rate: u64 = @intFromFloat(@as(f64, @floatFromInt(self.bytes_loaded)) / seconds);
+        if (groups == 0) {
+            load_log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ self.bytes_loaded, took, rate });
+        } else {
+            load_log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s], computed {d} tensors with {d} programs in {d} groups, {d} ms waiting for compiles", .{
+                self.bytes_loaded,
+                took,
+                rate,
+                tensors,
+                programs,
+                groups,
+                self.compile_wait_ns / std.time.ns_per_ms,
+            });
+        }
+        self.started_at = null;
+        self.compile_wait_ns = 0;
+    }
+
+    /// `deinit`'s debug line. `measured`: whether admission measured the
+    /// room (`Loader.measured`), printed as `memory_supported`.
+    fn logAdmission(self: *const Stats, measured: bool) void {
         if (self.submissions == 0) return;
         load_log.debug("loader admission: submissions={d}, execute_admission_retires={d}, memory_supported={}, min_room_seen={Bi:.2}, reserve={Bi:.2}", .{
             self.submissions,
             self.admission_retires,
-            self.memory_supported,
+            measured,
             self.min_room_seen orelse 0,
             admission.reserve_bytes,
         });
@@ -725,7 +719,7 @@ const PendingSubmission = struct {
     arena: std.heap.ArenaAllocator,
     /// Run in order once the reads are done; freed with their inputs when
     /// the submission is retired. Empty for a bulk load.
-    executables: []BoundExecutable,
+    calls: []Call,
     /// Output and temporary bytes per device of a program group, while
     /// admission measures (`admit`); zero otherwise and for a bulk load.
     execution: DeviceBytes,
@@ -734,21 +728,21 @@ const PendingSubmission = struct {
 
 /// Program tensors whose inputs `wait` publishes as one submission.
 const Group = struct {
-    executables: []BoundExecutable,
-    /// One per program input, filling the executables' input shells; they
-    /// and their parts live in `arena`.
+    calls: []Call,
+    /// One per program input, filling the calls' input shells; they and
+    /// their parts live in `arena`.
     specs: []LoadSpec,
     arena: std.heap.ArenaAllocator,
     progress: std.Progress.Node,
 
     fn deinit(self: Group, allocator: std.mem.Allocator) void {
-        for (self.executables) |*executable| executable.deinit(allocator);
-        allocator.free(self.executables);
+        for (self.calls) |*call| call.deinit(allocator);
+        allocator.free(self.calls);
         self.arena.deinit();
     }
 };
 
-/// A program compiling on a task of its own, then compiled.
+/// A program compiling, then compiled.
 const CompiledProgram = struct {
     compute: TensorStore.Binding.Compute,
     output: Shape,
@@ -782,12 +776,15 @@ const CompiledProgram = struct {
     /// (`checkOutput`).
     fn await(self: *CompiledProgram, io: std.Io, platform: *const Platform) !void {
         if (self.exe != null) return;
-        const name = self.compute.program.name();
         self.exe = self.future.await(io) catch |err| {
-            load_log.failure(err, "compile program {s} computing {f}", .{ name, self.output });
+            load_log.failure(err, "compile program {s} computing {f}", .{ self.name(), self.output });
             return err;
         };
-        try checkOutput(platform, name, self.output, &self.exe.?);
+        try checkOutput(platform, self.name(), self.output, &self.exe.?);
+    }
+
+    fn name(self: *const CompiledProgram) []const u8 {
+        return self.compute.program.name();
     }
 
     fn destroy(self: *CompiledProgram, allocator: std.mem.Allocator, io: std.Io) void {
@@ -800,9 +797,10 @@ const CompiledProgram = struct {
     }
 };
 
-/// One tensor of a program group: its program, the input shells the
-/// group's submission fills, and the model's buffer it computes.
-const BoundExecutable = struct {
+/// One tensor of a program group, a pending `Exe.call`: its program, the
+/// input shells the group's submission fills, and the model's buffer it
+/// computes.
+const Call = struct {
     program: *CompiledProgram,
     inputs: []Buffer,
     output: *Buffer,
@@ -814,7 +812,7 @@ const BoundExecutable = struct {
     /// exactly once; a runner would destroy the donated handles itself.
     /// A failed execution, an input whose transfer failed included, is
     /// returned and leaves `output` unwritten.
-    fn execute(self: *const BoundExecutable, allocator: std.mem.Allocator, io: std.Io) !void {
+    fn execute(self: *const Call, allocator: std.mem.Allocator, io: std.Io) !void {
         const exe = &self.program.exe.?;
         var args = try exe.args(allocator);
         defer args.deinit(allocator);
@@ -827,7 +825,7 @@ const BoundExecutable = struct {
 
     /// Frees the inputs, donated or not; a shell the loader never wrote owns
     /// no shards.
-    fn deinit(self: *BoundExecutable, allocator: std.mem.Allocator) void {
+    fn deinit(self: *Call, allocator: std.mem.Allocator) void {
         for (self.inputs) |*input| input.deinit();
         allocator.free(self.inputs);
     }
@@ -845,9 +843,10 @@ const admission = struct {
 
     /// Bytes the loader may still take on one device: the limit (null when the
     /// plugin reports none, as CPU does) minus what is in use, minus its own
-    /// bytes published but not allocated yet (`unlanded`), minus the reserve.
-    fn room(limit: ?u64, in_use: u64, unlanded: u64, reserve: u64) ?u64 {
-        return (limit orelse return null) -| in_use -| unlanded -| reserve;
+    /// bytes published but not allocated yet (`unallocated`), minus the
+    /// reserve.
+    fn room(limit: ?u64, in_use: u64, unallocated: u64, reserve: u64) ?u64 {
+        return (limit orelse return null) -| in_use -| unallocated -| reserve;
     }
 
     /// Whether one submission's `inputs` (placements, counted here until they
@@ -861,7 +860,7 @@ const admission = struct {
     }
 };
 
-test "room subtracts use, unlanded bytes and the reserve, saturating" {
+test "room subtracts use, unallocated bytes and the reserve, saturating" {
     try std.testing.expectEqual(null, admission.room(null, 0, 0, 0));
     try std.testing.expectEqual(55, admission.room(100, 30, 10, 5).?);
     // More in use than the limit admits: no room, no underflow.
@@ -887,17 +886,18 @@ fn addPlacementBytes(out: *DeviceBytes, platform: *const Platform, shape: Shape)
     for (placement.mesh().?.devicesInCanonicalOrder()) |device| out[device.id] += bytes;
 }
 
-/// A tensor a program computes, the buffer it computes into, and its
-/// program and inputs.
+/// A tensor a program computes, at `path` in the model, the buffer it
+/// computes into, and its program and inputs.
 const Computed = struct {
-    id: Tensor.Id,
+    path: []const u8,
     shape: Shape,
     output: *Buffer,
     compute: TensorStore.Binding.Compute,
 };
 
 /// A model as `start` takes it: one spec per tensor the loader fills, and
-/// the tensors programs compute, all in `arena` with the specs' parts.
+/// the tensors programs compute, all in `arena` with the specs' parts and
+/// the tensors' field paths.
 const PreparedModel = struct {
     arena: std.heap.ArenaAllocator,
     specs: []const LoadSpec,
@@ -910,42 +910,42 @@ const PreparedModel = struct {
 fn prepareModel(
     allocator: std.mem.Allocator,
     platform: *const Platform,
+    backend_: Backend,
     store: *const TensorStore,
     model: anytype,
     buffers: *Bufferized(@TypeOf(model.*)),
 ) PrepareError!PreparedModel {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    errdefer arena.deinit();
     // Tensors and buffers pair by structure, before any buffer is written: a
     // buffer tree shaped otherwise is refused whole.
     var report_buffer: [256]u8 = undefined;
     var report: std.Io.Writer = .fixed(&report_buffer);
-    const pairs = mem.pairBufferized(allocator, model, buffers, &report) catch |err| switch (err) {
+    const pairs = mem.pairBufferized(arena.allocator(), model, buffers, &report) catch |err| switch (err) {
         error.Mismatch => {
             load_log.err("buffers shaped unlike the model at model{s}; bufferize them from this model", .{report.buffered()});
             return error.InvalidBinding;
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
-    defer allocator.free(pairs);
     // Empty until a backend or a program writes it whole, so the caller can
     // free the tree whatever fails.
     for (pairs) |pair| pair.buffer.* = .{ ._platform = platform, ._shape = pair.tensor.shape(), ._shards = .empty };
 
-    var arena: std.heap.ArenaAllocator = .init(allocator);
-    errdefer arena.deinit();
     var specs: std.ArrayList(LoadSpec) = try .initCapacity(arena.allocator(), pairs.len);
     var computed: std.ArrayList(Computed) = try .initCapacity(arena.allocator(), pairs.len);
     for (pairs) |pair| {
         const tensor = pair.tensor;
+        const target: Target = .{ .path = pair.path, .shape = tensor.shape() };
         const binding = store.bindingOf(tensor.id) orelse {
-            load_log.err("tensor {} {f} has no checkpoint binding", .{ tensor.id, tensor.shape() });
+            load_log.err("{f} has no checkpoint binding", .{target});
             return error.InvalidBinding;
         };
-        const target: Target = .{ .id = tensor.id, .shape = tensor.shape() };
         switch (binding) {
-            .load => |load| specs.appendAssumeCapacity(try prepareSpec(arena.allocator(), platform, target, load.source, load.memory, pair.buffer)),
+            .load => |load| specs.appendAssumeCapacity(try prepareSpec(arena.allocator(), platform, backend_, target, load.source, load.memory, pair.buffer)),
             .compute => |compute| {
                 try checkPlacement(platform, target, compute.program.name());
-                computed.appendAssumeCapacity(.{ .id = tensor.id, .shape = tensor.shape(), .output = pair.buffer, .compute = compute });
+                computed.appendAssumeCapacity(.{ .path = pair.path, .shape = tensor.shape(), .output = pair.buffer, .compute = compute });
             },
         }
     }
@@ -965,10 +965,10 @@ fn expandable(lattice: backend.Lattice) bool {
     return lattice.dims.len == 0 or lattice.runs() <= max_part_runs or lattice.width >= large_run_bytes;
 }
 
-/// What a spec fills, as the logs name it: tensor `id` of `shape`, or
-/// `input` of the program computing it.
+/// What a spec fills, as the logs name it: the model's tensor at `path`
+/// (`mem.Pair.path`) of `shape`, or `input` of the program computing it.
 const Target = struct {
-    id: Tensor.Id,
+    path: []const u8,
     shape: Shape,
     input: ?Input = null,
 
@@ -981,7 +981,7 @@ const Target = struct {
 
     pub fn format(self: Target, writer: *std.Io.Writer) !void {
         if (self.input) |input| try writer.print("program input {d} {f} of ", .{ input.index, input.shape });
-        try writer.print("tensor {} {f}", .{ self.id, self.shape });
+        try writer.print("model{s} {f}", .{ self.path, self.shape });
     }
 };
 
@@ -989,12 +989,13 @@ const Target = struct {
 /// `memory`, its parts in `arena`: the source lowered to bytes
 /// (`Source.Placed.lower`), expanded into its runs unless a part does not
 /// expand, in destination order. The one check of what the backends trust
-/// (`backend.LoadSpec`); a rule it breaks is `InvalidBinding`, logged with
-/// the target, and with the key its source reads once the source is
-/// lowered.
+/// (`backend.LoadSpec`, `Backend.stridedRead`); a rule it breaks is
+/// `InvalidBinding`, logged with the target, and with the key its source
+/// reads once the source is lowered.
 fn prepareSpec(
     arena: std.mem.Allocator,
     platform: *const Platform,
+    backend_: Backend,
     target: Target,
     source: TensorStore.Source.Placed,
     memory: Memory,
@@ -1013,10 +1014,6 @@ fn prepareSpec(
         return error.InvalidBinding;
     }
     const key = lowered[0].source.name;
-    if (source.shape.byteSize() != shape.byteSize()) {
-        load_log.err("{f} of {d} bytes from {s}: its source fills {f}, {d} bytes", .{ target, shape.byteSize(), key, source.shape, source.shape.byteSize() });
-        return error.InvalidBinding;
-    }
     var expands = true;
     var runs: u64 = 0;
     for (lowered) |part| {
@@ -1050,18 +1047,33 @@ fn prepareSpec(
         }
     }.lessThan);
     if (!backend.checkParts(parts, shape.byteSize())) {
-        load_log.err("{f} from {s}: its parts leave their sources or its {d} bytes, or come out of order", .{ target, key, shape.byteSize() });
+        load_log.err("{f} from {s}: its parts leave their sources or its {d} bytes, pass the largest file offset, or come out of order", .{ target, key, shape.byteSize() });
         return error.InvalidBinding;
+    }
+    // After `checkParts`, which bounds the offsets `stridedRead` adds.
+    for (parts) |part| {
+        const strided = backend_.stridedRead(part);
+        if (strided.read > strided.limit) {
+            load_log.err("{f} from {s}: a strided part spans {d} source bytes, more than one read of {d}", .{ target, key, strided.read, strided.limit });
+            return error.InvalidBinding;
+        }
     }
     return .{ .shape = shape, .memory = memory, .output = output, .parts = parts };
 }
 
 /// Checks that `target`, from `from` (its source's key or its program),
-/// places on `platform`'s devices, in any memory space: its mesh
+/// places on `platform`'s devices, in any memory space: a sub-byte last
+/// dimension packs into whole bytes (`Shape.packedShape`), its mesh
 /// partitions divide its dimensions, and every device of its mesh is one of
 /// the platform's.
 fn checkPlacement(platform: *const Platform, target: Target, from: []const u8) error{InvalidBinding}!void {
-    const placed = platform.placedShape(target.destination()).packedShape();
+    const shape = target.destination();
+    const bits = shape.dtype().bitSizeOf();
+    if (bits < 8 and (shape.rank() == 0 or @rem(shape.dim(-1), 8 / bits) != 0)) {
+        load_log.err("{f} from {s}: its last dimension does not pack into whole bytes", .{ target, from });
+        return error.InvalidBinding;
+    }
+    const placed = platform.placedShape(shape).packedShape();
     const placement = Sharding.Placement.init(&placed) catch {
         load_log.err("{f} from {s}: its dimensions are not divisible by its mesh partitions", .{ target, from });
         return error.InvalidBinding;
@@ -1097,51 +1109,24 @@ fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backen
         load_log.err("invalid loader options: checkpoint={?s}, read_chunk_size={d}, expected 1..{d}: InvalidOptions", .{ opts.checkpoint, hints.read_chunk_size, max_request });
         return error.InvalidOptions;
     }
-    if (opts.dma_block_sizes.len == 0) {
-        load_log.err("invalid loader options: dma_block_sizes is empty: InvalidOptions", .{});
-        return error.InvalidOptions;
-    }
-    const dma_block_sizes = backend.DmaBlockSizes.fromSlice(opts.dma_block_sizes) catch {
-        load_log.err("invalid loader options: {d} dma block sizes, expected at most {d}: InvalidOptions", .{ opts.dma_block_sizes.len, backend.max_dma_block_sizes });
-        return error.InvalidOptions;
-    };
-    // A direct read is widened by up to an alignment unit at each end,
-    // which a job of smaller blocks cannot hold (`Planner.maximumJobLen`).
-    const alignment = backend.readAlignment(io, opts.direct_io);
-    const min_block = @max(alignment, 1);
-    for (opts.dma_block_sizes) |block_size| {
-        if (block_size < min_block or block_size > max_request) {
-            load_log.err("invalid loader options: dma block size {d}, expected {d}..{d}: InvalidOptions", .{ block_size, min_block, max_request });
-            return error.InvalidOptions;
-        }
-    }
-    // A source request is the larger of the read chunk and the block
-    // calibration selected, and a whole number of blocks (the direct
-    // `Loader.create`); with an alignment, it holds a direct read widened at
-    // each end. Checked for every block it may select: a candidate, or on
-    // CPU the default.
-    for ([_][]const usize{ opts.dma_block_sizes, &.{dma_calibration.cpu_block_size} }) |block_sizes| {
-        for (block_sizes) |block_size| {
-            const request = @max(hints.read_chunk_size, block_size);
-            if (request % block_size != 0) {
-                load_log.err("invalid loader options: checkpoint={?s}, read_chunk_size={d} is not a multiple of the dma block size {d}: InvalidOptions", .{ opts.checkpoint, hints.read_chunk_size, block_size });
-                return error.InvalidOptions;
-            }
-            if (alignment != 0 and request <= 2 * alignment) {
-                load_log.err("invalid loader options: checkpoint={?s}, request of {d} cannot hold a direct read widened by {d} at each end: InvalidOptions", .{ opts.checkpoint, request, alignment });
-                return error.InvalidOptions;
-            }
-        }
-    }
-    return .{
+    const options: backend.Options = .{
         .read_parallelism = opts.read_parallelism orelse if (hints.high_latency)
             Loader.Options.high_latency_read_parallelism
         else
             Loader.Options.local_read_parallelism,
         .read_hints = hints,
-        .dma_block_sizes = dma_block_sizes,
+        .dma_block_size = opts.dma_block_size,
         .direct_io = opts.direct_io,
     };
+    // Checked for every block calibration may select.
+    const alignment = backend.readAlignment(io, opts.direct_io);
+    for (options.dmaBlockSizes()) |block_size| {
+        if (backend.requestSize(hints.read_chunk_size, block_size, alignment) == null) {
+            load_log.err("invalid loader options: checkpoint={?s}, read_chunk_size={d}, dma_block_size={d}, alignment={d}, max_request={d}: no request size fits: InvalidOptions", .{ opts.checkpoint, hints.read_chunk_size, block_size, alignment, max_request });
+            return error.InvalidOptions;
+        }
+    }
+    return options;
 }
 
 /// A program must compute one tensor of `expected`, placed on the same
@@ -1213,35 +1198,33 @@ const LoaderTestFixture = struct {
         self.missing_len = missing_path.len;
 
         var registry: safetensors.TensorRegistry = .init(allocator);
-        {
-            errdefer registry.deinit();
-            try registry.registerTensor(.{
-                .file_uri = path,
-                .name = "value",
-                .shape = .init(.{contents.len}, .u8),
-                .offset = 0,
-            });
-            try registry.registerTensor(.{
-                .file_uri = path,
-                .name = "second",
-                .shape = .init(.{second_contents.len}, .u8),
-                .offset = contents.len,
-            });
-            try registry.registerTensor(.{
-                .file_uri = missing_path,
-                .name = "missing",
-                .shape = .init(.{contents.len}, .u8),
-                .offset = 0,
-            });
-            try registry.registerTensor(.{
-                .file_uri = path,
-                .name = "empty",
-                .shape = .init(.{0}, .u8),
-                .offset = 0,
-            });
-        }
+        defer registry.deinit();
+        try registry.registerTensor(.{
+            .file_uri = path,
+            .name = "value",
+            .shape = .init(.{contents.len}, .u8),
+            .offset = 0,
+        });
+        try registry.registerTensor(.{
+            .file_uri = path,
+            .name = "second",
+            .shape = .init(.{second_contents.len}, .u8),
+            .offset = contents.len,
+        });
+        try registry.registerTensor(.{
+            .file_uri = missing_path,
+            .name = "missing",
+            .shape = .init(.{contents.len}, .u8),
+            .offset = 0,
+        });
+        try registry.registerTensor(.{
+            .file_uri = path,
+            .name = "empty",
+            .shape = .init(.{0}, .u8),
+            .offset = 0,
+        });
         self.platform = testing.env();
-        self.store = .init(allocator, registry, .{ .meshes = &.{self.platform.replicated_mesh} });
+        self.store = .init(allocator, &registry, .{ .meshes = &.{self.platform.replicated_mesh} });
         self.value = self.store.view().createReplicatedTensor("value", null);
         self.second = self.store.view().createReplicatedTensor("second", null);
         self.missing = self.store.view().createReplicatedTensor("missing", null);
@@ -1295,7 +1278,7 @@ test "start publishes the bulk at once and wait runs program groups one at a tim
     // Exercise serial admission regardless of the platform's memory stats:
     // decided once the set-up is done.
     try loader.awaitSetup();
-    loader.memory_supported = false;
+    loader.measured = null;
 
     const Model = struct { value: Tensor, first: Tensor, second: Tensor };
     const model: Model = .{
@@ -1307,6 +1290,7 @@ test "start publishes the bulk at once and wait runs program groups one at a tim
     defer mem.deinitBufferized(allocator, &buffers);
 
     try loader.start(&model, &buffers, &fixture.store, .none);
+    errdefer loader.cancel();
     // The bulk is published; the groups wait for `wait`, their one program
     // (the same function and shapes) compiling meanwhile.
     try std.testing.expectEqual(1, loader.pending.len);
@@ -1316,24 +1300,24 @@ test "start publishes the bulk at once and wait runs program groups one at a tim
     try std.testing.expectEqual(0, loader.pending.len + loader.queued.len + loader.programs.items.len);
     // Serial admission retired the bulk and the first group before it
     // published the second.
-    try std.testing.expectEqual(2, loader.admission_retires);
+    try std.testing.expectEqual(2, loader.stats.admission_retires);
     try testing.expectShards(allocator, io, &buffers.value, &LoaderTestFixture.contents, .default);
     try testing.expectShards(allocator, io, &buffers.first, &LoaderTestFixture.contents, .default);
     try testing.expectShards(allocator, io, &buffers.second, &LoaderTestFixture.second_contents, .default);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytes_loaded);
+    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.stats.bytes_loaded);
 
     // Idempotent: a second wait neither reruns nor recounts.
     try loader.wait();
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytes_loaded);
+    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.stats.bytes_loaded);
 
     // The next load counts and times from its own first start.
-    try std.testing.expectEqual(null, loader.started_at);
+    try std.testing.expectEqual(null, loader.stats.started_at);
     var again: Buffer = undefined;
     try loader.start(&fixture.second, &again, &fixture.store, .none);
     try loader.wait();
     defer again.deinit();
-    try std.testing.expectEqual(LoaderTestFixture.second_contents.len, loader.bytes_loaded);
-    try std.testing.expectEqual(null, loader.started_at);
+    try std.testing.expectEqual(LoaderTestFixture.second_contents.len, loader.stats.bytes_loaded);
+    try std.testing.expectEqual(null, loader.stats.started_at);
 }
 
 test "one loader takes loads from different stores before one wait" {
@@ -1379,6 +1363,7 @@ test "tensors of one program and equal args share one compile, and one group run
     var buffers = try mem.bufferize(allocator, &model);
     defer mem.deinitBufferized(allocator, &buffers);
     try loader.start(&model, &buffers, &fixture.store, .none);
+    errdefer loader.cancel();
     // Nothing for the loader to fill itself, and one group.
     try std.testing.expectEqual(0, loader.pending.len);
     try std.testing.expectEqual(1, loader.queued.len);
@@ -1387,7 +1372,7 @@ test "tensors of one program and equal args share one compile, and one group run
     try testing.expectShards(allocator, io, &buffers.a, &.{ 2, 3, 4, 5 }, .default);
     try testing.expectShards(allocator, io, &buffers.b, &.{ 6, 7, 8, 9 }, .default);
     try testing.expectShards(allocator, io, &buffers.c, &.{ 3, 4, 5, 6 }, .default);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytes_loaded);
+    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.stats.bytes_loaded);
 }
 
 test "loader delivers host bindings into pinned host memory without charging the devices" {
@@ -1428,11 +1413,11 @@ fn expectHostDelivery(kind: Memory) !void {
     // Only the tensor in device memory counts against the devices, on both
     // sides of the admission ledger.
     if (loader.backend.? == .direct) {
-        const allocated = try allocator.alloc(u64, platform.devices.len);
-        defer allocator.free(allocated);
-        loader.backend.?.direct.allocatedBytesPerDevice(allocated);
-        try std.testing.expectEqualSlices(u64, loader.backend.?.direct.submitted_bytes, allocated);
-        for (allocated) |bytes| try std.testing.expectEqual(LoaderTestFixture.contents.len, bytes);
+        const direct = loader.backend.?.direct;
+        for (direct.sealed_bytes[0..platform.devices.len], direct.allocated_bytes[0..platform.devices.len]) |sealed, *allocated| {
+            try std.testing.expectEqual(LoaderTestFixture.contents.len, sealed);
+            try std.testing.expectEqual(sealed, allocated.load(.acquire));
+        }
     }
 }
 
@@ -1447,13 +1432,11 @@ test "a program frees its donated and non-donated inputs once" {
     defer allocator.free(path);
 
     const shape: Shape = .init(.{2}, .i32);
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(allocator);
-        errdefer registry.deinit();
-        try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
-        try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
-        break :store .init(allocator, registry, .{ .meshes = &.{platform.replicated_mesh} });
-    };
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
+    try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
+    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{platform.replicated_mesh} });
     defer store.deinit();
 
     const Sum = struct {
@@ -1473,6 +1456,7 @@ test "a program frees its donated and non-donated inputs once" {
         }, shape, Sum{ .donate = donate });
         var output: Buffer = undefined;
         try loader.start(&tensor, &output, &store, .none);
+        errdefer loader.cancel();
         try loader.programs.items[0].await(io, platform);
         try std.testing.expectEqual(@as(usize, @intFromBool(donate)), loader.programs.items[0].exe.?.donated_input_indices.len);
         // Retiring runs the program, then frees every input handle once, the
@@ -1503,7 +1487,7 @@ test "cancel gives up on everything started without running its programs" {
     // The loader is failed: what it waits for and what it is given.
     try std.testing.expectError(error.Canceled, loader.wait());
     try std.testing.expectError(error.Canceled, loader.start(&model, &buffers, &fixture.store, .none));
-    try std.testing.expectEqual(@as(usize, 0), loader.bytes_loaded);
+    try std.testing.expectEqual(@as(usize, 0), loader.stats.bytes_loaded);
 }
 
 test "cancel frees a published group's inputs without running its program" {
@@ -1520,6 +1504,7 @@ test "cancel frees a published group's inputs without running its program" {
     var buffers = try mem.bufferize(allocator, &model);
     defer mem.deinitBufferized(allocator, &buffers);
     try loader.start(&model, &buffers, &fixture.store, .none);
+    errdefer loader.cancel();
     // Publish the group as `wait` does, then give up before it retires.
     try loader.publish(loader.queued.popFront().?);
     try std.testing.expect(loader.programGroupPending());
@@ -1539,7 +1524,7 @@ test "a read failure fails the loader for every later call" {
     var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2, .program_group_bytes = 1 });
     defer loader.deinit();
     try loader.awaitSetup();
-    loader.memory_supported = false;
+    loader.measured = null;
 
     const Model = struct { broken: Tensor, value: Tensor };
     const model: Model = .{
@@ -1554,7 +1539,7 @@ test "a read failure fails the loader for every later call" {
     try std.testing.expectEqual(@as(usize, 0), buffers.value._shards.len);
     try std.testing.expectError(error.FileNotFound, loader.start(&model, &buffers, &fixture.store, .none));
     try std.testing.expectError(error.FileNotFound, loader.wait());
-    try std.testing.expectEqual(@as(usize, 0), loader.bytes_loaded);
+    try std.testing.expectEqual(@as(usize, 0), loader.stats.bytes_loaded);
 }
 
 test "after a failed load every buffer is empty or whole, and deinitBufferized frees the tree" {
@@ -1582,9 +1567,8 @@ test "after a failed load every buffer is empty or whole, and deinitBufferized f
     var buffers = try mem.bufferize(allocator, &model);
     // Frees whatever the failed load wrote, under the testing allocator.
     defer mem.deinitBufferized(allocator, &buffers);
-    // The direct backend may open the file as it plans, in `start`.
-    const result = if (loader.start(&model, &buffers, &fixture.store, .none)) loader.wait() else |err| err;
-    try std.testing.expectError(error.FileNotFound, result);
+    try loader.start(&model, &buffers, &fixture.store, .none);
+    try std.testing.expectError(error.FileNotFound, loader.wait());
     try LoaderTestFixture.expectFailed(&loader, error.FileNotFound);
     // Each buffer holds no shard or one per device.
     const devices = fixture.platform.placedShape(fixture.value.shape())._sharding.mesh.?.devicesInCanonicalOrder().len;
@@ -1617,16 +1601,15 @@ test "the direct backend allocates what it was submitted once everything landed"
     try loader.start(&model, &buffers, &fixture.store, .none);
     try loader.wait();
     if (loader.backend.? != .direct) return;
-    const allocated = try allocator.alloc(u64, fixture.platform.devices.len);
-    defer allocator.free(allocated);
-    loader.backend.?.direct.allocatedBytesPerDevice(allocated);
+    const direct = loader.backend.?.direct;
+    const n = fixture.platform.devices.len;
+    const unallocated = direct.unallocatedBytes();
     // Replicated program inputs and bulk outputs occupy every device.
-    for (allocated) |bytes| try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, bytes);
-    try std.testing.expectEqualSlices(u64, loader.backend.?.direct.submitted_bytes, allocated);
-    const unlanded = try allocator.alloc(u64, fixture.platform.devices.len);
-    defer allocator.free(unlanded);
-    loader.backend.?.direct.unlandedBytesPerDevice(unlanded);
-    for (unlanded) |bytes| try std.testing.expectEqual(0, bytes);
+    for (direct.sealed_bytes[0..n], direct.allocated_bytes[0..n], unallocated[0..n]) |sealed, *allocated, bytes| {
+        try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, sealed);
+        try std.testing.expectEqual(sealed, allocated.load(.acquire));
+        try std.testing.expectEqual(0, bytes);
+    }
 }
 
 test "init checks every option and returns InvalidOptions" {
@@ -1635,19 +1618,15 @@ test "init checks every option and returns InvalidOptions" {
     const platform = testing.env();
     var vfs: VFS = try .init(allocator, io);
     defer vfs.deinit();
-    const too_large = [_]usize{backend.max_read_request_size + 1};
-    const too_many: [backend.max_dma_block_sizes + 1]usize = @splat(4 << 20);
     const Case = struct { io: std.Io, opts: Loader.Options };
     const cases = [_]Case{
         .{ .io = io, .opts = .{ .read_parallelism = 0 } },
         .{ .io = io, .opts = .{ .read_parallelism = Loader.max_read_parallelism + 1 } },
-        .{ .io = io, .opts = .{ .dma_block_sizes = &.{} } },
-        .{ .io = io, .opts = .{ .dma_block_sizes = &.{0} } },
-        .{ .io = io, .opts = .{ .dma_block_sizes = &too_large } },
-        .{ .io = io, .opts = .{ .dma_block_sizes = &too_many } },
+        .{ .io = io, .opts = .{ .dma_block_size = 0 } },
+        .{ .io = io, .opts = .{ .dma_block_size = backend.max_read_request_size + 1 } },
         // The local hints read 8 MiB at least: not a whole number of
         // 3 MiB blocks.
-        .{ .io = io, .opts = .{ .dma_block_sizes = &.{3 << 20} } },
+        .{ .io = io, .opts = .{ .dma_block_size = 3 << 20 } },
         // No backend of the VFS serves the scheme.
         .{ .io = vfs.io(), .opts = .{ .checkpoint = "missing://bucket/model" } },
     };
@@ -1661,8 +1640,7 @@ test "init checks every option and returns InvalidOptions" {
     // Under a VFS, a local file may be read directly: a block holds an
     // alignment unit at least.
     if (VFS.direct_io_alignment != 0) {
-        const small = [_]usize{VFS.direct_io_alignment / 2};
-        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "/model.safetensors", .dma_block_sizes = &small })) |value| {
+        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "/model.safetensors", .dma_block_size = VFS.direct_io_alignment / 2 })) |value| {
             var loader = value;
             loader.deinit();
             return error.TestUnexpectedResult;
@@ -1670,8 +1648,7 @@ test "init checks every option and returns InvalidOptions" {
         // Whatever the checkpoint: a request of one alignment unit cannot
         // hold a direct read widened at each end.
         try vfs.registerBackend("tiny", .{ .io = io, .read_hints = .{ .read_chunk_size = VFS.direct_io_alignment } });
-        const unit = [_]usize{VFS.direct_io_alignment};
-        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "tiny://model", .dma_block_sizes = &unit })) |value| {
+        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "tiny://model", .dma_block_size = VFS.direct_io_alignment })) |value| {
             var loader = value;
             loader.deinit();
             return error.TestUnexpectedResult;
@@ -1688,8 +1665,8 @@ test "a failed set-up fails the first start, and deinit frees the rest" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(std.testing.allocator, io);
     defer fixture.deinit();
-    // `init` allocates its two per-device slices, then the set-up's first
-    // allocation, the backend, fails.
+    // `init` allocates nothing; the set-up's third allocation, inside the
+    // backend, fails.
     var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 2 });
     var loader = try Loader.init(failing.allocator(), io, fixture.platform, .{ .read_parallelism = 2 });
     defer loader.deinit();
@@ -1773,20 +1750,18 @@ test "a rate-limited HTTP source loads through the VFS hold" {
     const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
 
     const platform = testing.env();
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(allocator);
-        errdefer registry.deinit();
-        const names = [tensors][]const u8{ "a", "b", "c", "d" };
-        for (names, 0..) |name, index| {
-            try registry.registerTensor(.{
-                .file_uri = url,
-                .name = name,
-                .shape = .init(.{tensor_bytes}, .u8),
-                .offset = 2 * index * tensor_bytes,
-            });
-        }
-        break :store .init(allocator, registry, .{ .meshes = &.{platform.replicated_mesh} });
-    };
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    const names = [tensors][]const u8{ "a", "b", "c", "d" };
+    for (names, 0..) |name, index| {
+        try registry.registerTensor(.{
+            .file_uri = url,
+            .name = name,
+            .shape = .init(.{tensor_bytes}, .u8),
+            .offset = 2 * index * tensor_bytes,
+        });
+    }
+    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{platform.replicated_mesh} });
     defer store.deinit();
 
     const Model = struct { a: Tensor, b: Tensor, c: Tensor, d: Tensor };
@@ -1827,7 +1802,7 @@ test "a rate-limited HTTP source loads through the VFS hold" {
     try std.testing.expectEqual(credits.free.len, credits.free_len);
 
     // The checkpoint's VFS backend, not the local hints (8 MiB), sized the
-    // reads: 16 MiB requests over the CPU's 4 MiB blocks. Its file was read
+    // reads: 16 MiB requests over the CPU's 2 MiB blocks. Its file was read
     // exact: a remote file is never direct.
     const direct = loader.backend.?.direct;
     try std.testing.expectEqual(@as(usize, 16 << 20), direct.plan_config.request_size);
@@ -1946,24 +1921,6 @@ fn expectStructureMismatch(fixture: *LoaderTestFixture, comptime Model: type, bu
         }
     }.call, .{ untouched, &written });
     try std.testing.expectEqual(0, written);
-}
-
-test "loader reports source size mismatches" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var fixture: LoaderTestFixture = undefined;
-    try fixture.init(allocator, io);
-    defer fixture.deinit();
-    var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
-    defer loader.deinit();
-    // Eight bytes from a source of four.
-    var tensor = fixture.value;
-    tensor._shape = .init(.{8}, .u8);
-    var output: Buffer = undefined;
-    // Checked before anything is published, whatever the backend.
-    try std.testing.expectError(error.InvalidBinding, loader.start(&tensor, &output, &fixture.store, .none));
-    try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
-    try std.testing.expectError(error.InvalidBinding, loader.wait());
 }
 
 /// Two safetensors files for composite loads, every row 16 bytes (8 u16):
@@ -2111,17 +2068,16 @@ test "loader assembles concatenated and padded sources on every placement and me
                 try testing.expectShards(allocator, io, &buffers.reversed, &reversed, memory);
                 try testing.expectShards(allocator, io, &buffers.plain, &fixture.plain, memory);
                 // Each destination once, padding included.
-                try std.testing.expectEqual(@as(usize, 256 + 128 + 96 + 64), loader.bytes_loaded);
+                try std.testing.expectEqual(@as(usize, 256 + 128 + 96 + 64), loader.stats.bytes_loaded);
                 // A destination is allocated once per device, whatever its
                 // parts; host memory counts on neither side.
                 if (loader.backend.? == .direct) {
-                    const allocated = try allocator.alloc(u64, platform.devices.len);
-                    defer allocator.free(allocated);
-                    loader.backend.?.direct.allocatedBytesPerDevice(allocated);
-                    try std.testing.expectEqualSlices(u64, loader.backend.?.direct.submitted_bytes, allocated);
+                    const direct = loader.backend.?.direct;
+                    const n = platform.devices.len;
+                    for (direct.sealed_bytes[0..n], direct.allocated_bytes[0..n]) |sealed, *allocated| try std.testing.expectEqual(sealed, allocated.load(.acquire));
                     for (devices.physical.devices_in_canonical_order) |device| {
                         const expected: u64 = if (memory.isHost()) 0 else (256 + 128 + 64) / shards + 96;
-                        try std.testing.expectEqual(expected, allocated[device.id]);
+                        try std.testing.expectEqual(expected, direct.sealed_bytes[device.id]);
                     }
                 }
             }
@@ -2332,6 +2288,12 @@ test "bindings the loader cannot fill fail it before submission" {
         .shape = .init(.{3}, .u4),
         .offset = 0,
     });
+    try fixture.registry.registerTensor(.{
+        .file_uri = fixture.registry.tensors.get("a").?.file_uri,
+        .name = "nibble_rows",
+        .shape = .init(.{ 2, 3 }, .f4e2m1),
+        .offset = 0,
+    });
     const platform = testing.env();
     var store = try testing.storeOf(allocator, &fixture.registry, .{ .meshes = &.{platform.replicated_mesh} });
     defer store.deinit();
@@ -2351,11 +2313,24 @@ test "bindings the loader cannot fill fail it before submission" {
             view.setMemory(tensor, .host_pinned);
             break :host tensor;
         },
+        // Three whole bytes, in rows of three nibbles that do not pack, as a
+        // tensor and as a program input.
+        view.createReplicatedTensor("nibble_rows", null),
+        Source.bindProgram(&.{view.source("nibble_rows", null).withPartitioning(.replicated, .{})}, .init(.{3}, .u8), LoaderTestFixture.Identity{}),
+        // A program input whose transpose reads its 1024 source bytes in
+        // every job, more than one read.
+        Source.bindProgram(&.{rows(view, "wide").transpose(.{}).withPartitioning(.replicated, .{})}, .init(.{ 8, 64 }, .u16), LoaderTestFixture.Identity{}),
     };
     var output: Buffer = undefined;
     for (&rejected) |*tensor| {
         var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
         defer loader.deinit();
+        // One read holds half of `wide`; the buffered backend reads any part.
+        try loader.awaitSetup();
+        switch (loader.backend.?) {
+            .direct => |direct| direct.plan_config.request_size = 512,
+            .buffered => if (tensor == &rejected[rejected.len - 1]) continue,
+        }
         try std.testing.expectError(error.InvalidBinding, loader.start(tensor, &output, &store, .none));
         try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
     }
@@ -2474,7 +2449,7 @@ test "a padded host-mapped table stays in host memory and serves device gathers 
 
 test "a replicated host-mapped table is one allocation that every device reads in place" {
     // The same table on every device: the direct loader makes it one
-    // allocation (`direct_loader.TensorTransfer.initHost`), each device's
+    // allocation (`direct_loader.DestinationState.initHost`), each device's
     // shard a view of it, and every device's kernels gather from it.
     try expectHostTableGathers(.replicated);
 }
@@ -2484,7 +2459,6 @@ test "a replicated host-mapped table is one allocation that every device reads i
 /// device. The table is freed while the gather is queued behind matrix
 /// products: its memory must outlive the read, and go once it is done.
 fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
-    const direct_loader = @import("direct_loader.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const rows: usize = 100_003;
@@ -2523,14 +2497,12 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(allocator);
-        errdefer registry.deinit();
-        try testing.writeSafetensors(allocator, io, tmp.dir, "table.safetensors", &registry, &.{
-            .{ .name = "table", .dtype = "U8", .dims = &.{ @intCast(rows), @intCast(row_bytes) }, .bytes = padded[0 .. rows * row_bytes] },
-        });
-        break :store .init(allocator, registry, .{ .meshes = &.{mesh} });
-    };
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try testing.writeSafetensors(allocator, io, tmp.dir, "table.safetensors", &registry, &.{
+        .{ .name = "table", .dtype = "U8", .dims = &.{ @intCast(rows), @intCast(row_bytes) }, .bytes = padded[0 .. rows * row_bytes] },
+    });
+    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{mesh} });
     defer store.deinit();
     const source = store.view().source("table", .{ .row, .channel })
         .pad(0, .{ .row = TensorStore.Source.Pad{ .high = @intCast(padded_rows - rows) } });
@@ -2560,7 +2532,7 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     for (devices) |device| if (allocations[device.id]) |before| {
         try std.testing.expectEqual(before, platform.devices[device.id].memoryStats().num_allocs.?);
     };
-    try std.testing.expectEqual(padded.len, loader.bytes_loaded);
+    try std.testing.expectEqual(padded.len, loader.stats.bytes_loaded);
     try testing.expectShards(allocator, io, &device_table, padded, .host_mapped);
     // A row shard is one allocation per device, a replicated table one.
     try std.testing.expectEqual(live_before + if (placement == .rows) shard_count else 1, direct_loader.liveHostAllocations());

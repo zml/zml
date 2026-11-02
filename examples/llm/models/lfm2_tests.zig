@@ -39,8 +39,9 @@ pub fn main(init: std.process.Init) !void {
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     defer repo.close(io);
     const meshes: common.Meshes = try .init(platform);
-    const registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
-    var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &meshes.all() });
+    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &meshes.all() });
     defer store.deinit();
 
     var repo_model = try lfm2.LoadedModel.init(allocator, io, repo, store.view(), .{});
@@ -87,8 +88,9 @@ pub fn run(
     attention_parameters: zml.attention.Parameters,
     meshes: common.Meshes,
 ) !void {
-    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
-    var activation_store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &meshes.all() });
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
+    defer registry.deinit();
+    var activation_store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &meshes.all() });
     defer activation_store.deinit();
 
     var ctx = TestContext{

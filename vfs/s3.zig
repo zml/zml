@@ -365,12 +365,9 @@ pub const S3 = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (err) {
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (self.governor.readFailure(handle.uri, handle.pos, err)) {
                     error.Canceled => return error.Canceled,
-                    else => {
-                        log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                        return .{ .file_read_streaming = error.InputOutput };
-                    },
+                    error.Unexpected => return .{ .file_read_streaming = error.InputOutput },
                 };
 
                 if (total == 0) {
@@ -559,15 +556,7 @@ pub const S3 = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| switch (err) {
-            // A cancelled task must not surface as an I/O failure: every
-            // wait in the governed loop is a cancellation point.
-            error.Canceled => return error.Canceled,
-            else => {
-                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-                return std.Io.File.ReadPositionalError.Unexpected;
-            },
-        };
+        return self.performRead(handle, data, offset) catch |err| self.governor.readFailure(handle.uri, offset, err);
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
@@ -679,15 +668,9 @@ pub const S3 = struct {
         signature: Signature = .{},
 
         fn attempt(self: *Listing, current: request.Attempt) anyerror!request.Outcome([]u8) {
-            const authorization = try self.signature.sign(self.s3, .GET, self.uri, &.{});
-            var head_buffer: [2 * 1024]u8 = undefined;
             return request.exchange([]u8, current, self.uri, .{
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = authorization,
-                },
+                .authorization = try self.signature.sign(self.s3, .GET, self.uri, &.{}),
                 .extra_headers = &self.signature.headers,
-                .head_buffer = &head_buffer,
             }, self, Listing.consume);
         }
 
@@ -763,17 +746,11 @@ pub const S3 = struct {
         signature: Signature = .{},
 
         fn attempt(self: *SizeRequest, current: request.Attempt) anyerror!request.Outcome(u64) {
-            const authorization = try self.signature.sign(self.s3, .HEAD, self.uri, &.{});
-            var head_buffer: [8 * 1024]u8 = undefined;
             return request.exchange(u64, current, self.uri, .{
                 .method = .HEAD,
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = authorization,
-                },
+                .authorization = try self.signature.sign(self.s3, .HEAD, self.uri, &.{}),
                 .extra_headers = &self.signature.headers,
                 .open = true,
-                .head_buffer = &head_buffer,
             }, self, SizeRequest.consume);
         }
 
@@ -788,9 +765,7 @@ pub const S3 = struct {
         var signed: SignedRequest = .{ .s3 = self, .uri = std.Uri.parse(url) catch return error.BadPathName };
         return range_read.performRangeRead(&self.governor, .{
             .request = .{ .target = url, .key = request.authorityOf(signed.uri) },
-            .context = &signed,
-            .prepare = SignedRequest.prepare,
-        }, data, offset, range_read.readSize(handle.size, offset, data));
+        }, &signed, SignedRequest.prepare, data, offset, handle.size);
     }
 
     /// One SigV4-signed GET. The signature covers `x-amz-date` and `Range`,
@@ -800,8 +775,7 @@ pub const S3 = struct {
         uri: std.Uri,
         signature: Signature = .{},
 
-        fn prepare(context: *anyopaque, _: request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
-            const self: *SignedRequest = @ptrCast(@alignCast(context));
+        fn prepare(self: *SignedRequest, _: request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
             return .{
                 .uri = self.uri,
                 .authorization = try self.signature.sign(self.s3, .GET, self.uri, &.{range}),

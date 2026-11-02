@@ -20,14 +20,10 @@ pub fn scopedLog(comptime scope: @EnumLiteral()) type {
 }
 
 /// How a backend's files are best read, for the loader (`VFS.readHints`).
-/// Source request size is independent of DMA block size and source width.
-/// In historical warm Llama loads on one B70 at fixed width 12, 8/16/32 MiB
-/// requests achieved 27.05/24.21/21.33 GiB/s and used 96/192/384 MiB pinned
-/// high-water. Real AWS instead plateaued near 950 MiB/s: 16 MiB at width 24
-/// was within 3% of peak; 32 MiB cut GET count 39% but did not improve speed.
-/// A universal 32 MiB policy would trade a local regression for no remote
-/// throughput gain. Hints supply minima; the loader also respects its
-/// independently calibrated DMA block and the supported request-size limit.
+/// No one source request size suits every backend: warm local 8 MiB
+/// requests on one B70 reached 27.05 GiB/s against 21.33 at 32 MiB, with a
+/// quarter of the pinned memory; real AWS plateaued near 950 MiB/s, and
+/// 32 MiB was no faster.
 pub const ReadHints = struct {
     /// Local files, through a VFS or not. Also the loader's hints when it
     /// is given no checkpoint or no VFS.
@@ -35,91 +31,12 @@ pub const ReadHints = struct {
 
     /// Smallest source request expected to avoid excessive per-request cost
     /// or backend rate limiting. The loader may increase it to match the
-    /// calibrated DMA block size.
+    /// calibrated DMA block size (zml/io/backend.zig's `requestSize`).
     read_chunk_size: usize = 16 * 1024 * 1024,
     /// The backend benefits from opening enough source calls to hide request
     /// latency before the first response arrives.
     high_latency: bool = false,
 };
-
-pub const ReadFailure = enum {
-    transient,
-    timeout,
-    server_failure,
-    throttle,
-};
-
-pub const AtomicReadStats = struct {
-    physical_requests: std.atomic.Value(u64) = .init(0),
-    physical_bytes: std.atomic.Value(u64) = .init(0),
-    retries: std.atomic.Value(u64) = .init(0),
-    transient_retries: std.atomic.Value(u64) = .init(0),
-    timeouts: std.atomic.Value(u64) = .init(0),
-    server_failures: std.atomic.Value(u64) = .init(0),
-    throttles: std.atomic.Value(u64) = .init(0),
-    retry_delay_ns: std.atomic.Value(u64) = .init(0),
-    /// Backend-wide holds armed by rate limiting, and the time requests
-    /// spent waiting them out.
-    holds: std.atomic.Value(u64) = .init(0),
-    hold_wait_ns: std.atomic.Value(u64) = .init(0),
-
-    pub fn recordAttempt(self: *AtomicReadStats) void {
-        _ = self.physical_requests.fetchAdd(1, .monotonic);
-    }
-
-    pub fn recordSuccess(self: *AtomicReadStats, request_size: usize) void {
-        _ = self.physical_bytes.fetchAdd(@intCast(request_size), .monotonic);
-    }
-
-    pub fn recordFailure(self: *AtomicReadStats, failure: ReadFailure) void {
-        switch (failure) {
-            .transient => _ = self.transient_retries.fetchAdd(1, .monotonic),
-            .timeout => _ = self.timeouts.fetchAdd(1, .monotonic),
-            .server_failure => _ = self.server_failures.fetchAdd(1, .monotonic),
-            .throttle => _ = self.throttles.fetchAdd(1, .monotonic),
-        }
-    }
-
-    pub fn recordRetry(self: *AtomicReadStats) void {
-        _ = self.retries.fetchAdd(1, .monotonic);
-    }
-
-    pub fn recordRetryDelay(self: *AtomicReadStats, delay: std.Io.Duration) void {
-        const delay_ns: u64 = @intCast(@max(delay.nanoseconds, 0));
-        _ = self.retry_delay_ns.fetchAdd(delay_ns, .monotonic);
-    }
-
-    /// One rate-limit hold armed over every request of this backend.
-    pub fn recordHold(self: *AtomicReadStats) void {
-        _ = self.holds.fetchAdd(1, .monotonic);
-    }
-
-    /// Time one request spent waiting a hold out.
-    pub fn recordHoldWait(self: *AtomicReadStats, waited: std.Io.Duration) void {
-        _ = self.hold_wait_ns.fetchAdd(@intCast(@max(waited.nanoseconds, 0)), .monotonic);
-    }
-};
-
-test "atomic read stats retain aggregate retry feedback" {
-    var stats: AtomicReadStats = .{};
-    const request_size = 16 * 1024 * 1024;
-    stats.recordAttempt();
-    stats.recordFailure(.timeout);
-    stats.recordRetry();
-    stats.recordRetryDelay(.fromMilliseconds(25));
-    stats.recordHold();
-    stats.recordHoldWait(.fromMilliseconds(40));
-    stats.recordAttempt();
-    stats.recordSuccess(request_size);
-
-    try std.testing.expectEqual(@as(u64, 2), stats.physical_requests.load(.acquire));
-    try std.testing.expectEqual(@as(u64, request_size), stats.physical_bytes.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), stats.retries.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), stats.timeouts.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 25 * std.time.ns_per_ms), stats.retry_delay_ns.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), stats.holds.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms), stats.hold_wait_ns.load(.acquire));
-}
 
 pub const Backend = struct {
     io: std.Io,

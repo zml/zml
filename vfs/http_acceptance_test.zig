@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const stdx = @import("stdx");
-
 const GCS = @import("gcs.zig").GCS;
 const HTTP = @import("http.zig").HTTP;
 const MockServer = @import("mock_server.zig").MockServer;
@@ -21,6 +19,81 @@ fn instantRetries(max_retries: usize) vfs_request.Retry {
     };
 }
 
+/// A retry configuration whose retries and holds are short enough for a test.
+fn fastRetry(initial_ms: i64, budget_ms: i64) vfs_request.Retry {
+    return .{
+        .max_retries = 5,
+        .initial_delay = .fromMilliseconds(initial_ms),
+        .max_delay = .fromMilliseconds(initial_ms),
+        .max_hold = .fromSeconds(30),
+        .throttle_budget = .fromMilliseconds(budget_ms),
+    };
+}
+
+/// A `MockServer` serving `object`, an HTTP backend with a client of its
+/// own, and `/object` open through that backend. Initialized in place: the
+/// backend points at the client and the server must not move once started.
+const Fixture = struct {
+    server: MockServer,
+    client: std.http.Client,
+    http: HTTP,
+    file: std.Io.File,
+
+    fn init(self: *Fixture, object: []const u8, server_opts: MockServer.Options, retry: vfs_request.Retry) !void {
+        const allocator = std.testing.allocator;
+        const io = std.testing.io;
+        self.server = try .init(io, object, server_opts);
+        errdefer self.server.deinit(io);
+        try self.server.start(io);
+        self.client = .{ .allocator = allocator, .io = io };
+        errdefer self.client.deinit();
+        self.http = try .init(allocator, io, &self.client, .{ .protocol = .http, .retry = retry });
+        errdefer self.http.deinit();
+        var path_buffer: [128]u8 = undefined;
+        const path = try self.server.path(&path_buffer);
+        self.file = try std.Io.Dir.openFile(.cwd(), self.http.io(), path, .{ .mode = .read_only });
+    }
+
+    fn deinit(self: *Fixture) void {
+        self.file.close(self.http.io());
+        self.http.deinit();
+        self.client.deinit();
+        self.server.deinit(std.testing.io);
+    }
+};
+
+/// Reads `object` back through the fixture's file with `readers` concurrent
+/// positional reads of `read_size` bytes, reader `i` at `i * read_size`,
+/// all released at once. Fails on the first reader that failed or read
+/// other bytes.
+fn expectConcurrentReads(fixture: *Fixture, object: []const u8, comptime readers: usize, comptime read_size: usize) !void {
+    const Reader = struct {
+        fn run(file: std.Io.File, file_io: std.Io, output: []u8, offset: u64, result: *anyerror!usize, start: *std.Io.Event) void {
+            start.wait(file_io) catch |err| {
+                result.* = err;
+                return;
+            };
+            result.* = file.readPositional(file_io, &.{output}, offset);
+        }
+    };
+    const io = std.testing.io;
+    var outputs: [readers][read_size]u8 = undefined;
+    var results: [readers]anyerror!usize = undefined;
+    var released: std.Io.Event = .unset;
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    for (&outputs, &results, 0..) |*output, *result, index| {
+        try group.concurrent(io, Reader.run, .{ fixture.file, fixture.http.io(), output, index * read_size, result, &released });
+    }
+    released.set(io);
+    try group.await(io);
+
+    for (&outputs, results, 0..) |*output, result, index| {
+        try std.testing.expectEqual(read_size, try result);
+        try std.testing.expectEqualSlices(u8, object[index * read_size ..][0..read_size], output);
+    }
+}
+
 test "generic HTTP keeps a large scattered positional read to one GET" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -33,21 +106,11 @@ test "generic HTTP keeps a large scattered positional read to one GET" {
     const output = try allocator.alloc(u8, request_size);
     defer allocator.free(output);
 
-    var server = try MockServer.init(io, object, .{});
-    defer server.deinit(io);
-    try server.start(io);
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http });
-    defer http.deinit();
-    const http_io = http.io();
-    const stats = &http.governor.stats;
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
+    var fixture: Fixture = undefined;
+    try fixture.init(object, .{}, .{});
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const stats = &fixture.http.governor.stats;
 
     // Fresh stats for the read: the open's HEAD is a request too.
     stats.* = .{};
@@ -58,7 +121,7 @@ test "generic HTTP keeps a large scattered positional read to one GET" {
     };
     try std.testing.expectEqual(
         request_size,
-        try file.readPositional(http_io, &buffers, offset),
+        try fixture.file.readPositional(fixture.http.io(), &buffers, offset),
     );
     try std.testing.expectEqualSlices(u8, object[offset..], output);
 
@@ -71,34 +134,29 @@ test "generic HTTP keeps a large scattered positional read to one GET" {
 }
 
 test "generic HTTP follows a relative redirect chain at open and on every read" {
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
 
     var object: [4096]u8 = undefined;
     for (&object, 0..) |*byte, i| byte.* = @truncate(i);
     var output: [1000]u8 = undefined;
 
-    // The second location resolves against the first hop's path.
-    var server = try MockServer.init(io, &object, .{ .redirects = &.{
-        .{ .path = "/start", .location = "/hop/next" },
-        .{ .path = "/hop/next", .location = "../object" },
-    } });
-    defer server.deinit(io);
-    try server.start(io);
+    // `/object` redirects twice, and the second location resolves against
+    // the first hop's path.
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{
+        .redirects = &.{
+            .{ .path = "/object", .location = "/hop/next" },
+            .{ .path = "/hop/next", .location = "../moved" },
+        },
+        .objects = &.{.{ .path = "/moved", .bytes = &object }},
+    }, .{});
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const http_io = fixture.http.io();
 
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http });
-    defer http.deinit();
-    const http_io = http.io();
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "127.0.0.1:{d}/start", .{server.port()});
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
-    try std.testing.expectEqual(@as(u64, object.len), (try file.stat(http_io)).size);
+    try std.testing.expectEqual(@as(u64, object.len), (try fixture.file.stat(http_io)).size);
     const buffers = [_][]u8{&output};
-    try std.testing.expectEqual(output.len, try file.readPositional(http_io, &buffers, 77));
+    try std.testing.expectEqual(output.len, try fixture.file.readPositional(http_io, &buffers, 77));
     try std.testing.expectEqualSlices(u8, object[77..][0..output.len], &output);
 
     try server.stop(io);
@@ -118,31 +176,22 @@ test "generic HTTP retries serially and reports aggregate retry counters" {
     const output = try allocator.alloc(u8, request_size);
     defer allocator.free(output);
 
-    var server = try MockServer.init(io, object, .{ .fail_first_gets = 1 });
-    defer server.deinit(io);
-    try server.start(io);
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http, .retry = .{
+    var fixture: Fixture = undefined;
+    try fixture.init(object, .{ .fail_first_gets = 1 }, .{
         .max_retries = 1,
         .initial_delay = .fromNanoseconds(0),
         .max_delay = .fromNanoseconds(0),
-    } });
-    defer http.deinit();
-    const http_io = http.io();
-    const stats = &http.governor.stats;
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
+    });
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const http_io = fixture.http.io();
+    const stats = &fixture.http.governor.stats;
 
     stats.* = .{};
     const one_buffer = [_][]u8{output};
     try std.testing.expectEqual(
         request_size,
-        try file.readPositional(http_io, &one_buffer, 0),
+        try fixture.file.readPositional(http_io, &one_buffer, 0),
     );
     try std.testing.expectEqual(@as(u64, 2), stats.physical_requests.load(.acquire));
     try std.testing.expectEqual(@as(u64, request_size), stats.physical_bytes.load(.acquire));
@@ -153,7 +202,7 @@ test "generic HTTP retries serially and reports aggregate retry counters" {
     stats.* = .{};
     try std.testing.expectEqual(
         request_size,
-        try file.readPositional(http_io, &one_buffer, 0),
+        try fixture.file.readPositional(http_io, &one_buffer, 0),
     );
     try std.testing.expectEqual(@as(u64, 1), stats.physical_requests.load(.acquire));
     try std.testing.expectEqual(@as(u64, request_size), stats.physical_bytes.load(.acquire));
@@ -167,7 +216,6 @@ test "generic HTTP retries serially and reports aggregate retry counters" {
 }
 
 test "generic HTTP physical concurrency does not exceed caller admission" {
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
     const admission = 3;
     const read_size = 1024;
@@ -175,74 +223,14 @@ test "generic HTTP physical concurrency does not exceed caller admission" {
     var object: [admission * read_size]u8 = undefined;
     for (&object, 0..) |*byte, index| byte.* = @truncate(index);
 
-    var server = try MockServer.init(io, &object, .{
-        .barrier_gets = admission,
-    });
-    defer server.deinit(io);
-    try server.start(io);
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{ .barrier_gets = admission }, .{});
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const stats = &fixture.http.governor.stats;
 
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http });
-    defer http.deinit();
-    const http_io = http.io();
-    const stats = &http.governor.stats;
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
-
-    var outputs: [admission][read_size]u8 = undefined;
-    var results: [admission]usize = @splat(0);
-    var first_error: stdx.FirstError(anyerror) = .{};
-    var start: std.Io.Event = .unset;
-    var readers: std.Io.Group = .init;
-    const Reader = struct {
-        fn run(
-            file_: std.Io.File,
-            io_: std.Io,
-            output: []u8,
-            offset: u64,
-            result: *usize,
-            first_error_: *stdx.FirstError(anyerror),
-            start_: *std.Io.Event,
-        ) void {
-            start_.wait(io_) catch |err| {
-                _ = first_error_.set(err);
-                return;
-            };
-            const buffers = [_][]u8{output};
-            result.* = file_.readPositional(io_, &buffers, offset) catch |err| {
-                _ = first_error_.set(err);
-                return;
-            };
-        }
-    };
     stats.* = .{};
-    for (0..admission) |index| {
-        try readers.concurrent(io, Reader.run, .{
-            file,
-            http_io,
-            &outputs[index],
-            @as(u64, @intCast(index * read_size)),
-            &results[index],
-            &first_error,
-            &start,
-        });
-    }
-    start.set(io);
-    try readers.await(io);
-
-    if (first_error.get()) |err| return err;
-    for (0..admission) |index| {
-        try std.testing.expectEqual(read_size, results[index]);
-        try std.testing.expectEqualSlices(
-            u8,
-            object[index * read_size ..][0..read_size],
-            &outputs[index],
-        );
-    }
+    try expectConcurrentReads(&fixture, &object, admission, read_size);
 
     try server.stop(io);
 
@@ -279,8 +267,7 @@ test "the shared range loop prepares the request once per attempt" {
         uri: std.Uri,
         prepared: usize = 0,
 
-        fn prepare(context: *anyopaque, _: vfs_request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
-            const self: *@This() = @ptrCast(@alignCast(context));
+        fn prepare(self: *@This(), _: vfs_request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
             try std.testing.expectEqualStrings("Range", range.name);
             self.prepared += 1;
             return .{ .uri = self.uri };
@@ -291,21 +278,24 @@ test "the shared range loop prepares the request once per attempt" {
     var signed: Signed = .{ .uri = try .parse(url) };
     const spec: range_read.RangeSpec = .{
         .request = .{ .target = url, .key = vfs_request.authorityOf(signed.uri) },
-        .context = &signed,
-        .prepare = Signed.prepare,
     };
     const buffers = [_][]u8{ output[0..1024], output[1024..] };
-    const size = range_read.readSize(object.len, 0, &buffers);
 
     // No retry budget: one attempt, one hook call, the failure is counted.
     var no_retry: vfs_request.Governor = .init(io, &client, "test", .throttle, instantRetries(0));
-    try std.testing.expectError(error.RetriesExhausted, range_read.performRangeRead(&no_retry, spec, &buffers, 0, size));
+    try std.testing.expectError(
+        error.RetriesExhausted,
+        range_read.performRangeRead(&no_retry, spec, &signed, Signed.prepare, &buffers, 0, object.len),
+    );
     try std.testing.expectEqual(@as(usize, 1), signed.prepared);
     try std.testing.expectEqual(@as(u64, 1), no_retry.stats.server_failures.load(.acquire));
 
     signed.prepared = 0;
     var one_retry: vfs_request.Governor = .init(io, &client, "test", .throttle, instantRetries(1));
-    try std.testing.expectEqual(size, try range_read.performRangeRead(&one_retry, spec, &buffers, 0, size));
+    try std.testing.expectEqual(
+        object.len,
+        try range_read.performRangeRead(&one_retry, spec, &signed, Signed.prepare, &buffers, 0, object.len),
+    );
     try std.testing.expectEqual(@as(usize, 2), signed.prepared);
     try std.testing.expectEqualSlices(u8, &object, &output);
 
@@ -321,65 +311,7 @@ test "the shared range loop prepares the request once per attempt" {
     try std.testing.expectEqual(@as(u64, request_size), stats.physical_bytes.load(.acquire));
 }
 
-/// Options whose retries and holds are short enough for a test.
-fn fastOptions(initial_ms: i64, budget_ms: i64) HTTP.Options {
-    return .{ .protocol = .http, .retry = .{
-        .max_retries = 5,
-        .initial_delay = .fromMilliseconds(initial_ms),
-        .max_delay = .fromMilliseconds(initial_ms),
-        .max_hold = .fromSeconds(30),
-        .throttle_budget = .fromMilliseconds(budget_ms),
-    } };
-}
-
-/// Runs one concurrent positional read per output slice, each at its own
-/// offset, and reports what every reader got.
-const ConcurrentReads = struct {
-    results: []usize,
-    errors: []u16,
-
-    fn run(io: std.Io, file_io: std.Io, file: std.Io.File, outputs: []const []u8, self: ConcurrentReads) !void {
-        var start: std.Io.Event = .unset;
-        var readers: std.Io.Group = .init;
-        const Reader = struct {
-            fn run(
-                file_: std.Io.File,
-                io_: std.Io,
-                output: []u8,
-                offset: u64,
-                result: *usize,
-                failure: *u16,
-                start_: *std.Io.Event,
-            ) void {
-                start_.wait(io_) catch |err| {
-                    failure.* = @intFromError(err);
-                    return;
-                };
-                const buffers = [_][]u8{output};
-                result.* = file_.readPositional(io_, &buffers, offset) catch |err| {
-                    failure.* = @intFromError(err);
-                    return;
-                };
-            }
-        };
-        for (outputs, self.results, self.errors, 0..) |output, *result, *failure, index| {
-            try readers.concurrent(io, Reader.run, .{
-                file,
-                file_io,
-                output,
-                @as(u64, @intCast(index * output.len)),
-                result,
-                failure,
-                &start,
-            });
-        }
-        start.set(io);
-        try readers.await(io);
-    }
-};
-
 test "one throttled GET holds every reader of the backend" {
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
     const readers = 8;
     const read_size = 512;
@@ -389,37 +321,16 @@ test "one throttled GET holds every reader of the backend" {
 
     // Every reader's first GET is throttled, all eight answered together (the
     // barrier), with a one second reset.
-    var server = try MockServer.init(io, &object, .{
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{
         .barrier_gets = readers,
         .throttle = .{ .first_gets = readers, .retry_after_s = 1 },
-    });
-    defer server.deinit(io);
-    try server.start(io);
+    }, fastRetry(50, 300_000));
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const stats = &fixture.http.governor.stats;
 
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, fastOptions(50, 300_000));
-    defer http.deinit();
-    const http_io = http.io();
-    const stats = &http.governor.stats;
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
-
-    var outputs: [readers][read_size]u8 = undefined;
-    var slices: [readers][]u8 = undefined;
-    for (&outputs, &slices) |*output, *slice| slice.* = output;
-    var results: [readers]usize = @splat(0);
-    var errors: [readers]u16 = @splat(0);
-    try ConcurrentReads.run(io, http_io, file, &slices, .{ .results = &results, .errors = &errors });
-
-    for (results, errors, 0..) |result, failure, index| {
-        if (failure != 0) return @errorFromInt(failure);
-        try std.testing.expectEqual(read_size, result);
-        try std.testing.expectEqualSlices(u8, object[index * read_size ..][0..read_size], &outputs[index]);
-    }
+    try expectConcurrentReads(&fixture, &object, readers, read_size);
 
     try server.stop(io);
 
@@ -436,7 +347,6 @@ test "one throttled GET holds every reader of the backend" {
 }
 
 test "a rate window is absorbed by the hold instead of the retry budget" {
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
     const readers = 12;
     const read_size = 256;
@@ -445,38 +355,16 @@ test "a rate window is absorbed by the hold instead of the retry budget" {
     for (&object, 0..) |*byte, index| byte.* = @truncate(index *% 3);
 
     // Four GETs per 100 ms; twelve readers need three windows at best.
-    var server = try MockServer.init(io, &object, .{
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{
         .throttle = .{ .window = .{ .gets = 4, .per_ms = 100 } },
-    });
-    defer server.deinit(io);
-    try server.start(io);
+    }, fastRetry(50, 300_000));
+    defer fixture.deinit();
+    const stats = &fixture.http.governor.stats;
 
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, fastOptions(50, 300_000));
-    defer http.deinit();
-    const http_io = http.io();
-    const stats = &http.governor.stats;
+    try expectConcurrentReads(&fixture, &object, readers, read_size);
 
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
-
-    var outputs: [readers][read_size]u8 = undefined;
-    var slices: [readers][]u8 = undefined;
-    for (&outputs, &slices) |*output, *slice| slice.* = output;
-    var results: [readers]usize = @splat(0);
-    var errors: [readers]u16 = @splat(0);
-    try ConcurrentReads.run(io, http_io, file, &slices, .{ .results = &results, .errors = &errors });
-
-    for (results, errors, 0..) |result, failure, index| {
-        if (failure != 0) return @errorFromInt(failure);
-        try std.testing.expectEqual(read_size, result);
-        try std.testing.expectEqualSlices(u8, object[index * read_size ..][0..read_size], &outputs[index]);
-    }
-
-    try server.stop(io);
+    try fixture.server.stop(io);
 
     try std.testing.expect(stats.holds.load(.acquire) > 0);
     try std.testing.expect(stats.throttles.load(.acquire) > 0);
@@ -486,79 +374,20 @@ test "a rate window is absorbed by the hold instead of the retry budget" {
     try std.testing.expect(stats.hold_wait_ns.load(.acquire) > 0);
 }
 
-test "a zero reset still holds for the initial delay instead of hot looping" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    const readers = 4;
-    const read_size = 256;
-    const initial_ms = 100;
-
-    var object: [readers * read_size]u8 = undefined;
-    @memset(&object, 0x5a);
-
-    // `RateLimit; t=0`, which parses to a zero delay.
-    var server = try MockServer.init(io, &object, .{
-        .throttle = .{ .first_gets = readers, .rate_limit_reset_s = 0 },
-    });
-    defer server.deinit(io);
-    try server.start(io);
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, fastOptions(initial_ms, 300_000));
-    defer http.deinit();
-    const http_io = http.io();
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
-
-    var outputs: [readers][read_size]u8 = undefined;
-    var slices: [readers][]u8 = undefined;
-    for (&outputs, &slices) |*output, *slice| slice.* = output;
-    var results: [readers]usize = @splat(0);
-    var errors: [readers]u16 = @splat(0);
-    try ConcurrentReads.run(io, http_io, file, &slices, .{ .results = &results, .errors = &errors });
-    for (results, errors) |result, failure| {
-        if (failure != 0) return @errorFromInt(failure);
-        try std.testing.expectEqual(read_size, result);
-    }
-
-    try server.stop(io);
-
-    const throttled_at = server.first_throttle_ns.load(.acquire);
-    const resumed_at = server.first_get_after_throttle_ns.load(.acquire);
-    try std.testing.expect(resumed_at - throttled_at >= initial_ms * std.time.ns_per_ms);
-    // Two rounds of GETs, not a spin.
-    try std.testing.expectEqual(@as(usize, 2 * readers), server.get_requests.load(.acquire));
-}
-
 test "a throttled HEAD at open waits the hold out and succeeds" {
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
 
     var object: [64]u8 = undefined;
     @memset(&object, 0x11);
 
-    var server = try MockServer.init(io, &object, .{
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{
         .throttle = .{ .first_heads = 1, .retry_after_s = 0 },
-    });
-    defer server.deinit(io);
-    try server.start(io);
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, fastOptions(20, 300_000));
-    defer http.deinit();
-    const http_io = http.io();
-    const stats = &http.governor.stats;
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
-    try std.testing.expectEqual(@as(u64, object.len), try file.length(http_io));
+    }, fastRetry(20, 300_000));
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const stats = &fixture.http.governor.stats;
+    try std.testing.expectEqual(@as(u64, object.len), try fixture.file.length(fixture.http.io()));
 
     try server.stop(io);
 
@@ -654,7 +483,7 @@ test "a server that never lets up fails the request with RateLimited" {
 
     var url_buffer: [160]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
-    var prepared: range_read.PreparedRequest = .{ .uri = try .parse(url) };
+    const uri: std.Uri = try .parse(url);
     const buffers = [_][]u8{&output};
 
     var governor: vfs_request.Governor = .init(io, &client, "test", .throttle, .{
@@ -669,9 +498,7 @@ test "a server that never lets up fails the request with RateLimited" {
     // `fileReadPositional` maps this to `Unexpected` with its own log line.
     try std.testing.expectError(error.RateLimited, range_read.performRangeRead(&governor, .{
         .request = .{ .target = url },
-        .context = &prepared,
-        .prepare = range_read.prepareStatic,
-    }, &buffers, 0, read_size));
+    }, &uri, range_read.static, &buffers, 0, object.len));
     const elapsed = started.durationTo(.now(io, .awake)).nanoseconds;
     try std.testing.expect(elapsed >= 300 * std.time.ns_per_ms);
     try std.testing.expect(elapsed < 5 * std.time.ns_per_s);
@@ -681,7 +508,6 @@ test "a server that never lets up fails the request with RateLimited" {
 }
 
 test "a reader cancelled while the backend is held returns Canceled" {
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
     const read_size = 256;
 
@@ -689,22 +515,11 @@ test "a reader cancelled while the backend is held returns Canceled" {
     @memset(&object, 0x21);
     var output: [read_size]u8 = undefined;
 
-    var server = try MockServer.init(io, &object, .{
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{
         .throttle = .{ .first_gets = 1, .retry_after_s = 30 },
-    });
-    defer server.deinit(io);
-    try server.start(io);
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, fastOptions(20, 300_000));
-    defer http.deinit();
-    const http_io = http.io();
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
+    }, fastRetry(20, 300_000));
+    defer fixture.deinit();
 
     var failure: std.atomic.Value(u16) = .init(0);
     var readers: std.Io.Group = .init;
@@ -716,18 +531,17 @@ test "a reader cancelled while the backend is held returns Canceled" {
                 return;
             };
         }
-    }.run, .{ file, http_io, output[0..], &failure });
+    }.run, .{ fixture.file, fixture.http.io(), output[0..], &failure });
 
     // Let the first GET be throttled and the reader settle into the hold.
     try io.sleep(.fromMilliseconds(50), .awake);
     readers.cancel(io);
     try std.testing.expectEqual(@intFromError(error.Canceled), failure.load(.acquire));
 
-    try server.stop(io);
+    try fixture.server.stop(io);
 }
 
 test "generic HTTP cancels a GET that receives nothing and retries it as a timeout" {
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
 
     var object: [4096]u8 = undefined;
@@ -736,29 +550,19 @@ test "generic HTTP cancels a GET that receives nothing and retries it as a timeo
 
     // The first GET waits unanswered for the second: a peer that receives
     // the request and sends nothing.
-    var server = try MockServer.init(io, &object, .{ .barrier_gets = 2 });
-    defer server.deinit(io);
-    try server.start(io);
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http, .retry = .{
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{ .barrier_gets = 2 }, .{
         .initial_delay = .fromNanoseconds(0),
         .max_delay = .fromNanoseconds(0),
         .stall_timeout = .fromMilliseconds(100),
-    } });
-    defer http.deinit();
-    const http_io = http.io();
-    const stats = &http.governor.stats;
-
-    var path_buffer: [128]u8 = undefined;
-    const path = try server.path(&path_buffer);
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, path, .{ .mode = .read_only });
-    defer file.close(http_io);
+    });
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const stats = &fixture.http.governor.stats;
 
     stats.* = .{};
     const buffers = [_][]u8{&output};
-    try std.testing.expectEqual(output.len, try file.readPositional(http_io, &buffers, 77));
+    try std.testing.expectEqual(output.len, try fixture.file.readPositional(fixture.http.io(), &buffers, 77));
     try std.testing.expectEqualSlices(u8, object[77..][0..output.len], &output);
     try std.testing.expectEqual(@as(u64, 1), stats.timeouts.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), stats.retries.load(.acquire));

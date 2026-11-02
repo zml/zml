@@ -32,6 +32,7 @@ const TensorStore = @import("TensorStore.zig");
 const Source = @This();
 
 store: *TensorStore,
+/// Always replicated: placement comes last (`Placed`).
 _shape: Shape,
 /// Disjoint lattices of elements read from checkpoint tensors; elements no
 /// piece covers are zero. zml/io's own: a binding keeps them (`Placed`)
@@ -64,8 +65,11 @@ pub const Pad = Tensor.Pad;
 /// `slice`'s range, as for `Tensor.slice`.
 pub const Slice = Tensor.Slice;
 
-/// The checkpoint tensor itself, with `tags` (null keeps the checkpoint's).
-pub fn init(store: *TensorStore, tensor: *const safetensors.Tensor, tags: ?[]const Shape.Tag) Source {
+/// The checkpoint tensor `subkey` of `view`, with `tags` (null keeps the
+/// checkpoint's); null when the checkpoint has no such tensor.
+pub fn init(view: TensorStore.View, subkey: []const u8, tags: ?[]const Shape.Tag) ?Source {
+    const tensor = view.get(subkey) orelse return null;
+    const store = view.store;
     var shape_ = tensor.shape;
     if (tags) |user_tags| {
         stdx.debug.assert(user_tags.len == shape_.rank(), "checkpoint tensor {s} has shape {f}, but got {d} tags: {f}", .{ tensor.name, shape_, user_tags.len, stdx.fmt.stringsZ(user_tags) });
@@ -185,8 +189,7 @@ pub fn bitCast(self: Source, dt: DataType) Source {
     defer ctx.deinit();
     if (src_bits > tgt_bits) {
         const ratio = std.math.divExact(u64, src_bits, tgt_bits) catch std.debug.panic("bitCast from {t} to {t}: bit sizes are not multiples", .{ self.dtype(), dt });
-        var res_shape = self._shape.append(.{ .bitcast = @as(i64, @intCast(ratio)) }).withDtype(dt);
-        res_shape._sharding = .replicated;
+        const res_shape = self._shape.append(.{ .bitcast = @as(i64, @intCast(ratio)) }).withDtype(dt);
         for (self._pieces) |piece| {
             var flat: Flat = .fromPiece(piece);
             flat.origin *= ratio;
@@ -199,11 +202,9 @@ pub fn bitCast(self: Source, dt: DataType) Source {
     const ratio = std.math.divExact(u64, tgt_bits, src_bits) catch std.debug.panic("bitCast from {t} to {t}: bit sizes are not multiples", .{ self.dtype(), dt });
     const last: u3 = @intCast(self.rank() - 1);
     stdx.debug.assert(self.dim(last) == @as(i64, @intCast(ratio)), "bitCast from {f} to {t} expects a last axis of {d} elements", .{ self._shape, dt, ratio });
-    var res_shape = self._shape.remove(last).withDtype(dt);
-    res_shape._sharding = .replicated;
+    const res_shape = self._shape.remove(last).withDtype(dt);
     for (self._pieces) |piece| {
-        ctx.decompose(self._shape, piece);
-        for (ctx.axis_pieces.items) |*axis_piece| {
+        for (ctx.decompose(self._shape, piece)) |*axis_piece| {
             // The elements merged into one must be one contiguous run of bits.
             const inner: ?usize = for (axis_piece.dims.constSlice(), 0..) |d, k| {
                 if (d.axis == last) break k;
@@ -234,12 +235,7 @@ pub fn slice(self: Source, axis_: anytype, s: Tensor.Slice) Source {
     var ctx: Rewrite = .init(self.store);
     defer ctx.deinit();
     for (self._pieces) |piece| {
-        ctx.decompose(self._shape, piece);
-        for (ctx.axis_pieces.items) |axis_piece| ctx.clip(axis_piece, a, lo, hi);
-        for (ctx.clipped.items) |*axis_piece| {
-            axis_piece.origin[a] -= lo;
-            ctx.emit(res_shape, axis_piece.*);
-        }
+        for (ctx.decompose(self._shape, piece)) |axis_piece| ctx.clip(res_shape, axis_piece, a, lo, hi);
     }
     const sliced = ctx.finish(res_shape);
     return if (s.singleton) sliced.reshaped(res_shape.remove(a)) else sliced;
@@ -299,8 +295,7 @@ pub fn transpose(self: Source, axes_: anytype) Source {
     var ctx: Rewrite = .init(self.store);
     defer ctx.deinit();
     for (self._pieces) |piece| {
-        ctx.decompose(self._shape, piece);
-        for (ctx.axis_pieces.items) |axis_piece| {
+        for (ctx.decompose(self._shape, piece)) |axis_piece| {
             var moved = axis_piece;
             for (0..r) |i| moved.origin[i] = axis_piece.origin[permutation[i]];
             for (moved.dims.slice()) |*d| d.axis = inverse[d.axis];
@@ -327,8 +322,7 @@ pub fn pad(self: Source, padding_value: anytype, paddings: anytype) Source {
     var ctx: Rewrite = .init(self.store);
     defer ctx.deinit();
     for (self._pieces) |piece| {
-        ctx.decompose(self._shape, piece);
-        for (ctx.axis_pieces.items) |*axis_piece| {
+        for (ctx.decompose(self._shape, piece)) |*axis_piece| {
             for (options.constSlice(), 0..) |p, a| {
                 axis_piece.origin[a] = @as(u64, @intCast(p.low)) + axis_piece.origin[a] * @as(u64, @intCast(p.interior + 1));
             }
@@ -352,8 +346,7 @@ pub fn broad(self: Source, other: Shape) Source {
     } else {
         for (self._shape.tags(), 0..) |t, i| axes_map[i] = other.axis(t);
     }
-    var res_shape = other.withDtype(self.dtype());
-    res_shape._sharding = .replicated;
+    const res_shape = other.withDtype(self.dtype());
     // The axes the elements repeat along: new ones and those grown from 1.
     var repeated: [constants.MAX_RANK]bool = @splat(true);
     for (0..r) |i| {
@@ -362,8 +355,7 @@ pub fn broad(self: Source, other: Shape) Source {
     var ctx: Rewrite = .init(self.store);
     defer ctx.deinit();
     for (self._pieces) |piece| {
-        ctx.decompose(self._shape, piece);
-        for (ctx.axis_pieces.items) |axis_piece| {
+        for (ctx.decompose(self._shape, piece)) |axis_piece| {
             var moved: AxisPiece = .{ .tensor = axis_piece.tensor, .offset = axis_piece.offset };
             for (0..r) |i| moved.origin[axes_map[i]] = axis_piece.origin[i];
             for (axis_piece.dims.constSlice()) |d| {
@@ -411,8 +403,7 @@ pub fn concatenate(sources: []const Source, axis_: anytype) Source {
                 ctx.emitFlat(flat);
                 continue;
             }
-            ctx.decompose(s._shape, piece);
-            for (ctx.axis_pieces.items) |*axis_piece| {
+            for (ctx.decompose(s._shape, piece)) |*axis_piece| {
                 axis_piece.origin[a] += offset;
                 ctx.emit(res_shape, axis_piece.*);
             }
@@ -431,8 +422,7 @@ pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source {
         stdx.debug.assert(first._shape.eqlWithTags(s._shape), "stack expects source shapes to match, got {f} and {f}", .{ first._shape, s._shape });
     }
     const a: u3 = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last) @intCast(first.rank()) else first.axis(axis_);
-    var res_shape = first._shape.insertTag(axis_, @intCast(sources.len), tag);
-    res_shape._sharding = .replicated;
+    const res_shape = first._shape.insertTag(axis_, @intCast(sources.len), tag);
     const r = first.rank();
     var ctx: Rewrite = .init(first.store);
     defer ctx.deinit();
@@ -444,8 +434,7 @@ pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source {
                 ctx.emitFlat(flat);
                 continue;
             }
-            ctx.decompose(s._shape, piece);
-            for (ctx.axis_pieces.items) |axis_piece| {
+            for (ctx.decompose(s._shape, piece)) |axis_piece| {
                 var moved = axis_piece;
                 std.mem.copyBackwards(u64, moved.origin[a + 1 .. r + 1], axis_piece.origin[a..r]);
                 moved.origin[a] = i;
@@ -471,7 +460,6 @@ pub fn withPartitioning(self: Source, comptime mesh_: @EnumLiteral(), partitioni
         const T = @TypeOf(partitioning);
         if (comptime !(stdx.meta.isStruct(T) and std.meta.fieldNames(T).len == 0))
             @compileError("Source.withPartitioning(.replicated, ...) takes .{}: a replicated source has no partitioning, got " ++ @typeName(T));
-        placed._sharding = .replicated;
     } else {
         placed = self._shape.withPartitioning(self.store.mesh(mesh_), partitioning);
     }
@@ -638,8 +626,6 @@ const Rewrite = struct {
     work: std.ArrayList(Flat) = .empty,
     /// The current piece in coordinates of its shape (`decompose`).
     axis_pieces: std.ArrayList(AxisPiece) = .empty,
-    /// What `clip` kept of them.
-    clipped: std.ArrayList(AxisPiece) = .empty,
     out: std.ArrayList(Piece) = .empty,
 
     fn init(store: *TensorStore) Rewrite {
@@ -660,21 +646,20 @@ const Rewrite = struct {
         };
     }
 
-    /// Rewrites `piece` in coordinates of `shape` into `axis_pieces`,
-    /// cutting it where a dimension would carry from one axis into the next.
-    fn decompose(self: *Rewrite, shape_: Shape, piece: Piece) void {
+    /// `piece` in coordinates of `shape_`, cut where a dimension would carry
+    /// from one axis into the next; valid until the next call.
+    fn decompose(self: *Rewrite, shape_: Shape, piece: Piece) []AxisPiece {
         const scratch = self.scratch.allocator();
         self.axis_pieces.clearRetainingCapacity();
-        self.clipped.clearRetainingCapacity();
-        self.work.clearRetainingCapacity();
         self.work.append(scratch, .fromPiece(piece)) catch oom();
         const strides = elementStrides(shape_);
         while (self.work.pop()) |flat| {
-            switch (placeFlat(shape_, strides, flat)) {
+            switch (fitAxes(shape_, strides, flat)) {
                 .piece => |axis_piece| self.axis_pieces.append(scratch, axis_piece) catch oom(),
                 .overflow => |overflowing| self.cut(shape_, strides, flat, overflowing),
             }
         }
+        return self.axis_pieces.items;
     }
 
     /// Splits `flat`, which carries past the end of axis `a`, into pieces
@@ -727,10 +712,9 @@ const Rewrite = struct {
         }
     }
 
-    /// Appends the elements of `axis_piece` whose coordinate on `a` is in
-    /// `[lo, hi)` to `clipped`.
-    fn clip(self: *Rewrite, axis_piece: AxisPiece, a: u3, lo: u64, hi: u64) void {
-        const scratch = self.scratch.allocator();
+    /// Emits in `res_shape` the elements of `axis_piece` whose coordinate on
+    /// `a` is in `[lo, hi)`, at that coordinate minus `lo`.
+    fn clip(self: *Rewrite, res_shape: Shape, axis_piece: AxisPiece, a: u3, lo: u64, hi: u64) void {
         var span: u64 = 0;
         var outer: ?usize = null;
         for (axis_piece.dims.constSlice(), 0..) |d, k| {
@@ -740,7 +724,9 @@ const Rewrite = struct {
         }
         const o = axis_piece.origin[a];
         if (o >= lo and o + span < hi) {
-            self.clipped.append(scratch, axis_piece) catch oom();
+            var kept = axis_piece;
+            kept.origin[a] = o - lo;
+            self.emit(res_shape, kept);
             return;
         }
         if (o + span < lo or o >= hi) return;
@@ -754,9 +740,9 @@ const Rewrite = struct {
         if (full_lo < full_hi) {
             var kept = axis_piece;
             kept.dims.buffer[k].count = full_hi - full_lo;
-            kept.origin[a] = o + full_lo * d.step;
+            kept.origin[a] = o + full_lo * d.step - lo;
             kept.offset += full_lo * d.stride;
-            self.clipped.append(scratch, kept) catch oom();
+            self.emit(res_shape, kept);
         }
         const touch_lo: u64 = if (o + inner >= lo) 0 else std.math.divCeil(u64, lo - o - inner, d.step) catch unreachable;
         const touch_hi: u64 = @min(d.count, (hi - 1 - o) / d.step + 1);
@@ -771,7 +757,7 @@ const Rewrite = struct {
                 part.origin[a] = o + j * d.step;
                 part.offset += j * d.stride;
                 _ = part.dims.orderedRemove(k);
-                self.clip(part, a, lo, hi);
+                self.clip(res_shape, part, a, lo, hi);
             }
         }
     }
@@ -821,7 +807,7 @@ const Rewrite = struct {
     }
 };
 
-const Placement = union(enum) {
+const AxisFit = union(enum) {
     piece: AxisPiece,
     /// The axis some coordinate would run past.
     overflow: u3,
@@ -829,7 +815,7 @@ const Placement = union(enum) {
 
 /// `flat` in coordinates of `shape_`, if no dimension carries into the next
 /// axis: each dimension moves the outermost axis its step is a multiple of.
-fn placeFlat(shape_: Shape, strides: [constants.MAX_RANK]u64, flat: Flat) Placement {
+fn fitAxes(shape_: Shape, strides: [constants.MAX_RANK]u64, flat: Flat) AxisFit {
     const r = shape_.rank();
     var axis_piece: AxisPiece = .{ .tensor = flat.tensor, .offset = flat.offset };
     for (0..r) |b| axis_piece.origin[b] = (flat.origin / strides[b]) % @as(u64, @intCast(shape_.dim(b)));
@@ -900,15 +886,13 @@ const TestCheckpoint = struct {
     /// Registers `entries` end to end, each holding distinct bytes.
     fn init(self: *TestCheckpoint, allocator: std.mem.Allocator, entries: []const Entry) !void {
         var registry: safetensors.TensorRegistry = .init(allocator);
-        {
-            errdefer registry.deinit();
-            var offset: u64 = 0;
-            for (entries) |entry| {
-                try registry.registerTensor(.{ .file_uri = "memory", .name = entry.name, .shape = entry.shape, .offset = offset });
-                offset += entry.shape.byteSize();
-            }
+        defer registry.deinit();
+        var offset: u64 = 0;
+        for (entries) |entry| {
+            try registry.registerTensor(.{ .file_uri = "memory", .name = entry.name, .shape = entry.shape, .offset = offset });
+            offset += entry.shape.byteSize();
         }
-        self.* = .{ .store = .init(allocator, registry, .{}), .allocator = allocator };
+        self.* = .{ .store = .init(allocator, &registry, .{}), .allocator = allocator };
         errdefer self.deinit();
         for (entries, 0..) |entry, index| {
             const bytes = try allocator.alloc(u8, entry.shape.byteSize());
@@ -957,191 +941,30 @@ const TestCheckpoint = struct {
     }
 };
 
-/// Each case builds a tensor from its inputs with shape ops only, the same
-/// code for `Tensor` and `Source`. Cases are public, which is what the test
-/// iterates.
-const cases = struct {
-    fn interleave(comptime T: type, members: []const T, groups: i64) T {
-        var parts: [4]T = undefined;
-        for (members, parts[0..members.len]) |member, *part| part.* = member.splitAxis(.row, .{ .group = groups, .r = -1 });
-        return T.concatenate(parts[0..members.len], .r).merge(.{ .row = .{ .group, .r } });
-    }
+fn interleave(comptime T: type, members: []const T, groups: i64) T {
+    var parts: [4]T = undefined;
+    for (members, parts[0..members.len]) |member, *part| part.* = member.splitAxis(.row, .{ .group = groups, .r = -1 });
+    return T.concatenate(parts[0..members.len], .r).merge(.{ .row = .{ .group, .r } });
+}
 
-    pub const ConcatenateRows = struct {
-        const inputs = .{ .{ .row = 3, .col = 4 }, .{ .row = 2, .col = 4 }, .{ .row = 4, .col = 4 } };
-        fn build(comptime T: type, x: []const T) T {
-            return T.concatenate(x, .row);
-        }
-    };
-    pub const ConcatenateColumns = struct {
-        const inputs = .{ .{ .row = 3, .col = 4 }, .{ .row = 3, .col = 2 } };
-        fn build(comptime T: type, x: []const T) T {
-            return T.concatenate(x, .col);
-        }
-    };
-    pub const InterleaveByHeads = struct {
-        const inputs = .{ .{ .row = 4, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
-        fn build(comptime T: type, x: []const T) T {
-            return interleave(T, x, 2);
-        }
-    };
-    pub const InterleaveRows = struct {
-        const inputs = .{ .{ .row = 4, .col = 3 }, .{ .row = 4, .col = 3 } };
-        fn build(comptime T: type, x: []const T) T {
-            return interleave(T, x, 4);
-        }
-    };
-    pub const StackExperts = struct {
-        const inputs = .{ .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
-        fn build(comptime T: type, x: []const T) T {
-            const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
-            return T.concatenate(&members, .row);
-        }
-    };
-    pub const InterleaveExperts = struct {
-        const inputs = StackExperts.inputs;
-        fn build(comptime T: type, x: []const T) T {
-            const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
-            return T.stack(&members, 2, .proj).merge(.{ .rows = .{ .row, .proj } });
-        }
-    };
-    pub const InterleaveExpertVectors = struct {
-        // Per-expert vectors (biases): row r of projection p lands at r * 2 + p.
-        const inputs = .{ .{ .row = 3 }, .{ .row = 3 }, .{ .row = 3 }, .{ .row = 3 } };
-        fn build(comptime T: type, x: []const T) T {
-            const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
-            return T.stack(&members, .last, .proj).merge(.{ .rows = .{ .row, .proj } });
-        }
-    };
-    pub const Transpose = struct {
-        const inputs = .{.{ .row = 3, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].transpose(.{ .col, .row });
-        }
-    };
-    pub const RowsOfThree = struct {
-        // lfm2's in_proj: rows [B; C; x] become b0 c0 x0 b1 c1 x1.
-        const inputs = .{.{ .row = 6, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].splitAxis(.row, .{ .m = 3, .c = 2 }).transpose(.{ .c, .m, .col }).merge(.{ .row = .{ .c, .m } });
-        }
-    };
-    pub const SliceRows = struct {
-        const inputs = .{.{ .row = 5, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].slice(.row, .{ .start = 1, .end = 4 });
-        }
-    };
-    pub const SliceColumns = struct {
-        const inputs = .{.{ .row = 3, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].slice(.col, .{ .start = 1, .end = 3 });
-        }
-    };
-    pub const SliceByLength = struct {
-        const inputs = .{.{ .row = 6, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].slice(.row, .{ .start = 2, .len = 3 });
-        }
-    };
-    pub const SliceInterleaved = struct {
-        const inputs = InterleaveByHeads.inputs;
-        fn build(comptime T: type, x: []const T) T {
-            return interleave(T, x, 2).slice(.row, .{ .start = 3, .end = 7 });
-        }
-    };
-    pub const SingleRow = struct {
-        const inputs = .{.{ .row = 5, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].slice(.row, .single(2));
-        }
-    };
-    pub const Pad = struct {
-        const inputs = .{.{ .row = 4, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 4 }, .col = Tensor.Pad{ .low = 1, .interior = 1 } });
-        }
-    };
-    pub const PadRows = struct {
-        const inputs = .{.{ .row = 5, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 3 } });
-        }
-    };
-    pub const BroadcastScalar = struct {
-        const inputs = .{.{}};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].broad(Shape.init(.{ .row = 3, .col = 2 }, .u16));
-        }
-    };
-    pub const BroadcastColumn = struct {
-        // A per-tensor scale repeated over each member's rows.
-        const inputs = .{ .{ .row = 1, .col = 1 }, .{ .row = 1, .col = 1 } };
-        fn build(comptime T: type, x: []const T) T {
-            const members = [2]T{ x[0].broad(Shape.init(.{ .row = 4, .col = 1 }, .u16)), x[1].broad(Shape.init(.{ .row = 2, .col = 1 }, .u16)) };
-            return interleave(T, &members, 2);
-        }
-    };
-    pub const NarrowBits = struct {
-        const inputs = .{.{ .row = 3, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].bitCast(.u8).merge(.{ .col = .{ .col, .bitcast } });
-        }
-    };
-    pub const WidenBits = struct {
-        const inputs = .{.{ .row = 2, .col = 6 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].bitCast(.u8).splitAxis(.col, .{ .col = 3, .pair = 2 }).merge(.{ .pair = .{ .pair, .bitcast } }).bitCast(.u32);
-        }
-    };
-    pub const Swizzle = struct {
-        // The 128x4 block-scale layout, at 8x4: rows padded to 8 and tiled
-        // by 2x4, columns padded to 4.
-        const inputs = .{.{ .e = 2, .m = 7, .k = 6 }};
-        fn build(comptime T: type, x: []const T) T {
-            return x[0].pad(0, .{ .m = Tensor.Pad{ .high = 1 }, .k = Tensor.Pad{ .high = 2 } })
-                .splitAxis(.m, .{ .mo = -1, .m4 = 2, .mi = 4 })
-                .splitAxis(.k, .{ .ko = -1, .ki = 4 })
-                .transpose(.{ .e, .mo, .ko, .mi, .m4, .ki })
-                .merge(.{ .flat = .{ .mo, .ko, .mi, .m4, .ki } });
-        }
-    };
-    pub const SplitThenInterleave = struct {
-        // qwen3_5's in_proj_qkv sliced into q, k and v, interleaved with z.
-        const inputs = .{ .{ .row = 6, .col = 3 }, .{ .row = 2, .col = 3 } };
-        fn build(comptime T: type, x: []const T) T {
-            const qkv = x[0];
-            const members = [4]T{
-                qkv.slice(.row, .{ .start = 0, .end = 2 }),
-                qkv.slice(.row, .{ .start = 2, .end = 4 }),
-                qkv.slice(.row, .{ .start = 4, .end = 6 }),
-                x[1],
-            };
-            return interleave(T, &members, 2);
-        }
-    };
-    pub const ChunkThenStack = struct {
-        const inputs = .{.{ .row = 6, .col = 4 }};
-        fn build(comptime T: type, x: []const T) T {
-            const chunks = x[0].chunkExact(.row, 3);
-            return T.stack(&.{ chunks[2], chunks[0] }, .last, .pair).insertAxes(0, .{.one}).squeeze(0);
-        }
-    };
-};
+const qkv_inputs = .{ .{ .row = 4, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
+const expert_inputs = .{ .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
 
 fn inputShape(comptime dims_: anytype) Shape {
     return Shape.init(dims_, .u16);
 }
 
-fn expectCase(comptime Case: type, name: []const u8) !void {
+/// `build(T, x)` builds a tensor from `x` with shape ops only, the same code
+/// for `Tensor` and `Source`; `inputs` holds the dims of each `u16` input.
+fn expectCase(comptime inputs: anytype, comptime build: anytype) !void {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    const n = Case.inputs.len;
+    const n = inputs.len;
     var names: [n][]const u8 = undefined;
     var name_buffers: [n][16]u8 = undefined;
     var shapes: [n]Shape = undefined;
     var entries: [n]TestCheckpoint.Entry = undefined;
-    inline for (Case.inputs, 0..) |dims_, i| {
+    inline for (inputs, 0..) |dims_, i| {
         names[i] = try std.fmt.bufPrint(&name_buffers[i], "input{d}", .{i});
         shapes[i] = inputShape(dims_);
         entries[i] = .{ .name = names[i], .shape = shapes[i] };
@@ -1152,7 +975,7 @@ fn expectCase(comptime Case: type, name: []const u8) !void {
 
     var sources: [n]Source = undefined;
     for (&sources, names, shapes) |*s, input_name, shape_| s.* = checkpoint.store.view().source(input_name, null).withTags(shape_);
-    const bound = Case.build(Source, &sources).withPartitioning(.replicated, .{}).bind();
+    const bound = build(Source, &sources).withPartitioning(.replicated, .{}).bind();
     const assembled = try checkpoint.assemble(bound);
     defer allocator.free(assembled);
 
@@ -1161,7 +984,7 @@ fn expectCase(comptime Case: type, name: []const u8) !void {
     for (&tensors, shapes) |*t, shape_| t.* = .fromShape(shape_);
     const Program = struct {
         fn forward(x: []const Tensor) Tensor {
-            return Case.build(Tensor, x);
+            return build(Tensor, x);
         }
     };
     var exe = try platform.compileFn(allocator, io, Program.forward, .{&tensors}, .{});
@@ -1185,26 +1008,219 @@ fn expectCase(comptime Case: type, name: []const u8) !void {
     defer expected.free(allocator);
 
     std.testing.expect(bound.shape().eqlWithTags(output.shape())) catch |err| {
-        std.log.err("{s}: Source gives {f}, Tensor {f}", .{ name, bound.shape(), output.shape() });
+        std.log.err("Source gives {f}, Tensor {f}", .{ bound.shape(), output.shape() });
         return err;
     };
     std.testing.expectEqualSlices(u8, expected.constData(), assembled) catch |err| {
-        std.log.err("{s}: the loader's bytes differ from the program's", .{name});
+        std.log.err("the loader's bytes differ from the program's", .{});
         return err;
     };
 }
 
-test "every Source op places the bytes the same Tensor ops compute" {
-    // `declarations` lists only public declarations: a private case would
-    // not run.
-    var ran: usize = 0;
-    inline for (comptime std.meta.declarations(cases)) |name| {
-        const Case = @field(cases, name);
-        if (@TypeOf(Case) != type) continue;
-        try expectCase(Case, name);
-        ran += 1;
-    }
-    try std.testing.expect(ran > 0);
+test "Source concatenates rows as Tensor does" {
+    try expectCase(.{ .{ .row = 3, .col = 4 }, .{ .row = 2, .col = 4 }, .{ .row = 4, .col = 4 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return T.concatenate(x, .row);
+        }
+    }.build);
+}
+
+test "Source concatenates columns as Tensor does" {
+    try expectCase(.{ .{ .row = 3, .col = 4 }, .{ .row = 3, .col = 2 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return T.concatenate(x, .col);
+        }
+    }.build);
+}
+
+test "Source interleaves q, k and v by heads as Tensor does" {
+    try expectCase(qkv_inputs, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return interleave(T, x, 2);
+        }
+    }.build);
+}
+
+test "Source interleaves rows as Tensor does" {
+    try expectCase(.{ .{ .row = 4, .col = 3 }, .{ .row = 4, .col = 3 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return interleave(T, x, 4);
+        }
+    }.build);
+}
+
+test "Source stacks experts as Tensor does" {
+    try expectCase(expert_inputs, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
+            return T.concatenate(&members, .row);
+        }
+    }.build);
+}
+
+test "Source interleaves stacked experts as Tensor does" {
+    try expectCase(expert_inputs, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
+            return T.stack(&members, 2, .proj).merge(.{ .rows = .{ .row, .proj } });
+        }
+    }.build);
+}
+
+test "Source interleaves expert vectors as Tensor does" {
+    // Per-expert vectors (biases): row r of projection p lands at r * 2 + p.
+    try expectCase(.{ .{ .row = 3 }, .{ .row = 3 }, .{ .row = 3 }, .{ .row = 3 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
+            return T.stack(&members, .last, .proj).merge(.{ .rows = .{ .row, .proj } });
+        }
+    }.build);
+}
+
+test "Source transposes as Tensor does" {
+    try expectCase(.{.{ .row = 3, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].transpose(.{ .col, .row });
+        }
+    }.build);
+}
+
+test "Source interleaves rows of three as Tensor does" {
+    // lfm2's in_proj: rows [B; C; x] become b0 c0 x0 b1 c1 x1.
+    try expectCase(.{.{ .row = 6, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].splitAxis(.row, .{ .m = 3, .c = 2 }).transpose(.{ .c, .m, .col }).merge(.{ .row = .{ .c, .m } });
+        }
+    }.build);
+}
+
+test "Source slices rows as Tensor does" {
+    try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.row, .{ .start = 1, .end = 4 });
+        }
+    }.build);
+}
+
+test "Source slices columns as Tensor does" {
+    try expectCase(.{.{ .row = 3, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.col, .{ .start = 1, .end = 3 });
+        }
+    }.build);
+}
+
+test "Source slices by length as Tensor does" {
+    try expectCase(.{.{ .row = 6, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.row, .{ .start = 2, .len = 3 });
+        }
+    }.build);
+}
+
+test "Source slices an interleave as Tensor does" {
+    try expectCase(qkv_inputs, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return interleave(T, x, 2).slice(.row, .{ .start = 3, .end = 7 });
+        }
+    }.build);
+}
+
+test "Source takes a single row as Tensor does" {
+    try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.row, .single(2));
+        }
+    }.build);
+}
+
+test "Source pads as Tensor does" {
+    try expectCase(.{.{ .row = 4, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 4 }, .col = Tensor.Pad{ .low = 1, .interior = 1 } });
+        }
+    }.build);
+}
+
+test "Source pads rows as Tensor does" {
+    try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 3 } });
+        }
+    }.build);
+}
+
+test "Source broadcasts a scalar as Tensor does" {
+    try expectCase(.{.{}}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].broad(Shape.init(.{ .row = 3, .col = 2 }, .u16));
+        }
+    }.build);
+}
+
+test "Source broadcasts a column as Tensor does" {
+    // A per-tensor scale repeated over each member's rows.
+    try expectCase(.{ .{ .row = 1, .col = 1 }, .{ .row = 1, .col = 1 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const members = [2]T{ x[0].broad(Shape.init(.{ .row = 4, .col = 1 }, .u16)), x[1].broad(Shape.init(.{ .row = 2, .col = 1 }, .u16)) };
+            return interleave(T, &members, 2);
+        }
+    }.build);
+}
+
+test "Source bitcasts to a narrower type as Tensor does" {
+    try expectCase(.{.{ .row = 3, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].bitCast(.u8).merge(.{ .col = .{ .col, .bitcast } });
+        }
+    }.build);
+}
+
+test "Source bitcasts to a wider type as Tensor does" {
+    try expectCase(.{.{ .row = 2, .col = 6 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].bitCast(.u8).splitAxis(.col, .{ .col = 3, .pair = 2 }).merge(.{ .pair = .{ .pair, .bitcast } }).bitCast(.u32);
+        }
+    }.build);
+}
+
+test "Source swizzles block scales as Tensor does" {
+    // The 128x4 block-scale layout, at 8x4: rows padded to 8 and tiled
+    // by 2x4, columns padded to 4.
+    try expectCase(.{.{ .e = 2, .m = 7, .k = 6 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].pad(0, .{ .m = Tensor.Pad{ .high = 1 }, .k = Tensor.Pad{ .high = 2 } })
+                .splitAxis(.m, .{ .mo = -1, .m4 = 2, .mi = 4 })
+                .splitAxis(.k, .{ .ko = -1, .ki = 4 })
+                .transpose(.{ .e, .mo, .ko, .mi, .m4, .ki })
+                .merge(.{ .flat = .{ .mo, .ko, .mi, .m4, .ki } });
+        }
+    }.build);
+}
+
+test "Source splits then interleaves as Tensor does" {
+    // qwen3_5's in_proj_qkv sliced into q, k and v, interleaved with z.
+    try expectCase(.{ .{ .row = 6, .col = 3 }, .{ .row = 2, .col = 3 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const qkv = x[0];
+            const members = [4]T{
+                qkv.slice(.row, .{ .start = 0, .end = 2 }),
+                qkv.slice(.row, .{ .start = 2, .end = 4 }),
+                qkv.slice(.row, .{ .start = 4, .end = 6 }),
+                x[1],
+            };
+            return interleave(T, &members, 2);
+        }
+    }.build);
+}
+
+test "Source chunks then stacks as Tensor does" {
+    try expectCase(.{.{ .row = 6, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const chunks = x[0].chunkExact(.row, 3);
+            return T.stack(&.{ chunks[2], chunks[0] }, .last, .pair).insertAxes(0, .{.one}).squeeze(0);
+        }
+    }.build);
 }
 
 test "a source binds as its pieces, which the loader lowers to byte parts" {
@@ -1240,7 +1256,7 @@ test "a source binds as its pieces, which the loader lowers to byte parts" {
     // q, k and v in two groups: each member is one part of two runs, its
     // rows of a group side by side with the others'.
     const members = [_]Source{ q, view.source("k", .{ .row, .col }), view.source("v", .{ .row, .col }) };
-    const fused = cases.interleave(Source, &members, 2).withPartitioning(.replicated, .{});
+    const fused = interleave(Source, &members, 2).withPartitioning(.replicated, .{});
     try std.testing.expectEqualDeep(&[_]backend.LoadPart{
         .{ .source = entries[0], .lattice = .{ .src_offset = 0, .dst_offset = 0, .width = 12, .dims = &.{.{ .count = 2, .src_stride = 12, .dst_stride = 24 }} } },
         .{ .source = entries[1], .lattice = .{ .src_offset = 0, .dst_offset = 12, .width = 6, .dims = &.{.{ .count = 2, .src_stride = 6, .dst_stride = 24 }} } },
@@ -1300,13 +1316,11 @@ test "a source is placed last, by as or withPartitioning, and binds in its place
 
 test "lattices stay one piece per source at checkpoint sizes" {
     // Registered without bytes: nothing is evaluated.
-    var store: TensorStore = store: {
-        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
-        errdefer registry.deinit();
-        try registry.registerTensor(.{ .file_uri = "memory", .name = "gate", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
-        try registry.registerTensor(.{ .file_uri = "memory", .name = "up", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
-        break :store .init(std.testing.allocator, registry, .{});
-    };
+    var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .file_uri = "memory", .name = "gate", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
+    try registry.registerTensor(.{ .file_uri = "memory", .name = "up", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
+    var store: TensorStore = .init(std.testing.allocator, &registry, .{});
     defer store.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1314,14 +1328,14 @@ test "lattices stay one piece per source at checkpoint sizes" {
     const members = [_]Source{ view.source("gate", .{ .row, .col }), view.source("up", .{ .row, .col }) };
 
     // One row per group: two pieces, each 14336 runs of one row.
-    const finest = cases.interleave(Source, &members, 14336);
+    const finest = interleave(Source, &members, 14336);
     try std.testing.expectEqual(@as(usize, 2), finest._pieces.len);
     for (try finest.withPartitioning(.replicated, .{}).lower(arena.allocator())) |part| {
         try std.testing.expectEqual(@as(u64, 14336), part.lattice.runs());
         try std.testing.expectEqual(@as(u64, 8192), part.lattice.width);
     }
     // One group per device of four: four runs of 28 MiB each.
-    const per_shard = cases.interleave(Source, &members, 4);
+    const per_shard = interleave(Source, &members, 4);
     for (try per_shard.withPartitioning(.replicated, .{}).lower(arena.allocator())) |part| {
         try std.testing.expectEqual(@as(u64, 4), part.lattice.runs());
         try std.testing.expectEqual(@as(u64, 3584 * 8192), part.lattice.width);
