@@ -174,6 +174,49 @@ fn reshaped(self: Source, new_shape: Shape) Source {
     return res;
 }
 
+/// Reinterprets the bits as `dt`, like `Tensor.bitCast`: to a narrower type,
+/// each element becomes the elements of a new last axis `.bitcast`; to a
+/// wider one, the last axis must hold one element of `dt`.
+pub fn bitCast(self: Source, dt: DataType) Source {
+    const src_bits: u64 = self.dtype().bitSizeOf();
+    const tgt_bits: u64 = dt.bitSizeOf();
+    if (src_bits == tgt_bits) return .{ .store = self.store, ._shape = self._shape.withDtype(dt), ._pieces = self._pieces };
+    var ctx: Rewrite = .init(self.store);
+    defer ctx.deinit();
+    if (src_bits > tgt_bits) {
+        const ratio = std.math.divExact(u64, src_bits, tgt_bits) catch std.debug.panic("bitCast from {t} to {t}: bit sizes are not multiples", .{ self.dtype(), dt });
+        const res_shape = self._shape.append(.{ .bitcast = @as(i64, @intCast(ratio)) }).withDtype(dt);
+        for (self._pieces) |piece| {
+            var flat: Flat = .fromPiece(piece);
+            flat.origin *= ratio;
+            for (flat.dims.slice()) |*d| d.step *= ratio;
+            flat.dims.append(.{ .count = ratio, .step = 1, .stride = tgt_bits }) catch tooManyDims();
+            ctx.emitFlat(flat);
+        }
+        return ctx.finish(res_shape);
+    }
+    const ratio = std.math.divExact(u64, tgt_bits, src_bits) catch std.debug.panic("bitCast from {t} to {t}: bit sizes are not multiples", .{ self.dtype(), dt });
+    const last: u3 = @intCast(self.rank() - 1);
+    stdx.debug.assert(self.dim(last) == @as(i64, @intCast(ratio)), "bitCast from {f} to {t} expects a last axis of {d} elements", .{ self._shape, dt, ratio });
+    const res_shape = self._shape.remove(last).withDtype(dt);
+    for (self._pieces) |piece| {
+        for (ctx.decompose(self._shape, piece)) |*axis_piece| {
+            // The elements merged into one must be one contiguous run of bits.
+            const inner: ?usize = for (axis_piece.dims.constSlice(), 0..) |d, k| {
+                if (d.axis == last) break k;
+            } else null;
+            const whole = axis_piece.origin[last] == 0 and inner != null and blk: {
+                const d = axis_piece.dims.get(inner.?);
+                break :blk d.count == ratio and d.step == 1 and d.stride == src_bits;
+            };
+            if (!whole) std.debug.panic("bitCast of {f} to {t}: an element of {t} would gather bits that are not contiguous in the checkpoint", .{ self._shape, dt, dt });
+            _ = axis_piece.dims.orderedRemove(inner.?);
+            ctx.emit(res_shape, axis_piece.*);
+        }
+    }
+    return ctx.finish(res_shape);
+}
+
 // Ops that move elements.
 
 /// Like `Tensor.slice`, for a static, contiguous slice (`step` 1).
@@ -1102,6 +1145,36 @@ test "Source broadcasts a column as Tensor does" {
         fn build(comptime T: type, x: []const T) T {
             const members = [2]T{ x[0].broad(Shape.init(.{ .row = 4, .col = 1 }, .u16)), x[1].broad(Shape.init(.{ .row = 2, .col = 1 }, .u16)) };
             return interleave(T, &members, 2);
+        }
+    }.build);
+}
+
+test "Source bitcasts to a narrower type as Tensor does" {
+    try expectCase(.{.{ .row = 3, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].bitCast(.u8).merge(.{ .col = .{ .col, .bitcast } });
+        }
+    }.build);
+}
+
+test "Source bitcasts to a wider type as Tensor does" {
+    try expectCase(.{.{ .row = 2, .col = 6 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].bitCast(.u8).splitAxis(.col, .{ .col = 3, .pair = 2 }).merge(.{ .pair = .{ .pair, .bitcast } }).bitCast(.u32);
+        }
+    }.build);
+}
+
+test "Source swizzles block scales as Tensor does" {
+    // The 128x4 block-scale layout, at 8x4: rows padded to 8 and tiled
+    // by 2x4, columns padded to 4.
+    try expectCase(.{.{ .e = 2, .m = 7, .k = 6 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].pad(0, .{ .m = Tensor.Pad{ .high = 1 }, .k = Tensor.Pad{ .high = 2 } })
+                .splitAxis(.m, .{ .mo = -1, .m4 = 2, .mi = 4 })
+                .splitAxis(.k, .{ .ko = -1, .ki = 4 })
+                .transpose(.{ .e, .mo, .ko, .mi, .m4, .ki })
+                .merge(.{ .flat = .{ .mo, .ko, .mi, .m4, .ki } });
         }
     }.build);
 }
