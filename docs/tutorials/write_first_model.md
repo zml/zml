@@ -175,9 +175,9 @@ var executable = try platform.compile(allocator, io, layer, .forward, .{input}, 
 defer executable.deinit();
 ```
 
-You might wonder what this `sharding` variable is for ? ZML supports sharding tensors across multiple devices,
-and the `compile()` function needs to know how the tensors are sharded in order to compile the module correctly.
-For this simple example, we just replicate the tensors across all devices for simplicity.
+ZML supports sharding tensors across multiple devices, and `compile()` reads how
+each tensor is sharded from its shape. A tensor created from a shape alone, as
+here, is replicated on every device.
 
 
 ### Creating the "bufferized" Model
@@ -191,8 +191,8 @@ provides ways to have extra-low loading times).
 const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{1.0, 2.0, 3.0}));
 const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{1.0, 1.0, 1.0}));
 var layer_buffers: zml.Bufferized(Layer) = .{
-    .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, .replicated),
-    .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, .replicated),
+    .weight = try zml.Buffer.fromSlice(io, platform, weight_slice),
+    .bias = try zml.Buffer.fromSlice(io, platform, bias_slice),
 };
 defer layer_buffers.weight.deinit();
 defer layer_buffers.bias.?.deinit();
@@ -213,7 +213,7 @@ To create the _Args_ and _Results_, the _Executable_ exposes two conveniences.
 ```zig
 // create the input buffer
 const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
-var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
+var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
 defer input_buffer.deinit();
 
 // create the Args and Results structs
@@ -372,15 +372,15 @@ pub fn main(init: std.process.Init) !void {
     const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 2.0, 3.0 }));
     const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 1.0, 1.0 }));
     var layer_buffers: zml.Bufferized(Layer) = .{
-        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, .replicated),
-        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, .replicated),
+        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice),
+        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice),
     };
     defer layer_buffers.weight.deinit();
     defer layer_buffers.bias.?.deinit();
 
     // create the input buffer
     const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
     defer input_buffer.deinit();
 
     // create the Args and Results structs

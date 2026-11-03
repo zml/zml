@@ -132,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
 
             const root = try TensorNode.init(init.arena.allocator(), "");
 
-            var registry_it = registry.iterator();
+            var registry_it = registry.tensors.iterator();
             while (registry_it.next()) |kv| {
                 const name = kv.key_ptr.*;
                 const tensor = kv.value_ptr.*;
@@ -183,7 +183,7 @@ pub fn main(init: std.process.Init) !void {
             const tensors = try allocator.alloc(zml.Tensor, tensor_count);
             defer allocator.free(tensors);
 
-            var registry_it = registry.iterator();
+            var registry_it = registry.tensors.iterator();
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (load_count += 1) {
                 tensors[load_count] = switch (mesh_type) {

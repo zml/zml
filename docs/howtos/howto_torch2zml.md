@@ -206,17 +206,17 @@ pub fn main(init: std.process.Init) !void {
     const mlp: Mlp = .{
         .up_proj = .init(
             mlp_view.createReplicatedTensor("up_proj.weight", .{ .dout, .d }),
-            mlp_view.maybeCreateReplicatedTensor("up_proj.bias", .{.dout}),
+            mlp_view.maybeCreateTensor("up_proj.bias", .{.dout}, .replicated, .{}),
             .d,
         ),
         .gate_proj = .init(
             mlp_view.createReplicatedTensor("gate_proj.weight", .{ .dout, .d }),
-            mlp_view.maybeCreateReplicatedTensor("gate_proj.bias", .{.dout}),
+            mlp_view.maybeCreateTensor("gate_proj.bias", .{.dout}, .replicated, .{}),
             .d,
         ),
         .down_proj = .init(
             mlp_view.createReplicatedTensor("down_proj.weight", .{ .d, .dout }),
-            mlp_view.maybeCreateReplicatedTensor("down_proj.bias", .{.d}),
+            mlp_view.maybeCreateTensor("down_proj.bias", .{.d}, .replicated, .{}),
             .dout,
         ),
     };
@@ -242,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
     ...
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
+    defer platform.deinit(allocator, io);
     var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
 }
 ```
