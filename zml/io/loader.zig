@@ -27,6 +27,8 @@
 //! pending: one program group is in flight at a time.
 const std = @import("std");
 
+const VFS = @import("vfs");
+
 const Buffer = @import("../buffer.zig").Buffer;
 const Compiler = @import("../Compiler.zig");
 const Exe = @import("../exe.zig").Exe;
@@ -111,14 +113,41 @@ pub const Loader = struct {
     stats: Stats = .{},
 
     pub const Options = struct {
+        /// The checkpoint's path or URI, read by `init` only. When `io` is a
+        /// VFS, the VFS backend serving it sizes the reads
+        /// (`VFS.readHints`). Null, or a plain `io`: local sizing.
+        checkpoint: ?[]const u8 = null,
         /// Concurrent source reads, 1 to `max_read_parallelism`, fixed for
-        /// the load. Local checkpoints read fastest at 12 to 16 on every
-        /// host measured.
-        read_parallelism: usize = 16,
+        /// the load. Null: 16 for a local checkpoint, 32 for a high-latency
+        /// one. The direct backend may lower it to fit its pinned memory
+        /// (logged at debug).
+        read_parallelism: ?usize = null,
+        /// The direct backend's DMA block, at most 32 MiB, and a multiple of
+        /// `VFS.direct_io_alignment` when `io` is a VFS and `direct_io` is
+        /// not `off`. Null: calibration picks one of
+        /// `dma_calibration.default_block_sizes`, which suits every measured
+        /// host. A tuning knob, ignored by the buffered backend; `init`
+        /// refuses a block the checkpoint's reads cannot use.
+        dma_block_size: ?usize = null,
+        /// Direct I/O for local source files, decided once per file per
+        /// loader (`VFS.DirectIo` for the page-cache trade-off). Nothing
+        /// changes when `io` is not a VFS.
+        direct_io: VFS.DirectIo = .auto,
         /// Output bytes of the program tensors one group holds at most, one
         /// tensor at least. A group's inputs are read together and freed
         /// once its programs ran.
         program_group_bytes: usize = 8 << 30,
+
+        /// The default read widths by latency class, from the recorded width
+        /// sweeps. Local sources knee at 12 to 16 on every host measured: the
+        /// B70 peaks at 12 to 16 and loses 11% at 24, one MI300X prefers 12,
+        /// the RTX 5090 host 16 over 12, and the GB300 plateau from 12 to 48
+        /// has 16 within 5% of its best rung, so 16 is the width with the
+        /// smallest regret. Remote sources plateau from 24 to 32: hf:// reads
+        /// 32 and 64 alike and AWS was flat from 24, while pinned memory grows
+        /// with the width (32 x 32 MiB requests pin 1.5 GiB).
+        const local_read_parallelism: usize = 16;
+        const high_latency_read_parallelism: usize = 32;
     };
 
     /// Concurrent source reads at most (`Options.read_parallelism`).
@@ -128,15 +157,19 @@ pub const Loader = struct {
     /// creating the backend (for the direct one: DMA calibration and the
     /// pinned pre-growth) run on a task of the loader's own, or here when
     /// `io` has no concurrency; the first `start` waits for that task and
-    /// returns its error. A read width out of range is `InvalidOptions`,
-    /// logged.
+    /// returns its error. A read width or a block size out of range, a
+    /// block that is not a multiple of the direct-I/O alignment
+    /// (`Options.dma_block_size`), a checkpoint whose scheme the VFS does
+    /// not serve, a block calibration may select whose request (the read
+    /// chunk rounded up to whole blocks) passes 32 MiB, or a request too
+    /// short for a widened direct read is `InvalidOptions`, logged.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
         opts: Options,
     ) error{InvalidOptions}!Loader {
-        const backend_opts = try backendOptions(opts);
+        const backend_opts = try backendOptions(io, opts);
         const setup_args = .{ allocator, io, platform, backend_opts };
         return .{
             .allocator = allocator,
@@ -801,14 +834,47 @@ fn checkPlacement(platform: *const Platform, target: Target, from: []const u8) e
     }
 }
 
-/// `opts` as the backends take them, with the local read hints. Every
-/// option is checked here, once.
-fn backendOptions(opts: Loader.Options) error{InvalidOptions}!backend.Options {
-    if (opts.read_parallelism == 0 or opts.read_parallelism > Loader.max_read_parallelism) {
-        load_log.err("invalid loader options: read_parallelism={d}, expected 1..{d}: InvalidOptions", .{ opts.read_parallelism, Loader.max_read_parallelism });
+/// `opts` as the backends take them, the checkpoint resolved to the read
+/// hints of the VFS backend serving it and the read width to its default.
+/// Every option is checked here, once.
+fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backend.Options {
+    const hints: VFS.ReadHints = hints: {
+        const path = opts.checkpoint orelse break :hints .local;
+        const vfs = VFS.fromIo(io) orelse break :hints .local;
+        break :hints vfs.readHints(path) catch |err| {
+            load_log.err("invalid loader options: checkpoint={s}: {s}", .{ path, @errorName(err) });
+            return error.InvalidOptions;
+        };
+    };
+    if (opts.read_parallelism) |width| {
+        if (width == 0 or width > Loader.max_read_parallelism) {
+            load_log.err("invalid loader options: read_parallelism={d}, expected 1..{d}: InvalidOptions", .{ width, Loader.max_read_parallelism });
+            return error.InvalidOptions;
+        }
+    }
+    const max_request = backend.max_read_request_size;
+    if (hints.read_chunk_size == 0 or hints.read_chunk_size > max_request) {
+        load_log.err("invalid loader options: checkpoint={?s}, read_chunk_size={d}, expected 1..{d}: InvalidOptions", .{ opts.checkpoint, hints.read_chunk_size, max_request });
         return error.InvalidOptions;
     }
-    return .{ .read_parallelism = opts.read_parallelism };
+    const options: backend.Options = .{
+        .read_parallelism = opts.read_parallelism orelse if (hints.high_latency)
+            Loader.Options.high_latency_read_parallelism
+        else
+            Loader.Options.local_read_parallelism,
+        .read_hints = hints,
+        .dma_block_size = opts.dma_block_size,
+        .direct_io = opts.direct_io,
+    };
+    // Checked for every block calibration may select.
+    const alignment = backend.readAlignment(io, opts.direct_io);
+    for (options.dmaBlockSizes()) |block_size| {
+        if (backend.requestSize(hints.read_chunk_size, block_size, alignment) == null) {
+            load_log.err("invalid loader options: checkpoint={?s}, read_chunk_size={d}, dma_block_size={d}, alignment={d}, max_request={d}: no request size fits: InvalidOptions", .{ opts.checkpoint, hints.read_chunk_size, block_size, alignment, max_request });
+            return error.InvalidOptions;
+        }
+    }
+    return options;
 }
 
 /// A program must compute one tensor of `expected`, placed on the same
@@ -1213,16 +1279,44 @@ test "init checks every option and returns InvalidOptions" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = testing.env();
-    for ([_]usize{ 0, Loader.max_read_parallelism + 1 }) |width| {
-        if (Loader.init(allocator, io, platform, .{ .read_parallelism = width })) |value| {
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    const Case = struct { io: std.Io, opts: Loader.Options };
+    const cases = [_]Case{
+        .{ .io = io, .opts = .{ .read_parallelism = 0 } },
+        .{ .io = io, .opts = .{ .read_parallelism = Loader.max_read_parallelism + 1 } },
+        .{ .io = io, .opts = .{ .dma_block_size = 0 } },
+        .{ .io = io, .opts = .{ .dma_block_size = backend.max_read_request_size + 1 } },
+        // No backend of the VFS serves the scheme.
+        .{ .io = vfs.io(), .opts = .{ .checkpoint = "missing://bucket/model" } },
+    };
+    for (cases) |case| {
+        if (Loader.init(allocator, case.io, platform, case.opts)) |value| {
             var loader = value;
             loader.deinit();
             return error.TestUnexpectedResult;
         } else |err| try std.testing.expectEqual(error.InvalidOptions, err);
     }
-    // Nothing started, so `deinit` cancels the set-up or destroys what it
-    // built.
-    var loader = try Loader.init(allocator, io, platform, .{});
+    // Under a VFS, a local file may be read directly: a block is a whole
+    // number of alignment units, reads landing in blocks.
+    if (VFS.direct_io_alignment != 0) {
+        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "/model.safetensors", .dma_block_size = (8 << 20) + VFS.direct_io_alignment / 2 })) |value| {
+            var loader = value;
+            loader.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.InvalidOptions, err);
+        // Whatever the checkpoint: a request of one alignment unit cannot
+        // hold a direct read widened at each end.
+        try vfs.registerBackend("tiny", .{ .io = io, .read_hints = .{ .read_chunk_size = VFS.direct_io_alignment } });
+        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "tiny://model", .dma_block_size = VFS.direct_io_alignment })) |value| {
+            var loader = value;
+            loader.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.InvalidOptions, err);
+    }
+    // A plain io has no VFS to ask: local sizing. Nothing started, so
+    // `deinit` cancels the set-up or destroys what it built.
+    var loader = try Loader.init(allocator, io, platform, .{ .checkpoint = "missing://bucket/model" });
     loader.deinit();
 }
 
@@ -1442,7 +1536,7 @@ test "a program takes its inputs from sources, in order" {
 /// through the direct backend, and this keeps the front end over the
 /// buffered one under test.
 fn initBuffered(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Loader.Options) !Loader {
-    const backend_opts = try backendOptions(opts);
+    const backend_opts = try backendOptions(io, opts);
     return .{
         .allocator = allocator,
         .io = io,

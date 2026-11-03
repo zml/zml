@@ -1,13 +1,13 @@
 //! DMA sizing for the direct backend: the block size, decided once when the
 //! backend is created. It screens `default_block_sizes` (2 to 32 MiB), or
-//! the one block the backend's options pin (`backend.Options.dmaBlockSizes`),
-//! on one representative device, at `depth` transfers per device and over
-//! fixed windows, and keeps the smallest block within 8% of the measured
-//! peak; borderline candidates get longer, alternating confirmation
-//! windows. The ring it measures in stays mapped as the load's first pinned
-//! capacity. CPU returns the smallest candidate without measuring: its
-//! plugin's transfer is a memcpy, and a load takes the same time at every
-//! block size. The buffered backend has nothing to size.
+//! the one block `zml.io.next.Loader.Options.dma_block_size` gives, on one
+//! representative device, at `depth` transfers per device and over fixed
+//! windows, and keeps the smallest block within 8% of the measured peak;
+//! borderline candidates get longer, alternating confirmation windows. The
+//! ring it measures in stays mapped as the load's first pinned capacity.
+//! CPU returns the smallest candidate without measuring: its plugin's
+//! transfer is a memcpy, and a load takes the same time at every block
+//! size. The buffered backend has nothing to size.
 const std = @import("std");
 
 const pjrt = @import("pjrt");

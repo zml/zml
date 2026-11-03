@@ -25,7 +25,8 @@ pub const max_read_request_size: usize = 32 * 1024 * 1024;
 /// a nonzero multiple of `alignment` (`readAlignment`: reads land in
 /// blocks), and the request is at most `max_read_request_size` and, with an
 /// alignment, longer than two units, so a read widened by a unit at each
-/// end fits.
+/// end fits. `zml.io.next.Loader.init` refuses options for which a block
+/// calibration may select has none.
 pub fn requestSize(read_chunk_size: usize, block_size: usize, alignment: usize) ?usize {
     if (block_size == 0 or block_size % @max(alignment, 1) != 0) return null;
     // Bounded before the rounding, which then cannot overflow.
@@ -37,24 +38,22 @@ pub fn requestSize(read_chunk_size: usize, block_size: usize, alignment: usize) 
     return request;
 }
 
-/// What a backend widens the reads of a file read directly to: the VFS's
-/// alignment when `io` is a VFS and `direct_io` is not `off`, else 0, every
-/// read exact. The VFS decides per local file whether it is read directly
-/// (`VFS.useDirectIo`).
+/// What the direct backend widens the reads of a file read directly to:
+/// the VFS's alignment when `io` is a VFS and `direct_io` is not `off`, else
+/// 0, every read exact. The VFS decides per local file whether it is read
+/// directly (`VFS.useDirectIo`).
 pub fn readAlignment(io: std.Io, direct_io: VFS.DirectIo) usize {
     if (direct_io == .off or VFS.fromIo(io) == null) return 0;
     return VFS.direct_io_alignment;
 }
 
-/// The loader's options as its front end checked them, for the backends.
+/// `zml.io.next.Loader.Options` as `zml.io.next.Loader.init` checked them,
+/// the checkpoint resolved to its VFS backend's read hints and the read
+/// width to its default. See `zml.io.next.Loader.Options` for each field.
 pub const Options = struct {
-    /// Source reads in flight at once.
     read_parallelism: usize,
-    /// The checkpoint's VFS backend's read hints.
     read_hints: VFS.ReadHints = .local,
-    /// The DMA block, else one calibration picks.
     dma_block_size: ?usize = null,
-    /// Whether local files are read directly (`VFS.useDirectIo`).
     direct_io: VFS.DirectIo = .auto,
 
     /// The blocks calibration may select: `dma_block_size`, else

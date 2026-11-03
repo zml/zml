@@ -28,6 +28,13 @@
 //!   one back to host and compare them with the checkpoint's bytes, every
 //!   replica of a tensor each device holds whole. 1 checks every tensor;
 //!   unset or 0, none. A difference is `LoadContentMismatch`, logged.
+//! - `ZML_LOAD_READ_PARALLELISM=n`: the loader's concurrent source reads
+//!   (`Loader.Options.read_parallelism`); unset, the checkpoint's default
+//!   width, 16 locally and 32 remotely.
+//! - `ZML_DMA_BENCH_BLOCK_MIB=n`: the direct backend's DMA block, in MiB
+//!   (`Loader.Options.dma_block_size`); unset, calibration picks one.
+//! - `ZML_DIRECT_IO=off|on|auto`: direct I/O for local checkpoint files
+//!   (`Loader.Options.direct_io`, `VFS.DirectIo`); `auto` when unset.
 //! - `ZML_GPU_MEMORY_FRACTION=f`: a preallocated BFC pool of that fraction
 //!   of each device's memory on CUDA, ROCm and oneAPI, instead of the
 //!   platform's allocator defaults, for a run that observes the loader's
@@ -63,6 +70,11 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArgument;
     };
     const check_stride = try envNumber(usize, init.environ_map, "ZML_LOAD_CHECK") orelse 0;
+    const direct_io = std.meta.stringToEnum(zml.io.VFS.DirectIo, init.environ_map.get("ZML_DIRECT_IO") orelse "auto") orelse {
+        log.err("ZML_DIRECT_IO must be off, on or auto", .{});
+        return error.InvalidArgument;
+    };
+    const dma_block_mib = try envNumber(u32, init.environ_map, "ZML_DMA_BENCH_BLOCK_MIB");
 
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
@@ -78,7 +90,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Returns at once: the loader sets its backend up while the
     // checkpoint's headers are read and its tensors bound.
-    var loader: zml.io.next.Loader = try .init(allocator, io, platform, .{});
+    var loader: zml.io.next.Loader = try .init(allocator, io, platform, .{
+        .checkpoint = path,
+        .read_parallelism = try envNumber(usize, init.environ_map, "ZML_LOAD_READ_PARALLELISM"),
+        .dma_block_size = if (dma_block_mib) |mib| @as(usize, mib) * zml.MiB else null,
+        .direct_io = direct_io,
+    });
     defer loader.deinit();
 
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);

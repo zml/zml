@@ -33,6 +33,14 @@
 //! until every job completes; a failure retires the unclaimed jobs and
 //! drains what is in flight before the batch goes.
 //!
+//! Direct I/O. A local file the VFS reads past the page cache
+//! (`VFS.useDirectIo`, asked once per file: `Planner.Reads`) is read in
+//! whole alignment units: each job's read widens to aligned bounds around
+//! its range, into blocks that are whole units, and its transfers address
+//! the widened read. A job's range is at most a request less two units, so
+//! its widened read still fits its credit's slot. Every other file is read
+//! exact.
+//!
 //! Destinations. A part's source bytes map to its destination's logical
 //! offsets, which the destination's `ShardGrid` places on the devices by
 //! arithmetic. Pieces of one destination merge across parts when block,
@@ -49,6 +57,7 @@ const std = @import("std");
 
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
+const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
 const pjrtx = @import("../pjrtx.zig");
@@ -113,9 +122,10 @@ pub const Loader = struct {
     /// Per-device in-flight budget: `dma_calibration.depth` blocks, in bytes.
     dma_budget_bytes: usize,
     worker_group: std.Io.Group = .init,
-    /// One per source path. Its file opens at its first read and stays
-    /// open until `destroy`. Keyed by the slot's own copy of the path: the
-    /// registry that named it may go once the batch retired.
+    /// One per source path. Its file opens at first use (during planning
+    /// when a VFS decides direct IO for a local file, otherwise at the first
+    /// read) and stays open until `destroy`. Keyed by the slot's own copy of
+    /// the path: the registry that named it may go once the batch retired.
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
     /// What the debug lines time from (`logBatch`, `logSummary`).
     created_at: std.Io.Timestamp,
@@ -123,6 +133,8 @@ pub const Loader = struct {
     batch_count: usize = 0,
     /// The block size and the request size, for the whole load.
     plan_config: Planner.Config,
+    /// How each file is read: exact, or aligned for direct I/O.
+    reads: Planner.Reads,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -145,8 +157,8 @@ pub const Loader = struct {
             load_log.failure(err, "calibrate DMA: target={t}", .{platform.target});
             return err;
         };
-        // Every read is exact.
-        const request_size = backend.requestSize(opts.read_hints.read_chunk_size, block_size, 0).?;
+        const reads: Planner.Reads = .init(io, opts.direct_io);
+        const request_size = backend.requestSize(opts.read_hints.read_chunk_size, block_size, reads.alignment).?;
         const blocks_per_request = request_size / block_size;
         // The DMA stage of every device, kept mapped beside the source
         // working set; at least one maximal source request, so a single
@@ -211,6 +223,7 @@ pub const Loader = struct {
                 .block_size = block_size,
                 .request_size = request_size,
             },
+            .reads = reads,
         };
         std.debug.assert(self.dma_budget_bytes > 0);
         errdefer self.scheduler.deinit();
@@ -220,9 +233,11 @@ pub const Loader = struct {
             load_log.err("start {d} source workers: {s}", .{ workers, @errorName(err) });
             return err;
         };
-        load_log.debug("live loader ready: target={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
+        load_log.debug("live loader ready: target={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
             request_size,
+            opts.direct_io,
+            reads.alignment,
             block_size,
             self.dma_budget_bytes,
             width,
@@ -251,7 +266,7 @@ pub const Loader = struct {
             try self.createDestinations(batch, specs, progress);
             break :batch batch;
         };
-        Planner.publishFiles(&self.scheduler, self.io, batch, batch.parts, self.plan_config) catch |err| {
+        Planner.publishFiles(&self.scheduler, self.io, batch, batch.parts, self.plan_config, self.reads) catch |err| {
             // Fail the loader, seal and await what was published of this
             // batch, and return the loader's first error.
             self.recordError(err, "plan batch {d}, published_plans={d}", .{ batch.sequence, batch.plans.items.len });
@@ -685,10 +700,14 @@ const Part = struct {
 };
 
 /// One source file: every job of a plan reads the file of its slot, which
-/// the first read opens.
+/// the first read opens, or the planner when it asks the VFS whether the
+/// file is read directly (`Planner.Reads`).
 const SourceSlot = struct {
     uri: []const u8,
     file: LazyOnce(std.Io.File) = .{},
+    /// The file's read alignment once the planner decided it
+    /// (`Planner.Reads`): 0 when it is read exactly.
+    alignment: ?usize = null,
 
     fn ensure(self: *SourceSlot, io: std.Io) std.Io.File.OpenError!std.Io.File {
         const file = try self.file.ensure(io, std.Io.Dir.openFile, .{ .cwd(), io, self.uri, .{ .mode = .read_only } });
@@ -723,8 +742,8 @@ const Plan = struct {
         };
 
         /// `len` bytes from the job's `file_offset`, of which the first
-        /// `minimum_len` hold tensor data and must exist. Reads are exact:
-        /// the two are equal.
+        /// `minimum_len` hold tensor data and must exist. The rest is
+        /// alignment padding the end of the file may cut.
         const Read = struct {
             len: usize,
             minimum_len: usize,
@@ -790,10 +809,53 @@ const Planner = struct {
         request_size: usize,
     };
 
+    /// How each file is read: aligned when it is local and the VFS that
+    /// opens it reads it directly under `policy`, decided once per file and
+    /// kept in its slot. A remote file is read exact without being opened
+    /// here. Without a VFS (`io` is none, or no alignment) every file takes
+    /// `alignment`.
+    /// Widening buffered reads is not free: a widened read served from the
+    /// page cache costs the DMA sources their block alignment for nothing,
+    /// and warm replicated Llama on four GB300 lost 3-6% when its first
+    /// tensor no longer landed at block offset zero. So a file asks the VFS
+    /// actually owning its handle (`VFS.fromIo`, in `init`), both to avoid
+    /// that cost and to avoid indexing another VFS's handle table; an `io`
+    /// that is no VFS never reads directly.
+    const Reads = struct {
+        io: std.Io,
+        vfs: ?*VFS,
+        policy: VFS.DirectIo,
+        /// Every read of a file read directly starts and ends at a multiple
+        /// of this; 0 reads every file exact.
+        alignment: usize,
+
+        fn init(io: std.Io, policy: VFS.DirectIo) Reads {
+            const alignment = backend.readAlignment(io, policy);
+            return .{ .io = io, .vfs = if (alignment != 0) VFS.fromIo(io) else null, .policy = policy, .alignment = alignment };
+        }
+
+        /// The file's alignment, decided the first time it is asked: a
+        /// local file is opened here. One that fails to open is read exact:
+        /// its reads fail with the same error (`LazyOnce`), which `readSlot`
+        /// logs with the path.
+        fn alignmentOf(self: Reads, slot: *SourceSlot) error{Canceled}!usize {
+            const vfs = self.vfs orelse return self.alignment;
+            if (slot.alignment) |known| return known;
+            const direct = vfs.isLocal(slot.uri) and vfs.useDirectIo(slot.ensure(self.io) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return 0,
+            }, self.policy);
+            const alignment = if (direct) self.alignment else 0;
+            slot.alignment = alignment;
+            return alignment;
+        }
+    };
+
     /// Plans `parts` one file at a time and publishes each plan as soon as
     /// it exists, so workers claim the first file while the rest is planned,
     /// each plan in the batch's arena. Stops at the first error; the caller
-    /// seals or fails the batch.
+    /// seals or fails the batch. `reads` says how each file is read
+    /// (`Reads`).
     /// Whole-model planning delayed the first read by 0.32 s for DeepSeek's
     /// 46 files on one MI300X; publishing per file overlaps the rest with IO.
     fn publishFiles(
@@ -802,6 +864,7 @@ const Planner = struct {
         batch: *Batch,
         parts: []Part,
         config: Config,
+        reads: Reads,
     ) !void {
         const order = try sortedPartOrder(scheduler.allocator, parts);
         defer scheduler.allocator.free(order);
@@ -809,7 +872,7 @@ const Planner = struct {
         while (file_start < order.len) {
             const file_end = fileGroupEnd(parts, order, file_start);
             const planning_started: std.Io.Timestamp = .now(io, .awake);
-            const plan = try preparePlan(scheduler.allocator, batch.arena.allocator(), parts, order[file_start..file_end], config);
+            const plan = try preparePlan(scheduler.allocator, batch.arena.allocator(), parts, order[file_start..file_end], config, reads);
             plan.planning_ns = @intCast(@max(planning_started.untilNow(io, .awake).nanoseconds, 0));
             try scheduler.publish(io, batch, plan);
             if (batch.published_at == null) batch.published_at = .now(io, .awake);
@@ -818,22 +881,27 @@ const Planner = struct {
     }
 
     /// Plans one file: `order` indexes its `parts` by offset and size
-    /// (`sortedPartOrder`), and `JobCut.cutRuns` cuts them. The plan goes in
-    /// `arena` (`JobCut.finish`), the cut in `allocator`.
+    /// (`sortedPartOrder`), and `JobCut.cutRuns` cuts them at the file's
+    /// alignment (`Reads.alignmentOf`). The plan goes in `arena`
+    /// (`JobCut.finish`), the cut in `allocator`.
     fn preparePlan(
         allocator: std.mem.Allocator,
         arena: std.mem.Allocator,
         parts: []Part,
         order: []const usize,
         config: Config,
+        reads: Reads,
     ) !*Plan {
         const source_slot = parts[order[0]].source_slot;
         for (order) |part_index| std.debug.assert(std.mem.eql(u8, parts[part_index].source.file_uri, parts[order[0]].source.file_uri));
+        const alignment = try reads.alignmentOf(source_slot);
         var cut: JobCut = .{
             .allocator = allocator,
             .parts = parts,
             .source_slot = source_slot,
             .config = config,
+            .alignment = alignment,
+            .maximum_job_len = maximumJobLen(config.request_size, alignment),
         };
         defer cut.deinit();
         // Jobs are claimed in planning order, which is file order. A
@@ -855,6 +923,9 @@ const Planner = struct {
         /// The file every job of the plan reads.
         source_slot: *SourceSlot,
         config: Config,
+        /// The alignment of the plan's file (`Reads.alignmentOf`).
+        alignment: usize,
+        maximum_job_len: usize,
         jobs: std.ArrayList(Plan.Job) = .empty,
         transfers: std.ArrayList(Plan.Transfer) = .empty,
         safe_boundaries: std.ArrayList(u64) = .empty,
@@ -890,13 +961,17 @@ const Planner = struct {
 
         /// Cuts the runs of `order` (part indices in file order) into jobs:
         /// each run of touching or overlapping ranges into the minimum number
-        /// of jobs of at most a request, cut at part-safe boundaries where
-        /// that number allows. No job depends on another, since every DMA
-        /// piece is submitted as soon as its block is read.
+        /// of jobs, cut at part-safe boundaries where that number allows. No
+        /// job depends on another, since every DMA piece is submitted as soon
+        /// as its block is read. With an alignment (`Reads.alignmentOf`), a
+        /// job's read widens to aligned bounds around its range
+        /// (`maximumJobLen` leaves room for it), and the transfers address
+        /// the widened read.
         fn cutRuns(self: *JobCut, order: []const usize) !void {
             const allocator = self.allocator;
             const parts = self.parts;
-            const maximum_job_len = self.config.request_size;
+            const alignment = self.alignment;
+            const maximum_job_len = self.maximum_job_len;
             var run_cursor: usize = 0;
             while (run_cursor < order.len) {
                 self.safe_boundaries.clearRetainingCapacity();
@@ -960,6 +1035,9 @@ const Planner = struct {
                         break :boundary selected orelse maximum_end;
                     };
                     const job_len: usize = @intCast(job_end - job_start);
+                    const read_start = if (alignment == 0) job_start else std.mem.alignBackward(u64, job_start, alignment);
+                    const read_end = if (alignment == 0) job_end else std.mem.alignForward(u64, job_end, alignment);
+                    const read_len: usize = @intCast(read_end - read_start);
                     const transfer_start = self.transfers.items.len;
                     while (candidate_start < run_part_end) {
                         const candidate = parts[order[candidate_start]].fileRange();
@@ -979,14 +1057,14 @@ const Planner = struct {
                             .start = logical_start,
                             .end = logical_start + (intersection_end - intersection_start),
                             .file_offset = intersection_start,
-                        }, job_start);
+                        }, read_start);
                     }
                     std.debug.assert(self.transfers.items.len != transfer_start);
                     try self.jobs.append(allocator, .{
-                        .file_offset = job_start,
+                        .file_offset = read_start,
                         .transfer_start = transfer_start,
                         .transfer_len = self.transfers.items.len - transfer_start,
-                        .kind = .{ .dma_read = .{ .len = job_len, .minimum_len = job_len } },
+                        .kind = .{ .dma_read = .{ .len = read_len, .minimum_len = @intCast(job_end - read_start) } },
                     });
                     self.source_bytes +|= @intCast(job_len);
                     job_start = job_end;
@@ -1063,6 +1141,17 @@ const Planner = struct {
     };
     fn blockCount(len: usize, block_size: usize) usize {
         return len / block_size + @intFromBool(len % block_size != 0);
+    }
+
+    /// The longest tensor range one job may cover: the request size, less
+    /// the two alignment units its widened read can add, so a widened job
+    /// still fits a request (a credit's slot). `backend.requestSize` refuses
+    /// a request that cannot hold them.
+    fn maximumJobLen(request_size: usize, alignment: usize) usize {
+        std.debug.assert(request_size != 0);
+        if (alignment == 0) return request_size;
+        std.debug.assert(std.math.isPowerOfTwo(alignment) and 2 * alignment < request_size);
+        return request_size - 2 * alignment;
     }
 
     /// Part indices sorted by file URI, offset, size and index: the
@@ -1992,10 +2081,15 @@ fn writeTestFile(dir: std.Io.Dir, io: std.Io, name: []const u8, contents: []cons
 
 // Planner tests.
 
-/// `Planner.preparePlan`, kept in `arena`; the testing allocator checks the
-/// cut for leaks.
-fn prepareTestPlan(arena: std.mem.Allocator, parts: []Part, order: []const usize, config: Planner.Config) !*Plan {
-    return Planner.preparePlan(std.testing.allocator, arena, parts, order, config);
+/// Every file read at `alignment`, none opened to ask.
+fn fixedReads(alignment: usize) Planner.Reads {
+    return .{ .io = undefined, .vfs = null, .policy = .off, .alignment = alignment };
+}
+
+/// `Planner.preparePlan` with every file read at `alignment`, kept in
+/// `arena`; the testing allocator checks the cut for leaks.
+fn prepareTestPlan(arena: std.mem.Allocator, parts: []Part, order: []const usize, config: Planner.Config, alignment: usize) !*Plan {
+    return Planner.preparePlan(std.testing.allocator, arena, parts, order, config, fixedReads(alignment));
 }
 
 /// One plain destination per source, as `createDestinations` builds them
@@ -2039,6 +2133,36 @@ fn discardTestBatch(scheduler: *Scheduler, batch: *Batch) void {
     batch.destroy();
 }
 
+test "the planner opens only local files to ask about direct I/O" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const contents: [2 * 4096]u8 = @splat(7);
+    var path_buffer: [1024]u8 = undefined;
+    const path = try writeTestFile(tmp.dir, io, "drafter.bin", &contents, &path_buffer);
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    // A scheme whose files the plain io cannot open: asking would fail.
+    try vfs.registerBackend("remote", .{ .io = io });
+    const vfs_io = vfs.io();
+    const reads: Planner.Reads = .{ .io = vfs_io, .vfs = &vfs, .policy = .on, .alignment = 4096 };
+
+    // A remote file is read exact, without an open on the planner.
+    var remote: SourceSlot = .{ .uri = "remote://bucket/model.safetensors" };
+    defer remote.deinit(vfs_io);
+    try std.testing.expectEqual(@as(usize, 0), try reads.alignmentOf(&remote));
+    try std.testing.expect(remote.file.readyValue() == null);
+
+    // A local file beside it is opened and asked, whatever the checkpoint:
+    // direct where the filesystem allows it.
+    var local: SourceSlot = .{ .uri = path };
+    defer local.deinit(vfs_io);
+    const alignment = try reads.alignmentOf(&local);
+    const file = local.file.readyValue().?.*;
+    try std.testing.expectEqual(@as(usize, if (vfs.useDirectIo(file, .on)) 4096 else 0), alignment);
+}
+
 test "source planner coalesces exact adjacent and overlapping tensor ranges per file" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -2068,7 +2192,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try Planner.publishFiles(&scheduler, io, batch, &parts, .{
         .block_size = 4,
         .request_size = 8,
-    });
+    }, fixedReads(0));
 
     // One plan per file. a:[10,18) merges adjacency and the duplicate,
     // a:[20,24) remains exact, and b:[3,15) is split at the request-size
@@ -2119,12 +2243,35 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     const aligned_plan = try prepareTestPlan(arena.allocator(), &aligned_items, &.{ 0, 1, 2 }, .{
         .block_size = 4,
         .request_size = 8,
-    });
+    }, 0);
     try std.testing.expectEqual(@as(usize, 3), aligned_plan.jobs.len);
     try std.testing.expectEqual(@as(usize, 6), aligned_plan.transfers.len);
     try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 8), aligned_plan.jobs[1].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 5), aligned_plan.jobs[2].kind.dma_read.len);
+
+    // Widened for direct I/O: the same three jobs (16 - 2 * 4 = 8 still cuts
+    // at the tensor-safe boundaries 7 and 15), each read at 4-byte bounds,
+    // its transfers relative to the widened start; the last read runs past
+    // the tensor data, of which every byte is required.
+    const widened_plan = try prepareTestPlan(arena.allocator(), &aligned_items, &.{ 0, 1, 2 }, .{
+        .block_size = 4,
+        .request_size = 16,
+    }, 4);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs.len);
+    try std.testing.expectEqual(@as(u64, 0), widened_plan.jobs[0].file_offset);
+    try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[0].kind.dma_read.len);
+    try std.testing.expectEqual(@as(usize, 7), widened_plan.jobs[0].kind.dma_read.minimum_len);
+    try std.testing.expectEqual(@as(u64, 4), widened_plan.jobs[1].file_offset);
+    try std.testing.expectEqual(@as(usize, 12), widened_plan.jobs[1].kind.dma_read.len);
+    try std.testing.expectEqual(@as(usize, 11), widened_plan.jobs[1].kind.dma_read.minimum_len);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.jobs[1].blockLen(4));
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.transfers[widened_plan.jobs[1].transfer_start].landing);
+    try std.testing.expectEqual(@as(u64, 12), widened_plan.jobs[2].file_offset);
+    try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[2].kind.dma_read.len);
+    try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[2].kind.dma_read.minimum_len);
+    try std.testing.expectEqual(@as(usize, 3), widened_plan.transfers[widened_plan.jobs[2].transfer_start].landing);
+    try std.testing.expectEqual(@as(u64, 20), widened_plan.source_bytes);
 }
 
 // Scheduler tests.
@@ -2206,11 +2353,12 @@ test "scheduler publishes a submission one file at a time and claims the files i
     try Planner.publishFiles(&scheduler, io, batch, &parts, .{
         .block_size = 4,
         .request_size = 4,
-    });
+    }, fixedReads(0));
     try std.testing.expectEqual(@as(usize, 2), batch.plans.items.len);
     try std.testing.expectEqual(@as(usize, 2), batch.plans.items[0].jobs.len);
     try std.testing.expectEqual(@as(usize, 1), batch.plans.items[1].jobs.len);
     try std.testing.expectEqual(@as(usize, 3), unclaimedJobs(&scheduler));
+    try std.testing.expect(batch.published_at != null);
 
     // File a's jobs in offset order, then file b's.
     var claim = scheduler.claim(io).?;
@@ -2445,6 +2593,7 @@ const TestLoader = struct {
             .dma_budget_bytes = 64,
             .created_at = .now(std.testing.io, .awake),
             .plan_config = .{ .block_size = 64, .request_size = 64 },
+            .reads = fixedReads(0),
         };
     }
 
