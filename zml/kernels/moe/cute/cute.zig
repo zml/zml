@@ -52,49 +52,19 @@ pub fn fusedExperts(
     // multiplied in the up epilogue, before the down projection: applying it
     // after would have to move into the down epilogue or the reduction.
     stdx.debug.assert(options.routing_weight_placement == .before_down, "cute backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
-    const context: Context = .{
-        .input = input,
-        .ids = routing.localIds(),
-        .weights = routing.weights,
+    const topk = routing.ids.dim(.topk);
+    const experts = gate_up.weight.dim(.expert);
+    const ids = routing.localIds().convert(.i32).reshape(.{ .token = .auto, .topk = topk });
+    const tokens = ids.dim(.token);
+    const routing_weights = routing.weights.convert(.f32).reshape(.{ tokens, topk });
+
+    return kernels.forward(tokens, hidden, intermediate, experts, topk, options.activation.swiglu.limit, .{
+        .x = input.reshape(.{ tokens, hidden }),
+        .routing_weights = routing_weights,
         .w1 = gate_up.weight,
         .s1 = gq.scales,
         .w2 = down.weight,
         .s2 = dq.scales,
-        .topk = routing.ids.dim(.topk),
-        .swiglu_limit = options.activation.swiglu.limit,
-    };
-    return context.body(input.shape());
+        .ids = ids,
+    }).reshape(input.shape().dims()).withTags(input.shape());
 }
-
-const Context = struct {
-    input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
-    w1: zml.Tensor,
-    s1: zml.Tensor,
-    w2: zml.Tensor,
-    s2: zml.Tensor,
-    topk: i64,
-    swiglu_limit: ?f32,
-
-    fn body(self: Context, _: zml.Shape) zml.Tensor {
-        const experts = self.w1.dim(.expert);
-        const hidden = self.w2.dim(1);
-        const intermediate = self.w2.dim(2) * 2;
-        const ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
-        const tokens = ids.dim(.token);
-        const routing_weights = self.weights.convert(.f32).reshape(.{ tokens, self.topk });
-
-        const result = kernels.forward(tokens, hidden, intermediate, experts, self.topk, self.swiglu_limit, .{
-            .x = self.input.reshape(.{ tokens, hidden }),
-            .routing_weights = routing_weights,
-            .w1 = self.w1,
-            .s1 = self.s1,
-            .w2 = self.w2,
-            .s2 = self.s2,
-            .ids = ids,
-        }).reshape(self.input.shape().dims()).withTags(self.input.shape());
-
-        return result;
-    }
-};

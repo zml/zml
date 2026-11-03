@@ -20,59 +20,46 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 }
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.AttentionOptions) zml.Tensor {
-    return (Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }).body(q.shape());
+    const q_ = q.transpose(.{ .b, .hkv, .hg, .hd });
+    const k_ = k.transpose(.{ .page, .k_chunk, .hkv, .hd });
+    const v_ = v.transpose(.{ .page, .k_chunk, .hkv, .hd });
+    stdx.debug.assert(q_.dim(.hkv) == k_.dim(.hkv) and k_.shape().eql(v_.shape()) and k_.dim(.hd) == q_.dim(.hd) and q_.dim(.hg) > 0, "CuTe paged attention requires aligned local Q/KV heads and matching caches", .{});
+    const decode = !parameters.options_.is_prefill;
+    const cc = zml.platform.cuda.computeCapability(zml.Compiler.current().platform).?;
+    var c: kernel.Config = .{
+        .architecture = if (cc.minor >= 3) .sm103 else .sm100,
+        .head_dim = q_.dim(.hd),
+        .tokens = q_.dim(.b),
+        .batch = parameters.block_table.dim(.b),
+        .kv_heads = k_.dim(.hkv),
+        .group = q_.dim(.hg),
+        .pages_per_seq = parameters.block_table.dim(.p),
+        .page_size = k_.dim(.k_chunk),
+        .max_query = if (decode) 1 else @min(q_.dim(.b), @as(i64, @intCast(parameters.options_.max_seqlen_q))),
+        .dtype = zml.kernel.cute.from(q_.dtype()),
+        .decode = decode,
+        .causal = opts.mask.isCausal(),
+        .window = opts.mask.slidingWindow() orelse 0,
+        .scale = opts.scale orelse 1 / @sqrt(@as(f32, @floatFromInt(q_.dim(.hd)))),
+        .sink = opts.sink != null,
+    };
+    const query_tiles = if (decode) c.batch * c.queryTiles() else c.batch + @divTrunc(c.tokens * c.group + c.rows() - 1, c.rows());
+    const work = query_tiles * c.kv_heads;
+    const bound = if (c.window > 0 and c.causal) @min(c.window + @divTrunc(c.rows() + c.group - 1, c.group), c.pages_per_seq * c.page_size) else c.pages_per_seq * c.page_size;
+    c.splits = @max(1, @min(32, @min(@divTrunc(@as(i64, @intCast(cute.multiprocessorCount(zml.Compiler.current().platform))) * 2 + work - 1, work), @divTrunc(bound + 2 * c.keys() - 1, 2 * c.keys()))));
+    // An unused scalar stays a constant buffer; broadcasting a dummy for
+    // every head would add a helper kernel to each attention invocation.
+    const sink = if (opts.sink) |s| s.convert(.f32).reshape(.{c.kv_heads * c.group}) else zml.Tensor.scalar(0, .f32).reshape(.{1});
+    const out = kernel.Attention.call(.{ .q = q_, .k = k_, .v = v_, .table = parameters.block_table, .lengths = parameters.seq_lens, .starts = parameters.query_start_len, .sink = sink }, .{
+        .out = if (c.splits > 1) zml.Shape.init(.{ c.splits, c.tokens, c.kv_heads * c.group, c.head_dim + 2 }, .f32) else q_.shape(),
+    }, .{ .cfg = c, .grid = .{ @intCast(c.batch * c.queryTiles()), @intCast(c.kv_heads), @intCast(c.splits) }, .block = kernel.block }).out;
+    const result = if (c.splits > 1) kernel.Merge.call(.{ .partials = out, .lengths = parameters.seq_lens, .starts = parameters.query_start_len, .sink = sink }, .{ .out = q_.shape() }, .{
+        .cfg = c,
+        .grid = .{ @intCast(c.tokens), @intCast(c.kv_heads * c.group), 1 },
+        .block = .{ 128, 1, 1 },
+    }).out else out;
+    return result.transpose(q.shape());
 }
-
-const Context = struct {
-    q: zml.Tensor,
-    k: zml.Tensor,
-    v: zml.Tensor,
-    parameters: Parameters,
-    opts: paged.AttentionOptions,
-
-    fn body(self: Context, output_shape: zml.Shape) zml.Tensor {
-        const q = self.q.transpose(.{ .b, .hkv, .hg, .hd });
-        const k = self.k.transpose(.{ .page, .k_chunk, .hkv, .hd });
-        const v = self.v.transpose(.{ .page, .k_chunk, .hkv, .hd });
-        stdx.debug.assert(q.dim(.hkv) == k.dim(.hkv) and k.shape().eql(v.shape()) and k.dim(.hd) == q.dim(.hd) and q.dim(.hg) > 0, "CuTe paged attention requires aligned local Q/KV heads and matching caches", .{});
-        const p = self.parameters;
-        const decode = !p.options_.is_prefill;
-        const cc = zml.platform.cuda.computeCapability(zml.Compiler.current().platform).?;
-        var c: kernel.Config = .{
-            .architecture = if (cc.minor >= 3) .sm103 else .sm100,
-            .head_dim = q.dim(.hd),
-            .tokens = q.dim(.b),
-            .batch = p.block_table.dim(.b),
-            .kv_heads = k.dim(.hkv),
-            .group = q.dim(.hg),
-            .pages_per_seq = p.block_table.dim(.p),
-            .page_size = k.dim(.k_chunk),
-            .max_query = if (decode) 1 else @min(q.dim(.b), @as(i64, @intCast(p.options_.max_seqlen_q))),
-            .dtype = zml.kernel.cute.from(q.dtype()),
-            .decode = decode,
-            .causal = self.opts.mask.isCausal(),
-            .window = self.opts.mask.slidingWindow() orelse 0,
-            .scale = self.opts.scale orelse 1 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd)))),
-            .sink = self.opts.sink != null,
-        };
-        const query_tiles = if (decode) c.batch * c.queryTiles() else c.batch + @divTrunc(c.tokens * c.group + c.rows() - 1, c.rows());
-        const work = query_tiles * c.kv_heads;
-        const bound = if (c.window > 0 and c.causal) @min(c.window + @divTrunc(c.rows() + c.group - 1, c.group), c.pages_per_seq * c.page_size) else c.pages_per_seq * c.page_size;
-        c.splits = @max(1, @min(32, @min(@divTrunc(@as(i64, @intCast(cute.multiprocessorCount(zml.Compiler.current().platform))) * 2 + work - 1, work), @divTrunc(bound + 2 * c.keys() - 1, 2 * c.keys()))));
-        // An unused scalar stays a constant buffer; broadcasting a dummy for
-        // every head would add a helper kernel to each attention invocation.
-        const sink = if (self.opts.sink) |s| s.convert(.f32).reshape(.{c.kv_heads * c.group}) else zml.Tensor.scalar(0, .f32).reshape(.{1});
-        const out = kernel.Attention.call(.{ .q = q, .k = k, .v = v, .table = p.block_table, .lengths = p.seq_lens, .starts = p.query_start_len, .sink = sink }, .{
-            .out = if (c.splits > 1) zml.Shape.init(.{ c.splits, c.tokens, c.kv_heads * c.group, c.head_dim + 2 }, .f32) else q.shape(),
-        }, .{ .cfg = c, .grid = .{ @intCast(c.batch * c.queryTiles()), @intCast(c.kv_heads), @intCast(c.splits) }, .block = kernel.block }).out;
-        const result = if (c.splits > 1) kernel.Merge.call(.{ .partials = out, .lengths = p.seq_lens, .starts = p.query_start_len, .sink = sink }, .{ .out = q.shape() }, .{
-            .cfg = c,
-            .grid = .{ @intCast(c.tokens), @intCast(c.kv_heads * c.group), 1 },
-            .block = .{ 128, 1, 1 },
-        }).out else out;
-        return result.transpose(output_shape);
-    }
-};
 
 const ArchitectureCheck = struct {
     fn forward(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, c: kernel.Config) zml.Tensor {
