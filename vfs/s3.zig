@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 
 const parallel_read = @import("parallel_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
+const Backend = @import("base.zig").Backend;
 
 const log = std.log.scoped(.@"zml/vfs/s3");
 
@@ -480,6 +481,13 @@ pub const S3 = struct {
                 .fileSeekTo = fileSeekTo,
                 .fileRealPath = fileRealPath,
             }),
+        };
+    }
+
+    pub fn backend(self: *S3) Backend {
+        return .{
+            .io = self.io(),
+            .read_hints = .{ .high_latency = true },
         };
     }
 

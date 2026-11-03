@@ -2,6 +2,27 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+/// How a backend's files are best read (`VFS.readHints`). No one source
+/// request size suits every backend: warm local 8 MiB requests on one B70
+/// reached 27.05 GiB/s against 21.33 at 32 MiB, with a quarter of the pinned
+/// memory; real AWS plateaued near 950 MiB/s, and 32 MiB was no faster.
+pub const ReadHints = struct {
+    /// Local files, through a VFS or not.
+    pub const local: ReadHints = .{ .read_chunk_size = 8 * 1024 * 1024 };
+
+    /// Smallest source request expected to avoid excessive per-request cost
+    /// or backend rate limiting.
+    read_chunk_size: usize = 16 * 1024 * 1024,
+    /// The backend benefits from opening enough source calls to hide request
+    /// latency before the first response arrives.
+    high_latency: bool = false,
+};
+
+pub const Backend = struct {
+    io: std.Io,
+    read_hints: ReadHints = .{},
+};
+
 pub const VFSBase = struct {
     inner: std.Io,
 
