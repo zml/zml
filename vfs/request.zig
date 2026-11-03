@@ -216,7 +216,8 @@ fn clampDelay(value: std.Io.Duration, low: std.Io.Duration, high: std.Io.Duratio
 pub const max_redirects = 3;
 
 /// What happens to a redirect: the client chases it (`max_redirects` hops),
-/// `consume` receives it to walk the chain itself, or it fails the request.
+/// `consume` receives it because `HeadChain` walks the chain itself, or it
+/// fails the request.
 pub const Redirects = enum {
     follow,
     surface,
@@ -263,7 +264,7 @@ pub fn exchange(
 ) anyerror!Outcome(T) {
     const spec = attempt.spec;
     // A followed redirect keeps each hop's Location and merged path here,
-    // 8 KiB of each; `req.uri` points into it.
+    // 8 KiB of each, as much as a `HeadChain` URL; `req.uri` points into it.
     var redirect_buffer: [2 * max_redirects * 8 * 1024]u8 = undefined;
     var req = attempt.governor.client.request(options.method, uri, .{
         .redirect_behavior = options.redirects.behavior(),
@@ -394,6 +395,85 @@ fn fatal(attempt: Attempt, stage: []const u8, err: anyerror) error{RequestFailed
     log.err("{s}: {s} for {s} failed: {}", .{ attempt.governor.name, stage, attempt.spec.target, err });
     return error.RequestFailed;
 }
+
+/// The URLs of a HEAD redirect chain walked by hand: std hands a HEAD its
+/// redirect unfollowed. Three buffers in rotation: the current URL, the
+/// `Location` it answered (copied out of a head that dies with the
+/// response) with the path merged against it, and the resolved next URL.
+pub const HeadChain = struct {
+    urls: [3][8 * 1024]u8 = undefined,
+
+    pub const End = struct {
+        /// `start_url` itself, or a URL in the chain's buffers.
+        url: []const u8,
+        /// Its `Content-Length`, when it sent one.
+        size: ?u64,
+    };
+
+    /// Follows `start_url` through at most `max_hops` redirects, absolute
+    /// or relative, to the URL that answers a 2xx. Each hop is one governed
+    /// HEAD, retried as a GET would be. `authorize` names the credentials
+    /// each URL is sent. An absent or denied object fails the walk
+    /// (`ExchangeOptions.open`).
+    pub fn resolve(
+        self: *HeadChain,
+        governor: *Governor,
+        target: []const u8,
+        start_url: []const u8,
+        max_hops: usize,
+        context: anytype,
+        comptime authorize: fn (@TypeOf(context), url: []const u8) std.http.Client.Request.Headers.Value,
+    ) !End {
+        const Hop = struct {
+            context: @TypeOf(context),
+            url: []const u8,
+            uri: std.Uri,
+            /// Where a redirect's `Location` is copied.
+            location: []u8,
+
+            const Result = union(enum) { end: ?u64, redirect: usize };
+
+            fn attempt(hop: *@This(), current: Attempt) anyerror!Outcome(Result) {
+                return exchange(Result, current, hop.uri, .{
+                    .method = .HEAD,
+                    .authorization = authorize(hop.context, hop.url),
+                    .open = true,
+                    .redirects = .surface,
+                }, hop, consume);
+            }
+
+            fn consume(hop: *@This(), res: *std.http.Client.Response) anyerror!Result {
+                if (res.head.status.class() == .success) return .{ .end = res.head.content_length };
+                const location = res.head.location orelse return error.HttpRedirectLocationMissing;
+                if (location.len > hop.location.len) return error.HttpRedirectLocationOversize;
+                @memcpy(hop.location[0..location.len], location);
+                return .{ .redirect = location.len };
+            }
+        };
+
+        var url = start_url;
+        // `start_url` is in none of the buffers.
+        var current: usize = self.urls.len - 1;
+        var hops: usize = 0;
+        while (true) {
+            const uri: std.Uri = try .parse(url);
+            const scratch = (current + 1) % self.urls.len;
+            var hop: Hop = .{ .context = context, .url = url, .uri = uri, .location = &self.urls[scratch] };
+            const location_len = switch (try perform(Hop.Result, governor, .{ .target = target }, &hop, Hop.attempt)) {
+                .end => |size| return .{ .url = url, .size = size },
+                .redirect => |len| len,
+            };
+
+            if (hops == max_hops) return error.TooManyHttpRedirects;
+            hops += 1;
+            const output = (current + 2) % self.urls.len;
+            var aux: []u8 = &self.urls[scratch];
+            const resolved = try uri.resolveInPlace(location_len, &aux);
+            url = try std.fmt.bufPrint(&self.urls[output], "{f}", .{resolved});
+            current = output;
+        }
+    }
+};
 
 /// Retry classification of a non-2xx status; null when the status is not
 /// retried. `unavailable` is what a 503 means for the backend: rate limiting
