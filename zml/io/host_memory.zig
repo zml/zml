@@ -4,7 +4,9 @@
 //! supply a workspace or a budget.
 //!
 //! The memory depends on the target: CUDA and oneAPI take page-backed arenas
-//! registered with PJRT (DmaMap), and CPU plain pages, unregistered.
+//! registered with PJRT (DmaMap), ROCm and Furiosa PJRT `pinned_host`
+//! buffers, and CPU plain pages, unregistered. ROCm balances whole arenas
+//! across its devices' host nodes.
 //! `Workspace.mapped_bytes_ceiling` (16 GiB) is a safety guard, not a
 //! target. A failed allocation or registration, or a growth past the
 //! ceiling, is logged with its cause and returns `OutOfMemory`.
@@ -14,17 +16,40 @@ const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
+const pjrt = @import("pjrt");
+
 const Platform = @import("../platform.zig").Platform;
 const log = @import("log.zig").mem;
 
-/// One retained arena.
+/// One ROCm host-memory allocation path and its bytes allocated so far.
+const HostNode = struct {
+    /// The plugin's `numa_node` device attribute (`Device.numaNode`); null
+    /// for the one path kept when no device reports it.
+    node: ?u32,
+    any_device_index: usize,
+    total_allocated_bytes: usize = 0,
+};
+
+/// One retained arena. The bytes of a `pinned_host` arena belong to its
+/// PJRT buffer; page-backed arenas have none.
 const Arena = struct {
     bytes: []u8,
+    pjrt_buffer: ?*pjrt.Buffer = null,
 };
 
 /// How arenas are mapped and unmapped; each strategy keeps only the state
 /// it uses.
 const ArenaKind = union(enum) {
+    /// With eight MI300X visible, hipHostRegister took ~6.3 s for 1 GiB
+    /// versus 0.6-0.7 s through hipHostMalloc. KFD/IOMMU registration maps
+    /// pages to every GPU; huge-page advice helped only ~9%, and touching
+    /// pages or changing HIP flags did not remove the cost. Standard PJRT
+    /// pinned_host buffers provide allocation-owned memory without a custom
+    /// allocator extension.
+    pjrt_host: struct {
+        platform: *const Platform,
+        host_nodes: std.ArrayList(HostNode),
+    },
     /// Page-backed arenas, registered with the platform's PJRT client when
     /// there is one (`dma_map` in the arena log) and left pageable for CPU
     /// transfers when not (`pageable`), with huge-page alignment and advice.
@@ -38,18 +63,103 @@ const ArenaKind = union(enum) {
 
     const transparent_huge_page_size = 2 * 1024 * 1024;
 
-    fn init(platform: *const Platform) ArenaKind {
+    fn init(allocator: Allocator, platform: *const Platform) Allocator.Error!ArenaKind {
         return switch (platform.target) {
             .cuda, .oneapi => .{ .pages = .{ .platform = platform } },
             .cpu => .{ .pages = .{ .platform = null } },
-            .rocm, .furiosa, .tpu, .neuron, .metal => @panic("DMA is not accessible on this platform and shouldn't have been called."),
+            // Furiosa backs `.host_pinned` with SDK pinned (dma-buf) memory
+            // from `/dev/dma_heap/system`, which the SDK recognizes by
+            // address and transfers without pinning pages on every request.
+            .rocm, .furiosa => {
+                // PJRT-pinned allocations choose placement through the device's
+                // host memory space. Retain one allocation path per reported
+                // node; the blocks stay unpartitioned.
+                var host_nodes: std.ArrayList(HostNode) = try .initCapacity(allocator, @max(platform.devices.len, 1));
+                devices: for (platform.devices, 0..) |device, device_index| {
+                    std.debug.assert(device.memory(.host_pinned) != null);
+                    const node = device.numaNode() orelse continue;
+                    for (host_nodes.items) |existing| {
+                        if (existing.node == node) continue :devices;
+                    }
+                    host_nodes.appendAssumeCapacity(.{ .node = node, .any_device_index = device_index });
+                }
+                if (host_nodes.items.len == 0) host_nodes.appendAssumeCapacity(.{ .node = null, .any_device_index = 0 });
+                return .{ .pjrt_host = .{ .platform = platform, .host_nodes = host_nodes } };
+            },
+            .tpu, .neuron, .metal => @panic("DMA is not accessible on this platform and shouldn't have been called."),
         };
+    }
+
+    /// Call after every arena is unmapped.
+    fn deinit(self: *ArenaKind, allocator: Allocator) void {
+        switch (self.*) {
+            .pjrt_host => |*host| host.host_nodes.deinit(allocator),
+            .pages => {},
+        }
     }
 
     /// Maps one arena of `bytes`.
     fn map(self: *ArenaKind, allocator: Allocator, io: std.Io, bytes: usize) Allocator.Error!Arena {
         const started: std.Io.Timestamp = .now(io, .awake);
         switch (self.*) {
+            .pjrt_host => |*host| {
+                // Balance bytes, not arena/device counts: arenas differ in size.
+                // Replicated Llama-3.1-8B on eight MI300X lost the fast mode when
+                // all arenas came from device zero (1.27-1.45 s). Device rotation
+                // left a 61/39 byte split and took 0.98-1.33 s; byte-balanced
+                // allocation recovered 0.84-1.05 s over six runs, with 1.52 GiB
+                // mapped versus 2.03 GiB for per-node pools. Host contention
+                // affected both arms.
+                var host_node = &host.host_nodes.items[0];
+                for (host.host_nodes.items[1..]) |*candidate| {
+                    if (candidate.total_allocated_bytes < host_node.total_allocated_bytes) host_node = candidate;
+                }
+                const device_index = host_node.any_device_index;
+                // PJRT is the sole owner of these hipHostMalloc-backed bytes.
+                // Never DmaMap or DmaUnmap the borrowed pointer: unregistering
+                // allocation-owned memory breaks the eventual hipHostFree. The
+                // buffer and its external reference both live until `unmap`,
+                // after all reads and DMA finish.
+                // The ROCm plugin must implement IsHostMemoryPinned: without
+                // it, one MI300X staged transfers at 6.5 GiB/s instead of 46.6.
+                const api = host.platform.pjrt_api;
+                const memory = host.platform.devices[device_index].memory(.host_pinned).?;
+                const buffer = host.platform.pjrt_client.createUninitializedBuffer(api, .{
+                    .dims = &.{@intCast(bytes)},
+                    .element_type = .u8,
+                    .layout = .{
+                        .tiled = .{
+                            .minor_to_major = &.{0},
+                            .tile_dims = &.{},
+                            .tile_dims_sizes = &.{},
+                        },
+                    },
+                    .dst = .{ .memory = memory.pjrt_memory },
+                }) catch |err| {
+                    log.err("pinned host allocation failed on device {d} for {Bi:.2}: {s}", .{ device_index, bytes, @errorName(err) });
+                    return error.OutOfMemory;
+                };
+                errdefer buffer.deinit(api);
+                std.debug.assert(buffer.isOnCpu(api));
+                buffer.increaseExternalReferenceCount(api) catch |err| {
+                    log.err("retaining pinned host allocation failed on device {d} for {Bi:.2}: {s}", .{ device_index, bytes, @errorName(err) });
+                    return error.OutOfMemory;
+                };
+                errdefer buffer.decreaseExternalReferenceCount(api) catch {};
+                const ptr: [*]u8 = @ptrCast(buffer.opaqueDeviceMemoryDataPointer(api) catch |err| {
+                    log.err("accessing pinned host allocation failed on device {d} for {Bi:.2}: {s}", .{ device_index, bytes, @errorName(err) });
+                    return error.OutOfMemory;
+                });
+                // Counted once mapped: the workspace retains every mapped arena.
+                host_node.total_allocated_bytes += bytes;
+                log.debug("DMA arena kind=pjrt_host device={d} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
+                    device_index,
+                    @intFromPtr(ptr),
+                    bytes,
+                    @as(f64, @floatFromInt(elapsedNanoseconds(started, .now(io, .awake)))) / std.time.ns_per_ms,
+                });
+                return .{ .bytes = ptr[0..bytes], .pjrt_buffer = buffer };
+            },
             .pages => |*pages| {
                 const alignment = pageAlignment(bytes);
                 const ptr = allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse {
@@ -77,6 +187,12 @@ const ArenaKind = union(enum) {
 
     fn unmap(self: *const ArenaKind, allocator: Allocator, arena: Arena) void {
         switch (self.*) {
+            .pjrt_host => |host| {
+                const api = host.platform.pjrt_api;
+                const buffer = arena.pjrt_buffer.?;
+                buffer.decreaseExternalReferenceCount(api) catch unreachable;
+                buffer.deinit(api);
+            },
             .pages => |pages| {
                 if (pages.platform) |platform| {
                     // Unregistering can fail after a device error. The pages may
@@ -137,11 +253,11 @@ pub const Workspace = struct {
         allocator: Allocator,
         io: std.Io,
         platform: *const Platform,
-    ) Workspace {
+    ) Allocator.Error!Workspace {
         return .{
             .allocator = allocator,
             .io = io,
-            .kind = .init(platform),
+            .kind = try .init(allocator, platform),
         };
     }
 
@@ -152,6 +268,7 @@ pub const Workspace = struct {
         if (self.blocks) |blocks| self.allocator.free(blocks);
         for (self.arenas.items) |arena| self.kind.unmap(self.allocator, arena);
         self.arenas.deinit(self.allocator);
+        self.kind.deinit(self.allocator);
         const elapsed_ns = elapsedNanoseconds(started, .now(io, .awake));
         log.debug("DMA load workspace teardown: mapped={Bi:.2}, elapsed_ms={d:.3}", .{
             mapped_bytes,
@@ -175,7 +292,8 @@ pub const Workspace = struct {
             log.err("host memory allocation exceeds mapped ceiling: requested={Bi:.2}, mapped={Bi:.2}, ceiling={Bi:.2}: OutOfMemory", .{ bytes, mapped, mapped_bytes_ceiling });
             return error.OutOfMemory;
         }
-        // Reserved first, so a mapped arena is always retained.
+        // Reserved first, so a mapped arena is always retained: the ROCm
+        // balancer counts the bytes it maps.
         try self.arenas.ensureUnusedCapacity(self.allocator, 1);
         const arena = try self.kind.map(self.allocator, self.io, bytes);
         self.arenas.appendAssumeCapacity(arena);
@@ -193,8 +311,10 @@ pub const Workspace = struct {
     /// into blocks of `block_size`, once. The set is then complete: nothing
     /// maps inside a load (a slab mapped there cost 146 to 230 ms of
     /// hipHostMalloc on MI300X), and `allocate` asserts it. Arena tails
-    /// smaller than one block stay mapped and unused. The workspace owns the
-    /// list and the memory.
+    /// smaller than one block stay mapped and unused. Blocks are not split
+    /// per NUMA node: strict per-node pools duplicated source reserves and
+    /// constrained reads to the smallest node; placement belongs to arena
+    /// allocation. The workspace owns the list and the memory.
     pub fn carve(self: *Workspace, block_size: usize, first_blocks: usize, total_blocks: usize) Allocator.Error![]const Block {
         std.debug.assert(self.blocks == null and block_size != 0);
         for ([_]usize{ first_blocks, total_blocks }) |target_blocks| {
