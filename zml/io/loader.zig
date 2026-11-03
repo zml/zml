@@ -1832,6 +1832,101 @@ test "without concurrency init sets up in place" {
     try testing.expectShards(allocator, io, &output, &LoaderTestFixture.contents, .default);
 }
 
+test "a rate-limited HTTP source loads through the VFS hold" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const tensor_bytes = 1024;
+    const tensors = 4;
+
+    // Four tensor ranges with a gap between them, so the planner keeps four
+    // jobs and the load makes four concurrent GETs.
+    var object: [(2 * tensors - 1) * tensor_bytes]u8 = undefined;
+    for (&object, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+
+    var server = try VFS.MockServer.init(io, &object, .{
+        // Two GETs per 100 ms: the four readers are throttled repeatedly.
+        .throttle = .{ .window = .{ .gets = 2, .per_ms = 100 } },
+    });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var http: VFS.HTTP = try .init(allocator, io, &client, .{ .protocol = .http, .retry = .{
+        .max_retries = 5,
+        .initial_delay = .fromMilliseconds(20),
+        .max_delay = .fromMilliseconds(20),
+        .max_hold = .fromSeconds(5),
+        .throttle_budget = .fromSeconds(30),
+    } });
+    defer http.deinit();
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    try vfs.registerBackend("http", http.backend());
+    const stats = &http.governor.stats;
+
+    var url_buffer: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
+
+    const platform = testing.env();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    const names = [tensors][]const u8{ "a", "b", "c", "d" };
+    for (names, 0..) |name, index| {
+        try registry.registerTensor(.{
+            .file_uri = url,
+            .name = name,
+            .shape = .init(.{tensor_bytes}, .u8),
+            .offset = 2 * index * tensor_bytes,
+        });
+    }
+    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{platform.replicated_mesh} });
+    defer store.deinit();
+
+    const Model = struct { a: Tensor, b: Tensor, c: Tensor, d: Tensor };
+    const model: Model = .{
+        .a = store.view().createReplicatedTensor("a", null),
+        .b = store.view().createReplicatedTensor("b", null),
+        .c = store.view().createReplicatedTensor("c", null),
+        .d = store.view().createReplicatedTensor("d", null),
+    };
+    var buffers = try mem.bufferize(allocator, &model);
+    defer mem.deinitBufferized(allocator, &buffers);
+
+    var loader = try Loader.init(allocator, vfs.io(), platform, .{
+        .checkpoint = url,
+        .read_parallelism = 4,
+    });
+    // Holding costs time, not credits: the direct backend's `destroy`
+    // asserts that every lifecycle credit came back with its pinned blocks.
+    // It checks once its workers stopped, since until then one may hold a
+    // credit for a claim that finds nothing.
+    defer loader.deinit();
+    try loader.start(&model, &buffers, &store, .none);
+    try loader.wait();
+
+    inline for (comptime std.meta.fieldNames(Model), 0..) |field_name, index| {
+        try testing.expectShards(allocator, io, &@field(buffers, field_name), object[2 * index * tensor_bytes ..][0..tensor_bytes], .default);
+    }
+
+    try server.stop(io);
+
+    // The server rate limited the load, the backend held every reader, and
+    // no reader burned its retry budget for it.
+    try std.testing.expect(stats.throttles.load(.acquire) > 0);
+    try std.testing.expect(stats.holds.load(.acquire) > 0);
+    try std.testing.expect(stats.hold_wait_ns.load(.acquire) > 0);
+    try std.testing.expectEqual(@as(u64, 0), stats.retries.load(.acquire));
+    try std.testing.expectEqual(@as(u64, tensors * tensor_bytes), stats.physical_bytes.load(.acquire));
+
+    // The checkpoint's VFS backend, not the local hints (8 MiB), sized the
+    // reads: 16 MiB requests over the CPU's 2 MiB blocks. Its file was read
+    // exact: a remote file is never direct.
+    const direct = loader.backend.?.direct;
+    try std.testing.expectEqual(@as(usize, 16 << 20), direct.plan_config.request_size);
+    try std.testing.expectEqual(@as(usize, 0), direct.source_slots.get(url).?.alignment orelse 0);
+}
+
 test "a rejected binding or a program of the wrong output fails the loader" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
