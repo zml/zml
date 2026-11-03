@@ -49,7 +49,15 @@
 //! its first part, as a last fill job that reads nothing and transfers from
 //! the zero block, which no credit owns. The job of a tensor sharded along
 //! any axis but its first is staged by destination where that saves
-//! submissions (`JobCut.placeDma`).
+//! submissions (`JobCut.placeDma`). Strided parts are gathered
+//! (`JobCut.appendGatherJobs`), their runs copied out of the worker's bounce
+//! buffer by `Lattice.copyRuns`. Block-scale swizzles gather this way, as
+//! runs of four bytes. Runs under 4 KiB cost host copies, where a program
+//! costs a compile and staging memory: on DeepSeek-V4.1 over two GB300,
+//! laying the MXFP4 experts out here (gate and up rows interleaved, scales
+//! swizzled) copied 77 to 189 GiB through bounce buffers, 17 to 36 s of
+//! worker time; as programs it copied 1 to 3 GiB and loaded 0.1 to 1.1 s
+//! faster, for 4 to 6 GiB more device memory at the peak.
 //!
 //! Locks. Where several pumps are held, they are taken in device order. A
 //! pump's mutex may be held while a released request gives its credit back
@@ -136,7 +144,8 @@ pub const Loader = struct {
     created_at: std.Io.Timestamp,
     /// Submissions so far; the next batch's sequence number.
     batch_count: usize = 0,
-    /// The block size and the request size, for the whole load.
+    /// The block size, the request size and the gather limit, for the whole
+    /// load.
     plan_config: Planner.Config,
     /// How each file is read: exact, or aligned for direct I/O.
     reads: Planner.Reads,
@@ -227,6 +236,7 @@ pub const Loader = struct {
             .plan_config = .{
                 .block_size = block_size,
                 .request_size = request_size,
+                .gather_limit = backend.requestSize(opts.read_hints.read_chunk_size, std.mem.min(usize, opts.dmaBlockSizes()), reads.alignment).?,
             },
             .reads = reads,
         };
@@ -257,11 +267,12 @@ pub const Loader = struct {
     /// as soon as it exists behind every earlier submission, then seals the
     /// batch: work on the first file starts while the rest is planned. The
     /// batch owns its destinations and parts until `awaitBatch` retires it.
-    /// The specs keep the `LoadSpec` contract, which the front end checked,
-    /// and this backend's: device memory and contiguous parts. A planning
-    /// failure fails the loader (a partial submission can never complete):
-    /// the batch is awaited here and the caller sees only the first error.
-    /// A failed loader refuses every submit with its first error.
+    /// The specs keep the `LoadSpec` contract and `stridedRead`'s limit,
+    /// which the front end checked, and this backend's: device memory. A
+    /// planning failure fails the loader (a partial submission can never
+    /// complete): the batch is awaited here and the caller sees only the
+    /// first error. A failed loader refuses every submit with its first
+    /// error.
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) !*Batch {
         try self.checkOpen();
         const batch = batch: {
@@ -287,6 +298,12 @@ pub const Loader = struct {
         // jobs completes right here.
         batch.releaseUnits(1);
         return batch;
+    }
+
+    /// The source bytes every job of `part` reads whole, against one read
+    /// (`Planner.stridedRead`).
+    pub fn stridedRead(self: *const Loader, part: LoadPart) backend.Backend.StridedRead {
+        return Planner.stridedRead(self.plan_config, self.reads, part);
     }
 
     /// Waits for the batch's last completion unit, retires it and returns
@@ -386,8 +403,8 @@ pub const Loader = struct {
             const destination_parts = parts[next_part..][0..spec.parts.len];
             next_part += spec.parts.len;
             var covered_bytes: u64 = 0;
+            var gathered = false;
             for (spec.parts, destination_parts) |part, *slot| {
-                std.debug.assert(part.lattice.dims.len == 0); // submit
                 slot.* = .{
                     .source = part.source,
                     .source_slot = try self.sourceSlot(part.source.file_uri),
@@ -395,13 +412,18 @@ pub const Loader = struct {
                     .lattice = part.lattice,
                 };
                 covered_bytes += part.lattice.width;
+                gathered = gathered or part.lattice.dims.len != 0;
+                const strided = self.stridedRead(part);
+                std.debug.assert(strided.read <= strided.limit); // backend.Backend.stridedRead
             }
             destination.* = .{
                 .shape = spec.shape,
                 .grid = grid,
                 .output = spec.output,
                 .parts = destination_parts,
-                .unread_bytes = .init(covered_bytes),
+                .gathered = gathered,
+                // A gathered destination's jobs land every byte, zeros too.
+                .unread_bytes = .init(if (gathered) grid.total else covered_bytes),
                 .progress = progress,
             };
         }
@@ -515,13 +537,18 @@ pub const Loader = struct {
         var transfers: usize = 0;
         var dma_submissions: usize = 0;
         var kinds: std.EnumArray(std.meta.Tag(Plan.Job.Kind), usize) = .initFill(0);
+        var gather_jobs: usize = 0;
         for (batch.plans.items) |plan| {
             planning_ns += plan.planning_ns;
             source_bytes += plan.source_bytes;
             jobs += plan.jobs.len;
             transfers += plan.transfers.len;
             dma_submissions += plan.events.len;
-            for (plan.jobs) |job| kinds.getPtr(job.kind).* += 1;
+            for (plan.jobs) |job| {
+                kinds.getPtr(job.kind).* += 1;
+                // A gathered destination's landing jobs land it alone.
+                if (job.kind == .dma_land and plan.transfersOf(job)[0].destination.gathered) gather_jobs += 1;
+            }
         }
         const fill_jobs = kinds.get(.dma_fill);
         const source_jobs = jobs - fill_jobs;
@@ -531,7 +558,7 @@ pub const Loader = struct {
         else
             @as(f64, @floatFromInt(batch.parts.len)) /
                 @as(f64, @floatFromInt(source_jobs));
-        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, fill_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, staged_jobs={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
+        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, fill_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, staged_jobs={d}, gather_jobs={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
             batch.sequence,
             batch.plans.items.len,
             @as(f64, @floatFromInt(planning_ns)) / std.time.ns_per_s,
@@ -541,7 +568,8 @@ pub const Loader = struct {
             batch.parts.len,
             transfers,
             dma_submissions,
-            kinds.get(.dma_land),
+            kinds.get(.dma_land) - gather_jobs,
+            gather_jobs,
             coalescing_ratio,
             average_read_size,
         });
@@ -664,11 +692,25 @@ const Destination = struct {
     /// covers are written from the loader's zero block, by the fill job of
     /// the plan holding `parts[0]`.
     parts: []Part,
-    /// Bytes not read yet, the parts' widths at first. The read that
-    /// brings it to zero completes the destination's item on `progress`.
+    /// Fed by strided parts: planned whole, by logical ranges, with the
+    /// plan holding `parts[0]` (`Planner.JobCut.appendGatherJobs`), whose
+    /// jobs also write its zero fill.
+    gathered: bool = false,
+    /// Bytes not read yet: the parts' widths, or for a gathered destination
+    /// its whole placed size (its gather jobs land the zeros too). The read
+    /// that brings it to zero completes the destination's item on
+    /// `progress`.
     unread_bytes: std.atomic.Value(u64),
     progress: std.Progress.Node = .none,
     state: LazyOnce(DestinationState) = .{},
+
+    /// How its parts are planned, a class at a time in this order
+    /// (`Planner.sortedPartOrder`): DMA jobs, or gathered whole.
+    const Delivery = enum { dma, gathered };
+
+    fn delivery(self: *const Destination) Delivery {
+        return if (self.gathered) .gathered else .dma;
+    }
 
     fn ensureState(self: *Destination, allocator: std.mem.Allocator, io: std.Io, platform: *const Platform) StateInitError!*DestinationState {
         return self.state.ensure(io, DestinationState.init, .{ allocator, platform, self });
@@ -737,8 +779,10 @@ const Plan = struct {
     /// A claimable job: its slice of the plan's transfers and what its
     /// worker does for them. Its request slot is its index.
     const Job = struct {
-        /// Where the job's read starts; zero for a fill job, which reads
-        /// nothing and comes after the plan's reads.
+        /// Where the job reads first: its read's start, a landing job's
+        /// first extent's; zero for a job that reads nothing.
+        /// `Planner.preparePlan` sorts the other jobs by it and appends
+        /// the fill job after them.
         file_offset: u64,
         transfer_start: usize,
         transfer_len: usize,
@@ -751,7 +795,8 @@ const Plan = struct {
             dma_read: Read,
             /// Reads its extents, whose items land their bytes in its
             /// blocks: a read of its plan's file grouped by destination
-            /// box (`Planner.JobCut.stage`).
+            /// box (`Planner.JobCut.stage`), or a gathered destination's
+            /// range (`Planner.JobCut.appendGatherJobs`).
             dma_land: Land,
             /// Reads nothing: every transfer goes from the loader's zero
             /// block (`Planner.JobCut.appendFillTransfers`).
@@ -768,11 +813,14 @@ const Plan = struct {
 
         /// A landing job: `len` bytes in its blocks, landed by the
         /// `extent_len` extents of the plan's `extents` from
-        /// `extent_start`, in order.
+        /// `extent_start`, in order. A gathered range no part covers
+        /// has none.
         const Land = struct {
             len: usize,
             extent_start: usize,
             extent_len: usize,
+            /// Its blocks start zeroed: bytes no part covers.
+            zeroed: bool = false,
         };
 
         /// The blocks of its credit's slot the job reads into or lands
@@ -876,6 +924,10 @@ const Planner = struct {
         /// The longest read, a whole number of blocks
         /// (`backend.requestSize`).
         request_size: usize,
+        /// The one-read limit of a strided part (`stridedRead`, which caps
+        /// it at `request_size`): the request of the smallest block
+        /// calibration may pick, so a refusal does not follow its pick.
+        gather_limit: usize = std.math.maxInt(usize),
         /// Submissions a DMA job must save to be staged (`JobCut.stage`):
         /// one device's in-flight pieces.
         minimum_staging_gain: usize = max_dma_pieces_per_device,
@@ -885,7 +937,8 @@ const Planner = struct {
     /// opens it reads it directly under `policy`, decided once per file and
     /// kept in its slot. A remote file is read exact without being opened
     /// here. Without a VFS (`io` is none, or no alignment) every file takes
-    /// `alignment`.
+    /// `alignment`. A gather job reads files other than its plan's, so it
+    /// asks here for each.
     /// Widening buffered reads is not free: a widened read served from the
     /// page cache costs the DMA sources their block alignment for nothing,
     /// and warm replicated Llama on four GB300 lost 3-6% when its first
@@ -921,6 +974,13 @@ const Planner = struct {
             slot.alignment = alignment;
             return alignment;
         }
+
+        /// The widest alignment `alignmentOf` can give the file, without
+        /// opening it: 0 for a remote file.
+        fn boundOf(self: Reads, uri: []const u8) usize {
+            const vfs = self.vfs orelse return self.alignment;
+            return if (vfs.isLocal(uri)) self.alignment else 0;
+        }
     };
 
     /// Plans `parts` one file at a time and publishes each plan as soon as
@@ -952,11 +1012,13 @@ const Planner = struct {
         }
     }
 
-    /// Plans one file: `order` indexes its `parts` by offset and size
-    /// (`sortedPartOrder`), `JobCut.cutRuns` cuts them at the file's
-    /// alignment (`Reads.alignmentOf`), then `JobCut.appendFillJob` appends
-    /// the zero fill. The plan goes in `arena` (`JobCut.finish`), the cut in
-    /// `allocator`.
+    /// Plans one file: `order` indexes its `parts` by delivery class, then
+    /// offset and size (`sortedPartOrder`). `JobCut.cutRuns` cuts the DMA
+    /// parts at the file's alignment (`Reads.alignmentOf`),
+    /// `JobCut.appendGatherJobs` each gathered destination with the file of
+    /// its first part; the jobs merge in file order, then
+    /// `JobCut.appendFillJob` appends the zero fill. The plan goes in
+    /// `arena` (`JobCut.finish`), the cut in `allocator`.
     fn preparePlan(
         allocator: std.mem.Allocator,
         arena: std.mem.Allocator,
@@ -967,26 +1029,52 @@ const Planner = struct {
     ) !*Plan {
         const source_slot = parts[order[0]].source_slot;
         for (order) |part_index| std.debug.assert(std.mem.eql(u8, parts[part_index].source.file_uri, parts[order[0]].source.file_uri));
+        const dma_end = deliveryEnd(parts, order, 0, .dma);
         const alignment = try reads.alignmentOf(source_slot);
         var cut: JobCut = .{
             .allocator = allocator,
             .parts = parts,
             .source_slot = source_slot,
             .config = config,
+            .reads = reads,
             .alignment = alignment,
             .maximum_job_len = maximumJobLen(config.request_size, alignment),
+            // A gather job's extents may be in files read directly while
+            // this one is not, so its ranges leave room for the widest
+            // alignment.
+            .gather_len = maximumJobLen(config.request_size, reads.alignment),
         };
         defer cut.deinit();
-        // Jobs are claimed in planning order, which is file order. A
-        // byte-fair order across destination devices was measured against
-        // it on the two hosts where the DMA pump is not the ceiling and made
-        // no difference.
-        try cut.cutRuns(order);
+        try cut.cutRuns(order[0..dma_end]);
+        for (order[dma_end..]) |part_index| {
+            const part = &parts[part_index];
+            std.debug.assert(part.destination.gathered);
+            if (part == &part.destination.parts[0]) try cut.appendGatherJobs(part.destination);
+        }
+        // Jobs are claimed in planning order, which is file order (a
+        // gather job by its first read). A byte-fair order across
+        // destination devices was measured against it on the two hosts
+        // where the DMA pump is not the ceiling and made no difference.
+        // Each class is in file order already; the stable sort interleaves
+        // them.
+        std.mem.sort(Plan.Job, cut.jobs.items, {}, struct {
+            fn lessThan(_: void, lhs: Plan.Job, rhs: Plan.Job) bool {
+                return lhs.file_offset < rhs.file_offset;
+            }
+        }.lessThan);
+
         // The zero fill of each destination goes out once, with the plan
         // of its first part; it depends on no read, so one job after this
         // file's reads carries all of it.
-        try cut.appendFillJob(order);
+        try cut.appendFillJob(order[0..dma_end]);
         return cut.finish(arena);
+    }
+
+    /// The end of the parts of `delivery` in `order` from `start` on.
+    fn deliveryEnd(parts: []const Part, order: []const usize, start: usize, delivery: Destination.Delivery) usize {
+        var end = start;
+        while (end < order.len and parts[order[end]].destination.delivery() == delivery) : (end += 1) {}
+        return end;
     }
 
     /// The jobs and transfers of one plan as `preparePlan` cuts them.
@@ -1005,9 +1093,12 @@ const Planner = struct {
         /// The file every job of the plan reads.
         source_slot: *SourceSlot,
         config: Config,
+        reads: Reads,
         /// The alignment of the plan's file (`Reads.alignmentOf`).
         alignment: usize,
         maximum_job_len: usize,
+        /// The longest logical range of a gather job.
+        gather_len: usize,
         jobs: std.ArrayList(Plan.Job) = .empty,
         transfers: std.ArrayList(Plan.Transfer) = .empty,
         items: std.ArrayList(Plan.Item) = .empty,
@@ -1058,15 +1149,15 @@ const Planner = struct {
             self.jobs.deinit(allocator);
         }
 
-        /// Cuts the runs of `order` (part indices in file order) into jobs:
-        /// each run of touching or overlapping ranges into the minimum number
-        /// of jobs, cut at part-safe boundaries where that number allows. No
-        /// job depends on another, since every DMA piece is submitted as soon
-        /// as its block is read. With an alignment (`Reads.alignmentOf`), a
-        /// job's read widens to aligned bounds around its range
-        /// (`maximumJobLen` leaves room for it), and the transfers address
-        /// the widened read. Each job's segments are placed in its blocks
-        /// by `placeDma`.
+        /// Cuts the runs of `order` (the DMA parts' indices in file order)
+        /// into jobs: each run of touching or overlapping ranges into the
+        /// minimum number of jobs, cut at part-safe boundaries where that
+        /// number allows. No job depends on another, since every DMA piece
+        /// is submitted as soon as its block is read. With an alignment
+        /// (`Reads.alignmentOf`), a job's read widens to aligned bounds
+        /// around its range (`maximumJobLen` leaves room for it), and the
+        /// transfers address the widened read. Each job's segments are
+        /// placed in its blocks by `placeDma`.
         fn cutRuns(self: *JobCut, order: []const usize) !void {
             const allocator = self.allocator;
             const parts = self.parts;
@@ -1347,6 +1438,133 @@ const Planner = struct {
             }
         }
 
+        /// Plans a gathered destination (`Destination.gathered`) whole: its
+        /// logical bytes cut into ranges of at most `gather_len`, each one
+        /// job. For every part with runs in the range the job reads the
+        /// source range those runs come from (an `Extent`, from whichever
+        /// file holds it), and it lands the range in its blocks box by box,
+        /// one transfer per box and block, its bytes no part covers zero.
+        /// A part whose source runs are out of order (a broadcast repeats
+        /// them, a transpose permutes them) reads its whole source range
+        /// in every job (`stridedRead`). An interleave of members reads
+        /// each member's rows of the range, so the range lands in one piece
+        /// per box and block whatever the interleave's granularity.
+        fn appendGatherJobs(self: *JobCut, destination: *Destination) !void {
+            const allocator = self.allocator;
+            const grid = &destination.grid;
+            const parts = destination.parts;
+            // reach[i]: the furthest destination byte parts[0..=i] reach, so
+            // a range's first candidate is found by bisection.
+            const reach = try allocator.alloc(u64, parts.len);
+            defer allocator.free(reach);
+            var furthest: u64 = 0;
+            for (parts, reach) |*part, *at| {
+                const spans = part.lattice.spans().?;
+                furthest = @max(furthest, part.lattice.dst_offset + spans.dst);
+                at.* = furthest;
+            }
+            var start: u64 = 0;
+            while (start < grid.total) {
+                const end = @min(grid.total, start + self.gather_len);
+                const transfer_start = self.transfers.items.len;
+                const extent_start = self.extents.items.len;
+                const landing_start = self.landings.items.len;
+                try self.landings.appendNTimes(allocator, 0, grid.box_count);
+                var landing: u64 = 0;
+                for (0..grid.box_count) |box| {
+                    const low = grid.rankIn(box, start);
+                    const high = grid.rankIn(box, end);
+                    if (high == low) continue;
+                    self.landings.items[landing_start + box] = landing -% low;
+                    try self.appendBlocked(transfer_start, .{
+                        .destination = destination,
+                        .landing = @intCast(landing),
+                        .writer_mask = grid.writers[box],
+                        .destination_offset = @intCast(low),
+                        .len = @intCast(high - low),
+                    });
+                    landing += high - low;
+                }
+                std.debug.assert(landing == end - start);
+
+                var covered: u64 = 0;
+                var index = std.sort.partitionPoint(u64, reach, start, struct {
+                    fn below(limit: u64, at: u64) bool {
+                        return at <= limit;
+                    }
+                }.below);
+                while (index < parts.len and parts[index].lattice.dst_offset < end) : (index += 1) {
+                    const part = &parts[index];
+                    const first = part.lattice.firstEndingAfter(start);
+                    const last = part.lattice.firstStartingFrom(end);
+                    if (first >= last) continue;
+                    covered += part.lattice.coveredIn(start, end);
+                    try self.appendExtent(part, first, last, start, end, landing_start);
+                }
+                std.debug.assert(covered <= end - start);
+                const job_len: usize = @intCast(end - start);
+                const extent_len = self.extents.items.len - extent_start;
+                try self.jobs.append(allocator, .{
+                    .file_offset = if (extent_len != 0) self.extents.items[extent_start].file_offset else 0,
+                    .transfer_start = transfer_start,
+                    .transfer_len = self.transfers.items.len - transfer_start,
+                    .kind = .{ .dma_land = .{
+                        .len = job_len,
+                        .extent_start = extent_start,
+                        .extent_len = extent_len,
+                        .zeroed = covered < end - start,
+                    } },
+                });
+                start = end;
+            }
+        }
+
+        /// The extent reading `part`'s runs `first` to `last` (exclusive)
+        /// clipped to `[start, end)`, with the one item that places them:
+        /// from the first run's first byte in the range to the last run's
+        /// last one when the part's source runs are in order, else the
+        /// part's whole source range.
+        fn appendExtent(self: *JobCut, part: *const Part, first: u64, last: u64, start: u64, end: u64, landing_start: usize) !void {
+            const lattice = part.lattice;
+            const width = lattice.width;
+            var source_start = lattice.src_offset;
+            var source_end = lattice.src_offset + lattice.spans().?.src;
+            const ordered = lattice.srcOrdered();
+            if (ordered) {
+                const head = lattice.at(first);
+                const tail = lattice.at(last - 1);
+                source_start = head.src + (start -| head.dst);
+                source_end = tail.src + width - ((tail.dst + width) -| end);
+            }
+            const file_start = part.source.offset + source_start;
+            const file_end = part.source.offset + source_end;
+            const alignment = try self.reads.alignmentOf(part.source_slot);
+            const read_start = if (alignment == 0) file_start else std.mem.alignBackward(u64, file_start, alignment);
+            const read_end = if (alignment == 0) file_end else std.mem.alignForward(u64, file_end, alignment);
+            // The range of a part whose runs are back to back is the job's;
+            // any other part's whole range fits (`stridedRead`).
+            std.debug.assert(read_end - read_start <= self.config.request_size);
+            try self.extents.append(self.allocator, .{
+                .source_slot = part.source_slot,
+                .file_offset = read_start,
+                .len = @intCast(read_end - read_start),
+                .minimum_len = @intCast(file_end - read_start),
+                .scatter = alignment == 0 and ordered and lattice.srcTiled(),
+                .item_start = self.items.items.len,
+                .item_len = 1,
+            });
+            try self.items.append(self.allocator, .{
+                .destination = part.destination,
+                .lattice = .{ .src_offset = part.source.offset + lattice.src_offset, .dst_offset = lattice.dst_offset, .width = width, .dims = lattice.dims },
+                .first = first,
+                .end = last,
+                .clip_start = start,
+                .clip_end = end,
+                .landing_start = landing_start,
+            });
+            self.source_bytes +|= file_end - file_start;
+        }
+
         /// Appends `transfer`, cut at block boundaries, merged with the
         /// previous transfer from `transfer_start` on where block, writers
         /// and both offsets continue it.
@@ -1389,8 +1607,9 @@ const Planner = struct {
         }
 
         /// The zero fill of the destinations whose first part is among
-        /// `order`, the file's parts, as one job that reads one block, the
-        /// zero block.
+        /// `order`, the file's DMA parts, as one job that reads one block,
+        /// the zero block. A gathered destination's jobs write its zeros
+        /// themselves.
         fn appendFillJob(self: *JobCut, order: []const usize) !void {
             const fill_start = self.transfers.items.len;
             for (order) |part_index| {
@@ -1466,6 +1685,28 @@ const Planner = struct {
         return len / block_size + @intFromBool(len % block_size != 0);
     }
 
+    /// The source bytes every job of `part` reads whole, against one read
+    /// (`Config.gather_limit`, at most a request). A part whose source runs
+    /// are back to back reads only its job's range: 0. Any other counts its
+    /// whole source range, widened to the widest alignment its file may be
+    /// read at (`Reads.boundOf`): out of order (a broadcast repeats its
+    /// runs, a transpose permutes them), every job reads that range
+    /// (`JobCut.appendExtent`); in order with gaps (a slice along an inner
+    /// axis), a job reads from its first run to its last, which the gaps
+    /// stretch past any job's length.
+    fn stridedRead(config: Config, reads: Reads, part: LoadPart) backend.Backend.StridedRead {
+        const lattice = part.lattice;
+        const limit = @min(config.request_size, config.gather_limit);
+        if (lattice.srcTiled()) return .{ .read = 0, .limit = limit };
+        const alignment = @max(reads.boundOf(part.source.file_uri), 1);
+        const start = part.source.offset + lattice.src_offset;
+        const end = start + lattice.spans().?.src;
+        return .{
+            .read = std.mem.alignForward(u64, end, alignment) - std.mem.alignBackward(u64, start, alignment),
+            .limit = limit,
+        };
+    }
+
     /// The longest tensor range one job may cover: the request size, less
     /// the two alignment units its widened read can add, so a widened job
     /// still fits a request (a credit's slot). `backend.requestSize` refuses
@@ -1477,9 +1718,10 @@ const Planner = struct {
         return request_size - 2 * alignment;
     }
 
-    /// Part indices sorted by file URI, offset, size and index: the
-    /// planner's input, taken one file group at a time (`fileGroupEnd`), in
-    /// file order.
+    /// Part indices sorted by file URI, delivery class
+    /// (`Destination.Delivery`), offset, size and index: the planner's
+    /// input, taken one file group at a time (`fileGroupEnd`), each class
+    /// in file order.
     fn sortedPartOrder(allocator: std.mem.Allocator, parts: []const Part) ![]usize {
         const order = try allocator.alloc(usize, parts.len);
         for (order, 0..) |*index, i| index.* = i;
@@ -1491,6 +1733,9 @@ const Planner = struct {
                 const right = ctx.parts[rhs];
                 const uri_order = std.mem.order(u8, left.source.file_uri, right.source.file_uri);
                 if (uri_order != .eq) return uri_order == .lt;
+                const left_delivery = left.destination.delivery();
+                const right_delivery = right.destination.delivery();
+                if (left_delivery != right_delivery) return @backingInt(left_delivery) < @backingInt(right_delivery);
                 const left_offset = left.fileRange().start;
                 const right_offset = right.fileRange().start;
                 if (left_offset != right_offset) return left_offset < right_offset;
@@ -1781,7 +2026,8 @@ fn readFilePositionalAllV(
 }
 
 /// Every worker read goes through here, under a read permit: a failure is
-/// recorded with the file. Once the loader failed, returns its first error.
+/// recorded with the file, since a landing job's extents can come from files
+/// other than its plan's. Once the loader failed, returns its first error.
 /// Consumes `iovecs` (`readFilePositionalAllV`).
 fn readSlot(loader: *Loader, slot: *SourceSlot, iovecs: [][]u8, file_offset: u64, minimum_len: usize) !void {
     const io = loader.io;
@@ -1807,7 +2053,8 @@ fn readSlot(loader: *Loader, slot: *SourceSlot, iovecs: [][]u8, file_offset: u64
 /// (`Plan.Item`, `walkItem`). An extent marked for it scatters
 /// straight into the blocks, `max_positional_iovecs` ranges per call; any
 /// other lands in the worker's bounce buffer and is copied from there: a
-/// direct read, whose ranges must be aligned.
+/// direct read, whose ranges must be aligned, and a gather read whose
+/// source runs are out of order or repeat (a transpose, a broadcast).
 fn landJob(
     loader: *Loader,
     plan: *const Plan,
@@ -1815,6 +2062,9 @@ fn landJob(
     blocks: []const host_memory.Block,
     scratch: *ReadRequest.Scratch,
 ) !void {
+    if (land.zeroed) {
+        for (blocks) |block| @memset(block[0..loader.plan_config.block_size], 0);
+    }
     for (plan.extents[land.extent_start..][0..land.extent_len]) |extent| {
         try landExtent(loader, extent, plan.items[extent.item_start..][0..extent.item_len], plan.landings, blocks, scratch);
     }
@@ -1847,7 +2097,7 @@ fn landExtent(
     var buffers = [_][]u8{bounce};
     try readSlot(loader, extent.source_slot, &buffers, extent.file_offset, extent.minimum_len);
     var sink: CopySink = .{ .bounce = bounce, .file_offset = extent.file_offset, .blocks = blocks, .block_size = block_size };
-    for (items) |item| try walkItem(item, landings, &sink);
+    for (items) |item| try copyItem(item, landings, &sink);
 }
 
 /// Hands `sink` every run of `item` as `place(file offset, landing, len)`,
@@ -1874,6 +2124,47 @@ fn walkRuns(lattice: backend.Lattice, first: u64, end: u64, clip_start: u64, cli
             source += piece_end - at;
             at = piece_end;
         }
+    }
+}
+
+/// `walkItem` from the bounce buffer, a stretch at a time where that pays:
+/// a stretch of the destination landing in one piece, inside one run of
+/// the grid and one block, has its whole runs copied by
+/// `Lattice.copyRuns`, and only the runs its ends cut go one at a time. A
+/// stretch costs a few bisections, so items with few runs per stretch (a
+/// part of a few wide runs, a grid that cuts every row) are walked.
+fn copyItem(item: Plan.Item, landings: []const u64, sink: *CopySink) !void {
+    const lattice = item.lattice;
+    const grid = &item.destination.grid;
+    if (lattice.dims.len == 0 or item.first >= item.end) return walkItem(item, landings, sink);
+    const start = @max(item.clip_start, lattice.at(item.first).dst);
+    const stop = @min(item.clip_end, lattice.at(item.end - 1).dst + lattice.width);
+    if (start >= stop) return;
+    const stretches = grid.runCount(start, stop) + (stop - start) / sink.block_size + 1;
+    if (item.end - item.first < 16 * stretches) return walkItem(item, landings, sink);
+    const table = landings[item.landing_start..][0..grid.box_count];
+    const source = @intFromPtr(sink.bounce.ptr) -% @as(usize, @intCast(sink.file_offset));
+    var at = start;
+    while (at < stop) {
+        const box, const box_offset = grid.locate(at);
+        const landing: usize = @intCast(table[box] +% box_offset);
+        const in_block = landing % sink.block_size;
+        const stretch_end = @min(grid.runEnd(at, stop), at + (sink.block_size - in_block));
+        // The address logical offset zero would have, were the whole
+        // destination laid out like this stretch.
+        const destination = @intFromPtr(sink.blocks[landing / sink.block_size].ptr) + in_block -% @as(usize, @intCast(at));
+        const touched = @max(item.first, lattice.firstEndingAfter(at));
+        const whole = @max(item.first, lattice.firstStartingFrom(at));
+        const whole_end = @min(item.end, lattice.firstEndingAfter(stretch_end));
+        const touched_end = @min(item.end, lattice.firstStartingFrom(stretch_end));
+        if (whole < whole_end) {
+            try walkRuns(lattice, touched, whole, at, stretch_end, grid, table, sink);
+            lattice.copyRuns(whole, whole_end, destination, source);
+            try walkRuns(lattice, whole_end, touched_end, at, stretch_end, grid, table, sink);
+        } else {
+            try walkRuns(lattice, touched, touched_end, at, stretch_end, grid, table, sink);
+        }
+        at = stretch_end;
     }
 }
 
@@ -2645,6 +2936,8 @@ test "the planner opens only local files to ask about direct I/O" {
     try vfs.registerBackend("remote", .{ .io = io });
     const vfs_io = vfs.io();
     const reads: Planner.Reads = .{ .io = vfs_io, .vfs = &vfs, .policy = .on, .alignment = 4096 };
+    try std.testing.expectEqual(@as(usize, 0), reads.boundOf("remote://bucket/model.safetensors"));
+    try std.testing.expectEqual(@as(usize, 4096), reads.boundOf(path));
 
     // A remote file is read exact, without an open on the planner.
     var remote: SourceSlot = .{ .uri = "remote://bucket/model.safetensors" };
@@ -2659,6 +2952,31 @@ test "the planner opens only local files to ask about direct I/O" {
     const alignment = try reads.alignmentOf(&local);
     const file = local.file.readyValue().?.*;
     try std.testing.expectEqual(@as(usize, if (vfs.useDirectIo(file, .on)) 4096 else 0), alignment);
+}
+
+test "a strided part whose source runs are not back to back counts its whole source range" {
+    // [32, 16] u8 at a file offset off a 64-byte alignment.
+    const source: safetensors.Tensor = .{ .file_uri = "wide.bin", .name = "wide", .shape = .init(.{ 32, 16 }, .u8), .offset = 100 };
+    const config: Planner.Config = .{ .block_size = 256, .request_size = 512 };
+    // Transposed, 512 runs of one byte: every job reads all 512 bytes,
+    // 576 widened to the alignment.
+    const transposed: LoadPart = .{ .source = &source, .lattice = .{ .width = 1, .dims = &.{
+        .{ .count = 16, .src_stride = 1, .dst_stride = 32 },
+        .{ .count = 32, .src_stride = 16, .dst_stride = 1 },
+    } } };
+    try std.testing.expectEqual(@as(backend.Backend.StridedRead, .{ .read = 512, .limit = 512 }), Planner.stridedRead(config, fixedReads(0), transposed));
+    try std.testing.expectEqual(576, Planner.stridedRead(config, fixedReads(64), transposed).read);
+    // A bigger block calibration picked does not raise the limit past the
+    // smallest one's request.
+    const bigger_block: Planner.Config = .{ .block_size = 1024, .request_size = 1024, .gather_limit = 512 };
+    try std.testing.expectEqual(512, Planner.stridedRead(bigger_block, fixedReads(0), transposed).limit);
+    // Every other row, in order: the gaps stretch a job's range, so the
+    // whole range counts, from the first row to the last.
+    const every_other_row: LoadPart = .{ .source = &source, .lattice = .{ .width = 16, .dims = &.{.{ .count = 16, .src_stride = 32, .dst_stride = 16 }} } };
+    try std.testing.expectEqual(15 * 32 + 16, Planner.stridedRead(config, fixedReads(0), every_other_row).read);
+    // Rows back to back read within their job's range.
+    const rows: LoadPart = .{ .source = &source, .lattice = .{ .width = 16, .dims = &.{.{ .count = 32, .src_stride = 16, .dst_stride = 16 }} } };
+    try std.testing.expectEqual(0, Planner.stridedRead(config, fixedReads(64), rows).read);
 }
 
 test "source planner coalesces exact adjacent and overlapping tensor ranges per file" {
@@ -4085,5 +4403,63 @@ test "column-sharded tensors load as one DMA piece per device and block, read ex
         // Every credit is free once the workers stopped (`stopWorkers`).
         loader.stopWorkers();
         try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+    }
+}
+
+test "a strided part of a remote file is checked against its exact source range" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, io, 1);
+    defer devices.deinit();
+    var bytes: [128 * 128]u8 = undefined;
+    testing.pattern(&bytes, 1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try testing.writeSafetensors(allocator, io, tmp.dir, "square.safetensors", &registry, &.{
+        .{ .name = "square", .dtype = "U8", .dims = &.{ 128, 128 }, .bytes = &bytes },
+    });
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    // The same file through a registered scheme: a remote file, read exact.
+    try vfs.registerBackend("remote", .{ .io = io });
+    const local = registry.tensors.get("square").?;
+    var remote = local;
+    var uri_buffer: [1100]u8 = undefined;
+    remote.file_uri = try std.fmt.bufPrint(&uri_buffer, "remote://{s}", .{local.file_uri});
+    std.debug.assert(local.offset % 4096 != 0);
+
+    var transposed: [128 * 128]u8 = undefined;
+    for (0..128) |column| {
+        for (0..128) |row| transposed[column * 128 + row] = bytes[row * 128 + column];
+    }
+    // Transposed: its source read whole by every job, a request exactly,
+    // at an offset off the direct I/O alignment.
+    const dims = [_]backend.Lattice.Dim{
+        .{ .count = 128, .src_stride = 1, .dst_stride = 128 },
+        .{ .count = 128, .src_stride = 128, .dst_stride = 1 },
+    };
+    const loader = try Loader.create(allocator, vfs.io(), devices.platform, .{ .read_parallelism = 2 });
+    defer loader.destroy();
+    try std.testing.expectEqual(VFS.direct_io_alignment, loader.reads.alignment);
+    loader.plan_config.request_size = bytes.len;
+
+    var output: Buffer = undefined;
+    const part: LoadPart = .{ .source = &remote, .lattice = .{ .width = 1, .dims = &dims } };
+    const fit = loader.stridedRead(part);
+    try std.testing.expectEqual(fit.limit, fit.read);
+    const spec: LoadSpec = .{ .shape = .init(.{ 128, 128 }, .u8), .output = &output, .parts = (&part)[0..1] };
+    try loader.awaitBatch(try loader.submit(&.{spec}, .none));
+    defer output.deinit();
+    try testing.expectShards(allocator, io, &output, &transposed, .default);
+
+    // A local file may be read directly: its range widened to the alignment
+    // no longer fits.
+    if (VFS.direct_io_alignment != 0) {
+        const local_part: LoadPart = .{ .source = &local, .lattice = .{ .width = 1, .dims = &dims } };
+        const widened = loader.stridedRead(local_part);
+        try std.testing.expect(widened.read > widened.limit);
     }
 }

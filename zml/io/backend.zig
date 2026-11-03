@@ -64,7 +64,8 @@ pub const Options = struct {
 };
 
 /// One destination, its caller-owned output and the source ranges that fill
-/// it, as the front end checked them (`checkParts`): backends trust them.
+/// it, as the front end checked them (`checkParts`, `Backend.stridedRead`):
+/// backends trust them.
 /// Everything a spec names (its parts, their dimensions, the sources, the
 /// output) stays alive until its await; backends borrow it.
 pub const LoadSpec = struct {
@@ -161,15 +162,73 @@ pub const Lattice = struct {
     /// destination side: runs land in index order without overlapping.
     /// Needs `spans` not null.
     pub fn dstOrdered(self: Lattice) bool {
-        var extent = self.width;
-        var d = self.dims.len;
+        return ordered(self.dims, self.width, .dst, false);
+    }
+
+    /// Whether the source runs come in index order without overlapping,
+    /// gaps allowed: the runs of an index range lie between the first's
+    /// start and the last's end. Needs `spans` not null.
+    pub fn srcOrdered(self: Lattice) bool {
+        return ordered(self.dims, self.width, .src, false);
+    }
+
+    /// Whether the source runs are back to back in index order: an index
+    /// range reads one contiguous source range, each byte once. Needs
+    /// `spans` not null.
+    pub fn srcTiled(self: Lattice) bool {
+        return ordered(self.dims, self.width, .src, true);
+    }
+
+    /// Whether each dimension steps past everything inside it on `side`,
+    /// exactly with `exact`. The extents it sums are bounded by `spans`.
+    fn ordered(dims: []const Dim, width: u64, comptime side: enum { src, dst }, exact: bool) bool {
+        var extent = width;
+        var d = dims.len;
         while (d > 0) {
             d -= 1;
-            if (self.dims[d].count < 2) continue;
-            if (self.dims[d].dst_stride < extent) return false;
-            extent += (self.dims[d].count - 1) * self.dims[d].dst_stride;
+            if (dims[d].count < 2) continue;
+            const stride = if (side == .src) dims[d].src_stride else dims[d].dst_stride;
+            if (if (exact) stride != extent else stride < extent) return false;
+            extent += (dims[d].count - 1) * stride;
         }
         return true;
+    }
+
+    /// The first run, in index order, that ends after destination offset
+    /// `offset`; `runs()` when none does. Needs `dstOrdered`.
+    pub fn firstEndingAfter(self: Lattice, offset: u64) u64 {
+        var low: u64 = 0;
+        var high = self.runs();
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (self.at(middle).dst + self.width > offset) high = middle else low = middle + 1;
+        }
+        return low;
+    }
+
+    /// The first run that starts at destination offset `offset` or later;
+    /// `runs()` when none does. Needs `dstOrdered`.
+    pub fn firstStartingFrom(self: Lattice, offset: u64) u64 {
+        var low: u64 = 0;
+        var high = self.runs();
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (self.at(middle).dst >= offset) high = middle else low = middle + 1;
+        }
+        return low;
+    }
+
+    /// The destination bytes of the runs inside `[start, end)`.
+    pub fn coveredIn(self: Lattice, start: u64, end: u64) u64 {
+        const first = self.firstEndingAfter(start);
+        const last = self.firstStartingFrom(end);
+        if (first >= last) return 0;
+        var covered = (last - first) * self.width;
+        const head = self.at(first).dst;
+        if (head < start) covered -= start - head;
+        const tail = self.at(last - 1).dst + self.width;
+        if (tail > end) covered -= tail - end;
+        return covered;
     }
 
     /// Runs `first` to `end` (exclusive), in index order, without a
@@ -218,13 +277,72 @@ pub const Lattice = struct {
 
     /// Copies runs `first` to `end` (exclusive): the `width` bytes at
     /// `src + run.src` to `dst + run.dst`, `src` and `dst` being the
-    /// addresses the offsets count from (wrapping).
+    /// addresses the offsets count from (wrapping). Whole rows of the two
+    /// innermost dimensions go through nested loops, and a run of 1, 2, 4,
+    /// 8 or 16 bytes is one load and one store: a swizzle's 4-byte runs
+    /// cost a few cycles each instead of a cursor step and a `memcpy`.
     pub fn copyRuns(self: Lattice, first: u64, end: u64, dst: usize, src: usize) void {
+        switch (self.width) {
+            inline 1, 2, 4, 8, 16 => |width| self.copyRunsOf(width, first, end, dst, src),
+            else => self.copyRunsOf(0, first, end, dst, src),
+        }
+    }
+
+    /// `copyRuns` for runs of `width` bytes, or of `self.width` when zero.
+    fn copyRunsOf(self: Lattice, comptime width: usize, first: u64, end: u64, dst: usize, src: usize) void {
         if (first >= end) return;
-        const width: usize = @intCast(self.width);
+        const inner = self.dims[self.dims.len - @min(self.dims.len, 2) ..];
+        var row: u64 = 1;
+        for (inner) |d| row *= d.count;
+        const rows_start = std.math.divCeil(u64, first, row) catch unreachable;
+        const rows_end = end / row;
+        if (rows_start >= rows_end) return self.copyEach(width, first, end, dst, src);
+        self.copyEach(width, first, rows_start * row, dst, src);
+        const outer: Lattice = .{ .src_offset = self.src_offset, .dst_offset = self.dst_offset, .width = self.width, .dims = self.dims[0 .. self.dims.len - inner.len] };
+        var rows: Cursor = .init(outer, rows_start, rows_end);
+        while (rows.next()) |start| {
+            const row_dst = dst +% start.dst;
+            const row_src = src +% start.src;
+            switch (inner.len) {
+                0 => copyRun(width, self.width, row_dst, row_src),
+                1 => copyLine(width, self.width, inner[0], row_dst, row_src),
+                else => {
+                    var line_dst = row_dst;
+                    var line_src = row_src;
+                    for (0..inner[0].count) |_| {
+                        copyLine(width, self.width, inner[1], line_dst, line_src);
+                        line_dst +%= inner[0].dst_stride;
+                        line_src +%= inner[0].src_stride;
+                    }
+                },
+            }
+        }
+        self.copyEach(width, rows_end * row, end, dst, src);
+    }
+
+    fn copyEach(self: Lattice, comptime width: usize, first: u64, end: u64, dst: usize, src: usize) void {
+        if (first >= end) return;
         var cursor: Cursor = .init(self, first, end);
-        while (cursor.next()) |run| {
-            @memcpy(@as([*]u8, @ptrFromInt(dst +% run.dst))[0..width], @as([*]const u8, @ptrFromInt(src +% run.src))[0..width]);
+        while (cursor.next()) |run| copyRun(width, self.width, dst +% run.dst, src +% run.src);
+    }
+
+    inline fn copyLine(comptime width: usize, len: u64, d: Dim, dst: usize, src: usize) void {
+        var to = dst;
+        var from = src;
+        for (0..d.count) |_| {
+            copyRun(width, len, to, from);
+            to +%= d.dst_stride;
+            from +%= d.src_stride;
+        }
+    }
+
+    inline fn copyRun(comptime width: usize, len: u64, dst: usize, src: usize) void {
+        if (width == 0) {
+            const n: usize = @intCast(len);
+            @memcpy(@as([*]u8, @ptrFromInt(dst))[0..n], @as([*]const u8, @ptrFromInt(src))[0..n]);
+        } else {
+            const Word = @Int(.unsigned, 8 * width);
+            @as(*align(1) Word, @ptrFromInt(dst)).* = @as(*align(1) const Word, @ptrFromInt(src)).*;
         }
     }
 };
@@ -310,6 +428,25 @@ pub const Backend = union(enum) {
         };
     }
 
+    /// `read`, the source bytes every job of `part` reads whole, widened to
+    /// its file's alignment (0 when its jobs read only their own range:
+    /// source runs back to back, a contiguous part included), and `limit`,
+    /// the most one read takes: the front end refuses a part whose `read`
+    /// passes `limit`. Needs `checkParts`. The direct backend's limit is its
+    /// smallest read, whichever block calibration picks: the checkpoint's
+    /// read chunk (8 MiB locally) rounded up to whole blocks of the smallest
+    /// it may pick, 2 MiB or a pinned `dma_block_size`
+    /// (`direct_loader.Loader.stridedRead`); the buffered backend reads any
+    /// part.
+    pub fn stridedRead(self: Backend, part: LoadPart) StridedRead {
+        return switch (self) {
+            .direct => |loader| loader.stridedRead(part),
+            .buffered => .{ .read = 0, .limit = std.math.maxInt(u64) },
+        };
+    }
+
+    pub const StridedRead = struct { read: u64, limit: u64 };
+
     /// Waits for and retires `submission`, which this backend published.
     /// Its batch is dangling afterwards.
     pub fn await(self: Backend, submission: Submission) !void {
@@ -366,10 +503,12 @@ test "the cursor walks a range's runs where at places them, and copyRuns copies 
     var actual: [4096]u8 = undefined;
     var dims_buffer: [5]Lattice.Dim = undefined;
     for (0..2000) |_| {
-        const lattice = randomLattice(random, dims_buffer[0..random.intRangeAtMost(usize, 0, dims_buffer.len)]);
+        var lattice = randomLattice(random, dims_buffer[0..random.intRangeAtMost(usize, 0, dims_buffer.len)]);
+        // The widths `copyRuns` moves as one word, and others; a wider run
+        // may overlap its neighbours, which no part does.
+        if (random.boolean()) lattice.width = ([_]u64{ 1, 2, 4, 8, 16 })[random.uintLessThan(usize, 5)];
         const spans = lattice.spans().?;
-        if (lattice.src_offset + spans.src > source.len or lattice.dst_offset + spans.dst > expected.len) continue;
-        try std.testing.expect(lattice.dstOrdered());
+        if (lattice.src_offset + spans.src > source.len or lattice.dst_offset + spans.dst > expected.len or !lattice.dstOrdered()) continue;
         const runs = lattice.runs();
         const first = random.uintAtMost(u64, runs);
         const end = random.intRangeAtMost(u64, first, runs);
