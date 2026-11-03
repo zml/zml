@@ -171,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
             );
             const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
 
-            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
+            var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{tensor_parallel} });
             defer store.deinit();
 
             const AllTensorsModel = struct {

@@ -189,7 +189,7 @@ convert it to a `TensorStore`:
 ```zig
 pub fn main(init: std.process.Init) !void {
     ...
-    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry, &.{});
+    var model_store: zml.io.TensorStore = .init(allocator, &model_registry, .{});
     defer model_store.deinit();
 }
 ```
@@ -286,7 +286,7 @@ pub const Wrapper = struct {
 pub fn main(init: std.process.Init) !void {
     ...
 
-    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry, &.{});
+    var activations_store: zml.io.TensorStore = .init(allocator, &activations_registry, .{});
     defer activations_store.deinit();
 
     try zml.testing.testLayer(allocator, io, platform, Wrapper{ .mlp = mlp }, .forward, activations_store.view(), "model.model.layers.0.mlp", .{ .mlp = mlp_weights }, &.{}, .{});

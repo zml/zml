@@ -14,6 +14,7 @@ const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
+const Quantization = @import("quantization.zig").Quantization;
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
@@ -32,15 +33,30 @@ pub const TensorStore = struct {
 
     registry: *safetensors.TensorRegistry,
     meshes: []const *const Sharding.Mesh,
+    quantization: ?Quantization.Target,
     id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, meshes: []const *const Sharding.Mesh) TensorStore {
+    pub const Options = struct {
+        /// The meshes `View.createTensor` and `mesh` name. The slice is
+        /// copied; the meshes must outlive the store.
+        meshes: []const *const Sharding.Mesh = &.{},
+        /// How the platform's FP8 GEMMs want block-FP8 weights, for the code
+        /// that binds them (`View.quantization`): `.of(platform)`. Required to
+        /// bind block-FP8 weights.
+        quantization: ?Quantization.Target = null,
+    };
+
+    /// A store over `registry`, which it borrows: the registry must outlive
+    /// the store, and may still gain entries, which views then find. Each
+    /// tensor the store binds holds a copy of its entry.
+    pub fn init(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, opts: Options) TensorStore {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
-            .meshes = arena.allocator().dupe(*const Sharding.Mesh, meshes) catch @panic("OOM"),
+            .meshes = arena.allocator().dupe(*const Sharding.Mesh, opts.meshes) catch @panic("OOM"),
+            .quantization = opts.quantization,
             .id_to_sources = .empty,
             .allocator = allocator,
             .arena = arena,
@@ -97,11 +113,6 @@ pub const TensorStore = struct {
         return self.id_to_sources.get(id);
     }
 
-    pub fn getShape(self: *const TensorStore, key: []const u8) ?Shape {
-        const entry_ptr = self.getPtrFromKey(key) orelse return null;
-        return entry_ptr.shape;
-    }
-
     pub fn view(self: *TensorStore) View {
         return .{ .store = self };
     }
@@ -115,7 +126,7 @@ pub const TensorStore = struct {
         }
         std.debug.panic(
             \\Found no meshes named {s} in TensorStore.
-            \\Try passing more meshes to `zml.TensorStore.fromRegistry`.
+            \\Try passing more meshes to `zml.io.TensorStore.init`.
             \\Known meshes: {f}
         , .{ name_slice, stdx.fmt.slice(store.meshes) });
     }
@@ -133,7 +144,8 @@ pub const TensorStore = struct {
         }
 
         pub fn parent(self: *const View) View {
-            const slice = self.prefix() orelse unreachable;
+            const slice = self.prefix();
+            std.debug.assert(slice.len != 0);
             const index = std.mem.lastIndexOfScalar(u8, slice[0 .. slice.len - 1], '.') orelse return self.root();
             var buffer: [256]u8 = undefined;
             @memcpy(buffer[0 .. index + 1], slice[0 .. index + 1]);
@@ -146,7 +158,7 @@ pub const TensorStore = struct {
 
         pub fn withPrefix(self: *const View, prefix_: []const u8) View {
             var buffer: [256]u8 = undefined;
-            const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ });
+            const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix(), prefix_ });
 
             return .{
                 .store = self.store,
@@ -157,7 +169,7 @@ pub const TensorStore = struct {
 
         pub fn withLayer(self: *const View, index: usize) View {
             var buffer: [256]u8 = undefined;
-            const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index });
+            const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix(), index });
 
             return .{
                 .store = self.store,
@@ -166,22 +178,32 @@ pub const TensorStore = struct {
             };
         }
 
-        pub fn prefix(self: *const View) ?[]const u8 {
-            return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+        /// The keys' prefix under this view, with its trailing dot; "" at the
+        /// root.
+        pub fn prefix(self: *const View) []const u8 {
+            return self.prefix_buffer[0..self.prefix_length];
         }
 
-        pub fn hasKey(self: *const View, subkey: []const u8) bool {
+        /// The checkpoint tensor `subkey`, the registry's own entry; null
+        /// when the checkpoint has none. The pointer is valid until the
+        /// registry next gains an entry.
+        pub fn get(self: View, subkey: []const u8) ?*const safetensors.Tensor {
             var buffer: [256]u8 = undefined;
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            return for (self.store.registry.tensors.keys()) |k| {
-                if (std.mem.startsWith(u8, k, key)) break true;
-            } else false;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix(), subkey });
+            return self.store.registry.tensors.getPtr(key);
+        }
+
+        /// See `Options.quantization`. Panics when the store has none: binding
+        /// block-FP8 weights requires it.
+        pub fn quantization(self: View) Quantization.Target {
+            return self.store.quantization orelse
+                stdx.debug.panic("TensorStore.Options.quantization is unset: block-FP8 weights bind for a platform; pass .of(platform)", .{});
         }
 
         /// Creates a zml.Tensor from a specific entry in the store.
         pub fn createTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
             return self.maybeCreateTensor(subkey, tags, mesh_, partitioning) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix(), subkey });
         }
 
         pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
@@ -201,7 +223,7 @@ pub const TensorStore = struct {
 
         pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
             return self.maybeCreateHostPinnedTensor(subkey, tags, mesh_, partitioning) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix(), subkey });
         }
 
         pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
@@ -218,12 +240,12 @@ pub const TensorStore = struct {
             const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
 
             return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, .replicated) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix(), subkey });
         }
 
         fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding: Sharding) ?Tensor {
             var buffer: [256]u8 = undefined;
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix(), subkey });
             const source = self.store.dupeSource(key) orelse return null;
 
             const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
@@ -252,7 +274,7 @@ pub const TensorStore = struct {
 
             var buffer: [256]u8 = undefined;
             for (sources) |subkey| {
-                const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+                const key = makeKey(&buffer, "{s}{s}", .{ self.prefix(), subkey });
                 const tensor = self.store.dupeSource(key) orelse return null;
                 tensor_list.appendAssumeCapacity(tensor);
             }
@@ -266,31 +288,15 @@ pub const TensorStore = struct {
             return tensor;
         }
 
-        pub fn getShape(self: View, subkey: []const u8) ?Shape {
-            var buffer: [256]u8 = undefined;
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            return self.store.getShape(key);
-        }
-
-        pub fn getShapeOpts(self: View, subkey: []const u8, opts: struct { no_prefix: bool = false }) ?Shape {
-            var buffer: [256]u8 = undefined;
-            const key = if (opts.no_prefix)
-                subkey
-            else b: {
-                break :b makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            };
-            return self.store.getShape(key);
-        }
-
         pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
             var key_buffer: [256]u8 = undefined;
-            const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+            const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix(), subkey });
             return self.store.getReader(key, io, buffer);
         }
 
         pub fn count(self: View) usize {
             var count_: usize = 0;
-            const prefix_ = self.prefix() orelse "";
+            const prefix_ = self.prefix();
             var it = self.store.registry.tensors.iterator();
             while (it.next()) |item| {
                 const key = item.key_ptr.*;
@@ -552,6 +558,39 @@ pub const Loader = struct {
     }
 };
 
+test "View.get finds exact keys in the registry the store borrows" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try @import("testing.zig").writeSafetensors(allocator, io, tmp.dir, "layer.safetensors", &registry, &.{
+        .{ .name = "layer.experts.0.down_proj.weight", .dtype = "U8", .dims = &.{4}, .bytes = &.{ 1, 2, 3, 4 } },
+    });
+    var store: TensorStore = .init(allocator, &registry, .{ .quantization = .{ .fp8 = .f8e4m3fnuz } });
+    defer store.deinit();
+
+    const layer = store.view().withPrefix("layer");
+    const entry = layer.get("experts.0.down_proj.weight").?;
+    try std.testing.expectEqual(entry, registry.tensors.getPtr("layer.experts.0.down_proj.weight").?);
+    var bytes: [4]u8 = undefined;
+    try entry.read(io, &bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, &bytes);
+    // Exact keys only: a key's prefix names no tensor.
+    try std.testing.expectEqual(null, layer.get("experts.0.down_proj"));
+    try std.testing.expectEqualStrings("layer.", layer.prefix());
+    try std.testing.expectEqualStrings("", layer.root().prefix());
+    try std.testing.expectEqual(1, layer.withPrefix("experts").count());
+    try std.testing.expectEqual(0, layer.withPrefix("gate").count());
+    try std.testing.expect(layer.quantization().fp8.? == .f8e4m3fnuz);
+
+    // An entry registered after `init`, such as an alias of a fused
+    // tensor, is found too.
+    try registry.registerTensor(.{ .file_uri = entry.file_uri, .name = "layer.gate.weight", .shape = entry.shape, .offset = entry.offset });
+    try std.testing.expect(layer.get("gate.weight") != null);
+}
+
 test "Loader.loadExecute cleans up donated and non-donated inputs" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -567,7 +606,7 @@ test "Loader.loadExecute cleans up donated and non-donated inputs" {
     defer registry.deinit();
     try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
     try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
-    var store: TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_mesh});
+    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{platform.replicated_mesh} });
     defer store.deinit();
     var loader = try Loader.init(allocator, platform, .{ .parallelism = 2, .dma_chunks = 2, .dma_chunk_size = 4096 });
     defer loader.deinit();

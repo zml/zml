@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
     var profiler = try platform.profiler(allocator, io, .{ .session_id = "mnist" });
     defer profiler.deinit();
 
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{dp_mp});
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{dp_mp} });
     defer store.deinit();
     const mnist_model: Mnist = .init(store.view());
 

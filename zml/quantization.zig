@@ -106,9 +106,11 @@ pub const Quantization = struct {
         }
     };
 
-    /// What a platform's FP8 GEMMs read: the encoding and the scale layout
-    /// that block-FP8 weights are bound in, and that `quantizeInput`
-    /// quantizes activations to.
+    /// What a platform's FP8 GEMMs read, so block-FP8 weights can be bound
+    /// for it once. Binding them requires the store to carry one
+    /// (`zml.io.TensorStore.Options.quantization`); the code that binds them
+    /// reads it (`TensorStore.View.quantization`) and converts or lays them
+    /// out while binding.
     pub const Target = struct {
         /// The E4M3 encoding of FP8 weights and activations: FNUZ on CDNA3,
         /// FN on CUDA, CDNA4 and RDNA4. Null on other platforms: block-FP8
