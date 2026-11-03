@@ -332,6 +332,13 @@ pub fn MapRestrict(From: type, To: type) type {
 
             if (!Contains(T, From)) return void;
 
+            // `visit` walks a bounded array's `len` elements, but its mapped
+            // struct would hold the whole buffer: pairing the two by visit
+            // order would miss or misplace elements.
+            if (@typeInfo(T) == .@"struct" and @hasDecl(T, "constSlice") and @hasDecl(T, "slice")) {
+                stdx.debug.compileError("zml.meta.MapRestrict({any}, {any}) cannot map the bounded array {any}: use a slice or an array", .{ From, To, T });
+            }
+
             return switch (@typeInfo(T)) {
                 .@"struct" => |struct_infos| {
                     // We know that at least one of the struct field contains a From.
