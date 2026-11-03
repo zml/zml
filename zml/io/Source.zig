@@ -9,11 +9,13 @@
 //! the store's arena, where the ops that rewrite them allocate. Nothing is
 //! freed before `TensorStore.deinit`, and the store must not move while
 //! sources point to it. The ops touch neither the registry nor the
-//! bindings. Sources of different stores do not mix: `concatenate` and
-//! `stack` panic on them. Placement comes last: `withPartitioning` and `as`
-//! return a `Placed`, which has no ops and drops its placement with
-//! `unplaced`. A `Placed` is what binds: `Placed.bind` records the model
-//! tensor the loader fills from it. Sources are built during model init.
+//! bindings. Sources of different stores do not mix: `concatenate`,
+//! `stack` and `bindProgram` panic on them. Placement comes last:
+//! `withPartitioning` and `as` return a `Placed`, which has no ops and
+//! drops its placement with `unplaced`. A `Placed` is what binds:
+//! `Placed.bind` records the model tensor the loader fills from it,
+//! `bindProgram` one a program computes from several. Sources are built
+//! during model init.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -448,7 +450,8 @@ pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source {
 /// source's tags (axes it does not name are replicated), or a
 /// `Sharding.Partitioning`. `.replicated` places it on every device without
 /// a mesh, and takes only `.{}`. Placement comes last: a `Placed` only
-/// binds (`Placed.bind`) or drops its placement (`Placed.unplaced`).
+/// binds (`Placed.bind`, `bindProgram`) or drops its placement
+/// (`Placed.unplaced`).
 pub fn withPartitioning(self: Source, comptime mesh_: @EnumLiteral(), partitioning: anytype) Placed {
     var placed = self._shape;
     if (mesh_ == .replicated) {
@@ -470,6 +473,25 @@ pub fn as(self: Source, placed: Shape) Placed {
     return .{ .store = self.store, .shape = placed, ._pieces = self._pieces };
 }
 
+/// Makes a model tensor of `output` that `program` computes while loading,
+/// `program.forward(output, inputs)` over the placed sources `inputs` in this
+/// order (`TensorStore.Program.init`). The loader lands each input as it
+/// lands a bound source, placed by its shape, in default device memory;
+/// compiles the program once for every tensor of an equal program over the
+/// same placed shapes; runs it, and frees the inputs. `forward` returns a
+/// tensor of `output`, placed alike, in default device memory.
+pub fn bindProgram(inputs: []const Placed, output: Shape, program: anytype) Tensor {
+    stdx.debug.assert(inputs.len != 0, "Source.bindProgram: a program computing {f} needs an input", .{output});
+    const store = inputs[0].store;
+    for (inputs) |input| {
+        stdx.debug.assert(input.store == store, "Source.bindProgram: the inputs of {f} come from different stores", .{output});
+    }
+    const arena = store.arena.allocator();
+    const kept = arena.dupe(Placed, inputs) catch oom();
+    const erased = TensorStore.Program.init(arena, program) catch oom();
+    return bindNew(store, output, .{ .compute = .{ .program = erased, .inputs = kept } });
+}
+
 /// A source with its placement (`withPartitioning`, `as`): the only thing
 /// that binds, and what a binding keeps (`TensorStore.Binding`).
 pub const Placed = struct {
@@ -480,8 +502,8 @@ pub const Placed = struct {
     _pieces: []const Piece,
 
     /// Makes the model tensor the loader fills from this source, in default
-    /// memory. The binding keeps the source as it is; the loader lowers it
-    /// to bytes (`lower`).
+    /// memory unless `View.setMemory` names another. The binding keeps the
+    /// source as it is; the loader lowers it to bytes (`lower`).
     pub fn bind(self: Placed) Tensor {
         return bindNew(self.store, self.shape, .{ .load = .{ .source = self } });
     }
@@ -522,8 +544,8 @@ pub const Placed = struct {
 };
 
 /// A new tensor of `shape_`, bound to `binding`: the one maker of
-/// `store`'s bindings (`Placed.bind`), whose pieces are disjoint by
-/// construction: the loader relies on that and does not check.
+/// `store`'s bindings (`Placed.bind`, `bindProgram`), whose pieces are
+/// disjoint by construction: the loader relies on that and does not check.
 fn bindNew(store: *TensorStore, shape_: Shape, binding: TensorStore.Binding) Tensor {
     const tensor: Tensor = .fromShape(shape_);
     store.id_to_sources.putNoClobber(store.allocator, tensor.id, binding) catch oom();
