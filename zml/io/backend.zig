@@ -1,7 +1,7 @@
 //! The seam between the front end (loader.zig) and its backends: the
 //! `LoadSpec` contract they trust, its parts' byte runs (`Lattice`), the
-//! source request size (`requestSize`), the backend a load runs on
-//! (`Backend`) and the memory kinds it takes (`supportsMemory`).
+//! source request size (`requestSize`), and which backend and memory kinds
+//! a platform takes (`loadsDirect`, `supportsMemory`).
 const std = @import("std");
 
 const VFS = @import("vfs");
@@ -13,6 +13,7 @@ const Shape = @import("../shape.zig").Shape;
 const Memory = @import("TensorStore.zig").Memory;
 const constants = @import("../constants.zig");
 const buffered_loader = @import("buffered_loader.zig");
+const direct_loader = @import("direct_loader.zig");
 
 /// The largest source request, and so the largest DMA block: a request is
 /// a whole number of blocks, at least one.
@@ -261,6 +262,22 @@ pub fn checkParts(parts: []const LoadPart, destination_bytes: u64) bool {
     return covered <= destination_bytes;
 }
 
+/// Whether `platform` loads through the direct backend. Transfer-manager
+/// support and host pinning are independent. CPU implements byte-range
+/// transfers from ordinary pages but not DmaMap, so it shares coalescing
+/// and bounded blocks without DMA support. The whole-tensor buffered path
+/// has neither: on one B70, interleaved HF Qwen3.5-4B loads took 10.9 to
+/// 16.3 s direct against about 48 s buffered. Furiosa stages in its
+/// plugin's `.host_pinned` buffers (SDK dma-buf memory, which the SDK
+/// transfers without pinning pages per request). TPU, neuron and metal
+/// stay buffered until their transfer path is checked on hardware.
+pub fn loadsDirect(platform: *const Platform) bool {
+    return switch (platform.target) {
+        .cuda, .rocm, .oneapi, .cpu, .furiosa => true,
+        .tpu, .neuron, .metal => false,
+    };
+}
+
 /// Whether the loader can deliver into `kind` on `platform`: device memory,
 /// on every platform. The host kinds need a backend that writes host
 /// memory in place.
@@ -269,9 +286,9 @@ pub fn supportsMemory(platform: *const Platform, kind: Memory) bool {
     return kind == .default;
 }
 
-/// The transfer implementation a load runs on: the buffered backend, which
-/// places each whole tensor with `Buffer.from`.
+/// The transfer implementation selected for the platform (`loadsDirect`).
 pub const Backend = union(enum) {
+    direct: *direct_loader.Loader,
     buffered: *buffered_loader.Loader,
 
     pub fn init(
@@ -280,7 +297,10 @@ pub const Backend = union(enum) {
         platform: *const Platform,
         opts: Options,
     ) !Backend {
-        return .{ .buffered = try buffered_loader.Loader.create(allocator, io, platform, opts) };
+        return if (loadsDirect(platform))
+            .{ .direct = try direct_loader.Loader.create(allocator, io, platform, opts) }
+        else
+            .{ .buffered = try buffered_loader.Loader.create(allocator, io, platform, opts) };
     }
 
     /// Publishes `specs`, and completes one item of `progress` per spec.
@@ -318,6 +338,7 @@ pub const Backend = union(enum) {
 
 /// A published batch of the backend that published it.
 pub const Submission = union(enum) {
+    direct: *direct_loader.Batch,
     buffered: *buffered_loader.Batch,
 };
 

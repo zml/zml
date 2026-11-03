@@ -1,6 +1,7 @@
 //! Direct loading follows a batch from per-file planning through FIFO claims,
 //! source reads and DMA completion. Runtime ownership and synchronization
-//! live here.
+//! live here. CUDA, ROCm, oneAPI, Furiosa and CPU load this way
+//! (`backend.loadsDirect`).
 //!
 //! Sizing, fixed by `Loader.create`. The DMA block is the options' one
 //! (`backend.Options.dmaBlockSizes`); each device's DMA budget is

@@ -43,6 +43,7 @@ const Tensor = @import("../tensor.zig").Tensor;
 const testing = @import("../testing.zig");
 const backend = @import("backend.zig");
 const Backend = backend.Backend;
+const buffered_loader = @import("buffered_loader.zig");
 const LoadSpec = backend.LoadSpec;
 const load_log = @import("log.zig").load;
 const TensorStore = @import("TensorStore.zig");
@@ -53,11 +54,13 @@ const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
 /// once.
 ///
 /// What it borrows. The platform outlives the loader and every buffer it
-/// loads. `io` outlives the loader: the backend's tasks run on it and open
-/// the source files through it. `start` borrows the store, the buffers and
-/// the progress node until `wait` or `cancel` returns, and reads the model
-/// during the call only. The loaded buffers are the caller's and outlive
-/// the loader.
+/// loads. `io`, and the VFS behind it, outlive the loader: its tasks run on
+/// `io`, and the direct backend opens each source file through it and
+/// keeps it open until `deinit`, under a copy of the file's path, so
+/// nothing of the store is kept past `wait`. `start` borrows the store, the
+/// buffers and the progress node until `wait` or `cancel` returns, and
+/// reads the model during the call only. The loaded buffers are the
+/// caller's and outlive the loader.
 ///
 /// Start and wait serially on the owning task; source reads and transfers
 /// run concurrently inside the backend, compiles on tasks of their own, or
@@ -78,10 +81,12 @@ const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
 /// can act on: a missing checkpoint file is `FileNotFound`; a denied one
 /// `AccessDenied` locally and `PermissionDenied` remotely; a file that ends
 /// inside a tensor `UnexpectedEndOfFile`, because it changed after its
-/// header was read; host memory the backend cannot allocate `OutOfMemory`;
-/// device memory that runs out PJRT's `ResourceExhausted`; `cancel`
-/// `Canceled`. The rest (PJRT, the compiler, a remote that failed) passes
-/// through as its source names it.
+/// header was read; host memory the backend cannot allocate, pin or fit
+/// under its mapped ceiling `OutOfMemory`; device memory that runs out
+/// PJRT's `ResourceExhausted`; an io that cannot run the loader's tasks
+/// concurrently `ConcurrencyUnavailable`; `cancel` `Canceled`. The rest
+/// (PJRT, the compiler, a remote that failed) passes through as its source
+/// names it.
 pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -173,9 +178,9 @@ pub const Loader = struct {
     }
 
     /// Cancels `init`'s task when no `start` awaited it, destroying what it
-    /// built, and destroys the backend: its workers and its host staging.
-    /// The buffers it loaded stay the caller's. Panics on loads neither
-    /// waited for nor canceled.
+    /// built, and destroys the backend: its host memory, its workers and the
+    /// files it keeps open, closed through `io`. The buffers it loaded stay
+    /// the caller's. Panics on loads neither waited for nor canceled.
     pub fn deinit(self: *Loader) void {
         if (self.loadsStarted()) std.debug.panic("Loader.deinit with loads started, whose store and buffers may be freed already: add `errdefer loader.cancel();` after `start`", .{});
         self.queued.deinit(self.allocator);
@@ -206,12 +211,13 @@ pub const Loader = struct {
     /// Every tensor and program input is checked once, before anything is
     /// published: a tensor `store` did not bind, a source that reads no
     /// bytes (an empty checkpoint tensor among them), a source that this
-    /// loader cannot assemble (a run that starts or ends inside a byte, or
+    /// loader cannot assemble (a run that starts or ends inside a byte;
     /// strided runs: a transpose, a broadcast, an interleave or interior
-    /// padding), a sub-byte last dimension that does not pack into whole
-    /// bytes, a placement its mesh does not divide or on devices the
-    /// platform lacks, and a memory kind the platform cannot take are
-    /// `error.InvalidBinding`.
+    /// padding; or, on a platform that loads through the direct backend
+    /// (`backend.loadsDirect`), bytes no piece covers: padding), a sub-byte
+    /// last dimension that does not pack into whole bytes, a placement its
+    /// mesh does not divide or on devices the platform lacks, and a memory
+    /// kind the platform cannot take are `error.InvalidBinding`.
     ///
     /// `buffers` is `mem.bufferize` of `model`, whose buffers are empty. A
     /// tree of another structure (other union arms, optionals or slice
@@ -757,6 +763,15 @@ fn prepareSpec(
         load_log.err("{f} from {s}: its parts leave their sources or its {d} bytes, pass the largest file offset, or come out of order", .{ target, key, shape.byteSize() });
         return error.InvalidBinding;
     }
+    // The direct backend writes the bytes its parts cover, and no others.
+    if (backend.loadsDirect(platform)) {
+        var covered: u64 = 0;
+        for (parts) |part| covered += part.lattice.width;
+        if (covered != shape.byteSize()) {
+            load_log.err("{f} from {s}: {d} of its {d} bytes covered by no part (padding), which this loader does not zero on {t}", .{ target, key, shape.byteSize() - covered, shape.byteSize(), platform.target });
+            return error.InvalidBinding;
+        }
+    }
     return .{ .shape = shape, .memory = memory, .output = output, .parts = parts };
 }
 
@@ -1215,9 +1230,9 @@ test "a failed set-up fails the first start, and deinit frees the rest" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(std.testing.allocator, io);
     defer fixture.deinit();
-    // `init` allocates nothing; the set-up's first allocation, inside the
-    // backend, fails.
-    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    // `init` allocates nothing; the set-up's third allocation, inside the
+    // backend, fails, so the backend unwinds what it built before it.
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 2 });
     var loader = try Loader.init(failing.allocator(), io, fixture.platform, .{ .read_parallelism = 2 });
     defer loader.deinit();
     var output: Buffer = undefined;
@@ -1298,7 +1313,8 @@ test "a rejected binding or a program of the wrong output fails the loader" {
 
     // No binding, an empty source or program input, a mesh of other
     // devices, a host kind the platform cannot take, a broadcast's strided
-    // runs, and a program of the wrong shape or placement.
+    // runs, padding where the direct backend loads, and a program of the
+    // wrong shape or placement.
     const Case = struct { tensor: Tensor, at_wait: bool = false, skip: bool = false };
     const cases = [_]Case{
         .{ .tensor = Tensor.fromShape(fixture.value.shape()) },
@@ -1309,6 +1325,7 @@ test "a rejected binding or a program of the wrong output fails the loader" {
         .{ .tensor = fixture.computed("value", foreign[2], LoaderTestFixture.Identity{}) },
         .{ .tensor = pinned, .skip = backend.supportsMemory(platform, .host_pinned) },
         .{ .tensor = fixture.store.view().source("value", .{.x}).broad(Shape.init(.{ .y = 2, .x = 4 }, .u8)).withPartitioning(.replicated, .{}).bind() },
+        .{ .tensor = fixture.store.view().source("second", .{.x}).pad(0, .{ .x = TensorStore.Source.Pad{ .high = 2 } }).withPartitioning(.replicated, .{}).bind(), .skip = !backend.loadsDirect(platform) },
         .{ .tensor = fixture.computed("value", fixture.value, Rows{}), .at_wait = true },
         .{ .tensor = fixture.computed("value", misplaced, LoaderTestFixture.Identity{}), .at_wait = true, .skip = !splits },
     };
@@ -1417,4 +1434,61 @@ test "a program takes its inputs from sources, in order" {
     defer output.deinit();
     // { 1, 2, 7, 8 } - { 5, 6, 7, 8 }, wrapping.
     try testing.expectShards(allocator, io, &output, &.{ 252, 252, 0, 0 }, .default);
+}
+
+/// A loader on the buffered backend, whichever backend `platform` loads
+/// through (`backend.loadsDirect`), its set-up done in place: CPU loads
+/// through the direct backend, and this keeps the front end over the
+/// buffered one under test.
+fn initBuffered(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Loader.Options) !Loader {
+    const backend_opts = try backendOptions(opts);
+    return .{
+        .allocator = allocator,
+        .io = io,
+        .platform = platform,
+        .setup = null,
+        .backend = .{ .buffered = try buffered_loader.Loader.create(allocator, io, platform, backend_opts) },
+        .program_group_bytes = opts.program_group_bytes,
+    };
+}
+
+test "the front end loads through the buffered backend and fails with it" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    var loader = try initBuffered(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+
+    // A tensor, one assembled from value's first half and second's last
+    // half, and a program tensor, in a group of its own.
+    const Source = TensorStore.Source;
+    const view = fixture.store.view();
+    const Model = struct { value: Tensor, assembled: Tensor, computed: Tensor };
+    const model: Model = .{
+        .value = fixture.value,
+        .assembled = Source.concatenate(&.{
+            view.source("value", .{.x}).slice(.x, .{ .end = 2 }),
+            view.source("second", .{.x}).slice(.x, .{ .start = 2 }),
+        }, .x).withPartitioning(.replicated, .{}).bind(),
+        .computed = fixture.computed("value", fixture.value, LoaderTestFixture.Add{ .value = 1 }),
+    };
+    var buffers = try mem.bufferize(allocator, &model);
+    defer mem.deinitBufferized(allocator, &buffers);
+    try loader.start(&model, &buffers, &fixture.store, .none);
+    errdefer loader.cancel();
+    try loader.wait();
+    try testing.expectShards(allocator, io, &buffers.value, &LoaderTestFixture.contents, .default);
+    try testing.expectShards(allocator, io, &buffers.assembled, &.{ 1, 2, 7, 8 }, .default);
+    try testing.expectShards(allocator, io, &buffers.computed, &.{ 2, 3, 4, 5 }, .default);
+
+    // A missing file fails the loader, and every later call with it.
+    var broken: Buffer = undefined;
+    try loader.start(&fixture.missing, &broken, &fixture.store, .none);
+    defer broken.deinit();
+    try std.testing.expectError(error.FileNotFound, loader.wait());
+    try LoaderTestFixture.expectFailed(&loader, error.FileNotFound);
+    try std.testing.expectEqual(0, broken._shards.len);
+    try std.testing.expectError(error.FileNotFound, loader.start(&fixture.value, &broken, &fixture.store, .none));
 }

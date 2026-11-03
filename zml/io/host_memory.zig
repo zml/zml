@@ -5,8 +5,9 @@
 //!
 //! The memory depends on the target: CUDA and oneAPI take page-backed arenas
 //! registered with PJRT (DmaMap), ROCm and Furiosa PJRT `pinned_host`
-//! buffers, and CPU plain pages, unregistered. ROCm balances whole arenas
-//! across its devices' host nodes.
+//! buffers, and CPU plain pages, unregistered. The arenas' kind and the
+//! transfer path are separate decisions: CPU loads through the direct
+//! backend too. ROCm balances whole arenas across its devices' host nodes.
 //! `Workspace.mapped_bytes_ceiling` (16 GiB) is a safety guard, not a
 //! target. A failed allocation or registration, or a growth past the
 //! ceiling, is logged with its cause and returns `OutOfMemory`.
