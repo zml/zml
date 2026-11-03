@@ -827,6 +827,9 @@ pub const Shape = struct {
         .grid = undefined,
     };
 
+    /// Returns shape metadata with the requested sharding on `mesh`.
+    /// Omitted dimensions in a mapping are replicated, including during compilation.
+    /// Use `Tensor.withPartitioning` to emit a constraint on a graph value.
     pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partitioning: anytype) Shape {
         if (@TypeOf(partitioning) != Sharding.Partitioning) {
             return self.withPartitioning(mesh, Sharding.Partitioning.parse(self.tags(), mesh, .replicated, partitioning));

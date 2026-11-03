@@ -41,7 +41,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         token_index.convert(.i32).broad(zml.Shape.init(.{ .b = q.dim(.b) }, .i32))
     else
         token_index.convert(.i32);
-    return zml.ops.manualComputation(Context.body, Context{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .positions = positions }, q_sharded.shape());
+    return zml.ops.manualComputation(Context.body, Context{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .positions = positions }, q.shape().withPartitioning(mesh, .{ .h = .model }));
 }
 
 const Context = struct {

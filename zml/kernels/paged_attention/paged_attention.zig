@@ -6,9 +6,9 @@ const zml = @import("../../zml.zig");
 const cute = @import("cute/cute.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
-const triton = @import("triton/triton.zig");
-pub const tcl = @import("tcl/tcl.zig");
 const stablehlo = @import("stablehlo/stablehlo.zig");
+pub const tcl = @import("tcl/tcl.zig");
+const triton = @import("triton/triton.zig");
 
 const PagedAttention = @This();
 
@@ -335,21 +335,22 @@ test pagedAttention {
     const batch_size = active_batch_size + 1;
     const query_token_count = prefill_token_count + num_decode;
     const dt: zml.DataType = .bf16;
-    const model_meshe = platform.meshes.get("model").?;
+    const tp = zml.testing.tpMesh();
+    const num_kv_heads = tp.numPartitionsForLogicalAxis(.model);
     const partition = .{ .hkv = .model };
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache } = .{
-        .q = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hg = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
-        .k = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
-        .v = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+        .q = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = num_kv_heads, .hg = 4, .hd = 32 }, dt)).withPartitioning(tp, partition),
+        .k = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(tp, partition),
+        .v = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(tp, partition),
         .kv_cache = .{
             .split = .{
-                .k = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
-                .v = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+                .k = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(tp, partition),
+                .v = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(tp, partition),
             },
         },
     };
 
-    const meshes: []const *const zml.Mesh = &.{ platform.replicated_mesh, platform.meshes.get("model").? };
+    const meshes: []const *const zml.Mesh = &.{ platform.replicated_mesh, tp };
     const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{ .meshes = meshes });
     defer rng_q.deinit();
     const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{ .meshes = meshes });

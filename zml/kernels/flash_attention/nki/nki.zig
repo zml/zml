@@ -82,7 +82,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
                 .token_index = token_index_2d,
                 .parameters = parameters,
             },
-            q_sharded.shape(),
+            q.shape().withPartitioning(tp, .{ .h = .model }),
         ).convert(q.dtype());
     }
 
@@ -108,6 +108,6 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             }
         }).body,
         .{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .parameters = parameters },
-        q_sharded.shape(),
+        q.shape().withPartitioning(tp, .{ .h = .model }),
     ).convert(q.dtype());
 }

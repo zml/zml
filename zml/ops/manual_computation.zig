@@ -6,18 +6,19 @@ const shardy = @import("mlir/dialects/shardy");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
-const zml = struct {
-    // Nested to disambiguate from stdx.meta
-    const meta = @import("../meta.zig");
-    const testing = @import("../testing.zig");
-};
-
 const Compiler = @import("../Compiler.zig");
 const DataType = @import("../dtype.zig").DataType;
 const mlirx = @import("../mlirx.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Tensor = @import("../tensor.zig").Tensor;
+
+const zml = struct {
+    // Nested to disambiguate from stdx.meta
+    const meta = @import("../meta.zig");
+    const testing = @import("../testing.zig");
+};
+
 const log = std.log.scoped(.@"zml/Compiler");
 
 /// ZML operator describes computation across several devices,
@@ -214,9 +215,10 @@ noinline fn manualComputationInternal(
         },
     };
 
-    // reuse local_outputs buffer to store the final result.
+    // Returned tensors describe the operation's global output shapes and sharding.
     for (0.., local_outputs, global_output_shapes) |o, output_tensor_ptr, output_shape| {
-        output_tensor_ptr.* = Tensor._resultPropagateSharding(output_shape, op.result(o));
+        output_tensor_ptr.* = Tensor._result(output_shape, op.result(o));
+        output_tensor_ptr._shape = output_shape;
     }
     return local_outputs;
 }
