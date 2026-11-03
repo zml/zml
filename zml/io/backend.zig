@@ -25,7 +25,7 @@ pub const max_read_request_size: usize = 32 * 1024 * 1024;
 /// a nonzero multiple of `alignment` (`readAlignment`: reads land in
 /// blocks), and the request is at most `max_read_request_size` and, with an
 /// alignment, longer than two units, so a read widened by a unit at each
-/// end fits. `zml.io.next.Loader.init` refuses options for which a block
+/// end fits. `zml.io.Loader.init` refuses options for which a block
 /// calibration may select has none.
 pub fn requestSize(read_chunk_size: usize, block_size: usize, alignment: usize) ?usize {
     if (block_size == 0 or block_size % @max(alignment, 1) != 0) return null;
@@ -47,9 +47,9 @@ pub fn readAlignment(io: std.Io, direct_io: VFS.DirectIo) usize {
     return VFS.direct_io_alignment;
 }
 
-/// `zml.io.next.Loader.Options` as `zml.io.next.Loader.init` checked them,
-/// the checkpoint resolved to its VFS backend's read hints and the read
-/// width to its default. See `zml.io.next.Loader.Options` for each field.
+/// `zml.io.Loader.Options` as `zml.io.Loader.init` checked them, the
+/// checkpoint resolved to its VFS backend's read hints and the read width to
+/// its default. See `zml.io.Loader.Options` for each field.
 pub const Options = struct {
     read_parallelism: usize,
     read_hints: VFS.ReadHints = .local,

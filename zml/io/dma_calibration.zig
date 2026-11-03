@@ -1,6 +1,6 @@
 //! DMA sizing for the direct backend: the block size, decided once when the
 //! backend is created. It screens `default_block_sizes` (2 to 32 MiB), or
-//! the one block `zml.io.next.Loader.Options.dma_block_size` gives, on one
+//! the one block `zml.io.Loader.Options.dma_block_size` gives, on one
 //! representative device, at `depth` transfers per device and over fixed
 //! windows, and keeps the smallest block within 8% of the measured peak;
 //! borderline candidates get longer, alternating confirmation windows. The
@@ -99,7 +99,7 @@ pub fn measure(allocator: std.mem.Allocator, io: std.Io, platform: *const Platfo
 }
 
 /// A block is at most the largest source request, the bound
-/// `zml.io.next.Loader.init` puts on its own block sizes, so every
+/// `zml.io.Loader.init` puts on its own block sizes, so every
 /// candidate's ring of `block_parallelism` blocks fits the workspace's
 /// mapped ceiling.
 fn validate(opts: Options) error{InvalidOptions}!void {
@@ -133,7 +133,7 @@ fn validate(opts: Options) error{InvalidOptions}!void {
 /// and returns the block it selects; CPU returns the smallest without
 /// measuring. On a platform mixing device kinds, device 0's block serves
 /// every device: it is a tuning choice, valid for all of them. `opts` were
-/// checked (`validate`, or `zml.io.next.Loader.init` for the loader's block
+/// checked (`validate`, or `zml.io.Loader.init` for the loader's block
 /// sizes). The rate the `dma_bench` line logs is that one device's
 /// synthetic H2D rate, not the platform's nor a prediction of a
 /// checkpoint's load speed.

@@ -1,3 +1,23 @@
+//! Checkpoint loading and virtual filesystem integration. Each file's
+//! header holds its internals:
+//!
+//! - io/loader.zig: options and their checks, the set-up task, starts,
+//!   program compiles and groups, admission, and the one check of every
+//!   binding before the backends see it (`LoadSpec`).
+//! - io/backend.zig: backend selection, the request size rule and the
+//!   `LoadSpec` contract.
+//! - io/TensorStore.zig, io/Source.zig: bindings, views, and the sources
+//!   that describe a tensor's checkpoint bytes.
+//! - io/direct_loader.zig: sizing, per-file planning, FIFO claims, source
+//!   workers, per-device pumps and transfer completion.
+//! - io/ShardGrid.zig: where a destination's logical bytes land.
+//! - io/buffered_loader.zig: whole-tensor staging and positional reads.
+//! - io/dma_calibration.zig: DMA block selection.
+//! - io/host_memory.zig: pinned host arenas and their blocks.
+//! - io/log.zig: log scopes. Loader test support is in `zml.testing`.
+//! - vfs: local and remote files behind one `std.Io`, the remote error
+//!   contract, retries and the rate-limit hold (vfs/request.zig).
+
 const std = @import("std");
 
 const pjrt = @import("pjrt");
@@ -24,32 +44,20 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
 
-/// A preview of the loader that replaces `Loader` and `TensorStore` below:
-/// the new `Loader` (io/loader.zig), its store (io/TensorStore.zig) and
-/// the DMA calibration of its direct backend (io/dma_calibration.zig).
-/// Unstable: their API may still change until they replace the old ones.
-pub const next = struct {
-    pub const Loader = @import("io/loader.zig").Loader;
-    pub const TensorStore = @import("io/TensorStore.zig");
-    pub const dma_calibration = @import("io/dma_calibration.zig");
-};
+pub const Loader = @import("io/loader.zig").Loader;
+pub const TensorStore = @import("io/TensorStore.zig");
 
-// Every file of the new loader under io/, for its tests: `next` exports
-// only some of them.
+pub const dma_calibration = @import("io/dma_calibration.zig");
+
+/// This module under a second name, for code written against it:
+/// `zml.io.next.Loader` is `zml.io.Loader`.
+pub const next = @This();
+
 test {
-    _ = @import("io/ShardGrid.zig");
-    _ = @import("io/Source.zig");
-    _ = @import("io/TensorStore.zig");
-    _ = @import("io/backend.zig");
-    _ = @import("io/buffered_loader.zig");
-    _ = @import("io/direct_loader.zig");
-    _ = @import("io/dma_calibration.zig");
-    _ = @import("io/host_memory.zig");
-    _ = @import("io/loader.zig");
-    _ = @import("io/log.zig");
+    std.testing.refAllDecls(@This());
 }
 
-pub const TensorStore = struct {
+const OldTensorStore = struct {
     pub const Binding = struct {
         tensors: []*safetensors.Tensor,
         transformed: bool,
@@ -76,7 +84,7 @@ pub const TensorStore = struct {
     /// A store over `registry`, which it borrows: the registry must outlive
     /// the store, and may still gain entries, which views then find. Each
     /// tensor the store binds holds a copy of its entry.
-    pub fn init(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, opts: Options) TensorStore {
+    pub fn init(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, opts: Options) OldTensorStore {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
@@ -88,12 +96,12 @@ pub const TensorStore = struct {
         };
     }
 
-    pub fn deinit(self: *TensorStore) void {
+    pub fn deinit(self: *OldTensorStore) void {
         self.id_to_sources.deinit(self.allocator);
         self.arena.deinit();
     }
 
-    fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
+    fn putSourcesNoClobber(self: *OldTensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
         const gop = try self.id_to_sources.getOrPut(self.allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has associated sources", .{id});
@@ -103,12 +111,12 @@ pub const TensorStore = struct {
         gop.value_ptr.* = sources;
     }
 
-    fn getPtrFromKey(self: *const TensorStore, key: []const u8) ?*safetensors.Tensor {
+    fn getPtrFromKey(self: *const OldTensorStore, key: []const u8) ?*safetensors.Tensor {
         const tensor_desc_ptr = self.registry.tensors.getPtr(key) orelse return null;
         return tensor_desc_ptr;
     }
 
-    fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
+    fn dupeSource(self: *OldTensorStore, key: []const u8) ?*safetensors.Tensor {
         const entry = self.getPtrFromKey(key) orelse return null;
 
         const copy = self.arena.allocator().create(safetensors.Tensor) catch @panic("OOM");
@@ -117,32 +125,32 @@ pub const TensorStore = struct {
         return copy;
     }
 
-    fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
+    fn getPtrFromId(self: *const OldTensorStore, id: usize) ?*safetensors.Tensor {
         const sources = self.id_to_sources.get(id) orelse return null;
         stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
         return sources.tensors[0];
     }
 
-    pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
+    pub fn getReader(self: *const OldTensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
         return self.registry.reader(io, key, buffer);
     }
 
-    pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
+    pub fn getReaderById(self: *const OldTensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
         const sources = self.id_to_sources.get(id) orelse return error.NotFound;
         stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
 
         return sources.tensors[0].reader(io, buffer, .{});
     }
 
-    pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
+    pub fn getSourcesById(self: *const OldTensorStore, id: Tensor.Id) ?Binding {
         return self.id_to_sources.get(id);
     }
 
-    pub fn view(self: *TensorStore) View {
+    pub fn view(self: *OldTensorStore) View {
         return .{ .store = self };
     }
 
-    pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) *const Sharding.Mesh {
+    pub fn mesh(store: *const OldTensorStore, name: @EnumLiteral()) *const Sharding.Mesh {
         const name_slice = @tagName(name);
         for (store.meshes) |m| {
             if (std.mem.eql(u8, name_slice, m.name)) {
@@ -157,7 +165,7 @@ pub const TensorStore = struct {
     }
 
     pub const View = struct {
-        store: *TensorStore,
+        store: *OldTensorStore,
 
         prefix_buffer: [256]u8 = undefined,
         prefix_length: usize = 0,
@@ -340,7 +348,7 @@ pub const TensorStore = struct {
     };
 };
 
-pub const Loader = struct {
+const OldLoader = struct {
     allocator: std.mem.Allocator,
     platform: *const Platform,
     dma_allocators: []const mem.DmaAllocator,
@@ -361,7 +369,7 @@ pub const Loader = struct {
         dma_chunk_size: usize,
     };
 
-    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) error{OutOfMemory}!Loader {
+    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) error{OutOfMemory}!OldLoader {
         const pool_count = platform.devices.len;
         const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
         errdefer allocator.free(dma_allocators);
@@ -388,14 +396,14 @@ pub const Loader = struct {
         };
     }
 
-    pub fn deinit(self: *Loader) void {
+    pub fn deinit(self: *OldLoader) void {
         self.delivered.deinit(self.allocator);
         for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
         self.allocator.free(self.pinned_buffer_pools);
         self.allocator.free(self.dma_allocators);
     }
 
-    pub fn await(self: *Loader, io: std.Io) std.Io.Cancelable!void {
+    pub fn await(self: *OldLoader, io: std.Io) std.Io.Cancelable!void {
         return self.group.await(io);
     }
 
@@ -405,7 +413,7 @@ pub const Loader = struct {
 
     pub const LoadError = error{TransformedTensorNotDelivered};
 
-    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, opts: LoadOpts) LoadError!void {
+    pub fn load(self: *OldLoader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const OldTensorStore, opts: LoadOpts) LoadError!void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -464,11 +472,11 @@ pub const Loader = struct {
         log.err("Transformed tensor {} {f} was not delivered by loadExecute before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
     }
 
-    pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: *const Tensor, store: *const TensorStore, opts: LoadOpts) void {
+    pub fn loadBuffer(loader: *OldLoader, io: std.Io, buffer: *Buffer, tensor: *const Tensor, store: *const OldTensorStore, opts: LoadOpts) void {
         loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts });
     }
 
-    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts) void {
+    fn defaultCallback(self: *OldLoader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const OldTensorStore, opts: LoadOpts) void {
         const sources = store.getSourcesById(tensor.id) orelse {
             std.log.debug("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
@@ -481,7 +489,7 @@ pub const Loader = struct {
         };
     }
 
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, opts: LoadOpts) void {
+    fn loadSingle(self: *OldLoader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, opts: LoadOpts) void {
         self.loadSingleInner(io, source, shape, buffer, .device, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
@@ -491,7 +499,7 @@ pub const Loader = struct {
     }
 
     fn loadSingleInner(
-        self: *Loader,
+        self: *OldLoader,
         io: std.Io,
         source: *safetensors.Tensor,
         shape: Shape,
@@ -534,12 +542,12 @@ pub const Loader = struct {
     }
 
     pub fn loadExecute(
-        self: *Loader,
+        self: *OldLoader,
         arena: std.mem.Allocator,
         io: std.Io,
         tensor: Tensor,
         buffer: *Buffer,
-        store: *const TensorStore,
+        store: *const OldTensorStore,
         exe: *const Exe,
         opts: LoadOpts,
     ) error{ NotFound, OutOfMemory, LoadFailed, Canceled }!void {
@@ -593,7 +601,7 @@ test "View.get finds exact keys in the registry the store borrows" {
     try @import("testing.zig").writeSafetensors(allocator, io, tmp.dir, "layer.safetensors", &registry, &.{
         .{ .name = "layer.experts.0.down_proj.weight", .dtype = "U8", .dims = &.{4}, .bytes = &.{ 1, 2, 3, 4 } },
     });
-    var store: TensorStore = .init(allocator, &registry, .{ .quantization = .{ .fp8 = .f8e4m3fnuz } });
+    var store: OldTensorStore = .init(allocator, &registry, .{ .quantization = .{ .fp8 = .f8e4m3fnuz } });
     defer store.deinit();
 
     const layer = store.view().withPrefix("layer");
@@ -631,9 +639,9 @@ test "Loader.loadExecute cleans up donated and non-donated inputs" {
     defer registry.deinit();
     try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
     try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
-    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{platform.replicated_mesh} });
+    var store: OldTensorStore = .init(allocator, &registry, .{ .meshes = &.{platform.replicated_mesh} });
     defer store.deinit();
-    var loader = try Loader.init(allocator, platform, .{ .parallelism = 2, .dma_chunks = 2, .dma_chunk_size = 4096 });
+    var loader = try OldLoader.init(allocator, platform, .{ .parallelism = 2, .dma_chunks = 2, .dma_chunk_size = 4096 });
     defer loader.deinit();
 
     inline for (.{ false, true }) |donate| {

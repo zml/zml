@@ -215,9 +215,9 @@ pub const Loader = struct {
         }
         var workspace: host_memory.Workspace = try .init(allocator, io, platform, predicted.direct());
         errdefer workspace.deinit();
-        // At debug when canceled (`zml.io.next.Loader.deinit` cancels a
-        // set-up no `start` waited for) or out of memory (the workspace logs
-        // what it fails to map or pin).
+        // At debug when canceled (`zml.io.Loader.deinit` cancels a set-up
+        // no `start` waited for) or out of memory (the workspace logs what
+        // it fails to map or pin).
         const block_size = dma_calibration.calibrate(&workspace, platform, .{ .block_sizes = opts.dmaBlockSizes() }) catch |err| {
             load_log.failure(err, "calibrate DMA: target={t}", .{platform.target});
             return err;
