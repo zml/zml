@@ -250,18 +250,41 @@ fn getFileHandle(self: *VFS, file: std.Io.File) struct { *Handle, std.Io } {
 
 /// Direct reads for a local file under `policy`: sets the flag on a
 /// read-only descriptor of a regular file at least one alignment unit long
-/// and returns true, after which every read of the file must meet
-/// `direct_io_alignment` in offset, buffers and total. False leaves the file
-/// buffered: another backend's file, `off`, a filesystem that refuses the
+/// (and, under `auto`, mostly out of the page cache) and returns true, after
+/// which every read of the file must meet `direct_io_alignment` in offset,
+/// buffers and total. False leaves the file buffered: another backend's
+/// file, `off`, a cached file under `auto`, a filesystem that refuses the
 /// flag, or a file whose direct read the kernel already rejected. The first
-/// call under `on` decides for the handle's life (`direct_io.Mode`); the
-/// caller must ask before it reads. The mechanism lives in the VFS because
-/// it owns the descriptor; one descriptor suffices because a reader reads a
-/// file in one mode.
+/// call under `on` or `auto` decides for the handle's life
+/// (`direct_io.Mode`); the caller must ask before it reads. The mechanism
+/// lives in the VFS because it owns the descriptor; one descriptor suffices
+/// because a reader reads a file in one mode.
 pub fn useDirectIo(self: *VFS, file: std.Io.File, policy: DirectIo) bool {
     const handle, _ = self.getFileHandle(file);
     if (handle.backend_idx != null) return false;
     return handle.direct.decide(self.base.inner, handle.innerFile(), policy);
+}
+
+/// See `predictDirectIo`.
+pub const DirectIoPrediction = direct_io.Prediction;
+
+/// What `useDirectIo` would answer under `policy` for the local file
+/// `sub_path` of `dir`, and its size, asked on a descriptor of its own that
+/// is closed again: no handle is decided and nothing is logged. For a reader
+/// that places memory before it plans its files. Under `auto` this sample
+/// caches what it misses, so a decision that follows may find any file
+/// cached and read it buffered, the likelier the fewer pages it has per
+/// sample (`direct_io.predict`). Null for a path that is not local, or a
+/// file that does not open or stat.
+pub fn predictDirectIo(self: *VFS, dir: std.Io.Dir, sub_path: []const u8, policy: DirectIo) error{Canceled}!?DirectIoPrediction {
+    const backend_idx, const inner_dir, const inner = self.lookupDir(dir, sub_path) catch return null;
+    if (backend_idx != null) return null;
+    const file = inner_dir.openFile(inner, stripScheme(sub_path), .{ .mode = .read_only }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    defer file.close(inner);
+    return direct_io.predict(inner, file, policy);
 }
 
 /// A local file as the inner `Io` may read it, off direct reads
@@ -746,11 +769,12 @@ test "VFS reads the same bytes under every direct I/O policy" {
     const buffer = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(alignment), 2 * alignment);
     defer std.testing.allocator.free(buffer);
     const plain: []u8 = buffer;
-    for ([_]DirectIo{ .on, .off }) |policy| {
+    for ([_]DirectIo{ .on, .auto, .off }) |policy| {
         const file = try std.Io.Dir.openFile(.cwd(), vfs_io, path, .{ .mode = .read_only });
         defer file.close(vfs_io);
         // Direct when the policy and the filesystem allow it, buffered
-        // otherwise (`off`). The bytes are the same either way.
+        // otherwise: `off`, or under `auto` a file just written and thus
+        // cached. The bytes are the same either way.
         const direct = filesystem.useDirectIo(file, policy);
         if (policy != .on) try std.testing.expect(!direct);
         // The decision stands; `off` neither asks nor changes it.
@@ -793,6 +817,118 @@ test "VFS reads the same bytes under every direct I/O policy" {
     try std.testing.expect(!filesystem.useDirectIo(writable, .on));
     const writable_handle, _ = filesystem.getFileHandle(writable);
     if (comptime direct_io.supported) try std.testing.expectEqual(std.os.linux.E.BADF, direct_io.enable(writable_handle.innerFile().handle));
+}
+
+test "predictDirectIo answers as useDirectIo would and decides no handle" {
+    if (comptime !direct_io.supported) return error.SkipZigTest;
+    const testing_io = std.testing.io;
+    const alignment = 4096;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const contents: [3 * alignment + 100]u8 = @splat(0x5a);
+    try tmp.dir.writeFile(testing_io, .{ .sub_path = "data.bin", .data = &contents });
+    try tmp.dir.writeFile(testing_io, .{ .sub_path = "short.bin", .data = contents[0..100] });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(testing_io, &root_buffer)];
+
+    var filesystem = try VFS.init(std.testing.allocator, testing_io);
+    defer filesystem.deinit();
+    // Another backend's scheme, served here by the plain io: its paths open,
+    // but they are not local.
+    try filesystem.registerBackend("remote", .{ .io = testing_io });
+    const vfs_io = filesystem.io();
+    const dir = try std.Io.Dir.openDir(.cwd(), vfs_io, root, .{});
+    defer dir.close(vfs_io);
+    var path_buffer: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/data.bin", .{root});
+
+    for ([_]DirectIo{ .on, .auto, .off }) |policy| {
+        // No handle is opened or decided to answer.
+        const handles = filesystem.handles.len;
+        const closed_handles = filesystem.closed_handles.items.len;
+        const predicted = (try filesystem.predictDirectIo(.cwd(), path, policy)).?;
+        try std.testing.expectEqual(@as(u64, contents.len), predicted.size);
+        try std.testing.expectEqual(predicted, (try filesystem.predictDirectIo(dir, "data.bin", policy)).?);
+        try std.testing.expectEqual(handles, filesystem.handles.len);
+        try std.testing.expectEqual(closed_handles, filesystem.closed_handles.items.len);
+
+        // A fresh handle decides as predicted: direct only under `on`, where
+        // the filesystem allows it, since the file was just written and so
+        // is cached.
+        const file = try std.Io.Dir.openFile(.cwd(), vfs_io, path, .{ .mode = .read_only });
+        defer file.close(vfs_io);
+        try std.testing.expectEqual(predicted.direct, filesystem.useDirectIo(file, policy));
+        if (policy != .on) try std.testing.expect(!predicted.direct);
+    }
+
+    // A file shorter than a unit is never direct.
+    const short = (try filesystem.predictDirectIo(dir, "short.bin", .on)).?;
+    try std.testing.expectEqual(DirectIoPrediction{ .size = 100, .direct = false }, short);
+    // Nothing to answer for a remote path, though its backend opens the same
+    // file, or for a missing file.
+    var remote_buffer: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const remote = try std.fmt.bufPrint(&remote_buffer, "remote://{s}/data.bin", .{root});
+    try std.testing.expectEqual(null, try filesystem.predictDirectIo(.cwd(), remote, .on));
+    try std.testing.expectEqual(null, try filesystem.predictDirectIo(dir, "missing.bin", .on));
+}
+
+test "auto keeps reading a cold file direct after probing it" {
+    if (comptime !direct_io.supported) return error.SkipZigTest;
+    const testing_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // One 2 MiB window per sample (`direct_io.residency_samples`): many
+    // pages each, on 64 KiB-page kernels too.
+    const window = 2 << 20;
+    const contents = try std.testing.allocator.alloc(u8, direct_io.residency_samples * window);
+    defer std.testing.allocator.free(contents);
+    @memset(contents, 0x5a);
+    const created = try tmp.dir.createFile(testing_io, "cold.bin", .{ .read = true });
+    try created.writePositionalAll(testing_io, contents, 0);
+    try created.sync(testing_io);
+    _ = std.os.linux.fadvise(created.handle, 0, 0, std.os.linux.POSIX_FADV.DONTNEED);
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buffer[0..try created.realPath(testing_io, &path_buffer)];
+    created.close(testing_io);
+
+    // The testing io, but the probes draw shifts a quarter window apart,
+    // 512 KiB from each other's samples. At random shifts a probe may sample
+    // the pages an earlier one's misses read, and find the file cached
+    // (`direct_io.predict`): about once in window / page pairs of probes.
+    const Shifts = struct {
+        var drawn: u64 = 0;
+
+        fn random(_: ?*anyopaque, buffer: []u8) void {
+            std.mem.writeInt(u64, buffer[0..8], window / 8 + drawn * window / 4, .native);
+            drawn += 1;
+        }
+    };
+    Shifts.drawn = 0;
+    var vtable = testing_io.vtable.*;
+    vtable.random = Shifts.random;
+    const shifting_io: std.Io = .{ .userdata = testing_io.userdata, .vtable = &vtable };
+
+    var filesystem = try VFS.init(std.testing.allocator, shifting_io);
+    defer filesystem.deinit();
+    const vfs_io = filesystem.io();
+    for (0..2) |open| {
+        // Predicted first, as a reader placing memory before it plans.
+        const predicted = (try filesystem.predictDirectIo(.cwd(), path, .auto)).?;
+        const file = try std.Io.Dir.openFile(.cwd(), vfs_io, path, .{ .mode = .read_only });
+        defer file.close(vfs_io);
+        const direct = filesystem.useDirectIo(file, .auto);
+        // A filesystem that kept the file cached (tmpfs) or refused direct
+        // reads says nothing here.
+        if (open == 0 and !direct) return error.SkipZigTest;
+        try std.testing.expect(predicted.direct);
+        // The first probes' misses queued reads of the pages they sampled;
+        // once they landed, sampling the same pages would find the file
+        // cached.
+        if (open == 0) try testing_io.sleep(.fromMilliseconds(250), .awake);
+        try std.testing.expect(direct);
+    }
+    // Each probe drew a shift of its own.
+    try std.testing.expectEqual(@as(u64, 4), Shifts.drawn);
 }
 
 test "standard streams resolve to their own descriptors" {

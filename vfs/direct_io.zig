@@ -27,9 +27,15 @@ pub const supported = builtin.target.os.tag == .linux and @hasField(std.posix.O,
 /// after which the VFS demotes the handle to buffered.
 pub const alignment: usize = 4 * 1024;
 
+/// `Policy.auto` reads a file directly when at most this fraction of its
+/// sampled pages is cached.
+const cold_fraction: f64 = 0.5;
+
 /// Whether a local file is read past the page cache. A direct read comes
 /// from the disk even when the cache holds the data; it also leaves the cache
-/// as it found it, so a file read directly is still cold for the next load.
+/// as it found it, so a file read directly is still cold for the next load
+/// (the `auto` probe caches what it samples, elsewhere on every probe:
+/// `cachedFraction`).
 /// Raw warm-cache reads exceeded disk throughput in the measured setups,
 /// but the loader can still favor direct reads: page-cache copies compete
 /// with DMA for host memory bandwidth. Conversely, repeated loads from a
@@ -39,6 +45,12 @@ pub const Policy = enum {
     off,
     /// Every file the filesystem allows.
     on,
+    /// A file mostly out of the page cache when asked, buffered for a cached
+    /// one. Residency is sampled: `residency_samples` pages spread over the
+    /// file, read with `RWF_NOWAIT`, which answers `EAGAIN` for a page that
+    /// is not cached, needs no permission on the file and costs the same
+    /// whatever its size. Unknown counts as cached.
+    auto,
 };
 
 /// A local handle's read mode: undecided until a reader asks for direct
@@ -66,7 +78,19 @@ pub const Mode = struct {
             .undecided => {},
         }
         const stat = file.stat(io) catch return self.settle(io, file, false);
-        if (stat.kind != .file or stat.size < alignment) return self.settle(io, file, false);
+        if (!fits(stat)) return self.settle(io, file, false);
+        if (policy == .auto) {
+            const name: Name = .{ .io = io, .file = file };
+            const cached = sampleResidency(io, file, stat.size) orelse {
+                log.debug("{f}: page cache residency unknown; reading buffered", .{name});
+                return self.settle(io, file, false);
+            };
+            if (cached > cold_fraction) {
+                log.debug("{f}: {d:.0}% cached; reading buffered", .{ name, cached * 100 });
+                return self.settle(io, file, false);
+            }
+            log.debug("{f}: {d:.0}% cached", .{ name, cached * 100 });
+        }
         return self.settle(io, file, true);
     }
 
@@ -139,6 +163,39 @@ pub const Mode = struct {
         return true;
     }
 };
+
+/// A file's size, and whether `Mode.decide` would read it direct
+/// (`predict`).
+pub const Prediction = struct { size: u64, direct: bool };
+
+/// `Mode.decide`'s answer for `file` under `policy`, deciding and logging
+/// nothing: the same rule, then the flag set on `file` and left set, so
+/// `file` must be a read-only descriptor of the caller's own, which the
+/// caller closes. Under `auto` the sample caches what it misses, as
+/// `decide`'s does: a missed sample queues the read of its page and of the
+/// kernel's readahead. A decision that follows and samples those pages
+/// once the reads have landed finds the file cached and reads it buffered,
+/// which may happen to any file, the likelier the fewer pages it has per
+/// sample (`cachedFraction`). Null when `file` cannot be stat-ed.
+pub fn predict(io: std.Io, file: std.Io.File, policy: Policy) error{Canceled}!?Prediction {
+    if (comptime !supported) return null;
+    const stat = file.stat(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    const direct = fits(stat) and switch (policy) {
+        .off => false,
+        .on => true,
+        .auto => if (sampleResidency(io, file, stat.size)) |cached| cached <= cold_fraction else false,
+    };
+    return .{ .size = stat.size, .direct = direct and enable(file.handle) == .SUCCESS };
+}
+
+/// A regular file at least one unit long: the only kind read direct
+/// (`Mode.decide`, `predict`).
+fn fits(stat: std.Io.File.Stat) bool {
+    return stat.kind == .file and stat.size >= alignment;
+}
 
 /// A local file's path in a log line, resolved only when the line is
 /// written.
@@ -226,6 +283,48 @@ fn setStatusFlags(fd: std.posix.fd_t, flags: usize) linux.E {
             else => |err| return err,
         }
     }
+}
+
+/// A fixed count bounds the probe's cost whatever the checkpoint's size and
+/// suffices for the coarse half-cached decision. A whole-file `cachestat`
+/// walks every cached folio, about 7 ms per cached GiB on a 4 KiB-page
+/// kernel, paid on the planner thread, and refuses a file the process can
+/// read but not write.
+pub const residency_samples = 32;
+
+/// The fraction of `residency_samples` pages spread over the file that the
+/// page cache holds, or null when the filesystem cannot say (no
+/// `RWF_NOWAIT`). One sample per window of the file, each `shift` bytes
+/// into its window (`shift` modulo the window), unknown residency selecting
+/// buffered IO. A sample that misses queues the read of its page, which a
+/// direct file never reads back: with the same offsets the next probe would
+/// find every sample cached and read a cold file buffered, so callers draw a
+/// new `shift` for every probe. A file of at most `residency_samples` pages
+/// has every page sampled whatever the shift, so its first probe caches it.
+/// The header page a parser has just read is sampled only when `shift`
+/// lands in it, not systematically.
+fn cachedFraction(fd: std.posix.fd_t, size: u64, shift: u64) ?f64 {
+    var buffer: [512]u8 = undefined;
+    const iovec: std.posix.iovec = .{ .base = &buffer, .len = buffer.len };
+    var cached: usize = 0;
+    const window = size / residency_samples;
+    for (0..residency_samples) |sample| {
+        const offset = window * sample + shift % @max(window, 1);
+        const rc = linux.preadv2(fd, @ptrCast(&iovec), 1, @intCast(offset), linux.RWF.NOWAIT);
+        switch (linux.errno(rc)) {
+            .SUCCESS => cached += @intFromBool(rc != 0),
+            .AGAIN => {},
+            else => return null,
+        }
+    }
+    return @as(f64, @floatFromInt(cached)) / @as(f64, @floatFromInt(residency_samples));
+}
+
+/// `cachedFraction` at a fresh shift, as every probe draws one.
+fn sampleResidency(io: std.Io, file: std.Io.File, size: u64) ?f64 {
+    var shift: u64 = undefined;
+    io.random(std.mem.asBytes(&shift));
+    return cachedFraction(file.handle, size, shift);
 }
 
 const ReadResult = union(enum) {
