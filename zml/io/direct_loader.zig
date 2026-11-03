@@ -16,6 +16,14 @@ const host_memory = @import("host_memory.zig");
 /// of the tensor.
 const StateInitError = std.mem.Allocator.Error || pjrt.ApiError;
 
+/// Bounds per-device event overhead for tiny tensors. This is not a measured
+/// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
+/// byte budget.
+const max_dma_pieces_per_device: usize = 64;
+
+/// Each device's in-flight DMA budget, in blocks (`Dma.DevicePump.hasRoom`).
+const dma_depth: usize = 8;
+
 /// One submission: its plans (one per source file, published as each file
 /// is planned), the destinations it writes and their parts, and every
 /// request and event context created while loading it, all in the batch's
@@ -71,7 +79,9 @@ pub const Batch = struct {
         if (previous == count) self.done.set(self.io);
     }
 
-    /// Frees the arena: the plans, the destinations and the parts.
+    /// Frees the arena: the plans with their contexts, which
+    /// `Dma.retireBatch` must already have retired, the destinations and
+    /// the parts.
     fn destroy(self: *Batch) void {
         const allocator = self.arena.child_allocator;
         self.arena.deinit();
@@ -762,6 +772,346 @@ fn readFilePositionalAllV(
     return completed;
 }
 
+/// The bytes from offset `at` of `blocks` taken end to end, `block_size`
+/// bytes each, up to `len` of them or the end of that block.
+fn blockPiece(blocks: []const host_memory.Block, block_size: usize, at: usize, len: usize) []u8 {
+    const in_block = at % block_size;
+    return blocks[at / block_size][in_block..][0..@min(len, block_size - in_block)];
+}
+
+/// The DMA stage, over the loader's pumps (`Loader.pumps`): workers queue a
+/// request's transfers per device, a pump submits them under the device's
+/// in-flight budget, and their callbacks release the request.
+const Dma = struct {
+    /// One DMA piece: `data`, in its request's slot, for `target` at
+    /// `destination_offset`. The piece holds one of its request's
+    /// references until its callback. Replicas share their source bytes:
+    /// copying them to another CPU socket first was rejected on MI300X,
+    /// where raw local and remote H2D both reached ~49-50 GiB/s per GPU
+    /// while one CPU thread copied across sockets at 5-10 GiB/s.
+    const Piece = struct {
+        target: *DestinationState.Target,
+        request: *ReadRequest,
+        data: []const u8,
+        destination_offset: usize,
+    };
+
+    /// Pieces ready for one device, submitted in arrival order so the
+    /// oldest requests and submissions complete first. Owned by the
+    /// device's `DevicePump.mutex`.
+    const ReadyQueue = std.Deque(Piece);
+
+    /// One device's submission state. Its pump runs on whichever thread
+    /// finds work -- a worker after enqueueing, a ready callback after a
+    /// completion -- one at a time per device (`pumping`), and shares
+    /// nothing with the other devices' pumps. Per-device pumps load
+    /// replicated DeepSeek on four GB300 in 4.68 s, against 5.41 s with one
+    /// pump for every device, at unchanged pinned high-water. A dedicated
+    /// task per device took 5.0-5.4 s with a wake per completion (a futex
+    /// round trip per piece), or 4.4-5.1 s with half-budget wake hysteresis.
+    const DevicePump = struct {
+        mutex: std.Io.Mutex = .init,
+        queue: ReadyQueue = .empty,
+        /// In-flight DMA bytes and submissions; owned by `mutex`.
+        active_bytes: usize = 0,
+        active_pieces: usize = 0,
+        /// True while one thread runs this device's pump; owned by `mutex`.
+        /// One submitter per device is a correctness requirement:
+        /// `Target.nextIsLast` flags a tensor's last piece in submission
+        /// order.
+        pumping: bool = false,
+        /// Contexts whose callback fired, for the next pump or a batch's
+        /// retirement to destroy, never the event's own callback: an
+        /// intrusive stack through `EventContext.next_retired`, owned by
+        /// `mutex`. Destroying an event from the next pump instead of at its
+        /// batch's retirement bounds live PJRT events by the DMA width plus
+        /// one pump batch rather than by a submission's transfer count;
+        /// every shipped plugin accepted destruction outside the event's own
+        /// callback (16,384 fired events on two B70, CUDA and ROCm alike).
+        retired: ?*EventContext = null,
+
+        /// Whether the next queued piece may go. The budget is in bytes,
+        /// not submissions: `dma_depth` blocks, and a piece is one tensor's
+        /// slice of a block, so a model of small tensors needs many more
+        /// pieces in flight to keep the same bytes moving: eight average
+        /// DeepSeek pieces occupy only ~18 MiB against the 128 MiB budget of
+        /// 16 MiB blocks. The piece that crosses the budget is admitted: a
+        /// device with room always has a piece in flight.
+        fn hasRoom(self: *const DevicePump, budget_bytes: usize) bool {
+            return self.active_bytes < budget_bytes and self.active_pieces < max_dma_pieces_per_device;
+        }
+
+        /// `mutex`. Destroys every retired event.
+        fn destroyRetired(self: *DevicePump) void {
+            while (self.retired) |ctx| {
+                self.retired = ctx.next_retired;
+                ctx.next_retired = null;
+                ctx.destroyEvent();
+            }
+        }
+    };
+
+    const EventContext = struct {
+        request: *ReadRequest,
+        /// Null once destroyed: by a pump or a batch's retirement after its
+        /// callback ran, or at once by a failed `onReady`.
+        pjrt_event: ?*pjrt.Event,
+        device_index: usize,
+        /// Bytes this submission holds against the device's in-flight budget.
+        len: usize,
+        /// Link of the device pump's `retired`; owned by that pump's mutex.
+        next_retired: ?*EventContext = null,
+
+        /// Pump mutex, unless no callback was registered. Destroys the
+        /// event, once. The platform is reached through the request, and
+        /// only when there is something to destroy: a context whose event
+        /// is null never touches it.
+        fn destroyEvent(self: *EventContext) void {
+            if (self.pjrt_event) |event| event.deinit(self.request.loader.platform.pjrt_api);
+            self.pjrt_event = null;
+        }
+    };
+
+    fn lockAllPumps(loader: *Loader) void {
+        for (loader.pumps) |*device_pump| device_pump.mutex.lockUncancelable(loader.io);
+    }
+
+    fn unlockAllPumps(loader: *Loader) void {
+        var index = loader.pumps.len;
+        while (index > 0) {
+            index -= 1;
+            loader.pumps[index].mutex.unlock(loader.io);
+        }
+    }
+
+    /// Retires the contexts of a done batch from the awaiting task, after
+    /// their callbacks fired, exactly as `pjrt.Event.await` does: drains
+    /// every pump's `retired`, whichever batch its contexts belong to, and
+    /// checks that every request completed. Runs with every pump locked so
+    /// an `abortReady` still iterating queued entries or a pump draining its
+    /// `retired` cannot race the free that follows.
+    fn retireBatch(loader: *Loader, batch: *Batch) void {
+        std.debug.assert(batch.done.isSet());
+        lockAllPumps(loader);
+        defer unlockAllPumps(loader);
+        for (loader.pumps) |*device_pump| device_pump.destroyRetired();
+        for (batch.plans.items) |plan| {
+            for (plan.requests) |*request| std.debug.assert(request.pending.load(.acquire) == 0);
+        }
+    }
+
+    /// Hands a context whose callback fired to its device's next pump. Under
+    /// that pump's mutex, so the batch's retirement sees it before the batch
+    /// is freed.
+    fn retireEvent(loader: *Loader, ctx: *EventContext) void {
+        const device_pump = &loader.pumps[ctx.device_index];
+        device_pump.mutex.lockUncancelable(loader.io);
+        ctx.next_retired = device_pump.retired;
+        device_pump.retired = ctx;
+        device_pump.mutex.unlock(loader.io);
+    }
+
+    /// Queues every piece of the request's job before pumping: queuing piece
+    /// by piece costs roughly 69k-79k mutex and pump trips per DeepSeek load,
+    /// which coalesced reads alone do not remove. A transfer reads `len`
+    /// bytes from its `landing` of `blocks` taken end to end, inside one
+    /// block, once for each of its writers: the devices the planner planned
+    /// for (both come from the sharding's canonical device order).
+    fn enqueue(request: *ReadRequest, blocks: []const host_memory.Block) !void {
+        const loader = request.loader;
+        const block_size = loader.plan_config.block_size;
+        const transfers = request.plan.transfersOf(request.plan.jobs[request.index]);
+        var counts: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
+        var pieces: usize = 0;
+        for (transfers) |transfer| {
+            const tensor = transfer.destination.state.readyValue().?;
+            pieces += @popCount(transfer.writer_mask);
+            var mask = transfer.writer_mask;
+            while (mask != 0) {
+                const writer_index: usize = @intCast(@ctz(mask));
+                mask &= mask - 1;
+                counts[tensor.targets[writer_index].device_index] += 1;
+            }
+        }
+        // Every pump is held while the request's pieces land, and every
+        // queue is reserved before any changes, so the request is either
+        // fully queued or not queued at all.
+        lockAllPumps(loader);
+        {
+            errdefer unlockAllPumps(loader);
+            // A failure recorded before these locks may have drained the
+            // queues already (`abortReady`), and nothing would complete what
+            // this queued; one recorded after them drains it.
+            if (loader.first_error.get()) |err| return err;
+            for (loader.pumps, counts[0..loader.pumps.len]) |*device_pump, count| {
+                try device_pump.queue.ensureUnusedCapacity(loader.allocator, count);
+            }
+        }
+        // Every piece holds the request, and with it the slot, until its
+        // callback.
+        _ = request.pending.fetchAdd(pieces, .acq_rel);
+        for (transfers) |transfer| {
+            // The planner cut the transfers to the job's blocks.
+            const data = blockPiece(blocks, block_size, transfer.landing, transfer.len);
+            std.debug.assert(data.len == transfer.len);
+            const tensor = transfer.destination.state.readyValue().?;
+            var mask = transfer.writer_mask;
+            while (mask != 0) {
+                const writer_index: usize = @intCast(@ctz(mask));
+                mask &= mask - 1;
+                const target = &tensor.targets[writer_index];
+                loader.pumps[target.device_index].queue.pushBackAssumeCapacity(.{
+                    .target = target,
+                    .request = request,
+                    .data = data,
+                    .destination_offset = transfer.destination_offset,
+                });
+            }
+        }
+        unlockAllPumps(loader);
+        for (counts[0..loader.pumps.len], 0..) |count, device_index| {
+            if (count != 0) requestPump(loader, device_index);
+        }
+    }
+
+    /// Runs the device's pump on this thread unless one is already running.
+    fn requestPump(loader: *Loader, device_index: usize) void {
+        const device_pump = &loader.pumps[device_index];
+        device_pump.mutex.lockUncancelable(loader.io);
+        if (device_pump.pumping or loader.first_error.get() != null) {
+            device_pump.mutex.unlock(loader.io);
+            return;
+        }
+        device_pump.pumping = true;
+        device_pump.mutex.unlock(loader.io);
+        pump(loader, device_index);
+    }
+
+    /// Submits from the device's queue, in arrival order, until the device
+    /// has no room or nothing is queued. Any queued piece can go: nothing
+    /// waits for another piece. Exactly one pump runs per device at a time,
+    /// see `DevicePump.pumping`.
+    fn pump(loader: *Loader, device_index: usize) void {
+        const device_pump = &loader.pumps[device_index];
+        while (true) {
+            var selected: ?Piece = null;
+            device_pump.mutex.lockUncancelable(loader.io);
+            device_pump.destroyRetired();
+            if (loader.first_error.get() == null and device_pump.hasRoom(loader.dma_budget_bytes)) {
+                if (device_pump.queue.popFront()) |piece| {
+                    device_pump.active_bytes += piece.data.len;
+                    device_pump.active_pieces += 1;
+                    selected = piece;
+                }
+            }
+            if (selected == null) device_pump.pumping = false;
+            device_pump.mutex.unlock(loader.io);
+            if (selected) |piece| submitOne(loader, piece) else return;
+        }
+    }
+
+    fn submitOne(loader: *Loader, piece: Piece) void {
+        const device_index = piece.target.device_index;
+        const len = piece.data.len;
+        submitTransfer(loader, piece) catch |err| {
+            loader.recordError(err, "submit DMA transfer: device={d}, destination_offset={d}, bytes={d}", .{ device_index, piece.destination_offset, len });
+            finishPiece(loader, device_index, len, null, piece.request);
+        };
+    }
+
+    fn submitTransfer(loader: *Loader, piece: Piece) !void {
+        const api = loader.platform.pjrt_api;
+        const target = piece.target;
+        const is_last = target.nextIsLast(piece.data.len);
+        const event = try target.manager.transferData(
+            api,
+            0,
+            piece.data,
+            @intCast(piece.destination_offset),
+            is_last,
+        );
+        target.noteSubmitted(piece.data.len);
+
+        // The plan holds one event slot per planned submission; the batch
+        // owns it.
+        const plan = piece.request.plan;
+        const event_index = plan.events_used.fetchAdd(1, .monotonic);
+        std.debug.assert(event_index < plan.events.len);
+        const ctx = &plan.events[event_index];
+        ctx.* = .{
+            .request = piece.request,
+            .pjrt_event = event,
+            .device_index = target.device_index,
+            .len = piece.data.len,
+        };
+
+        event.onReady(api, EventContext, struct {
+            fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
+                const request = ctx_.request;
+                const loader_ = request.loader;
+                const api_ = loader_.platform.pjrt_api;
+                const device_index = ctx_.device_index;
+                const len = ctx_.len;
+                // The shipped plugins resolve this event without an error
+                // whatever happened to the copy (the C API wrapper sets the
+                // promise with an OK status); kept for a plugin that reports.
+                // The callback owns the error.
+                if (err) |pjrt_error| {
+                    loader_.recordError(pjrt_error.getCode(api_).toApiError(), "complete DMA transfer: device={d}, bytes={d}, message={s}", .{ device_index, len, pjrt_error.getMessage(api_) });
+                    pjrt_error.deinit(api_);
+                }
+                finishPiece(loader_, device_index, len, ctx_, request);
+            }
+        }.call, ctx) catch |err| {
+            event.awaitRaw(api) catch {};
+            ctx.destroyEvent();
+            return err;
+        };
+    }
+
+    /// Ends a submitted piece: frees its room, which may pump on this thread;
+    /// then retires a fired context, after that pump, so its event is never
+    /// destroyed inside its own callback; then releases the request last,
+    /// since that release may complete and free the batch.
+    fn finishPiece(loader: *Loader, device_index: usize, len: usize, fired: ?*EventContext, request: *ReadRequest) void {
+        eventCompleted(loader, device_index, len);
+        if (fired) |ctx| retireEvent(loader, ctx);
+        request.release();
+    }
+
+    fn eventCompleted(loader: *Loader, device_index: usize, len: usize) void {
+        const device_pump = &loader.pumps[device_index];
+        device_pump.mutex.lockUncancelable(loader.io);
+        std.debug.assert(device_pump.active_bytes >= len);
+        std.debug.assert(device_pump.active_pieces > 0);
+        device_pump.active_bytes -= len;
+        device_pump.active_pieces -= 1;
+        device_pump.mutex.unlock(loader.io);
+        // A ready callback can be the first place an asynchronous PJRT error
+        // becomes visible. Once outside the pump lock, retire every queued
+        // piece so request lifecycles cannot wait forever on entries that
+        // the failed pumps will no longer submit.
+        if (loader.first_error.get() != null)
+            abortReady(loader)
+        else
+            requestPump(loader, device_index);
+    }
+
+    /// Force-completes every queued piece, one device at a time. A
+    /// completion here may finish its batch, but a batch still has an entry
+    /// queued until its last one is popped, and it is retired with every
+    /// pump locked, so no queued entry is touched after its request ends.
+    fn abortReady(loader: *Loader) void {
+        for (loader.pumps) |*device_pump| {
+            device_pump.mutex.lockUncancelable(loader.io);
+            while (device_pump.queue.popFront()) |piece| {
+                piece.request.release();
+            }
+            device_pump.mutex.unlock(loader.io);
+        }
+    }
+};
+
 const DestinationState = struct {
     /// One destination buffer of a tensor. PJRT makes the buffer ready once
     /// every transfer submitted to it has completed and one of them carried
@@ -1369,6 +1719,18 @@ test "fifo scheduler concurrent claims across two batches return each job once" 
 
 // DMA pump and transfer target tests.
 
+test "device pump admits by bytes and by pieces" {
+    var pump: Dma.DevicePump = .{};
+    try std.testing.expect(pump.hasRoom(8));
+    // The piece that crosses the budget was admitted; the next is not.
+    pump.active_bytes = 8;
+    try std.testing.expect(!pump.hasRoom(8));
+    pump.active_bytes = 7;
+    try std.testing.expect(pump.hasRoom(8));
+    pump.active_pieces = max_dma_pieces_per_device;
+    try std.testing.expect(!pump.hasRoom(8));
+}
+
 test "the submission that completes a target's bytes carries the last flag" {
     var target: DestinationState.Target = .{ .manager = undefined, .device_index = 0, .total = 100 };
     try std.testing.expect(!target.fullySubmitted());
@@ -1382,6 +1744,140 @@ test "the submission that completes a target's bytes carries the last flag" {
     try std.testing.expect(!target.fullySubmitted());
     target.noteSubmitted(50);
     try std.testing.expect(target.fullySubmitted());
+}
+
+// Request, credit and batch lifecycle tests.
+
+/// A single-device loader without PJRT, workers or pinned arenas: enough
+/// for request, credit and batch lifecycle tests, with 64-byte blocks cut
+/// as `create` cuts them, `slots` credits of one block. `platform` and
+/// `workspace` are its only undefined fields: what these tests run reaches
+/// the platform only through a non-null PJRT event
+/// (`Dma.EventContext.destroyEvent`). Must not move after `init`.
+const TestLoader = struct {
+    memory: []u8,
+    pumps: [1]Dma.DevicePump = .{.{}},
+    loader: Loader,
+
+    fn init(self: *TestLoader, slots: usize) !void {
+        const allocator = std.testing.allocator;
+        const memory = try allocator.alloc(u8, slots * 64);
+        errdefer allocator.free(memory);
+        const blocks = try allocator.alloc(host_memory.Block, slots);
+        errdefer allocator.free(blocks);
+        for (blocks, 0..) |*block, index| block.* = memory[index * 64 ..][0..64];
+        self.* = .{ .memory = memory, .loader = undefined };
+        self.loader = .{
+            .allocator = allocator,
+            .io = std.testing.io,
+            .platform = undefined,
+            .workspace = undefined,
+            .blocks = blocks,
+            .scheduler = .init(allocator),
+            .read_permits = .{ .permits = 1 },
+            .read_width = 1,
+            .credits = try .init(allocator, blocks, 1),
+            .pumps = &self.pumps,
+            .dma_budget_bytes = 64,
+            .plan_config = .{ .block_size = 64, .request_size = 64 },
+        };
+    }
+
+    fn deinit(self: *TestLoader) void {
+        const allocator = std.testing.allocator;
+        self.loader.scheduler.deinit();
+        self.pumps[0].queue.deinit(allocator);
+        self.loader.credits.deinit(allocator);
+        allocator.free(self.loader.blocks);
+        allocator.free(self.memory);
+    }
+};
+
+test "a callback failing while a piece is queued drains it and completes the batch" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var fixture: TestLoader = undefined;
+    try fixture.init(1);
+    defer fixture.deinit();
+    const loader = &fixture.loader;
+
+    // One request whose only piece is queued behind a DMA slot that a failed
+    // callback is about to free.
+    const batch = try publishTestBatch(&loader.scheduler, 1);
+    const request = loader.claimRequest().?;
+    var target: DestinationState.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
+    _ = request.pending.fetchAdd(1, .acq_rel);
+    try fixture.pumps[0].queue.pushBack(allocator, .{
+        .target = &target,
+        .request = request,
+        .data = loader.credits.slotBlocks(request.slot)[0],
+        .destination_offset = 0,
+    });
+    fixture.pumps[0].active_bytes = 64;
+    fixture.pumps[0].active_pieces = 1;
+    request.release();
+    try std.testing.expect(!batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 1), loader.credits.inUse(io));
+    _ = loader.first_error.set(error.Unknown);
+
+    Dma.eventCompleted(loader, 0, 64);
+    try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].active_pieces);
+    try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+    try std.testing.expect(batch.done.isSet());
+
+    Dma.retireBatch(loader, batch);
+    batch.destroy();
+}
+
+test "retired events are destroyed by the next pump or by a batch's retirement" {
+    // Without PJRT, contexts with a null event stand in for destroyed ones;
+    // the list mechanics are the subject.
+    const io = std.testing.io;
+    var fixture: TestLoader = undefined;
+    try fixture.init(2);
+    defer fixture.deinit();
+    const loader = &fixture.loader;
+
+    const batch = try publishTestBatch(&loader.scheduler, 2);
+    const requests = [_]*ReadRequest{
+        loader.claimRequest().?,
+        loader.claimRequest().?,
+    };
+    const plan = batch.plans.items[0];
+    plan.events_used.store(2, .release);
+    for (plan.events, requests) |*ctx, request| ctx.* = .{
+        .request = request,
+        .pjrt_event = null,
+        .device_index = 0,
+        .len = 64,
+    };
+    // Two callbacks fired: the next pump destroys both, newest first.
+    Dma.retireEvent(loader, &plan.events[0]);
+    Dma.retireEvent(loader, &plan.events[1]);
+    const device_pump = &fixture.pumps[0];
+    try std.testing.expect(device_pump.retired == &plan.events[1]);
+    try std.testing.expect(plan.events[1].next_retired == &plan.events[0]);
+    device_pump.mutex.lockUncancelable(io);
+    device_pump.destroyRetired();
+    device_pump.mutex.unlock(io);
+    try std.testing.expect(device_pump.retired == null);
+    try std.testing.expect(plan.events[0].next_retired == null);
+    try std.testing.expect(plan.events[1].next_retired == null);
+
+    // A callback that fires after the last pump leaves its context linked;
+    // the batch's retirement destroys it before the batch is freed, with
+    // the retired contexts of a batch still in flight.
+    var other: Dma.EventContext = .{ .request = undefined, .pjrt_event = null, .device_index = 0, .len = 64 };
+    Dma.retireEvent(loader, &other);
+    Dma.retireEvent(loader, &plan.events[0]);
+    for (requests) |request| request.release();
+    try std.testing.expect(batch.done.isSet());
+    Dma.retireBatch(loader, batch);
+    try std.testing.expect(device_pump.retired == null);
+    try std.testing.expect(plan.events[0].next_retired == null);
+    try std.testing.expect(other.next_retired == null);
+    batch.destroy();
 }
 
 // Source read tests.
