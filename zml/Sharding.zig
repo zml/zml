@@ -437,18 +437,22 @@ pub const Partitioning = packed struct {
         const logical = if (@TypeOf(partitioning) == Logical)
             partitioning
         else
-            // capture all the comptime logic in the Logical struct.
+            // capture all the comptime logic in Logical.
             comptime Logical.parse(partitioning);
 
         return logical.applyUseAll(tags, mesh, default_value);
     }
 
-    pub const Logical = struct {
-        src: Shape.TagsArray,
-        tgt: Shape.TagsArray,
+    pub const Logical = union(enum) {
+        /// Replicates every dimension, including when used as a graph constraint.
+        replicated,
+        mapping: struct {
+            src: Shape.TagsArray,
+            tgt: Shape.TagsArray,
+        },
 
-        const replicated: Shape.Tag = Shape.toTag(.replicated);
-        const open: Shape.Tag = Shape.toTag(.open);
+        const replicated_tag: Shape.Tag = Shape.toTag(.replicated);
+        const open_tag: Shape.Tag = Shape.toTag(.open);
 
         pub fn parse(v: anytype) Logical {
             const V = @TypeOf(v);
@@ -457,7 +461,7 @@ pub const Partitioning = packed struct {
             var tgt_: Shape.TagsArray = .empty;
 
             if (comptime stdx.meta.isStruct(V)) {
-                const field_names = std.meta.fieldNames(V);
+                const field_names = comptime std.meta.fieldNames(V);
                 stdx.debug.assertComptime(field_names.len <= @TypeOf(src_).max_len, "Too many tags in struct {} ({d})", .{ V, field_names.len });
                 inline for (field_names) |field_name| {
                     const fv = @field(v, field_name);
@@ -467,7 +471,7 @@ pub const Partitioning = packed struct {
                         src_.appendAssumeCapacity(field_name);
                     }
                 }
-                return .{ .src = src_, .tgt = tgt_ };
+                return .{ .mapping = .{ .src = src_, .tgt = tgt_ } };
             }
 
             stdx.debug.compileError("Sharding.Partitioning.parse expects a struct of enum literals, eg {{ .b = .data, .d = .model }}, got: {any}", .{V});
@@ -476,23 +480,39 @@ pub const Partitioning = packed struct {
         test "Logical.parse" {
             const logical = comptime Logical.parse(.{ .a = .x, .b = .y });
 
-            try std.testing.expectEqualSlices(Shape.Tag, &.{ "a".ptr, "b".ptr }, logical.src.constSlice());
-            try std.testing.expectEqualSlices(Shape.Tag, &.{ "x".ptr, "y".ptr }, logical.tgt.constSlice());
+            try std.testing.expectEqualSlices(Shape.Tag, &.{ "a".ptr, "b".ptr }, logical.mapping.src.constSlice());
+            try std.testing.expectEqualSlices(Shape.Tag, &.{ "x".ptr, "y".ptr }, logical.mapping.tgt.constSlice());
+        }
+
+        test "Logical.replicated" {
+            const mesh: Mesh = .initTest(.logical, .{.model});
+            const tags: []const Shape.Tag = &.{ "a", "b" };
+            const logical: Logical = .replicated;
+            for ([_]PartitionSpec{ .open, .replicated }) |default| {
+                try std.testing.expectEqual(Partitioning.replicated(tags.len), logical.applyUseAll(tags, &mesh, default));
+            }
+            const unspecified = Logical.parse(.{});
+            try std.testing.expectEqual(Partitioning.open(tags.len), unspecified.applyUseAll(tags, &mesh, .open));
         }
 
         pub fn apply(logical: *const Logical, tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec) struct { Partitioning, ?u8 } {
+            const mapping = switch (logical.*) {
+                .replicated => return .{ .replicated(tags.len), null },
+                .mapping => |*mapping_| mapping_,
+            };
+
             var partition_: Partitioning = .repeat(default_value, tags.len);
             var missing_src_axis: ?u8 = null;
 
-            for (0.., logical.src.slice(), logical.tgt.slice()) |i, shape_tag, mesh_tag| {
+            for (0.., mapping.src.slice(), mapping.tgt.slice()) |i, shape_tag, mesh_tag| {
                 const shape_ax = Shape.axisFromTagMaybe(tags, shape_tag) orelse {
                     missing_src_axis = @intCast(i);
                     continue;
                 };
 
-                const spec: PartitionSpec = if (mesh_tag == Logical.replicated)
+                const spec: PartitionSpec = if (mesh_tag == Logical.replicated_tag)
                     .replicated
-                else if (mesh_tag == Logical.open)
+                else if (mesh_tag == Logical.open_tag)
                     .open
                 else spec: {
                     const mesh_ax = mesh.resolveLogicalAxis(mesh_tag) orelse {
@@ -509,7 +529,7 @@ pub const Partitioning = packed struct {
             const p, const missing_shape_axis = logical.apply(tags, mesh, default_value);
 
             if (missing_shape_axis) |ax| {
-                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), logical.src.get(ax) });
+                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), logical.mapping.src.get(ax) });
             }
             return p;
         }
@@ -2068,7 +2088,7 @@ pub const DeviceGrid = struct {
                         for (strategy.foldSources(part.axis) orelse &.{part.axis}) |source| {
                             if (used.contains(source)) continue;
                             used.insert(source);
-                            const info = mesh_.physical.axisInfo(source) orelse continue;
+                            const info = mesh_.physical.axisInfo(source) orelse return error.InvalidPhysicalAxis;;
                             try grid.appendAxis(mesh_, logical_axis, source, 1, @intCast(info.size));
                         }
                     }

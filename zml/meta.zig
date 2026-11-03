@@ -143,7 +143,7 @@ test MapType {
 /// The `to` parameter must be passed with mutable pointer, and tensor data need to be mutable if callback needs it.
 /// `mapAlloc` tries as much as possible to respect the conversions made by Zig itself.
 /// For example it can convert from a comptime array to a runtime slice.
-/// `mapAlloc` can allocate new slices to write the result if the result struct requires it.
+/// `mapAlloc` allocates slices and single-item pointers needed to hold mapped values.
 /// The caller is owning said allocations, using an `ArenaAllocator` might help tracking them.
 ///
 /// Note: to avoid infinite loop, mapAlloc doesn't look for `From` fields inside `To` struct.
@@ -176,6 +176,11 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     }
 
     if (FromStruct == To) {
+        to.* = from;
+        return;
+    }
+
+    if (FromStruct == ToStruct and !comptime Contains(FromStruct, From)) {
         to.* = from;
         return;
     }
@@ -226,7 +231,11 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
                     }
                     to.* = items;
                 },
-                else => try mapAlloc(cb, allocator, ctx, from.*, to.*),
+                else => {
+                    const item = try allocator.create(ptr_info.child);
+                    try mapAlloc(cb, allocator, ctx, from.*, item);
+                    to.* = item;
+                },
             },
             .slice => {
                 const items = try allocator.alloc(@typeInfo(ToStruct).pointer.child, from.len);
@@ -267,6 +276,7 @@ test mapAlloc {
         field: A,
         array: [2]A,
         slice: []const A,
+        pointer: *const A,
         other: u8,
         tag: [*:0]const u8,
         // We want to allow conversion from comptime to runtime, because Zig type inference works like this.
@@ -278,6 +288,7 @@ test mapAlloc {
         field: B,
         array: [2]B,
         slice: []const B,
+        pointer: *const B,
         other: u8,
         tag: [*:0]const u8,
         static_val: u8,
@@ -291,6 +302,7 @@ test mapAlloc {
         .other = 7,
         .tag = "feature",
         .slice = &.{ .{ .a = 9 }, .{ .a = 10 } },
+        .pointer = &.{ .a = 13 },
         .field_with_empty = .{ .{ .a = 9 }, .{} },
     };
     var bb: BB = undefined;
@@ -298,6 +310,7 @@ test mapAlloc {
     try mapAlloc(A.convert, testing.allocator, {}, aa, &bb);
     defer testing.allocator.free(bb.slice);
     defer testing.allocator.free(bb.static_slice);
+    defer testing.allocator.destroy(bb.pointer);
 
     try testing.expectEqual(4, bb.field.b);
     try testing.expectEqual(5, bb.array[0].b);
@@ -309,6 +322,7 @@ test mapAlloc {
     try testing.expectEqual(10, bb.slice[1].b);
     try testing.expectEqual(11, bb.static_slice[0].b);
     try testing.expectEqual(12, bb.static_slice[1].b);
+    try testing.expectEqual(13, bb.pointer.b);
 }
 
 /// Visit a given type `T` and:
