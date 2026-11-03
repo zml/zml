@@ -11,10 +11,20 @@ pub const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/vfs");
 
-const CWD_HANDLE: u32 = 0;
+/// Indices 0-2 are the standard streams, so `std.Io.File.stdout()` and
+/// friends resolve to their own descriptor; the cwd placeholder follows.
+const CWD_HANDLE: u32 = 3;
 
 const VFS = @This();
-const Handle = struct { handle: u32, backend_idx: ?usize, flags: std.Io.File.Flags = .{ .nonblocking = false } };
+const Handle = struct {
+    handle: u32,
+    backend_idx: ?usize,
+    flags: std.Io.File.Flags = .{ .nonblocking = false },
+
+    fn innerFile(self: *const Handle) std.Io.File {
+        return .{ .handle = @intCast(self.handle), .flags = self.flags };
+    }
+};
 
 allocator: std.mem.Allocator,
 mutex: std.Io.Mutex = .init,
@@ -29,10 +39,11 @@ pub fn init(allocator: std.mem.Allocator, base_io: std.Io) !VFS {
     const base = VFSBase.init(base_io);
 
     var handles: @FieldType(@This(), "handles") = .{};
-    try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDIN_FILENO, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDOUT_FILENO, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDERR_FILENO, .backend_idx = null });
+    try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
+    std.debug.assert(handles.len == CWD_HANDLE + 1);
 
     return .{
         .allocator = allocator,
@@ -149,19 +160,8 @@ fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usiz
     }
 
     if (std.meta.eql(dir, std.Io.Dir.cwd())) {
-        if (sub_path == null) return .{ null, dir, self.base.inner };
-        if (std.fs.path.isAbsolutePosix(sub_path.?)) return .{ null, dir, self.base.inner };
-
-        const uri = std.Uri.parse(sub_path.?) catch null;
-        if (uri) |u| {
-            const backend_idx: ?usize = for (self.backends.entries.items(.key), 0..) |s, idx| {
-                if (std.mem.eql(u8, u.scheme, s)) break idx;
-            } else null;
-            if (backend_idx == null) return error.VFSNotRegistered;
-            return .{ backend_idx, std.Io.Dir.cwd(), self.getBackend(backend_idx) };
-        } else {
-            return .{ null, std.Io.Dir.cwd(), self.base.inner };
-        }
+        // Without "://", a path from cwd is local, a colon in it included.
+        return .{ null, dir, self.base.inner };
     } else {
         const handle = self.getDirHandle(dir);
         if (handle.backend_idx) |backend_idx| {
@@ -172,9 +172,11 @@ fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usiz
     }
 }
 
+/// `path` without its "scheme://" prefix; a name with a colon and no "://"
+/// is a plain local name.
 fn stripScheme(path: []const u8) []const u8 {
-    const uri = std.Uri.parse(path) catch return path;
-    return path[uri.scheme.len + 3 ..];
+    const i = std.mem.indexOf(u8, path, "://") orelse return path;
+    return path[i + 3 ..];
 }
 
 fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
@@ -330,10 +332,10 @@ fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8
 
     if (self.getScheme(backend_idx)) |s| {
         const prefix = try std.fmt.bufPrint(out_buffer, "{s}://", .{s});
-        const path_len = try backend.vtable.dirRealPathFile(backend.userdata, dir_, path_name, out_buffer[prefix.len..]);
+        const path_len = try backend.vtable.dirRealPathFile(backend.userdata, dir_, stripScheme(path_name), out_buffer[prefix.len..]);
         return prefix.len + path_len;
     } else {
-        return try backend.vtable.dirRealPathFile(backend.userdata, dir_, path_name, out_buffer);
+        return try backend.vtable.dirRealPathFile(backend.userdata, dir_, stripScheme(path_name), out_buffer);
     }
 }
 
@@ -437,6 +439,19 @@ fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.
     }
 }
 
+test "standard streams resolve to their own descriptors" {
+    var vfs: VFS = try .init(std.testing.allocator, std.testing.io);
+    defer vfs.deinit();
+
+    const files = [_]std.Io.File{ .stdin(), .stdout(), .stderr() };
+    const fds = [_]std.posix.fd_t{ std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO, std.posix.STDERR_FILENO };
+    for (files, fds) |file, fd| {
+        const handle, const backend = vfs.getFileHandle(file);
+        try std.testing.expectEqual(fd, handle.innerFile().handle);
+        try std.testing.expect(backend.vtable == vfs.base.inner.vtable);
+    }
+}
+
 test "copy a local file through the VFS" {
     const allocator = std.testing.allocator;
     const process_io = std.testing.io;
@@ -480,4 +495,32 @@ test "copy a local file through the VFS" {
     const copied = try tmp.dir.readFileAlloc(process_io, "destination", allocator, .limited(source_data.len + 1));
     defer allocator.free(copied);
     try std.testing.expectEqualSlices(u8, &source_data, copied);
+}
+
+test "a name with a colon and no \"://\" is local" {
+    const testing_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing_io, .{ .sub_path = "notes:old.txt", .data = "bytes" });
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = path_buffer[0..try tmp.dir.realPath(testing_io, &path_buffer)];
+
+    var vfs: VFS = try .init(std.testing.allocator, testing_io);
+    defer vfs.deinit();
+    const vfs_io = vfs.io();
+
+    const backend_idx, _, _ = try vfs.lookupDir(.cwd(), "notes:old.txt");
+    try std.testing.expectEqual(null, backend_idx);
+
+    const dir = try std.Io.Dir.openDir(.cwd(), vfs_io, root, .{});
+    defer dir.close(vfs_io);
+    const file = try dir.openFile(vfs_io, "notes:old.txt", .{});
+    defer file.close(vfs_io);
+    var contents: [5]u8 = undefined;
+    try std.testing.expectEqual(contents.len, try file.readPositionalAll(vfs_io, &contents, 0));
+    try std.testing.expectEqualStrings("bytes", &contents);
+
+    var real_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const real_path = real_path_buffer[0..try dir.realPathFile(vfs_io, "notes:old.txt", &real_path_buffer)];
+    try std.testing.expect(std.mem.endsWith(u8, real_path, "/notes:old.txt"));
 }
