@@ -1,6 +1,9 @@
 const std = @import("std");
 
+const pjrt = @import("pjrt");
+
 const Buffer = @import("../buffer.zig").Buffer;
+const pjrtx = @import("../pjrtx.zig");
 const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
@@ -8,8 +11,16 @@ const backend = @import("backend.zig");
 const ShardGrid = @import("ShardGrid.zig");
 const host_memory = @import("host_memory.zig");
 
+/// Creating a tensor's device state: host memory or PJRT, since the front
+/// end checked its placement. `LazyOnce` replays it to every later reader
+/// of the tensor.
+const StateInitError = std.mem.Allocator.Error || pjrt.ApiError;
+
 /// One output buffer and what places it. Its parts may come from several
-/// files, so several plans can write it.
+/// files, so several plans can write it: their pieces all count toward the
+/// same targets (`Target.total` is the placement's bytes, whichever plan
+/// submits them), and its device state is created once, by the first
+/// worker that reads for it.
 const Destination = struct {
     /// The caller's shape, which the output buffer keeps.
     shape: Shape,
@@ -20,6 +31,15 @@ const Destination = struct {
     /// What fills it, in ascending, disjoint destination order
     /// (`backend.LoadSpec`).
     parts: []Part,
+    state: LazyOnce(DestinationState) = .{},
+
+    fn ensureState(self: *Destination, allocator: std.mem.Allocator, io: std.Io, platform: *const Platform) StateInitError!*DestinationState {
+        return self.state.ensure(io, DestinationState.init, .{ allocator, platform, self });
+    }
+
+    fn deinit(self: *Destination, allocator: std.mem.Allocator, api: *const pjrt.Api) void {
+        if (self.state.readyValue()) |state| state.deinit(allocator, api);
+    }
 };
 
 /// One source range of a destination: what the planner sorts by file offset
@@ -417,6 +437,97 @@ fn readFilePositionalAllV(
     return completed;
 }
 
+const DestinationState = struct {
+    /// One destination buffer of a tensor. PJRT makes the buffer ready once
+    /// every transfer submitted to it has completed and one of them carried
+    /// the last-transfer flag, whatever their completion order: the flag
+    /// only closes the buffer to further calls. The pump, the only
+    /// submitter, therefore flags the submission that completes the
+    /// placement's bytes, and no piece ever waits for another one.
+    /// Flagging the highest-offset piece instead makes a tail wait for its
+    /// prefixes, which can deadlock a sharded multi-device load: tails can
+    /// hold every lifecycle credit while their prefixes stay unclaimed,
+    /// whatever the pinned memory. This follows XLA's
+    /// CommonAsyncHostToDeviceTransferManager: readiness requires zero
+    /// in-flight transfers and a last-call flag, not destination-offset order.
+    const Target = struct {
+        manager: *pjrt.AsyncHostToDeviceTransferManager,
+        device_index: usize,
+        /// Bytes of the placement on this device. The pieces partition them:
+        /// those of every part, from whichever file and plan.
+        total: usize,
+        /// Owned by the pump; read by the awaiting task once the batch is
+        /// done and nothing submits any more.
+        submitted_bytes: usize = 0,
+
+        /// Whether a submission of `len` bytes closes the buffer.
+        fn nextIsLast(self: *const Target, len: usize) bool {
+            std.debug.assert(len != 0 and self.submitted_bytes + len <= self.total);
+            return self.submitted_bytes + len == self.total;
+        }
+
+        fn noteSubmitted(self: *Target, len: usize) void {
+            std.debug.assert(self.submitted_bytes + len <= self.total);
+            self.submitted_bytes += len;
+        }
+
+        /// Every byte went out, so the last-transfer flag did too.
+        fn fullySubmitted(self: *const Target) bool {
+            return self.submitted_bytes == self.total;
+        }
+    };
+
+    /// The destination's transfer targets, one per device in canonical
+    /// order.
+    targets: []Target,
+
+    /// Creates the destination's device buffers and transfer managers, one
+    /// per device of its grid in canonical order, and writes the output
+    /// shell. Runs once per destination (`LazyOnce`), however many parts
+    /// feed it, on the worker that first reads for it.
+    fn init(allocator: std.mem.Allocator, platform: *const Platform, destination: *const Destination) StateInitError!DestinationState {
+        const grid = &destination.grid;
+        const targets = try allocator.alloc(Target, grid.devices.len);
+        errdefer allocator.free(targets);
+
+        var pjrt_buffers: Buffer.Shards = .empty;
+        var initialized: usize = 0;
+        errdefer {
+            for (targets[0..initialized]) |target| target.manager.deinit(platform.pjrt_api);
+            for (pjrt_buffers.constSlice()) |buffer| buffer.deinit(platform.pjrt_api);
+        }
+
+        const shape_spec: pjrt.ShapeSpec = .init(
+            grid.local.dims(),
+            pjrtx.bufferTypeFromDtype(grid.local.dtype()),
+        );
+        for (grid.devices, 0..) |device, i| {
+            const memory = platform.devices[device.id].memory(.default).?;
+            const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+                .shape_specs = &.{shape_spec},
+                .memory = memory.pjrt_memory,
+            });
+            errdefer manager.deinit(platform.pjrt_api);
+            const pjrt_buffer = try manager.retrieveBuffer(platform.pjrt_api, 0);
+            targets[i] = .{
+                .manager = manager,
+                .device_index = device.id,
+                .total = grid.local.byteSize(),
+            };
+            initialized += 1;
+            pjrt_buffers.appendAssumeCapacity(pjrt_buffer);
+        }
+
+        destination.output.* = .fromPjrtBuffers(platform, destination.shape, pjrt_buffers.constSlice());
+        return .{ .targets = targets };
+    }
+
+    fn deinit(self: *DestinationState, allocator: std.mem.Allocator, api: *const pjrt.Api) void {
+        for (self.targets) |target| target.manager.deinit(api);
+        allocator.free(self.targets);
+    }
+};
+
 /// The lifecycle credits: one per request the pre-grown pinned set holds,
 /// each a fixed slot of `blocks_per_slot` blocks. A worker takes a credit
 /// before claiming a job, and the request gives it back with its last
@@ -658,6 +769,23 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 8), aligned_plan.jobs[1].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 5), aligned_plan.jobs[2].kind.dma_read.len);
+}
+
+// DMA pump and transfer target tests.
+
+test "the submission that completes a target's bytes carries the last flag" {
+    var target: DestinationState.Target = .{ .manager = undefined, .device_index = 0, .total = 100 };
+    try std.testing.expect(!target.fullySubmitted());
+    // Pieces arrive in any order; only the byte total matters.
+    try std.testing.expect(!target.nextIsLast(20));
+    target.noteSubmitted(20);
+    try std.testing.expect(!target.nextIsLast(30));
+    target.noteSubmitted(30);
+    try std.testing.expect(!target.nextIsLast(10));
+    try std.testing.expect(target.nextIsLast(50));
+    try std.testing.expect(!target.fullySubmitted());
+    target.noteSubmitted(50);
+    try std.testing.expect(target.fullySubmitted());
 }
 
 // Source read tests.
