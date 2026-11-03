@@ -17,8 +17,9 @@ const host_memory = @import("host_memory.zig");
 const StateInitError = std.mem.Allocator.Error || pjrt.ApiError;
 
 /// One submission: its plans (one per source file, published as each file
-/// is planned), the destinations it writes and their parts, all in the
-/// batch's arena until it retires. `remaining` counts completion units: one
+/// is planned), the destinations it writes and their parts, and every
+/// request and event context created while loading it, all in the batch's
+/// arena until it retires. `remaining` counts completion units: one
 /// per published job plus a publish sentinel held until the submission is
 /// sealed. A job's unit is released exactly once, by whichever of these
 /// happens: its request's last reference drops (final DMA callback or
@@ -26,8 +27,8 @@ const StateInitError = std.mem.Allocator.Error || pjrt.ApiError;
 /// done when `remaining` reaches zero; the awaiting task then retires it,
 /// so releasing a unit is the last permitted access to the batch.
 pub const Batch = struct {
-    /// Holds the plans, the destinations and the parts until `destroy`;
-    /// only the submitting task allocates in it.
+    /// Holds the plans with their contexts, the destinations and the parts
+    /// until `destroy`; only the submitting task allocates in it.
     arena: std.heap.ArenaAllocator,
     io: std.Io,
     /// Published plans in file order: appended by the submitting task under
@@ -58,9 +59,11 @@ pub const Batch = struct {
     }
 
     /// Releases `count` completion units. MEMORY-ORDER RULE: this must be the
-    /// caller's final access to the batch and to anything it owns (plans,
-    /// destinations, parts). The last unit sets `done`, and the awaiting
-    /// task frees all of it as soon as it observes the event.
+    /// caller's final access to the batch and to anything it owns (requests,
+    /// events, destinations, parts, plans; a request's slot of blocks is the
+    /// loader's and went back with its credit just before). The last unit
+    /// sets `done`, and the awaiting task frees all of it as soon as it
+    /// observes the event.
     fn releaseUnits(self: *Batch, count: usize) void {
         if (count == 0) return;
         const previous = self.remaining.fetchSub(count, .acq_rel);
@@ -125,11 +128,14 @@ const SourceSlot = struct {
     uri: []const u8,
 };
 
-/// One file's jobs in claim order with their transfer records, allocated by
-/// the planner.
+/// One file's jobs in claim order with their transfer records and every
+/// context the jobs can need, allocated by the planner: one request per job
+/// and one event per planned DMA submission, handed out in submission
+/// order. Contexts hold the plan's address, which the batch's arena keeps
+/// until it retires.
 const Plan = struct {
     /// A claimable job: its slice of the plan's transfers and what its
-    /// worker does for them.
+    /// worker does for them. Its request slot is its index.
     const Job = struct {
         /// Where the job's read starts.
         file_offset: u64,
@@ -178,6 +184,11 @@ const Plan = struct {
     source_slot: *SourceSlot,
     jobs: []Job,
     transfers: []Transfer,
+    requests: []ReadRequest,
+    events: []Dma.EventContext,
+    /// Event slots handed out so far, one `fetchAdd` per submission from
+    /// any device's pump.
+    events_used: std.atomic.Value(usize) = .init(0),
     /// The tensor bytes the jobs read.
     source_bytes: u64,
     /// Next job to claim; owned by the scheduler mutex.
@@ -272,13 +283,22 @@ const Planner = struct {
         safe_boundaries: std.ArrayList(u64) = .empty,
         source_bytes: u64 = 0,
 
-        /// The plan of the jobs cut, copied into `arena`.
+        /// The plan of the jobs cut, copied into `arena` with every context
+        /// its jobs can need, allocated before publication makes it visible
+        /// to workers: a request per job and an event per writer of a
+        /// transfer.
         fn finish(self: *JobCut, arena: std.mem.Allocator) !*Plan {
+            const jobs = self.jobs.items;
+            const transfers = self.transfers.items;
+            const requests = try arena.alloc(ReadRequest, jobs.len);
+            @memset(requests, ReadRequest.idle);
             const plan = try arena.create(Plan);
             plan.* = .{
                 .source_slot = self.source_slot,
-                .jobs = try arena.dupe(Plan.Job, self.jobs.items),
-                .transfers = try arena.dupe(Plan.Transfer, self.transfers.items),
+                .jobs = try arena.dupe(Plan.Job, jobs),
+                .transfers = try arena.dupe(Plan.Transfer, transfers),
+                .requests = requests,
+                .events = try arena.alloc(Dma.EventContext, submissionCount(transfers)),
                 .source_bytes = self.source_bytes,
             };
             return plan;
@@ -457,6 +477,12 @@ const Planner = struct {
                 });
             }
         }
+
+        fn submissionCount(transfers: []const Plan.Transfer) usize {
+            var count: usize = 0;
+            for (transfers) |transfer| count += @popCount(transfer.writer_mask);
+            return count;
+        }
     };
     fn blockCount(len: usize, block_size: usize) usize {
         return len / block_size + @intFromBool(len % block_size != 0);
@@ -595,6 +621,114 @@ const Scheduler = struct {
             self.condition.waitUncancelable(io, &self.mutex);
         }
         return !self.stopping;
+    }
+};
+
+/// A claimed source job and its completion state. The plan owns its storage.
+const ReadRequest = struct {
+    const Scratch = struct {
+        allocator: std.mem.Allocator,
+        /// A read's ranges: one per block of a job (`readBlocks`).
+        iovecs: [][]u8,
+
+        fn init(allocator: std.mem.Allocator, maximum_blocks: usize) !Scratch {
+            return .{
+                .allocator = allocator,
+                .iovecs = try allocator.alloc([]u8, maximum_blocks),
+            };
+        }
+
+        fn deinit(self: *Scratch) void {
+            self.allocator.free(self.iovecs);
+            self.* = undefined;
+        }
+    };
+
+    loader: *Loader,
+    plan: *Plan,
+    /// The job's index in its plan, which holds this request at the same
+    /// index.
+    index: usize,
+    /// The request's lifecycle credit: its slot of blocks (`Credits`), which
+    /// only this request reads into and transfers from until it ends.
+    slot: u32,
+    /// The scheduling sentinel and one reference per DMA piece queued; the
+    /// last release gives the credit back and finishes the job.
+    pending: std.atomic.Value(usize) = .init(1),
+
+    /// The slot of a job that was never claimed: nothing pending, so the
+    /// retirement checks hold.
+    const idle: ReadRequest = .{
+        .loader = undefined,
+        .plan = undefined,
+        .index = undefined,
+        .slot = undefined,
+        .pending = .init(0),
+    };
+
+    /// Takes the claimed job's request context with the worker's credit.
+    /// The claim holds the batch's completion unit; the request's final
+    /// reference drop releases it.
+    fn init(loader: *Loader, claim: Scheduler.Claim, slot: u32) *ReadRequest {
+        const self = &claim.plan.requests[claim.index];
+        self.* = .{
+            .loader = loader,
+            .plan = claim.plan,
+            .index = claim.index,
+            .slot = slot,
+        };
+        return self;
+    }
+
+    fn run(self: *ReadRequest, scratch: *Scratch) !void {
+        const loader = self.loader;
+        const block_size = loader.plan_config.block_size;
+        const job = self.plan.jobs[self.index];
+        const transfers = self.plan.transfersOf(job);
+        // The first worker to touch a destination creates its state.
+        var previous: ?*Destination = null;
+        for (transfers) |transfer| {
+            const destination = transfer.destination;
+            if (destination == previous) continue;
+            previous = destination;
+            _ = destination.ensureState(loader.allocator, loader.io, loader.platform) catch |err| {
+                loader.recordError(err, "initialize tensor {s} from {s}, shape={f}", .{ destination.name(), destination.parts[0].source.file_uri, destination.shape });
+                return err;
+            };
+        }
+        const blocks = loader.credits.slotBlocks(self.slot)[0..job.blockLen(block_size)];
+        switch (job.kind) {
+            .dma_read => |read| try self.readBlocks(scratch, blocks, read),
+        }
+        for (transfers) |transfer| transfer.destination.recordRead(transfer.len);
+        try Dma.enqueue(self, blocks);
+    }
+
+    /// Reads the job's `read` into `blocks`, its slot's, in file order.
+    fn readBlocks(self: *ReadRequest, scratch: *Scratch, blocks: []const host_memory.Block, read: Plan.Job.Read) !void {
+        const loader = self.loader;
+        const block_size = loader.plan_config.block_size;
+        const iovecs = scratch.iovecs[0..blocks.len];
+        for (iovecs, blocks, 0..) |*iovec, block, block_index| {
+            iovec.* = block[0..@min(block_size, read.len - block_index * block_size)];
+        }
+        try readSlot(loader, self.plan.source_slot, iovecs, self.plan.jobs[self.index].file_offset, read.minimum_len);
+    }
+
+    /// Releases a DMA piece or the scheduling reference. The final release
+    /// gives the credit back and may let the awaiting task free this request
+    /// and everything its batch owns.
+    fn release(self: *ReadRequest) void {
+        const previous = self.pending.fetchSub(1, .acq_rel);
+        std.debug.assert(previous > 0);
+        if (previous != 1) return;
+
+        // Locals first: releasing the batch unit may complete the batch
+        // that owns this request, so nothing is touched after it.
+        const loader = self.loader;
+        const batch = self.plan.batch;
+        loader.credits.release(loader.io, self.slot);
+        batch.releaseUnits(1);
     }
 };
 
@@ -943,11 +1077,18 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 4), plans[1].jobs[1].kind.dma_read.len);
     try std.testing.expectEqual(@as(u64, 12), plans[0].source_bytes);
     try std.testing.expectEqual(@as(u64, 12), plans[1].source_bytes);
-    // Jobs span their 4-byte blocks.
+    // One writer per transfer on one device: one event per transfer. Jobs
+    // span their 4-byte blocks.
+    try std.testing.expectEqual(@as(usize, 4), plans[0].events.len);
+    try std.testing.expectEqual(@as(usize, 3), plans[1].events.len);
+    try std.testing.expectEqual(@as(usize, 2), plans[0].requests.len);
     try std.testing.expectEqual(@as(usize, 2), plans[0].jobs[0].blockLen(4));
     try std.testing.expectEqual(@as(usize, 1), plans[0].jobs[1].blockLen(4));
     try std.testing.expectEqual(@as(usize, 2), plans[1].jobs[0].blockLen(4));
     try std.testing.expectEqual(@as(usize, 1), plans[1].jobs[1].blockLen(4));
+    for (plans) |plan| {
+        for (plan.requests) |*request| try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
+    }
     discardTestBatch(&scheduler, batch);
 
     var aligned_sources = [_]safetensors.Tensor{
@@ -976,9 +1117,12 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
 // Scheduler tests.
 
 /// A plan of `job_count` unit jobs (`file_offset` = index), each with one
-/// block, and no transfers, in `arena`.
+/// block and one event slot, and no transfers, in `arena`.
 fn testPlan(arena: std.mem.Allocator, job_count: usize) !*Plan {
     const jobs = try arena.alloc(Plan.Job, job_count);
+    const requests = try arena.alloc(ReadRequest, job_count);
+    @memset(requests, ReadRequest.idle);
+    const events = try arena.alloc(Dma.EventContext, job_count);
     for (jobs, 0..) |*job, index| job.* = .{
         .file_offset = index,
         .transfer_start = 0,
@@ -990,6 +1134,8 @@ fn testPlan(arena: std.mem.Allocator, job_count: usize) !*Plan {
         .source_slot = undefined,
         .jobs = jobs,
         .transfers = &.{},
+        .requests = requests,
+        .events = events,
         .source_bytes = job_count,
     };
     return plan;
