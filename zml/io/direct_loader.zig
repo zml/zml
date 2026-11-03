@@ -6,6 +6,7 @@ const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const backend = @import("backend.zig");
 const ShardGrid = @import("ShardGrid.zig");
+const host_memory = @import("host_memory.zig");
 
 /// One output buffer and what places it. Its parts may come from several
 /// files, so several plans can write it.
@@ -415,6 +416,80 @@ fn readFilePositionalAllV(
     }
     return completed;
 }
+
+/// The lifecycle credits: one per request the pre-grown pinned set holds,
+/// each a fixed slot of `blocks_per_slot` blocks. A worker takes a credit
+/// before claiming a job, and the request gives it back with its last
+/// reference, after its last DMA callback. Only the holder reads into and
+/// transfers from its slot's blocks, so the credits are the one bound on
+/// pinned memory in use. A block whose pieces are done stays with its
+/// request until the request ends; nobody else could use it anyway, since
+/// every credit owns a whole slot.
+const Credits = struct {
+    /// Every slot's blocks, slot `s` at `blocks[s * blocks_per_slot ..]`;
+    /// a tail shorter than a slot is left unused.
+    blocks: []const host_memory.Block,
+    blocks_per_slot: usize,
+    /// Free slots, a stack of indices; owned by `mutex`.
+    free: []u32,
+    free_len: usize,
+    /// The most slots held at once.
+    high_water: usize = 0,
+    mutex: std.Io.Mutex = .init,
+    /// Waiters for a slot; one release wakes one of them.
+    condition: std.Io.Condition = .init,
+
+    fn init(allocator: std.mem.Allocator, blocks: []const host_memory.Block, blocks_per_slot: usize) std.mem.Allocator.Error!Credits {
+        std.debug.assert(blocks_per_slot != 0);
+        const free = try allocator.alloc(u32, blocks.len / blocks_per_slot);
+        // Slot 0 first.
+        for (free, 0..) |*slot, index| slot.* = @intCast(free.len - 1 - index);
+        return .{ .blocks = blocks, .blocks_per_slot = blocks_per_slot, .free = free, .free_len = free.len };
+    }
+
+    fn deinit(self: *Credits, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.free_len == self.free.len);
+        allocator.free(self.free);
+    }
+
+    fn count(self: *const Credits) usize {
+        return self.free.len;
+    }
+
+    /// Waits for a free slot. Requests in flight give theirs back even after
+    /// a failure, so a waiter always gets one.
+    fn acquire(self: *Credits, io: std.Io) u32 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (self.free_len == 0) {
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+        self.free_len -= 1;
+        self.high_water = @max(self.high_water, self.free.len - self.free_len);
+        return self.free[self.free_len];
+    }
+
+    fn release(self: *Credits, io: std.Io, slot: u32) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(self.free_len < self.free.len);
+        self.free[self.free_len] = slot;
+        self.free_len += 1;
+        // One release frees one slot: waking every waiter here would be a
+        // thundering herd.
+        self.condition.signal(io);
+    }
+
+    fn slotBlocks(self: *const Credits, slot: u32) []const host_memory.Block {
+        return self.blocks[slot * self.blocks_per_slot ..][0..self.blocks_per_slot];
+    }
+
+    fn inUse(self: *Credits, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.free.len - self.free_len;
+    }
+};
 
 /// A value initialized at most once by whichever task touches it first,
 /// with the initializer that task passes. Concurrent callers wait on the
