@@ -2,11 +2,13 @@
 const std = @import("std");
 
 const mlir = @import("mlir");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
+const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const quantization = @import("quantization.zig");
 pub const Quantization = quantization.Quantization;
@@ -320,13 +322,23 @@ fn onesGrid(shape: Shape, dt: DataType) Shape {
 }
 
 fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
-    return ops.customCall(
-        "zml$scaled_dot_unmatched",
-        .{ in[0], in[1], in[2], in[3] },
-        out_shape,
-        {},
-        .{ .has_side_effect = false },
-    );
+    // Keep the unmatched-composite marker in the graph for backend lowering.
+    const ctx = zml.Compiler.current();
+    const op = stablehlo.custom_call(
+        ctx.mlir_ctx,
+        &.{ in[0].value(), in[1].value(), in[2].value(), in[3].value() },
+        &.{mlirx.Type.rankedTensor(ctx.mlir_ctx, out_shape)},
+        .{
+            .call_target_name = "zml$scaled_dot_unmatched",
+            .has_side_effect = false,
+            .backend_config = .{ .typed_ffi = .dict(ctx.mlir_ctx, &.{}) },
+        },
+        ctx.location,
+    ).appendTo(ctx.currentScope().block);
+    if (ctx.manual_computation_depth > 0 and ctx.partitioner == .gspmd) {
+        op.setAttributeByName("mhlo.sharding", .string(ctx.mlir_ctx, "{manual}"));
+    }
+    return Tensor._result(out_shape, op.result(0));
 }
 
 fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {

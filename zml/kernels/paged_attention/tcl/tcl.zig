@@ -67,21 +67,8 @@ pub const paged = struct {
         const last_pe = attributes.get("pe_end");
         stdx.debug.assert(first_pe != null and first_pe.? == .int64 and first_pe.?.int64 == 0 and
             last_pe != null and last_pe.? == .int64 and last_pe.?.int64 == 7, "TCL attention requires a complete 8-PE RNGD chip", .{});
-        if (compiler.meshes[0].numDevices() > 1) return zml.ops.manualComputation(Shard.body, .{ .parameters = parameters, .q = q, .k_cache = k_cache, .v_cache = v_cache, .opts = opts }, q.shape());
         return attend(parameters, q, k_cache, v_cache, opts);
     }
-
-    const Shard = struct {
-        parameters: Parameters,
-        q: Tensor,
-        k_cache: Tensor,
-        v_cache: Tensor,
-        opts: AttentionOptions,
-
-        fn body(self: Shard, _: zml.Shape) Tensor {
-            return attend(self.parameters, self.q, self.k_cache, self.v_cache, self.opts);
-        }
-    };
 
     fn attend(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: AttentionOptions) Tensor {
         if (q.dim(.b) == 0) return Tensor.zeroes(q.shape());

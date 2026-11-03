@@ -316,7 +316,7 @@ pub fn forwardMoe(
             .axis = if (expert_axis) |axis| mesh.logical.axes.get(axis) else null,
         }, linear, specs) catch @panic("OOM");
     }
-    return zml.ops.manualComputation2(Call.forward, args, output_shape, mesh, .{
+    return zml.ops.manualComputation(Call.forward, args, output_shape, mesh, .{
         .in_specs = .{
             .input = partitioning.in_specs.input,
             .ids = partitioning.in_specs.ids,

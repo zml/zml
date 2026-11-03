@@ -103,7 +103,6 @@ zig_library(
         "nn.zig",
         "ops.zig",
         "ops/manual_computation.zig",
-        "ops/manual_computation2.zig",
         "pjrtx.zig",
         "platform.zig",
         "profiling/profiler.zig",

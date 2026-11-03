@@ -135,7 +135,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
 /// `attention`, causal or not depending on `opts`.
 pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: Options, mesh: *const zml.Mesh, partitioning: Partitioning) zml.Tensor {
     const args: Attention = .{ .q = q, .k = k, .v = v, .token_index = token_index, .metadata = metadata, .parameters = parameters, .opts = opts };
-    return zml.ops.manualComputation2(Attention.forward, args, q.shape(), mesh, .{
+    return zml.ops.manualComputation(Attention.forward, args, q.shape(), mesh, .{
         .in_specs = .{
             .q = partitioning.in_specs.q,
             .k = partitioning.in_specs.k,

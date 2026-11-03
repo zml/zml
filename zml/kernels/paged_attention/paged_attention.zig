@@ -207,7 +207,7 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     _ = k;
     _ = v;
     const args: Attention = .{ .parameters = parameters, .q = q, .kv_cache = kv_cache, .opts = opts };
-    return zml.ops.manualComputation2(Attention.forward, args, q.shape(), mesh, partitioning);
+    return zml.ops.manualComputation(Attention.forward, args, q.shape(), mesh, partitioning);
 }
 
 const Attention = struct {

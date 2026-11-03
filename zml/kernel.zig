@@ -1534,13 +1534,16 @@ test "tcl multi-chip kernels run on two furiosa chips" {
     const tp = zml.testing.tpMesh();
     const x_shape = Shape.init(.{ .c = 2, .a = 1024 }, .f32).withPartitioning(tp, .{ .c = .model });
     const Mod = struct {
-        pub fn forward(x: Tensor) [2]Tensor {
-            const r = zml.ops.manualComputation(TclSplitExp.body, .{ .x = x }, .{ x.shape(), Shape.init(.{ .c = 2, .a = 1024 }, .f32) });
+        pub fn forward(x: Tensor, mesh: *const zml.Sharding.Mesh) [2]Tensor {
+            const r = zml.ops.manualComputation(TclSplitExp.body, .{ .x = x }, .{ x.shape(), Shape.init(.{ .c = 2, .a = 1024 }, .f32) }, mesh, .{
+                .in_specs = .{ .x = .parse(.{ .c = .model }) },
+                .out_specs = .{ .parse(.{ .c = .model }), .replicated },
+            });
             return .{ r[0], r[1] };
         }
     };
     const x: Tensor = .fromShape(x_shape);
-    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{x}, platform, .{ .meshes = &.{tp} });
+    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{ x, tp }, platform, .{ .meshes = &.{tp} });
     defer exe.deinit();
     var hx: [2 * 1024]f32 = undefined;
     for (&hx, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 13)) * 0.125 - 0.5;
