@@ -1,15 +1,18 @@
-//! The seam between the loader's front end and its backends: the
-//! `LoadSpec` contract they trust, its parts' byte runs (`Lattice`), and the
-//! source request size (`requestSize`).
+//! The seam between the front end (loader.zig) and its backends: the
+//! `LoadSpec` contract they trust, its parts' byte runs (`Lattice`), the
+//! source request size (`requestSize`), the backend a load runs on
+//! (`Backend`) and the memory kinds it takes (`supportsMemory`).
 const std = @import("std");
 
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
+const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Memory = @import("TensorStore.zig").Memory;
 const constants = @import("../constants.zig");
+const buffered_loader = @import("buffered_loader.zig");
 
 /// The largest source request, and so the largest DMA block: a request is
 /// a whole number of blocks, at least one.
@@ -71,8 +74,9 @@ pub const LoadSpec = struct {
     /// sharding places the bytes on the devices; a shape without a mesh is
     /// replicated over every device (`Platform.placedShape`).
     shape: Shape,
-    /// Where the bytes go. A host kind comes only with contiguous parts
-    /// (`Lattice.dims` empty).
+    /// Where the bytes go, from the source's `TensorStore` binding. The
+    /// front end only submits kinds `supportsMemory` accepts, and a host
+    /// kind only with contiguous parts (`Lattice.dims` empty).
     memory: Memory = .default,
     /// Written whole once the destination's buffers exist, and not touched
     /// before: a failure leaves it as it was or holding those buffers.
@@ -256,6 +260,66 @@ pub fn checkParts(parts: []const LoadPart, destination_bytes: u64) bool {
     }
     return covered <= destination_bytes;
 }
+
+/// Whether the loader can deliver into `kind` on `platform`: device memory,
+/// on every platform. The host kinds need a backend that writes host
+/// memory in place.
+pub fn supportsMemory(platform: *const Platform, kind: Memory) bool {
+    _ = platform;
+    return kind == .default;
+}
+
+/// The transfer implementation a load runs on: the buffered backend, which
+/// places each whole tensor with `Buffer.from`.
+pub const Backend = union(enum) {
+    buffered: *buffered_loader.Loader,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        opts: Options,
+    ) !Backend {
+        return .{ .buffered = try buffered_loader.Loader.create(allocator, io, platform, opts) };
+    }
+
+    /// Publishes `specs`, and completes one item of `progress` per spec.
+    /// Fails with what the backend detected in the files, host memory and
+    /// PJRT, logged there (a plain allocation failure is `OutOfMemory`,
+    /// unlogged).
+    pub fn submit(self: Backend, specs: []const LoadSpec, progress: std.Progress.Node) !Submission {
+        return switch (self) {
+            inline else => |loader, tag| @unionInit(Submission, @tagName(tag), try loader.submit(specs, progress)),
+        };
+    }
+
+    /// Waits for and retires `submission`, which this backend published.
+    /// Its batch is dangling afterwards.
+    pub fn await(self: Backend, submission: Submission) !void {
+        return switch (self) {
+            inline else => |loader, tag| loader.awaitBatch(@field(submission, @tagName(tag))),
+        };
+    }
+
+    /// Fails the backend unless it already failed: queued work is dropped,
+    /// work in flight drains, and every later await returns the first error.
+    pub fn abort(self: Backend) void {
+        switch (self) {
+            inline else => |loader| loader.abort(),
+        }
+    }
+
+    pub fn destroy(self: Backend) void {
+        switch (self) {
+            inline else => |loader| loader.destroy(),
+        }
+    }
+};
+
+/// A published batch of the backend that published it.
+pub const Submission = union(enum) {
+    buffered: *buffered_loader.Batch,
+};
 
 /// A random lattice whose runs land in order (`Lattice.dstOrdered`), its
 /// source strides anything, zero (a broadcast) included.

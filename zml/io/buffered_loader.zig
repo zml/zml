@@ -188,7 +188,8 @@ pub const Loader = struct {
                 return self.fail(err, "read", spec, part);
             lattice.copyRuns(0, lattice.runs(), @intFromPtr(tensor.ptr), @intFromPtr(source.ptr) -% @as(usize, @intCast(lattice.src_offset)));
         }
-        // The front end asks no host kind of this backend.
+        // The front end asks no host kind of this backend
+        // (`backend.supportsMemory`).
         std.debug.assert(spec.memory == .default);
         // The shape's sharding places the bytes; a shape without a mesh is
         // replicated, as `Buffer.from` places it.
