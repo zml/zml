@@ -179,50 +179,6 @@ pub const DmaMapAllocator = struct {
     }
 };
 
-pub const FixedBufferPool = struct {
-    buffer: []u8,
-    block_size: usize,
-    q_buf: []const u16,
-    q: std.Io.Queue(u16),
-
-    pub fn init(allocator: std.mem.Allocator, buffer_: []u8, blocks_: u16) !FixedBufferPool {
-        const block_size = @divExact(buffer_.len, blocks_);
-        const q_buf = try allocator.alloc(u16, blocks_);
-        for (q_buf, 0..) |*idx, i| {
-            idx.* = @intCast(i);
-        }
-        var q: std.Io.Queue(u16) = .init(q_buf);
-        q.type_erased.len = q.type_erased.buffer.len; // make the queue full
-        return .{
-            .buffer = buffer_,
-            .block_size = block_size,
-            .q = q,
-            .q_buf = q_buf,
-        };
-    }
-
-    pub fn deinit(self: *FixedBufferPool, allocator: std.mem.Allocator) void {
-        allocator.free(self.q_buf);
-    }
-
-    pub fn get(self: *FixedBufferPool, io: std.Io) ![]u8 {
-        const idx = try self.q.getOneUncancelable(io);
-        return self.buffer[idx * self.block_size ..][0..self.block_size];
-    }
-
-    fn inRange(sub_buffer: []const u8, buffer: []const u8) bool {
-        return @intFromPtr(sub_buffer.ptr) >= @intFromPtr(buffer.ptr) and
-            @intFromPtr(sub_buffer[sub_buffer.len - 1 ..].ptr) <= @intFromPtr(buffer[buffer.len - 1 ..].ptr);
-    }
-
-    pub fn put(self: *FixedBufferPool, io: std.Io, buf: []u8) void {
-        // is the pointer in range ?
-        std.debug.assert(inRange(buf, self.buffer));
-        const idx = @divExact(@intFromPtr(buf.ptr) - @intFromPtr(self.buffer.ptr), self.block_size);
-        self.q.putOneUncancelable(io, @intCast(idx)) catch unreachable;
-    }
-};
-
 pub const DynamicBufferPool = struct {
     const Node = struct { next: ?*Node };
     const alignment: std.mem.Alignment = .of(Node);
