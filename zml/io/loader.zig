@@ -125,7 +125,8 @@ pub const Loader = struct {
     pub const max_read_parallelism: usize = 128;
 
     /// Checks `opts` and returns at once. Warming the device allocators and
-    /// creating the backend run on a task of the loader's own, or here when
+    /// creating the backend (for the direct one: DMA calibration and the
+    /// pinned pre-growth) run on a task of the loader's own, or here when
     /// `io` has no concurrency; the first `start` waits for that task and
     /// returns its error. A read width out of range is `InvalidOptions`,
     /// logged.

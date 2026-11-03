@@ -14,6 +14,7 @@ const Memory = @import("TensorStore.zig").Memory;
 const constants = @import("../constants.zig");
 const buffered_loader = @import("buffered_loader.zig");
 const direct_loader = @import("direct_loader.zig");
+const dma_calibration = @import("dma_calibration.zig");
 
 /// The largest source request, and so the largest DMA block: a request is
 /// a whole number of blocks, at least one.
@@ -51,18 +52,15 @@ pub const Options = struct {
     read_parallelism: usize,
     /// The checkpoint's VFS backend's read hints.
     read_hints: VFS.ReadHints = .local,
-    /// The DMA block, else `fixed_dma_block_size`.
+    /// The DMA block, else one calibration picks.
     dma_block_size: ?usize = null,
     /// Whether local files are read directly (`VFS.useDirectIo`).
     direct_io: VFS.DirectIo = .auto,
 
-    /// The DMA block when the options pin none.
-    pub const fixed_dma_block_size: usize = 16 * 1024 * 1024;
-
-    /// The blocks a backend may use: `dma_block_size`, else
-    /// `fixed_dma_block_size`.
+    /// The blocks calibration may select: `dma_block_size`, else
+    /// `dma_calibration.default_block_sizes`.
     pub fn dmaBlockSizes(self: *const Options) []const usize {
-        return if (self.dma_block_size) |*block_size| block_size[0..1] else &.{fixed_dma_block_size};
+        return if (self.dma_block_size) |*block_size| block_size[0..1] else &dma_calibration.default_block_sizes;
     }
 };
 
@@ -459,11 +457,11 @@ test "requestSize rounds the read chunk up to whole blocks of whole alignment un
     try std.testing.expectEqual(3 * 4096, requestSize(4096, 3 * 4096, 4096));
 }
 
-test "the options pin a DMA block or take the fixed one, and only a VFS widens reads" {
+test "the options pin a DMA block or leave calibration its candidates, and only a VFS widens reads" {
     const pinned: Options = .{ .read_parallelism = 1, .dma_block_size = 4 << 20 };
     try std.testing.expectEqualSlices(usize, &.{4 << 20}, pinned.dmaBlockSizes());
-    const fixed: Options = .{ .read_parallelism = 1 };
-    try std.testing.expectEqualSlices(usize, &.{Options.fixed_dma_block_size}, fixed.dmaBlockSizes());
+    const calibrated: Options = .{ .read_parallelism = 1 };
+    try std.testing.expectEqualSlices(usize, &dma_calibration.default_block_sizes, calibrated.dmaBlockSizes());
 
     var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
     defer filesystem.deinit();

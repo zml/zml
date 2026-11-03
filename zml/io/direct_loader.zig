@@ -3,19 +3,20 @@
 //! live here. CUDA, ROCm, oneAPI, Furiosa and CPU load this way
 //! (`backend.loadsDirect`).
 //!
-//! Sizing, fixed by `Loader.create`. The DMA block is the options' one
-//! (`backend.Options.dmaBlockSizes`); each device's DMA budget is
-//! `dma_depth` blocks. A source request is the checkpoint's minimum read
-//! (`VFS.readHints`) rounded up to whole blocks, one block at least
-//! (`backend.requestSize`). The source width is `read_parallelism`,
-//! clipped to what the mapped ceiling fits. The workspace then maps, once
-//! and before the first read, `width + 1` requests, the DMA reserve and the
-//! zero block, and cuts them into blocks (`Workspace.carve`): nothing maps
-//! during a load. `width + 1` workers share `width` read permits, so a full
-//! width of reads is in flight while one worker queues what it read. The
-//! lifecycle credits are the whole pinned set in requests, so transfers
-//! that still hold blocks keep the DMA stage fed and never want a block the
-//! reads did not leave free.
+//! Sizing, fixed by `Loader.create`. Calibration picks the DMA block
+//! (dma_calibration.zig) and maps the ring it measures in; each device's
+//! DMA budget is `dma_calibration.depth` blocks. A source request is the
+//! checkpoint's minimum read (`VFS.readHints`) rounded up to whole blocks,
+//! one block at least (`backend.requestSize`). The source width is
+//! `read_parallelism`, clipped to what the mapped ceiling fits. The
+//! workspace then maps, once and before the first read, what the ring
+//! leaves of `width + 1` requests, the DMA reserve and the zero block, and
+//! cuts them into blocks (`Workspace.carve`): nothing maps during a load.
+//! `width + 1` workers share `width` read permits, so a full width of reads
+//! is in flight while one worker queues what it read. The lifecycle credits
+//! are the whole pinned set in requests, so transfers that still hold
+//! blocks keep the DMA stage fed and never want a block the reads did not
+//! leave free.
 //!
 //! Planning and claims. `submit` sorts a submission's parts by file and
 //! offset, plans one file at a time and publishes each plan at once, so the
@@ -59,6 +60,7 @@ const BackendOptions = backend.Options;
 const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
 const ShardGrid = @import("ShardGrid.zig");
+const dma_calibration = @import("dma_calibration.zig");
 const Memory = @import("TensorStore.zig").Memory;
 const host_memory = @import("host_memory.zig");
 const load_log = @import("log.zig").load;
@@ -73,9 +75,6 @@ const StateInitError = std.mem.Allocator.Error || pjrt.ApiError;
 /// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
 /// byte budget.
 const max_dma_pieces_per_device: usize = 64;
-
-/// Each device's in-flight DMA budget, in blocks (`Dma.DevicePump.hasRoom`).
-const dma_depth: usize = 8;
 
 /// The direct DMA backend. Submissions and awaits come from one task at a
 /// time; the workers and the pumps run concurrently with them.
@@ -110,7 +109,7 @@ pub const Loader = struct {
     /// (`Dma.enqueue`, `Dma.retireBatch`) they are taken in device
     /// order; a pump, a completion and `Dma.abortReady` hold one at a time.
     pumps: []Dma.DevicePump,
-    /// Per-device in-flight budget: `dma_depth` blocks, in bytes.
+    /// Per-device in-flight budget: `dma_calibration.depth` blocks, in bytes.
     dma_budget_bytes: usize,
     worker_group: std.Io.Group = .init,
     /// One per source path. Its file opens at its first read and stays
@@ -136,15 +135,21 @@ pub const Loader = struct {
 
         var workspace: host_memory.Workspace = try .init(allocator, io, platform);
         errdefer workspace.deinit();
-        // The options' block for the whole load; every read is exact.
-        const block_size = opts.dmaBlockSizes()[0];
+        // At debug when canceled (`zml.io.Loader.deinit` cancels a set-up
+        // no `start` waited for) or out of memory (the workspace logs what
+        // it fails to map or pin).
+        const block_size = dma_calibration.calibrate(&workspace, platform, .{ .block_sizes = opts.dmaBlockSizes() }) catch |err| {
+            load_log.failure(err, "calibrate DMA: target={t}", .{platform.target});
+            return err;
+        };
+        // Every read is exact.
         const request_size = backend.requestSize(opts.read_hints.read_chunk_size, block_size, 0).?;
         const blocks_per_request = request_size / block_size;
         // The DMA stage of every device, kept mapped beside the source
         // working set; at least one maximal source request, so a single
         // request always fits beside it.
         const dma_reserve = @max(
-            dma_depth * platform.devices.len,
+            dma_calibration.depth * platform.devices.len,
             Planner.blockCount(backend.max_read_request_size, block_size),
         );
         // One more block for the zeros, which no credit owns.
@@ -167,11 +172,13 @@ pub const Loader = struct {
         // Two arenas, the reserve first: ROCm balances bytes across its host
         // nodes per allocation, and that split is recorded.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
+        const retained_before = workspace.mappedBytes();
         // The workspace logs what it fails to map.
         const blocks = try workspace.carve(block_size, dma_reserve, (width + 1) * blocks_per_request + dma_reserve + zero_blocks);
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
-        load_log.debug("host workspace pregrown: mapped={Bi:.2}, pregrowth_ms={d:.3}", .{
+        load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
             workspace.mappedBytes(),
+            workspace.mappedBytes() - retained_before,
             @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
         });
         std.debug.assert(blocks.len != 0);
@@ -195,7 +202,7 @@ pub const Loader = struct {
             .read_width = width,
             .credits = credits,
             .pumps = pumps,
-            .dma_budget_bytes = dma_depth * block_size,
+            .dma_budget_bytes = dma_calibration.depth * block_size,
             .plan_config = .{
                 .block_size = block_size,
                 .request_size = request_size,
@@ -1305,12 +1312,12 @@ const Dma = struct {
         retired: ?*EventContext = null,
 
         /// Whether the next queued piece may go. The budget is in bytes,
-        /// not submissions: `dma_depth` blocks, and a piece is one tensor's
-        /// slice of a block, so a model of small tensors needs many more
-        /// pieces in flight to keep the same bytes moving: eight average
-        /// DeepSeek pieces occupy only ~18 MiB against the 128 MiB budget of
-        /// 16 MiB blocks. The piece that crosses the budget is admitted: a
-        /// device with room always has a piece in flight.
+        /// not submissions: `dma_calibration.depth` blocks, and a piece is
+        /// one tensor's slice of a block, so a model of small tensors needs
+        /// many more pieces in flight to keep the same bytes moving: eight
+        /// average DeepSeek pieces occupy only ~18 MiB against the 128 MiB
+        /// budget of 16 MiB blocks. The piece that crosses the budget is
+        /// admitted: a device with room always has a piece in flight.
         fn hasRoom(self: *const DevicePump, budget_bytes: usize) bool {
             return self.active_bytes < budget_bytes and self.active_pieces < max_dma_pieces_per_device;
         }

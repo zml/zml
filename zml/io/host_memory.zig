@@ -1,7 +1,8 @@
 //! Loader-owned host arenas, cut into blocks once. The direct backend owns
-//! its workspace for its whole life: it grows the set to what its load holds
-//! and carves it, and its `destroy` releases every arena. Callers never
-//! supply a workspace or a budget.
+//! its workspace for its whole life: calibration maps its ring there, the
+//! backend grows the set to what its load holds and carves it, and its
+//! `destroy` releases every arena. Callers never supply a workspace, a
+//! budget or a calibration result.
 //!
 //! The memory depends on the target: CUDA and oneAPI take page-backed arenas
 //! registered with PJRT (DmaMap), ROCm and Furiosa PJRT `pinned_host`
@@ -231,15 +232,15 @@ const ArenaKind = union(enum) {
     }
 };
 
-/// Host arenas owned by one direct loader. Arenas are mapped one at a time
+/// Host arenas owned by one direct loader. Calibration maps its ring
 /// (`allocate`); the loader then grows the set to what its load holds and
 /// cuts it into blocks, once (`carve`). Deinitialize after all transfers
 /// finish and before the platform.
 pub const Workspace = struct {
     /// Safety guard on the arenas' total host memory (pinned on the DMA
-    /// targets), not an allocation target: the load's pre-growth decides
-    /// what is actually mapped. Fixed, because no caller ever had a reason
-    /// to choose another value.
+    /// targets), not an allocation target: calibration and the load's
+    /// pre-growth decide what is actually mapped. Fixed, because no caller
+    /// ever had a reason to choose another value.
     pub const mapped_bytes_ceiling: usize = 16 * 1024 * 1024 * 1024;
 
     allocator: Allocator,
@@ -405,8 +406,8 @@ test "Workspace arena ownership cleans up allocation failures" {
 
             _ = try workspace.allocate(64);
             _ = try workspace.allocate(128);
-            // The first step is already mapped; the second maps the last
-            // block.
+            // The first step is already mapped, as calibration's ring covers
+            // one device's reserve; the second maps the last block.
             const blocks = try workspace.carve(64, 3, 4);
             try std.testing.expectEqual(@as(usize, 4), blocks.len);
             try std.testing.expectEqual(@as(usize, 256), workspace.mappedBytes());
