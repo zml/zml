@@ -87,6 +87,7 @@ zig_library(
         "floats.zig",
         "io.zig",
         "io/ShardGrid.zig",
+        "io/Source.zig",
         "io/TensorStore.zig",
         "io/backend.zig",
         "io/log.zig",
