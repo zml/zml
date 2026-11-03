@@ -7,10 +7,6 @@ const Platform = @import("platform.zig").Platform;
 const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
-/// The new loader and its store, which zml does not export.
-const Loader = @import("io/loader.zig").Loader;
-const LoaderStore = @import("io/TensorStore.zig");
-const LoadMemory = LoaderStore.Memory;
 
 const log = std.log.scoped(.@"zml/testing");
 
@@ -482,7 +478,7 @@ pub fn pattern(bytes: []u8, seed: u8) void {
 /// A store of the new loader over a copy of `registry`, for a test that
 /// builds several stores over one checkpoint: a store takes its registry's
 /// entries.
-pub fn storeOf(allocator: std.mem.Allocator, registry: *const zml.safetensors.TensorRegistry, opts: LoaderStore.Options) !LoaderStore {
+pub fn storeOf(allocator: std.mem.Allocator, registry: *const zml.safetensors.TensorRegistry, opts: zml.io.next.TensorStore.Options) !zml.io.next.TensorStore {
     var copy: zml.safetensors.TensorRegistry = .init(allocator);
     defer copy.deinit();
     for (registry.tensors.values()) |tensor| try copy.registerTensor(tensor);
@@ -498,11 +494,11 @@ pub fn load(
     io: std.Io,
     platform: *const Platform,
     model: anytype,
-    store: *const LoaderStore,
+    store: *const zml.io.next.TensorStore,
 ) !zml.Bufferized(@TypeOf(model.*)) {
     var buffers = try zml.mem.bufferize(allocator, model);
     errdefer zml.mem.deinitBufferized(allocator, &buffers);
-    var loader = try Loader.init(allocator, io, platform, .{});
+    var loader = try zml.io.next.Loader.init(allocator, io, platform, .{});
     defer loader.deinit();
     try loader.start(model, &buffers, store, .none);
     try loader.wait();
@@ -515,7 +511,7 @@ pub fn load(
 /// A buffer without a mesh is replicated on the platform's devices. On
 /// CPU/neuron/metal every memory kind is the one memory space, so only
 /// CUDA/ROCm/oneAPI tell them apart.
-pub fn expectShards(allocator: std.mem.Allocator, io: std.Io, buffer: *const zml.Buffer, global: []const u8, memory: LoadMemory) !void {
+pub fn expectShards(allocator: std.mem.Allocator, io: std.Io, buffer: *const zml.Buffer, global: []const u8, memory: zml.io.next.TensorStore.Memory) !void {
     const platform = buffer._platform;
     const shape = platform.placedShape(buffer.shape()).packedShape();
     try std.testing.expectEqual(shape.byteSize(), global.len);

@@ -24,8 +24,16 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
 
-// The new loader's files under io/, which zml does not export: only their
-// tests reach them, from here.
+/// A preview of the loader that replaces `Loader` and `TensorStore` below:
+/// the new `Loader` (io/loader.zig) and its store (io/TensorStore.zig).
+/// Unstable: their API may still change until they replace the old ones.
+pub const next = struct {
+    pub const Loader = @import("io/loader.zig").Loader;
+    pub const TensorStore = @import("io/TensorStore.zig");
+};
+
+// Every file of the new loader under io/, for its tests: `next` exports
+// only some of them.
 test {
     _ = @import("io/ShardGrid.zig");
     _ = @import("io/Source.zig");

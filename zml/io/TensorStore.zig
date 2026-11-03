@@ -1,8 +1,8 @@
-//! The new loader's store: it associates model tensors with checkpoint
-//! sources and prefixed views, over the entries it takes from a checkpoint
-//! registry. zml does not export it: models and the loader they use build
-//! `zml.io.TensorStore` (io.zig), which borrows its registry, so production
-//! changes go there and the new loader's here.
+//! Associates model tensors with checkpoint sources and prefixed views,
+//! over the entries it takes from a checkpoint registry. zml exports it as
+//! `zml.io.next.TensorStore`, the store `zml.io.next.Loader` loads from;
+//! `zml.io.TensorStore` (io.zig) is the old loader's, which borrows its
+//! registry.
 //!
 //! The store owns those entries, the bindings, and every source and program
 //! value (its arena). Views and sources point to it: once `view` was
@@ -285,7 +285,7 @@ pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) *const Sharding.Mes
     }
     std.debug.panic(
         \\Found no meshes named {s} in TensorStore.
-        \\Try passing more meshes to `zml.io.TensorStore.init`.
+        \\Try passing more meshes to `zml.io.next.TensorStore.init`.
         \\Known meshes: {f}
     , .{ name_slice, stdx.fmt.slice(store.meshes) });
 }
