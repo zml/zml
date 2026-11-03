@@ -4,6 +4,7 @@
 //! each host.
 //!
 //!     bazel run //examples/io:load_check -- <checkpoint> [replicated|sharded|tp]
+//!     bazel run //examples/io:load_check -- dma-bench
 //!
 //! The checkpoint is a model directory, a .safetensors file or a
 //! .safetensors.index.json, local or remote (hf://, s3://, gs://, https://,
@@ -19,9 +20,26 @@
 //!   strided in the checkpoint), the first axis of the others.
 //! A scalar is replicated in every mode.
 //!
+//! `dma-bench` loads nothing: it runs the direct backend's DMA calibration
+//! (`zml.io.next.dma_calibration.measure`) on the platform and logs the
+//! block it selects. A platform that loads through the buffered backend has
+//! no DMA to measure, and CPU selects the smallest block unmeasured. Its
+//! knobs, beside the platform's below, are the screen's options, at their
+//! defaults when unset:
+//! - `ZML_DMA_BENCH_BLOCK_MIB=a,b,...`: the candidate blocks in MiB, each
+//!   at most 32 (2, 4, 8, 16 and 32); a load takes a single one (below);
+//! - `ZML_DMA_BENCH_BLOCK_PARALLELISM=n`: transfers in flight per device,
+//!   at most 32 (8);
+//! - `ZML_DMA_BENCH_WINDOW_MS=n`: a screen window's minimum duration (2);
+//! - `ZML_DMA_BENCH_MIN_TRANSFERS=n`: the transfers a window waits for on
+//!   the measured device, 0 for none (32);
+//! - `ZML_DMA_BENCH_BLOCK_TOLERANCE=f`: the smallest block within this
+//!   fraction of the peak rate is selected (0.08).
+//!
 //! The loader logs the bytes it loaded, its time and rate at info, and its
-//! stats at debug, on the `zml/io/load` scope; `zml/vfs` logs the remote
-//! read totals. This tool enables both.
+//! stats at debug, on the `zml/io/load` scope; `zml/io` logs the DMA
+//! calibration's pick with its measured rate on one device (`dma_bench`);
+//! `zml/vfs` logs the remote read totals. This tool enables all three.
 //!
 //! Knobs, from the environment:
 //! - `ZML_LOAD_CHECK=n`: once loaded, read every n-th tensor and the largest
@@ -54,6 +72,7 @@ pub const std_options: std.Options = .{
     .log_level = .info,
     .log_scope_levels = &.{
         .{ .scope = .@"zml/io/load", .level = .debug },
+        .{ .scope = .@"zml/io", .level = .debug },
         .{ .scope = .@"zml/vfs", .level = .debug },
     },
 };
@@ -66,9 +85,10 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next(); // skip program name
     const path = args.next() orelse {
-        log.err("usage: load_check <checkpoint> [replicated|sharded|tp]", .{});
+        log.err("usage: load_check <checkpoint> [replicated|sharded|tp], or load_check dma-bench", .{});
         return error.MissingPath;
     };
+    if (std.mem.eql(u8, path, "dma-bench")) return dmaBench(init);
     const mode = std.meta.stringToEnum(Mode, args.next() orelse "sharded") orelse {
         log.err("the mode must be replicated, sharded or tp", .{});
         return error.InvalidArgument;
@@ -145,6 +165,30 @@ pub fn main(init: std.process.Init) !void {
     try loader.wait();
 
     if (check_stride != 0) try checkLoaded(allocator, io, sources, buffers.tensors, check_stride);
+}
+
+/// Runs `dma-bench`: the DMA calibration screen on the platform, with the
+/// `ZML_DMA_BENCH_*` knobs.
+fn dmaBench(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+    const environ_map = init.environ_map;
+
+    const defaults: zml.io.next.dma_calibration.Options = .{};
+    const window_ms = try envNumber(i64, environ_map, "ZML_DMA_BENCH_WINDOW_MS");
+    const opts: zml.io.next.dma_calibration.Options = .{
+        .block_sizes = try envMibList(init.arena.allocator(), environ_map, "ZML_DMA_BENCH_BLOCK_MIB") orelse defaults.block_sizes,
+        .block_parallelism = try envNumber(usize, environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM") orelse defaults.block_parallelism,
+        .minimum_duration = if (window_ms) |ms| .fromMilliseconds(ms) else defaults.minimum_duration,
+        .minimum_transfers = try envNumber(u64, environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS") orelse defaults.minimum_transfers,
+        .block_selection_tolerance = try envNumber(f64, environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE") orelse defaults.block_selection_tolerance,
+    };
+
+    const platform: *zml.Platform = try .auto(allocator, io, try platformOptions(environ_map));
+    defer platform.deinit(allocator, io);
+
+    const block_size = try zml.io.next.dma_calibration.measure(allocator, io, platform, opts);
+    log.info("dma_benchmark block_bytes={d} parallelism={d}", .{ block_size, opts.block_parallelism });
 }
 
 /// The platform settings of the environment, which are not loader knobs.
@@ -269,6 +313,24 @@ fn expectSameBytes(name: []const u8, replica: ?usize, expected: []const u8, actu
         first_bad,
     });
     return error.LoadContentMismatch;
+}
+
+/// The environment variable `name` as a comma-separated list of MiB, in
+/// bytes, null when unset. An entry that does not parse is
+/// `InvalidArgument`, logged.
+fn envMibList(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, name: []const u8) !?[]const usize {
+    const text = environ_map.get(name) orelse return null;
+    var sizes: std.ArrayList(usize) = .empty;
+    errdefer sizes.deinit(allocator);
+    var entries = std.mem.tokenizeScalar(u8, text, ',');
+    while (entries.next()) |entry| {
+        const mib = std.fmt.parseInt(u32, entry, 10) catch {
+            log.err("{s} must be MiB counts separated by commas, not '{s}'", .{ name, text });
+            return error.InvalidArgument;
+        };
+        try sizes.append(allocator, @as(usize, mib) * zml.MiB);
+    }
+    return try sizes.toOwnedSlice(allocator);
 }
 
 /// The environment variable `name` parsed as a `T`, null when unset. A value

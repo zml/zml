@@ -25,11 +25,13 @@ const Tensor = @import("tensor.zig").Tensor;
 const log = std.log.scoped(.@"zml/io");
 
 /// A preview of the loader that replaces `Loader` and `TensorStore` below:
-/// the new `Loader` (io/loader.zig) and its store (io/TensorStore.zig).
+/// the new `Loader` (io/loader.zig), its store (io/TensorStore.zig) and
+/// the DMA calibration of its direct backend (io/dma_calibration.zig).
 /// Unstable: their API may still change until they replace the old ones.
 pub const next = struct {
     pub const Loader = @import("io/loader.zig").Loader;
     pub const TensorStore = @import("io/TensorStore.zig");
+    pub const dma_calibration = @import("io/dma_calibration.zig");
 };
 
 // Every file of the new loader under io/, for its tests: `next` exports
