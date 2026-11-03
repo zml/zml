@@ -3,7 +3,8 @@
 //! the one block the backend's options pin (`backend.Options.dmaBlockSizes`),
 //! on one representative device, at `depth` transfers per device and over
 //! fixed windows, and keeps the smallest block within 8% of the measured
-//! peak. The ring it measures in stays mapped as the load's first pinned
+//! peak; borderline candidates get longer, alternating confirmation
+//! windows. The ring it measures in stays mapped as the load's first pinned
 //! capacity. CPU returns the smallest candidate without measuring: its
 //! plugin's transfer is a memcpy, and a load takes the same time at every
 //! block size. The buffered backend has nothing to size.
@@ -45,13 +46,23 @@ pub const Options = struct {
     /// A screen window runs for at least this long and, unless the target is
     /// zero, until the representative device completes the transfer target.
     /// On eight MI300X, 2 ms/32-transfer windows calibrate in 0.96 s against
-    /// 4.83 s at 10 ms/128, selecting the same block.
+    /// 4.83 s at 10 ms/128, selecting the same block. Short screens sometimes
+    /// selected the wrong block under noise, hence the longer borderline
+    /// confirmation windows (`confirmation_duration`).
     minimum_duration: std.Io.Duration = .fromMilliseconds(2),
     minimum_transfers: u64 = 32,
     /// Prefer the smallest block within this tolerance of the measured peak
     /// transfer throughput.
     block_selection_tolerance: f64 = 0.08,
 };
+
+/// Borderline block candidates receive longer paired windows, alternating
+/// which runs first. A candidate is borderline when its rounds disagree on
+/// whether it is near the peak, or when its median ratio to the peak lies
+/// within `confirmation_margin` of the tolerance's floor.
+const confirmation_duration: std.Io.Duration = .fromMilliseconds(25);
+const confirmation_minimum_transfers: u64 = 256;
+const confirmation_margin: f64 = 0.02;
 
 /// Measures one representative device into the direct loader's workspace
 /// and returns the block it selects; CPU returns the smallest without
@@ -93,7 +104,7 @@ pub fn calibrate(
         candidate.* = .{ .block_size = block_size, .buffer_offset = index * opts.block_parallelism };
     }
     try measureAllCandidates(&session, opts, candidates, calibration_source);
-    const winner = candidates[try selectCandidate(&session, opts, candidates)];
+    const winner = candidates[try selectCandidate(&session, opts, candidates, calibration_source)];
 
     log.debug("dma_bench platform={s} devices={d} kind=\"{s}\" block_bytes={d} parallelism={d} measured_gib_s={d:.3} duration={f} retained_mapped_bytes={d}", .{
         @tagName(platform.target),
@@ -132,24 +143,41 @@ fn measureAllCandidates(
 }
 
 /// Returns the index of the selected candidate (`pick`), over each
-/// candidate's median ratio to the peak.
+/// candidate's median ratio to the peak, or its confirmation's when it is
+/// borderline.
 fn selectCandidate(
     session: *Session,
     opts: Options,
     candidates: []Candidate,
+    source: []const u8,
 ) !usize {
     const ratios = try session.allocator.alloc(f64, candidates.len);
     defer session.allocator.free(ratios);
 
-    var peak_rate: f64 = 0;
-    for (candidates) |candidate| peak_rate = @max(peak_rate, candidate.median().bytesPerSecond());
+    var peak_index: usize = 0;
+    var peak_rate = candidates[0].median().bytesPerSecond();
+    for (candidates[1..], 1..) |candidate, index| {
+        const rate = candidate.median().bytesPerSecond();
+        if (rate > peak_rate) {
+            peak_index = index;
+            peak_rate = rate;
+        }
+    }
     for (candidates, ratios) |candidate, *ratio| {
         ratio.* = if (peak_rate == 0) 0 else candidate.median().bytesPerSecond() / peak_rate;
+    }
+
+    // A borderline candidate's ratio is its confirmation's against the peak.
+    for (candidates, ratios, 0..) |*candidate, *ratio, index| {
+        if (index != peak_index and isBorderline(candidates, index, ratio.*, opts.block_selection_tolerance))
+            ratio.* = try confirmCandidateAgainstPeak(session, candidate, &candidates[peak_index], source);
     }
     return pick(candidates, ratios, opts.block_selection_tolerance);
 }
 
-/// The smallest block whose ratio is within `tolerance` of the best ratio.
+/// The smallest block whose ratio is within `tolerance` of the best ratio,
+/// screened or confirmed. A confirmation can rate a block above the screen's
+/// peak, so the best ratio may belong to a larger block.
 fn pick(candidates: []const Candidate, ratios: []const f64, tolerance: f64) usize {
     var best_index: usize = 0;
     for (ratios, 0..) |ratio, index| {
@@ -162,6 +190,59 @@ fn pick(candidates: []const Candidate, ratios: []const f64, tolerance: f64) usiz
             selected_index = index;
     }
     return selected_index;
+}
+
+/// Whether `candidates[index]`, at screen `ratio` to the peak, gets
+/// confirmation windows (`confirmation_margin`).
+fn isBorderline(candidates: []const Candidate, index: usize, ratio: f64, tolerance: f64) bool {
+    // Whether the candidate is near-peak in one round but fails in others.
+    var qualified_once = false;
+    var rejected_once = false;
+    for (candidates[index].metrics, 0..) |metric, round| {
+        var round_peak_rate: f64 = 0;
+        for (candidates) |round_candidate| {
+            round_peak_rate = @max(round_peak_rate, round_candidate.metrics[round].bytesPerSecond());
+        }
+        const round_ratio = if (round_peak_rate == 0) 0 else metric.bytesPerSecond() / round_peak_rate;
+        if (round_ratio >= 1.0 - tolerance)
+            qualified_once = true
+        else
+            rejected_once = true;
+    }
+    return (qualified_once and rejected_once) or @abs(ratio - (1.0 - tolerance)) <= confirmation_margin;
+}
+
+/// The median, over `sample_count` paired windows, of `candidate`'s rate
+/// over `peak`'s.
+fn confirmCandidateAgainstPeak(
+    session: *Session,
+    candidate: *Candidate,
+    peak: *Candidate,
+    source: []const u8,
+) !f64 {
+    var ratios: [sample_count]f64 = undefined;
+    for (&ratios, 0..) |*ratio, repeat| {
+        const order = if (repeat % 2 == 0)
+            [_]*Candidate{ candidate, peak }
+        else
+            [_]*Candidate{ peak, candidate };
+        var candidate_rate: f64 = undefined;
+        var peak_rate: f64 = undefined;
+        for (order) |measured| {
+            const rate = (try runWindow(
+                session.io,
+                session,
+                measured,
+                source,
+                confirmation_duration,
+                confirmation_minimum_transfers,
+            )).bytesPerSecond();
+            if (measured == candidate) candidate_rate = rate else peak_rate = rate;
+        }
+        ratio.* = if (peak_rate == 0) 0 else candidate_rate / peak_rate;
+    }
+    std.mem.sort(f64, &ratios, {}, std.sort.asc(f64));
+    return ratios[ratios.len / 2];
 }
 
 /// Runs one window of `candidate`'s transfers, `session.parallelism` at a
@@ -373,8 +454,8 @@ const Measurement = struct {
 };
 
 test "DMA benchmark selection uses medians and prefers the smallest near-peak value" {
-    // The selector only allocates its ratios: the session supplies only its
-    // allocator.
+    // No candidate below is borderline, so the selector never schedules a
+    // confirmation window and the session supplies only its allocator.
     var session: Session = .{
         .allocator = std.testing.allocator,
         .io = undefined,
@@ -400,9 +481,23 @@ test "DMA benchmark selection uses medians and prefers the smallest near-peak va
             metric.* = .{ .bytes = rate, .elapsed = .fromSeconds(1) };
         }
     }
-    const winner = candidates[try selectCandidate(&session, opts, &candidates)];
+    const winner = candidates[try selectCandidate(&session, opts, &candidates, &.{})];
     try std.testing.expectEqual(@as(usize, 4), winner.block_size);
     try std.testing.expectEqual(@as(f64, 98), winner.median().bytesPerSecond());
+
+    // A larger block near the peak in every round is neither confirmed nor
+    // picked.
+    var bimodal = [_]Candidate{
+        .{ .block_size = 2, .buffer_offset = undefined },
+        .{ .block_size = 4, .buffer_offset = undefined },
+        .{ .block_size = 8, .buffer_offset = undefined },
+        .{ .block_size = 16, .buffer_offset = undefined },
+    };
+    const bimodal_rates = [_]u64{ 80, 100, 70, 99 };
+    for (&bimodal, bimodal_rates) |*candidate, rate| {
+        candidate.metrics = @splat(.{ .bytes = rate, .elapsed = .fromSeconds(1) });
+    }
+    try std.testing.expectEqual(@as(usize, 4), bimodal[try selectCandidate(&session, opts, &bimodal, &.{})].block_size);
 }
 
 test "DMA benchmark picks the smallest block within the tolerance of the best ratio" {
@@ -413,6 +508,29 @@ test "DMA benchmark picks the smallest block within the tolerance of the best ra
     // 32 MiB is the peak; 16 MiB within the tolerance below it, then past it.
     try std.testing.expectEqual(0, pick(&candidates, &.{ 0.93, 1.0 }, 0.08));
     try std.testing.expectEqual(1, pick(&candidates, &.{ 0.91, 1.0 }, 0.08));
+    // 16 MiB is the screen's peak; a confirmation rates 32 MiB more than the
+    // tolerance above it, then within it.
+    try std.testing.expectEqual(1, pick(&candidates, &.{ 1.0, 1.10 }, 0.08));
+    try std.testing.expectEqual(0, pick(&candidates, &.{ 1.0, 1.05 }, 0.08));
+}
+
+test "DMA benchmark confirms a candidate when round qualification disagrees" {
+    var candidates = [_]Candidate{
+        .{ .block_size = 4, .buffer_offset = undefined },
+        .{ .block_size = 8, .buffer_offset = undefined },
+    };
+    const rates = [_][sample_count]u64{
+        .{ 99, 80, 70 },
+        .{ 100, 100, 100 },
+    };
+    for (&candidates, rates) |*candidate, candidate_rates| {
+        for (&candidate.metrics, candidate_rates) |*metric, rate| {
+            metric.* = .{ .bytes = rate, .elapsed = .fromSeconds(1) };
+        }
+    }
+    // The median ratio, 0.80, is far from the 0.95 floor: only the rounds
+    // make it borderline.
+    try std.testing.expect(isBorderline(&candidates, 0, 0.80, 0.05));
 }
 
 test "DMA benchmark shares one manager across candidate sizes and slots" {
