@@ -4,10 +4,17 @@ const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
+const range_read = @import("range_read.zig");
+const request = @import("request.zig");
 
 const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
+    pub const Options = struct {
+        protocol: Protocol,
+        retry: request.Retry = .{},
+    };
+
     const Handle = struct {
         pub const Type = enum {
             file,
@@ -40,22 +47,23 @@ pub const HTTP = struct {
 
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
-    client: *std.http.Client,
     protocol: Protocol,
+    governor: request.Governor,
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, protocol: Protocol) !HTTP {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, options: Options) !HTTP {
         return .{
             .allocator = allocator,
             .base = .init(inner),
-            .client = http_client,
-            .protocol = protocol,
+            .protocol = options.protocol,
+            .governor = .init(inner, http_client, "http", .server_failure, options.retry),
         };
     }
 
     pub fn deinit(self: *HTTP) void {
+        self.governor.logTotals();
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -152,9 +160,9 @@ pub const HTTP = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| {
-                    log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = error.InputOutput };
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (self.governor.readFailure(handle.uri, handle.pos, err)) {
+                    error.Canceled => return error.Canceled,
+                    error.Unexpected => return .{ .file_read_streaming = error.InputOutput },
                 };
 
                 if (total == 0) {
@@ -201,7 +209,9 @@ pub const HTTP = struct {
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
-        const size = self.fetchSize(dir, sub_path) catch return std.Io.Dir.StatFileError.Unexpected;
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return self.governor.openFailure(path, err);
 
         return .{
             .inode = @intCast(0),
@@ -216,15 +226,19 @@ pub const HTTP = struct {
         };
     }
 
-    fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
+        _ = self.fetchSize(path) catch |err| return self.governor.openFailure(path, err);
+    }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
 
-        const size = self.fetchSize(dir, sub_path) catch return std.Io.File.OpenError.Unexpected;
-
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return self.governor.openFailure(path, err);
 
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, path, size) catch return std.Io.File.OpenError.Unexpected;
@@ -290,20 +304,18 @@ pub const HTTP = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| {
-            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.ReadPositionalError.Unexpected;
-        };
+        return self.performRead(handle, data, offset) catch |err| self.governor.readFailure(handle.uri, offset, err);
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
         const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
 
+        // Saturates at both ends; `@abs` takes `minInt(i64)` too.
         handle.pos = if (relative_offset >= 0)
-            handle.pos + @as(u64, @intCast(relative_offset))
+            handle.pos +| @abs(relative_offset)
         else
-            handle.pos - @as(u64, @intCast(-relative_offset));
+            handle.pos -| @abs(relative_offset);
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
@@ -319,117 +331,31 @@ pub const HTTP = struct {
         return path.len;
     }
 
-    fn fetchSize(self: *HTTP, dir: std.Io.Dir, sub_path: []const u8) !u64 {
-        var path_buffer: [8 * 1024]u8 = undefined;
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var aux_buffer: []u8 = &redirect_buffer;
+    /// The size of the object at `url` (a resolved path without its scheme),
+    /// from a HEAD of the end of its redirect chain, as far as a read's GET
+    /// follows it (`request.max_redirects`).
+    fn fetchSize(self: *HTTP, url: []const u8) !u64 {
+        var url_buffer: [8 * 1024]u8 = undefined;
+        const full_url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), url });
+        var chain: request.HeadChain = .{};
+        const end = try chain.resolve(&self.governor, url, full_url, request.max_redirects, {}, urlAuthorization);
+        return end.size orelse error.MissingContentLength;
+    }
 
-        const scheme = @tagName(self.protocol);
-        const url = try self.resolvePath(dir, sub_path, &path_buffer);
-        const full_url = try std.fmt.bufPrint(aux_buffer, "{s}://{s}", .{ scheme, url });
-
-        var uri = std.Uri.parse(full_url) catch return std.Io.File.OpenError.BadPathName;
-        while (true) {
-            var req = try self.client.request(.HEAD, uri, .{
-                .redirect_behavior = .not_allowed,
-                .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            });
-            defer req.deinit();
-
-            try req.sendBodiless();
-
-            var res = try req.receiveHead(&redirect_buffer);
-
-            switch (res.head.status.class()) {
-                .server_error, .client_error => {
-                    log.err("Failed to fetch tree size for {s}", .{url});
-                    log.err("{s}", .{res.head.bytes});
-                    return error.ServerError;
-                },
-                .informational => return error.UnexpectedStatus,
-                .success => return res.head.content_length.?,
-                .redirect => {
-                    const location = res.head.location.?;
-                    @memcpy(aux_buffer[0..location.len], location);
-                    uri = uri.resolveInPlace(location.len, &aux_buffer) catch unreachable;
-                    continue;
-                },
-            }
-        }
+    /// Only what the URL carries: std's basic authorization from its
+    /// userinfo, as on every GET.
+    fn urlAuthorization(_: void, _: []const u8) std.http.Client.Request.Headers.Value {
+        return .default;
     }
 
     fn performRead(self: *HTTP, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        if (offset >= handle.size) return 0;
-
-        var range_buf: [64]u8 = undefined;
-        const range_header = blk: {
-            var total_bytes: u64 = 0;
-            for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
-            }
-            const remaining = handle.size - offset;
-            const take = @min(remaining, total_bytes);
-            const end = offset + take - 1;
-            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
-        };
-
         var url_buffer: [8 * 1024]u8 = undefined;
         const url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), handle.uri });
         const uri: std.Uri = try .parse(url);
-
-        var req = try self.client.request(.GET, uri, .{
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .partial_content and res.head.status != .ok) {
-            log.err("Failed to perform read for {s}", .{handle.uri});
-            log.err("{s}", .{res.head.bytes});
-            return error.RequestFailed;
-        }
-
-        const content_range = blk: {
-            var it = res.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parseContentRange(header.value);
-                }
-            }
-            break :blk null;
-        };
-
-        const reader = res.reader(&.{});
-
-        if (content_range) |cr| {
-            if (cr.start < offset) {
-                try reader.discardAll(offset - cr.start);
-            }
-        }
-
-        return try reader.readSliceShort(data[0]);
-    }
-
-    const ContentRange = struct {
-        start: u64,
-        end: u64,
-        total: u64,
-    };
-
-    fn parseContentRange(value: []const u8) ?ContentRange {
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
-        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
-        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
-
-        return .{
-            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
-            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
-            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
-        };
+        return range_read.performRangeRead(&self.governor, .{
+            .request = .{ .target = url },
+            // The object `fetchSize` found at the end of the chain.
+            .redirects = .follow,
+        }, &uri, range_read.static, data, offset, handle.size);
     }
 };

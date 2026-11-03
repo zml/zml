@@ -41,7 +41,10 @@ pub const Backend = struct {
 };
 
 pub const VFSBase = struct {
-    inner: std.Io,
+    /// Aligned like the i96 durations and timestamps a backend holds (its
+    /// `request.Governor`), so `@fieldParentPtr("base", ...)` needs no
+    /// `@alignCast`.
+    inner: std.Io align(@alignOf(std.Io.Duration)),
 
     pub fn init(io: std.Io) VFSBase {
         return .{ .inner = io };

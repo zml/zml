@@ -487,11 +487,9 @@ fn classifyStatus(status: std.http.Status, unavailable: ReadFailure) ?ReadFailur
     };
 }
 
-/// What an open, stat or access of a remote path fails with: `FileNotFound`
-/// for a missing object (404, 410), `PermissionDenied` for a denied one
-/// (401, 403), `Canceled` for a canceled task and `SystemResources` when a
-/// request cannot allocate. `openStatus` maps the statuses; anything else is
-/// `Unexpected`, logged once, by `exchange` or `Governor.openFailure`.
+/// What an open, stat or access of a remote path fails with (vfs.zig's
+/// header); `openStatus` maps the statuses, and anything else is logged
+/// once, by `exchange` or `Governor.openFailure`.
 pub const OpenError = error{ FileNotFound, PermissionDenied, Canceled, SystemResources, Unexpected };
 
 /// The error a status means for the path an open request
