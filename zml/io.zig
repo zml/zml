@@ -193,7 +193,7 @@ pub const TensorStore = struct {
             const resolved_mesh = self.store.mesh(mesh_);
             // Unspecified tensor axes are treated as replicated
             const partition: Sharding.Partitioning = if (has_tags)
-                .parse(parsed_tags.constSlice(), resolved_mesh, .replicated, partitioning)
+                Sharding.Partitioning.Logical.init(partitioning).resolve(parsed_tags.constSlice(), resolved_mesh, .replicated)
             else
                 partitioning;
             return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .{ .mesh = resolved_mesh, .partition = partition });
@@ -204,7 +204,7 @@ pub const TensorStore = struct {
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
             const tensor = self.maybeCreateTensor(subkey, tags, mesh_, partitioning);
             if (tensor) |t| {
                 const storage = self.store.id_to_sources.getPtr(t.id);

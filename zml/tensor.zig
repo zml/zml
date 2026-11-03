@@ -169,7 +169,9 @@ pub const Tensor = struct {
     /// Specify the mesh of the input tensor.
     /// * mesh: *const zml.Mesh, but during compilation the `.meshe_name` syntax can used to get
     /// a known mesh from the compilation options.
-    /// * partition spec: a struct where the field names match the axis of the given mesh
+    /// * partitioning: a `Partitioning`, or anything `Partitioning.Logical.init` accepts: a struct
+    /// mapping this tensor's axis tags to logical mesh axes, `.replicated` or `.open`.
+    /// Axes it leaves unspecified are `.open`.
     ///
     /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
     pub fn withPartitioning(self: Tensor, mesh_: anytype, partitioning: anytype) Tensor {
@@ -179,7 +181,7 @@ pub const Tensor = struct {
         }
 
         if (@TypeOf(partitioning) != Sharding.Partitioning) {
-            const parsed = Sharding.Partitioning.parse(self._shape.tags(), mesh_, .open, partitioning);
+            const parsed = Sharding.Partitioning.Logical.init(partitioning).resolve(self._shape.tags(), mesh_, .open);
             return self.withPartitioning(mesh_, parsed);
         }
 

@@ -405,90 +405,122 @@ pub const Partitioning = packed struct {
         try std.testing.expectEqual(PartitionSpec.out_of_bound, comptime_parts.get(7));
     }
 
-    /// Parse a struct literal into a partitioning object.
-    /// The struct passed to partitioning must only have fields names present in `tags`.
-    /// The ordering of tags matter, the return struct will map names to axis as specified by `tags`.
-    /// The default value is important.
-    /// In Tensor code unspecified axis will be inferred as `.open` while in shape code, it's `.replicated`.
-    pub fn parse(tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec, partitioning: anytype) Partitioning {
-        const logical = if (@TypeOf(partitioning) == Logical)
-            partitioning
-        else
-            // capture all the comptime logic in the Logical struct.
-            comptime Logical.parse(partitioning);
-
-        return logical.applyUseAll(tags, mesh, default_value);
-    }
-
+    /// A reusable, mesh-independent partitioning keyed by tensor axis tags.
+    /// Values name logical mesh axes (eg `.model`), or are `.replicated` / `.open`.
+    /// It is resolved into a positional `Partitioning` once the tensor tags and the mesh are known,
+    /// so the same value can be applied to tensors with reordered axes, or on different meshes.
     pub const Logical = struct {
-        src: Shape.TagsArray,
-        tgt: Shape.TagsArray,
+        pub const Spec = union(enum) {
+            /// Sharded along the logical mesh axis with this name.
+            axis: Shape.Tag,
+            replicated,
+            open,
 
-        const replicated: Shape.Tag = Shape.toTag(.replicated);
-        const open: Shape.Tag = Shape.toTag(.open);
-
-        pub fn parse(v: anytype) Logical {
-            const V = @TypeOf(v);
-
-            var src_: Shape.TagsArray = .empty;
-            var tgt_: Shape.TagsArray = .empty;
-
-            if (comptime stdx.meta.isStruct(V)) {
-                const field_names = std.meta.fieldNames(V);
-                stdx.debug.assertComptime(field_names.len <= @TypeOf(src_).max_len, "Too many tags in struct {} ({d})", .{ V, field_names.len });
-                inline for (field_names) |field_name| {
-                    const fv = @field(v, field_name);
-                    tgt_.appendAssumeCapacity(@tagName(fv));
-
-                    if (!comptime stdx.meta.isTuple(V)) {
-                        src_.appendAssumeCapacity(field_name);
-                    }
-                }
-                return .{ .src = src_, .tgt = tgt_ };
-            }
-
-            stdx.debug.compileError("Sharding.Partitioning.parse expects a struct of enum literals, eg {{ .b = .data, .d = .model }}, got: {any}", .{V});
-        }
-
-        test "Logical.parse" {
-            const logical = comptime Logical.parse(.{ .a = .x, .b = .y });
-
-            try std.testing.expectEqualSlices(Shape.Tag, &.{ "a".ptr, "b".ptr }, logical.src.constSlice());
-            try std.testing.expectEqualSlices(Shape.Tag, &.{ "x".ptr, "y".ptr }, logical.tgt.constSlice());
-        }
-
-        pub fn apply(logical: *const Logical, tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec) struct { Partitioning, ?u8 } {
-            var partition_: Partitioning = .repeat(default_value, tags.len);
-            var missing_src_axis: ?u8 = null;
-
-            for (0.., logical.src.slice(), logical.tgt.slice()) |i, shape_tag, mesh_tag| {
-                const shape_ax = Shape.axisFromTagMaybe(tags, shape_tag) orelse {
-                    missing_src_axis = @intCast(i);
-                    continue;
+            pub fn init(value: anytype) Spec {
+                const V = @TypeOf(value);
+                if (V == Spec) return value;
+                if (V == @EnumLiteral()) return switch (value) {
+                    .replicated => .replicated,
+                    .open => .open,
+                    else => .{ .axis = Shape.toTag(value) },
                 };
-
-                const spec: PartitionSpec = if (mesh_tag == Logical.replicated)
-                    .replicated
-                else if (mesh_tag == Logical.open)
-                    .open
-                else spec: {
-                    const mesh_ax = mesh.resolveLogicalAxis(mesh_tag) orelse {
-                        stdx.debug.panic("{f} has no logical axis '{s}'", .{ mesh, mesh_tag });
-                    };
-                    break :spec .sharded(@intCast(mesh_ax));
-                };
-                partition_ = partition_.set(shape_ax, spec);
+                if (V == Shape.Tag) return .{ .axis = value };
+                stdx.debug.compileError("Partitioning.Logical.Spec expects a logical axis tag, .replicated or .open, got {}", .{V});
             }
-            return .{ partition_, missing_src_axis };
+
+            pub fn resolve(self: Spec, mesh: *const Mesh) PartitionSpec {
+                return switch (self) {
+                    .replicated => .replicated,
+                    .open => .open,
+                    .axis => |t| .sharded(@intCast(mesh.resolveLogicalAxis(t) orelse {
+                        stdx.debug.panic("{f} has no logical axis '{s}'", .{ mesh, t });
+                    })),
+                };
+            }
+        };
+
+        const Entry = struct { tag: Shape.Tag, spec: Spec };
+
+        entries: stdx.BoundedArray(Entry, MAX_RANK) = .empty,
+        /// Spec of the axes without an entry. `null` defers to the default of the caller.
+        default: ?Spec = null,
+
+        pub const replicated: Logical = .{ .default = .replicated };
+
+        /// Accepts a `Logical`, `.replicated`, or a struct mapping tensor axis tags to specs,
+        /// eg `.{ .out = .model, .in = .replicated }`. Null optional specs are skipped.
+        pub fn init(specs: anytype) Logical {
+            const T = @TypeOf(specs);
+            if (T == Logical) return specs;
+            if (T == @EnumLiteral()) return switch (specs) {
+                .replicated => Logical.replicated,
+                else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
+            };
+            stdx.debug.assertComptime(stdx.meta.isStruct(T), "Partitioning.Logical expects a struct of partition specs or .replicated, got {}", .{T});
+
+            var result: Logical = .{};
+            inline for (comptime std.meta.fieldNames(T)) |field_name| {
+                const value = @field(specs, field_name);
+                const spec: ?Spec = if (@typeInfo(@TypeOf(value)) == .optional) (if (value) |v| Spec.init(v) else null) else Spec.init(value);
+                if (spec) |s| result.entries.append(.{ .tag = Shape.toTag(field_name), .spec = s }) catch stdx.debug.panic("Too many partitioning axes, max: {d}", .{MAX_RANK});
+            }
+            return result;
         }
 
-        pub fn applyUseAll(logical: *const Logical, tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec) Partitioning {
-            const p, const missing_shape_axis = logical.apply(tags, mesh, default_value);
-
-            if (missing_shape_axis) |ax| {
-                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), logical.src.get(ax) });
+        /// Returns the spec of the given tensor axis, or `default` when it has no entry.
+        pub fn get(self: Logical, tag_: anytype) ?Spec {
+            const axis_tag = Shape.toTag(tag_);
+            for (self.entries.constSlice()) |entry| {
+                if (std.mem.eql(u8, std.mem.span(entry.tag), std.mem.span(axis_tag))) return entry.spec;
             }
-            return p;
+            return self.default;
+        }
+
+        /// Resolves the partitioning of a tensor with the given axis tags on `mesh`.
+        /// Every entry must name one of `tags`.
+        pub fn resolve(self: Logical, tags: []const Shape.Tag, mesh: *const Mesh, default_value: PartitionSpec) Partitioning {
+            var res: Partitioning = .repeat(if (self.default) |d| d.resolve(mesh) else default_value, tags.len);
+            for (self.entries.constSlice()) |entry| {
+                const ax = Shape.axisFromTagMaybe(tags, entry.tag) orelse {
+                    stdx.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), entry.tag });
+                };
+                res = res.set(ax, entry.spec.resolve(mesh));
+            }
+            return res;
+        }
+
+        test "Logical resolves by tensor axis name on any mesh" {
+            const tp: Mesh = .initTest(.tp, .{.model});
+            const ep: Mesh = .initTest(.ep, .{ .experts, .model });
+            const specs: []const Spec = &.{ .init(.model), .replicated, .open };
+            for (specs) |spec| {
+                const logical: Logical = .init(.{ .out = spec, .in = .replicated });
+                const out = logical.get(.out).?;
+                try std.testing.expectEqual(std.meta.activeTag(spec), std.meta.activeTag(out));
+                try std.testing.expectEqual(spec.resolve(&ep), out.resolve(&ep));
+                try std.testing.expectEqual(null, logical.get(.batch));
+
+                const tags: []const Shape.Tag = &.{ "in", "batch", "out" };
+                try std.testing.expectEqualSlices(
+                    PartitionSpec,
+                    &.{ .replicated, .open, spec.resolve(&tp) },
+                    logical.resolve(tags, &tp, .open).toArray()[0..3],
+                );
+                try std.testing.expectEqual(spec.resolve(&ep), logical.resolve(tags, &ep, .replicated).get(2));
+            }
+            try std.testing.expectEqual(PartitionSpec.sharded(1), Spec.init(.model).resolve(&ep));
+        }
+
+        test "Logical replicated default and optional specs" {
+            const tp: Mesh = .initTest(.tp, .{.model});
+            const logical: Logical = .init(.replicated);
+            try std.testing.expect(logical.get(.out).? == .replicated);
+            try std.testing.expectEqual(Partitioning.replicated(2), logical.resolve(&.{ "a", "b" }, &tp, .open));
+
+            const maybe: ?Spec = null;
+            const partial: Logical = .init(.{ .a = maybe, .b = @as(?Spec, .init(.model)) });
+            try std.testing.expectEqual(1, partial.entries.len);
+            try std.testing.expectEqual(Partitioning.init(&.{ .open, .mesh_axis_0 }), partial.resolve(&.{ "a", "b" }, &tp, .open));
         }
     };
 };

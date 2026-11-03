@@ -407,6 +407,36 @@ pub const Shape = struct {
         return self.eql(other) and std.mem.eql(Tag, self.tags(), other.tags()) and self.dtype() == other.dtype();
     }
 
+    /// Compares dimensions, dtype, tags, mesh, and per-axis partition specs.
+    pub fn eqlWithTagsAndPartitioning(self: Shape, other: Shape) bool {
+        if (!self.eqlWithTags(other) or self._sharding.mesh != other._sharding.mesh) return false;
+        for (0..self.rank()) |ax| {
+            if (self.partition(ax) != other.partition(ax)) return false;
+        }
+        return true;
+    }
+
+    test eqlWithTagsAndPartitioning {
+        const other_mesh: Sharding.Mesh = .initTest(.other, .{ .batch, .feature });
+        const shape = Shape.init(.{ .out = 8, .in = 16 }, .f32)
+            .withPartitioning(&test_mesh, .{ .out = .feature, .in = .replicated });
+        const Spec = Sharding.Partitioning.Logical.Spec;
+        // Only the first spec is `shape`'s.
+        const specs: []const Spec = &.{ .init(.feature), .init(.batch), .replicated, .open };
+        for (specs, 0..) |spec, i| {
+            const other = shape.withPartitioning(&test_mesh, .{ .out = spec, .in = .replicated });
+            try testing.expect(shape.eqlWithTags(other));
+            try testing.expectEqual(i == 0, shape.eqlWithTagsAndPartitioning(other));
+        }
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withPartitioning(&other_mesh, .{ .out = .feature, .in = .replicated })));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withDtype(.bf16)));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.setDim(.out, 9)));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.rename(.{ .out = .features })));
+        try testing.expect(!shape.eqlWithTagsAndPartitioning(Shape.init(.{ .out = 8 }, .f32)));
+        try testing.expect(!shape.withDefaultPartitioning().eqlWithTagsAndPartitioning(Shape.init(.{ .out = 8, .in = 16 }, .f32)));
+        try testing.expect(Shape.init(.{}, .f32).eqlWithTagsAndPartitioning(Shape.init(.{}, .f32)));
+    }
+
     /// Format the shape.
     /// "Shape({.a=10, .b=20}, dtype=.f32)"
     pub fn format(self: Shape, writer: *std.Io.Writer) !void {
@@ -827,9 +857,11 @@ pub const Shape = struct {
         .grid = undefined,
     };
 
+    /// Partitions this shape on `mesh` as `Tensor.withPartitioning` takes `partitioning`, except
+    /// that axes it leaves unspecified are `.replicated`.
     pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partitioning: anytype) Shape {
         if (@TypeOf(partitioning) != Sharding.Partitioning) {
-            return self.withPartitioning(mesh, Sharding.Partitioning.parse(self.tags(), mesh, .replicated, partitioning));
+            return self.withPartitioning(mesh, Sharding.Partitioning.Logical.init(partitioning).resolve(self.tags(), mesh, .replicated));
         }
         var res = self;
         res._sharding = .{ .mesh = mesh, .partition = partitioning };
