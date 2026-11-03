@@ -247,9 +247,25 @@ pub const KvCache = union(enum) {
     }
 };
 
+/// Every backend runs inside the same manual computation using the inputs' sharding.
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
     _ = k;
     _ = v;
+    const Call = struct {
+        parameters: Parameters,
+        q: zml.Tensor,
+        kv_cache: KvCache,
+        opts: AttentionOptions,
+
+        fn forward(args: @This(), _: zml.Shape) zml.Tensor {
+            return pagedAttentionLocal(args.parameters, args.q, args.kv_cache, args.opts);
+        }
+    };
+    const args: Call = .{ .parameters = parameters, .q = q, .kv_cache = kv_cache, .opts = opts };
+    return zml.ops.manualComputation(Call.forward, args, q.shape());
+}
+
+fn pagedAttentionLocal(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
     return switch (parameters) {
         .cute => |p| switch (kv_cache) {
             .split => |split| cute.pagedAttention(p, q, split.k, split.v, opts),

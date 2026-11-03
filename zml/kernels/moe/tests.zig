@@ -675,3 +675,46 @@ test "Mosaic TPU compatibility matrix" {
         .biases = &.{ false, true },
     }, .{});
 }
+
+test "shared StableHLO boundary reduces only local expert contributions" {
+    const platform = zml.testing.env();
+    const mesh = zml.testing.tpMesh();
+    if (mesh.numPartitionsForLogicalAxis(.model) < 2) return error.SkipZigTest;
+    const Test = struct {
+        fn forward(m: *const zml.Mesh, placement: Placement) Outputs {
+            const experts = 2 * m.numPartitionsForLogicalAxis(.model);
+            const input: Tensor = .zeroes(.init(.{ .t = 2, .d = 4 }, .f32));
+            const ids = Tensor.constantTensor(.init(.{ .topk = 2 }, .i32), std.mem.sliceAsBytes(&[_]i32{ 0, @intCast(experts - 1) }))
+                .broad(.init(.{ .t = 2, .topk = 2 }, .i32));
+            const weights = Tensor.scalar(0.5, .f32).broad(ids.shape().withDtype(.f32));
+            const gate_up: zml.nn.Linear = .init(
+                Tensor.zeroes(.init(.{ .expert = experts, .out = 4, .in = 4 }, .f32)).withPartitioning(m, .{ .expert = .model }),
+                Tensor.scalar(1, .f32).broad(.init(.{ .expert = experts, .out = 4 }, .f32)).withPartitioning(m, .{ .expert = .model }),
+                .in,
+            );
+            const down: zml.nn.Linear = .init(
+                Tensor.scalar(1, .f32).broad(.init(.{ .expert = experts, .out = 4, .in = 4 }, .f32)).withPartitioning(m, .{ .expert = .model }),
+                Tensor.scalar(3, .f32).broad(.init(.{ .expert = experts, .out = 4 }, .f32)).withPartitioning(m, .{ .expert = .model }),
+                .in,
+            );
+            return .{
+                .actual = zml.moe.forwardMoe(input, ids, weights, gate_up, down, .stablehlo, .{
+                    .activation = .relu,
+                    .quantize_input = false,
+                    .routing_weight_placement = placement,
+                }),
+                .expected = Tensor.scalar(@as(f32, if (placement == .before_down) 10 else 7), .f32).broad(input.shape()),
+            };
+        }
+    };
+    for ([_]Placement{ .before_down, .after_down }) |placement| {
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Test.forward, .{ mesh, placement }, .{ .meshes = &.{mesh} });
+        defer exe.deinit();
+        var output: zml.Bufferized(Outputs) = undefined;
+        var runner = try exe.runner(std.testing.allocator);
+        defer runner.deinit(std.testing.allocator);
+        runner.run(std.testing.io, .{}, .{&output}, .{ .wait = true });
+        defer zml.Buffer.deinitAll(Outputs, &output);
+        try zml.testing.expectClose(std.testing.io, output.expected, output.actual, .{ .absolute_tolerance = 0.001, .minimum_close_fraction = 1 });
+    }
+}

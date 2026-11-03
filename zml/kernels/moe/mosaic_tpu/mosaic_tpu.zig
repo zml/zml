@@ -225,8 +225,7 @@ pub fn callGmmEp(
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: zml.moe.Options,
@@ -236,82 +235,16 @@ pub fn fusedExperts(
     const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
     const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
 
-    const expert_partition = gate_up.weight.shape().partition(.expert);
-
-    if (expert_partition.isSharded()) {
-        const global_num_experts = down.weight.dim(.expert);
-        const partial_output = zml.ops.manualComputation(
-            (struct {
-                input: zml.Tensor,
-                topk_ids: zml.Tensor,
-                topk_weights: zml.Tensor,
-                weights_gate_up: zml.Tensor,
-                weights_down: zml.Tensor,
-                activation: zml.moe.Activation,
-                global_num_experts: i64,
-                gate_up_scales: ?zml.Tensor,
-                bias_gate_up: ?zml.Tensor,
-                down_scales: ?zml.Tensor,
-                bias_down: ?zml.Tensor,
-
-                fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                    const local_num_experts = self.weights_gate_up.dim(.expert);
-                    const partition_id = zml.ops.partitionId().convert(.i32);
-                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                    const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                    const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                        .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                    const expert_map = local_expert_mask.select(
-                        global_expert_ids.sub(expert_start),
-                        zml.Tensor.scalar(-1, .i32),
-                    );
-                    const local_output = fusedExpertsImpl(
-                        self.input,
-                        self.weights_gate_up,
-                        self.weights_down,
-                        self.topk_weights,
-                        self.topk_ids,
-                        .{
-                            .activation = self.activation,
-                            .global_num_experts = self.global_num_experts,
-                            .expert_map = expert_map,
-                            .w1_scale = self.gate_up_scales,
-                            .w2_scale = self.down_scales,
-                            .w1_bias = self.bias_gate_up,
-                            .w2_bias = self.bias_down,
-                        },
-                    );
-                    return local_output.reshape(self.input.shape()).withTags(.{ .t, .d });
-                }
-            }).body,
-            .{
-                .input = input,
-                .topk_ids = topk_ids,
-                .topk_weights = topk_weights,
-                .weights_gate_up = gate_up.weight,
-                .weights_down = down.weight,
-                .activation = opts.activation,
-                .global_num_experts = global_num_experts,
-                .gate_up_scales = gate_up_scales,
-                .bias_gate_up = gate_up.bias,
-                .down_scales = down_scales,
-                .bias_down = down.bias,
-            },
-            input.shape(),
-        );
-        return zml.ops.allReduce(partial_output, zml.Tensor.add);
-    }
-
     return fusedExpertsImpl(
         input,
         gate_up.weight,
         down.weight,
-        topk_weights,
-        topk_ids,
+        routing.weights,
+        routing.ids,
         .{
             .activation = opts.activation,
-            .global_num_experts = gate_up.weight.dim(.expert),
+            .global_num_experts = routing.global_num_experts,
+            .expert_map = routing.expertMap(),
             .w1_scale = gate_up_scales,
             .w2_scale = down_scales,
             .w1_bias = gate_up.bias,

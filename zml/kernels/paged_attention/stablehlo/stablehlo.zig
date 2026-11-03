@@ -18,7 +18,15 @@ pub fn pagedAttention(
 
     const final_state = zml.ops.@"while"(
         AttentionLoop,
-        .{ .q = q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
+        .{
+            .q = q,
+            .kv_cache = .{ .split = .{
+                .k = kv_cache.split.k,
+                .v = kv_cache.split.v,
+            } },
+            .parameters = parameters,
+            .opts = opts,
+        },
         .{
             // i32 to match triton conventions
             .slot_id = .scalar(0, .i32),

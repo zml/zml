@@ -127,6 +127,7 @@ pub const Metadata = union(Backend) {
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+    stdx.debug.assert(zml.Compiler.current().manual_computation_depth > 0, "Attention kernels require a manualComputation boundary", .{});
     return switch (parameters) {
         .cute => cute.attention(q, k, v, token_index),
         .nki => nki.attention(q, k, v, token_index, parameters.nki),
@@ -245,12 +246,12 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     for (backends) |backend| {
         if (!backend.isAvailable(platform)) continue;
 
-        const metadata: Metadata = .init(.fromBackend(backend));
-        const parameters: Parameters = .init(.fromBackend(backend));
+        const metadata: zml.attention.Metadata = .{ .flash_attention = .init(.fromBackend(backend)) };
+        const parameters: zml.attention.Parameters = .{ .flash_attention = .init(.fromBackend(backend)) };
         const exe = try platform.compileFn(
             allocator,
             io,
-            attention,
+            zml.attention.attention,
             .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
@@ -260,7 +261,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
         defer exe.deinit();
 
         var metadata_d = try metadata.initBuffer(io, platform);
-        defer Metadata.deinitBuffer(&metadata_d);
+        defer zml.attention.Metadata.deinitBuffer(&metadata_d);
 
         var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, metadata_d });
         defer output_d.deinit();

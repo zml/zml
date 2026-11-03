@@ -274,92 +274,57 @@ pub const paged = struct {
             return pagedSparseAttention(parameters, q, k_cache, v_cache, opts);
         }
 
-        const output = zml.ops.manualComputation(
-            (struct {
-                q: zml.Tensor,
-                k_cache: zml.Tensor,
-                v_cache: zml.Tensor,
-                block_table: zml.Tensor,
-                seq_lens: zml.Tensor,
-                query_start_len: zml.Tensor,
-                opts: AttentionOptions,
-                options: Options,
+        const cu_count = getCuCount();
+        const num_heads: usize = @intCast(q.dim(.hkv) * q.dim(.hg));
+        const num_kv_heads: usize = @intCast(k_cache.dim(.hkv));
+        const num_queries_per_kv: usize = num_heads / num_kv_heads;
+        // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
+        // single decode query token doesn't carry masked-out fp32 acc lanes.
+        // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
+        const block_m: usize = if (!parameters.options_.is_prefill and isOneapiTarget())
+            std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
+        else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
+        const block_q: usize = block_m / num_queries_per_kv;
+        const num_tokens: usize = @intCast(q.dim(.b));
+        const num_seqs: usize = @intCast(parameters.block_table.dim(.b));
+        const total_q_blocks: usize = num_tokens / block_q + num_seqs;
+        const target_num_prgms: usize = cu_count * 4;
+        const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
 
-                fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                    const parameters_: Parameters = .{
-                        .block_table = self.block_table,
-                        .seq_lens = self.seq_lens,
-                        .query_start_len = self.query_start_len,
-                        .options_ = self.options,
-                    };
+        const sliding_window: usize = opts.mask.slidingWindow() orelse 0;
 
-                    const cu_count = getCuCount();
-                    const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
-                    const num_kv_heads: usize = @intCast(self.k_cache.dim(.hkv));
-                    const num_queries_per_kv: usize = num_heads / num_kv_heads;
-                    // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
-                    // single decode query token doesn't carry masked-out fp32 acc lanes.
-                    // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
-                    const block_m: usize = if (!self.options.is_prefill and isOneapiTarget())
-                        std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
-                    else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
-                    const block_q: usize = block_m / num_queries_per_kv;
-                    const num_tokens: usize = @intCast(self.q.dim(.b));
-                    const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
-                    const total_q_blocks: usize = num_tokens / block_q + num_seqs;
-                    const target_num_prgms: usize = cu_count * 4;
-                    const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
+        const paged_attention_opts: PagedAttentionOptions = .{
+            .cu_count = getCuCount(),
+            .all_decode = !parameters.options_.is_prefill,
+            .num_tokens = num_tokens,
+            .num_heads = num_heads,
+            .num_kv_heads = num_kv_heads,
+            .head_dim = @intCast(q.dim(.hd)),
+            .batch_size = @intCast(parameters.block_table.dim(.b)),
+            .block_size = @intCast(k_cache.dim(.k_chunk)),
+            .num_blocks = @intCast(k_cache.dim(.page)),
+            .max_num_block_per_seq = @intCast(parameters.block_table.dim(.p)),
+            .sliding_window = sliding_window,
+            .block_m = block_m,
+            .block_q = block_q,
+            .total_q_blocks = total_q_blocks,
+            .target_num_prgms = target_num_prgms,
+            .num_2d_prgms = num_2d_prgms,
+            .max_seqlen_q = parameters.options_.max_seqlen_q,
+            .scale = opts.scale,
+        };
 
-                    const sliding_window: usize = self.opts.mask.slidingWindow() orelse 0;
-
-                    const paged_attention_opts: PagedAttentionOptions = .{
-                        .cu_count = getCuCount(),
-                        .all_decode = !self.options.is_prefill,
-                        .num_tokens = num_tokens,
-                        .num_heads = num_heads,
-                        .num_kv_heads = num_kv_heads,
-                        .head_dim = @intCast(self.q.dim(.hd)),
-                        .batch_size = @intCast(parameters_.block_table.dim(.b)),
-                        .block_size = @intCast(self.k_cache.dim(.k_chunk)),
-                        .num_blocks = @intCast(self.k_cache.dim(.page)),
-                        .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
-                        .sliding_window = sliding_window,
-                        .block_m = block_m,
-                        .block_q = block_q,
-                        .total_q_blocks = total_q_blocks,
-                        .target_num_prgms = target_num_prgms,
-                        .num_2d_prgms = num_2d_prgms,
-                        .max_seqlen_q = self.options.max_seqlen_q,
-                        .scale = self.opts.scale,
-                    };
-
-                    const use_2d_kernel = use2dKernel(
-                        paged_attention_opts.all_decode,
-                        paged_attention_opts.batch_size,
-                        paged_attention_opts.num_kv_heads,
-                    );
-                    const output = if (use_2d_kernel)
-                        pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
-                    else if (isOneapiTarget())
-                        pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
-                    else
-                        pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
-
-                    return output;
-                }
-            }).body,
-            .{
-                .q = q,
-                .k_cache = k_cache,
-                .v_cache = v_cache,
-                .block_table = parameters.block_table,
-                .seq_lens = parameters.seq_lens,
-                .query_start_len = parameters.query_start_len,
-                .opts = opts,
-                .options = parameters.options_,
-            },
-            q.shape(),
+        const use_2d_kernel = use2dKernel(
+            paged_attention_opts.all_decode,
+            paged_attention_opts.batch_size,
+            paged_attention_opts.num_kv_heads,
         );
+        const output = if (use_2d_kernel)
+            pagedAttention2d(parameters, q, k_cache, v_cache, opts, paged_attention_opts)
+        else if (isOneapiTarget())
+            pagedAttention3dOneapi(parameters, q, k_cache, v_cache, opts, paged_attention_opts)
+        else
+            pagedAttention3d(parameters, q, k_cache, v_cache, opts, paged_attention_opts);
 
         return output;
     }
@@ -372,51 +337,18 @@ pub const paged = struct {
         stdx.debug.assert(indices.shape().hasTags(.{ .b, .topk }), "Sparse indices expect to have .b, .topk tags", .{});
         stdx.debug.assert(q.dtype() == k_cache.dtype() and q.dtype() == v_cache.dtype(), "Sparse attention requires matching query and KV dtypes", .{});
 
-        return zml.ops.manualComputation(
-            (struct {
-                q: zml.Tensor,
-                k_cache: zml.Tensor,
-                v_cache: zml.Tensor,
-                block_table: zml.Tensor,
-                seq_lens: zml.Tensor,
-                query_start_len: zml.Tensor,
-                opts: AttentionOptions,
-                options: Options,
-
-                fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                    const parameters_: Parameters = .{
-                        .block_table = self.block_table,
-                        .seq_lens = self.seq_lens,
-                        .query_start_len = self.query_start_len,
-                        .options_ = self.options,
-                    };
-
-                    const config = selectSparseConfig(
-                        @intCast(self.opts.mask.indices.dim(.topk)),
-                        @intCast(self.block_table.dim(.b)),
-                        @intCast(self.q.dim(.hkv)),
-                        getCuCount(),
-                        !self.options.is_prefill,
-                    );
-
-                    return if (config.num_segments == 1)
-                        pagedSparseAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, config)
-                    else
-                        pagedSparseAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, config);
-                }
-            }).body,
-            .{
-                .q = q,
-                .k_cache = k_cache,
-                .v_cache = v_cache,
-                .block_table = parameters.block_table,
-                .seq_lens = parameters.seq_lens,
-                .query_start_len = parameters.query_start_len,
-                .opts = opts,
-                .options = parameters.options_,
-            },
-            q.shape(),
+        const config = selectSparseConfig(
+            @intCast(opts.mask.indices.dim(.topk)),
+            @intCast(parameters.block_table.dim(.b)),
+            @intCast(q.dim(.hkv)),
+            getCuCount(),
+            !parameters.options_.is_prefill,
         );
+
+        return if (config.num_segments == 1)
+            pagedSparseAttention2d(parameters, q, k_cache, v_cache, opts, config)
+        else
+            pagedSparseAttention3d(parameters, q, k_cache, v_cache, opts, config);
     }
 
     pub fn pagedSparseAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, tuning: SparseConfig) zml.Tensor {

@@ -18,8 +18,7 @@ test {
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: zml.moe.Options,
@@ -34,48 +33,15 @@ pub fn fusedExperts(
         .hidden_states = input,
         .gate_up = gate_up,
         .down = down,
-        .topk_weights = topk_weights,
-        .topk_ids = topk_ids,
+        .topk_weights = routing.weights,
+        .topk_ids = routing.ids,
+        .expert_map = routing.expertMap(),
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,
         .gate_up_layout = layout.gate_up,
         .routing_weight_placement = opts.routing_weight_placement,
     };
-    const expert_partition = gate_up.weight.shape().partition(.expert);
-
-    if (!expert_partition.isSharded()) {
-        return fusedExpertsImpl(args);
-    }
-
-    return zml.ops.manualComputation(
-        (struct {
-            args: FusedExpertsArgs,
-            global_num_experts: i64,
-
-            fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                const local_args = self.args;
-                const local_num_experts = local_args.gate_up.weight.dim(.expert);
-                const partition_id = zml.ops.partitionId().convert(.i32);
-                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                // Map global expert ids to local ids, or -1 for experts outside this partition.
-                const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                    .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                var mapped_args = local_args;
-                mapped_args.expert_map = local_expert_mask.select(
-                    global_expert_ids.sub(expert_start),
-                    zml.Tensor.scalar(-1, .i32),
-                );
-
-                const local_output = fusedExpertsImpl(mapped_args);
-                const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
-                return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
-            }
-        }).call,
-        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
-        input.shape(),
-    );
+    return fusedExpertsImpl(args);
 }
 
 pub const FusedExpertsArgs = struct {

@@ -94,6 +94,7 @@ pub const Metadata = union(BackendType) {
 };
 
 /// Causal attention as used in transformers.
+/// Every backend runs on local head shards inside a manual computation.
 ///
 /// **Shapes**:
 ///   - q, result: .{ .q, .h, .hd }
@@ -105,18 +106,71 @@ pub const Metadata = union(BackendType) {
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-    return switch (parameters) {
-        .stablehlo => b: {
-            // Generate the attention mask.
-            const seq_len = k.dim(.k);
-            var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
+    const Call = struct {
+        q: zml.Tensor,
+        k: zml.Tensor,
+        v: zml.Tensor,
+        token_index: zml.Tensor,
+        metadata: Metadata,
+        parameters: Parameters,
 
-            // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
-            // then slice into it, but XLA is able to optimize this correctly.
-            attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.appendAxes(.{.coord}), .{});
-            const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
-            break :b attn_output;
-        },
-        .flash_attention => flash_attention.attention(q, k, v, token_index, metadata.flash_attention, parameters.flash_attention),
+        fn forward(args: @This(), _: zml.Shape) zml.Tensor {
+            return switch (args.parameters) {
+                .stablehlo => b: {
+                    const seq_len = args.k.dim(.k);
+                    var mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, args.q.dtype(), null);
+                    mask = mask.gatherSlices(zml.Shape.init(.{ .q = args.q.dim(.q) }, mask.dtype()), args.token_index.appendAxes(.{.coord}), .{});
+                    break :b zml.nn.sdpa(args.q, args.k, args.v, .{ .attn_mask = mask });
+                },
+                .flash_attention => flash_attention.attention(args.q, args.k, args.v, args.token_index, args.metadata.flash_attention, args.parameters.flash_attention),
+            };
+        }
     };
+    const mesh = zml.Compiler.current().resolveMesh(.{.model});
+    const args: Call = .{
+        .q = q.withPartitioning(mesh, q.shape().withPartitioning(mesh, .{ .h = .model })._sharding.partition),
+        .k = k.withPartitioning(mesh, k.shape().withPartitioning(mesh, .{ .h = .model })._sharding.partition),
+        .v = v.withPartitioning(mesh, v.shape().withPartitioning(mesh, .{ .h = .model })._sharding.partition),
+        .token_index = token_index,
+        .metadata = metadata,
+        .parameters = parameters,
+    };
+    return zml.ops.manualComputation(Call.forward, args, q.shape().withPartitioning(mesh, .{ .h = .model }));
+}
+
+test "attention runs every backend inside the shared manual region" {
+    const mlir = @import("mlir");
+    const platform = zml.testing.env();
+    const mesh = zml.testing.tpMesh();
+    const partitions = mesh.numPartitionsForLogicalAxis(.model);
+    var compiler: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{ .meshes = &.{mesh} });
+    defer compiler.deinit();
+    compiler.activate();
+    defer compiler.deactivate();
+    const block = mlir.Block.init(&.{}, &.{});
+    defer block.deinit();
+    const scope = compiler.pushBlock(block);
+    defer scope.pop();
+
+    for ([_]bool{ false, true }) |batched| {
+        const q_shape: zml.Shape = if (batched)
+            .init(.{ .b = 2, .q = 1, .h = 4 * partitions, .hd = 64 }, .bf16)
+        else
+            .init(.{ .q = 1, .h = 4 * partitions, .hd = 64 }, .bf16);
+        const k_shape: zml.Shape = if (batched)
+            .init(.{ .b = 2, .k = 8, .h = 2 * partitions, .hd = 64 }, .bf16)
+        else
+            .init(.{ .k = 8, .h = 2 * partitions, .hd = 64 }, .bf16);
+        const q: zml.Tensor = .zeroes(q_shape);
+        const k: zml.Tensor = .zeroes(k_shape);
+        const v: zml.Tensor = .zeroes(k_shape);
+
+        // Trace CuTe on any platform; no device kernel is compiled or executed.
+        for ([_]Backend{ .stablehlo, .{ .flash_attention = .cute } }) |backend| {
+            const output = attention(q, k, v, .scalar(0, .u32), .init(.fromBackend(backend)), .init(.fromBackend(backend)));
+            try std.testing.expect(output.shape().eql(q_shape));
+            try std.testing.expectEqualDeep(q_shape.withPartitioning(mesh, .{ .h = .model })._sharding, output.shape()._sharding);
+            try std.testing.expectEqualStrings("sdy.manual_computation", compiler.currentScope().value(output).owner().name());
+        }
+    }
 }
