@@ -92,6 +92,7 @@ zig_library(
         "io/backend.zig",
         "io/buffered_loader.zig",
         "io/direct_loader.zig",
+        "io/dma_calibration.zig",
         "io/host_memory.zig",
         "io/loader.zig",
         "io/log.zig",

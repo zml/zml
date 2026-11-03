@@ -33,6 +33,7 @@ test {
     _ = @import("io/backend.zig");
     _ = @import("io/buffered_loader.zig");
     _ = @import("io/direct_loader.zig");
+    _ = @import("io/dma_calibration.zig");
     _ = @import("io/host_memory.zig");
     _ = @import("io/loader.zig");
     _ = @import("io/log.zig");
