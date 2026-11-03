@@ -58,6 +58,7 @@ const BackendOptions = backend.Options;
 const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
 const ShardGrid = @import("ShardGrid.zig");
+const Memory = @import("TensorStore.zig").Memory;
 const host_memory = @import("host_memory.zig");
 const load_log = @import("log.zig").load;
 const testing = @import("../testing.zig");
@@ -228,8 +229,10 @@ pub const Loader = struct {
     /// and this backend's: device memory, and contiguous parts covering
     /// every byte of their destination. A planning failure fails the
     /// loader (a partial submission can never complete): the batch is
-    /// awaited here and the caller sees only the first error.
+    /// awaited here and the caller sees only the first error. A failed
+    /// loader refuses every submit with its first error.
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) !*Batch {
+        try self.checkOpen();
         const batch = batch: {
             const batch = try Batch.create(self.allocator, self.io, self.batch_count);
             errdefer batch.destroy();
@@ -318,6 +321,10 @@ pub const Loader = struct {
         self.credits.deinit(self.allocator);
         self.workspace.deinit();
         self.allocator.destroy(self);
+    }
+
+    fn checkOpen(self: *Loader) !void {
+        if (self.first_error.get()) |err| return err;
     }
 
     /// Creates the batch's destinations, one per spec, and their parts in
@@ -2516,6 +2523,14 @@ test "lazy initialization preserves its finite error across repeated callers" {
 
 // Whole-loader tests.
 
+/// Submits `specs`, which must fail with `expected`; a batch that went out
+/// anyway is awaited before the test fails.
+fn expectSubmitError(loader: *Loader, specs: []const LoadSpec, expected: anyerror) !void {
+    const batch = loader.submit(specs, .none) catch |err| return std.testing.expectEqual(expected, err);
+    loader.awaitBatch(batch) catch {};
+    return error.TestUnexpectedResult;
+}
+
 test "loader releases the pinned set when its workers cannot start" {
     const allocator = std.testing.allocator;
     const platform = Platform.init(allocator, std.testing.io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
@@ -2531,6 +2546,71 @@ test "loader releases the pinned set when its workers cannot start" {
         break :unexpected {};
     } else |err| err;
     try std.testing.expectError(error.ConcurrencyUnavailable, result);
+}
+
+test "loader failures clean up before publication, after publication and during reading" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const contents = [_]u8{ 1, 2, 3, 4 };
+    var path_buffer: [1024]u8 = undefined;
+    const path = try writeTestFile(tmp.dir, io, "weights.bin", &contents, &path_buffer);
+    var later_buffer: [1024]u8 = undefined;
+    const later_path = try writeTestFile(tmp.dir, io, "weights.bin.later", &contents, &later_buffer);
+    const sources = [_]safetensors.Tensor{
+        .{ .file_uri = path, .name = "first", .shape = .init(.{4}, .u8), .offset = 0 },
+        .{ .file_uri = later_path, .name = "later", .shape = .init(.{5}, .u8), .offset = 0 },
+    };
+    const parts = [_]LoadPart{ .whole(&sources[0]), .whole(&sources[1]) };
+
+    // Device memory, the one kind this backend loads, goes through blocks
+    // and DMA.
+    for ([_]Memory{.default}) |memory| {
+        // Planning allocates from the scheduler's allocator, whose
+        // allocations fail in turn: the first file's planning fails before
+        // any plan is published, then the later file's after the first
+        // file's plan was. Past the last, planning succeeds and the read
+        // fails: the later source ends after four of five bytes.
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var outputs: [2]Buffer = @splat(.{
+                ._platform = platform,
+                ._shape = sources[0].shape,
+                ._shards = .empty,
+            });
+            defer for (&outputs) |*output| output.deinit();
+            var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+            const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2, .direct_io = .off });
+            defer loader.destroy();
+            loader.scheduler.allocator = failing.allocator();
+            const specs = [_]LoadSpec{
+                .{ .shape = sources[0].shape, .memory = memory, .output = &outputs[0], .parts = parts[0..1] },
+                .{ .shape = sources[1].shape, .memory = memory, .output = &outputs[1], .parts = parts[1..2] },
+            };
+
+            if (loader.submit(&specs, .none)) |batch| {
+                try std.testing.expectError(error.UnexpectedEndOfFile, loader.awaitBatch(batch));
+            } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), loader.scheduler.queue.len);
+            // A worker the batch woke may still hold the credit it took for
+            // a claim that finds nothing: every credit is free once the
+            // workers stopped (`stopWorkers`).
+            loader.stopWorkers();
+            try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+            try std.testing.expectEqual(loader.read_width, loader.read_permits.permits);
+
+            // Each failure fails the loader: a later submission gets it.
+            try std.testing.expectEqual(@as(usize, 1), loader.batch_count);
+            const expected: anyerror = if (failing.has_induced_failure) error.OutOfMemory else error.UnexpectedEndOfFile;
+            try std.testing.expectError(expected, loader.checkOpen());
+            try expectSubmitError(loader, specs[0..1], expected);
+            if (!failing.has_induced_failure) break;
+        }
+    }
 }
 
 test "exactly the width of reads are in flight, and a read failing mid-load leaves nothing held" {
@@ -2738,6 +2818,70 @@ test "whole tensors load on four devices, sharded by rows or columns, replicated
     // Every credit is free once the workers stopped (`stopWorkers`).
     loader.stopWorkers();
     try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+}
+
+test "a submit the loader fails between its open check and its first publish returns that failure" {
+    const io = std.testing.io;
+    const platform = Platform.init(std.testing.allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(std.testing.allocator, io);
+    // Fails the loader in the submitting task's next allocation: after
+    // `submit`'s open check and before its first publish, where a worker of
+    // an older batch can fail it and the scheduler then answers `Canceled`.
+    const FailNextAllocation = struct {
+        parent: std.mem.Allocator,
+        loader: *Loader = undefined,
+        thread: std.Thread.Id = undefined,
+        armed: std.atomic.Value(bool) = .init(false),
+
+        fn arm(self: *@This(), loader: *Loader) void {
+            self.loader = loader;
+            self.thread = std.Thread.getCurrentId();
+            self.armed.store(true, .release);
+        }
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            // The workers allocate on threads of their own.
+            if (self.armed.load(.acquire) and self.thread == std.Thread.getCurrentId()) {
+                self.armed.store(false, .monotonic);
+                self.loader.recordError(error.UnexpectedEndOfFile, "an older batch's read", .{});
+            }
+            return self.parent.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.rawResize(memory, alignment, new_len, ret_addr);
+        }
+
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.rawRemap(memory, alignment, new_len, ret_addr);
+        }
+
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.parent.rawFree(memory, alignment, ret_addr);
+        }
+    };
+    var failing: FailNextAllocation = .{ .parent = std.testing.allocator };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [1024]u8 = undefined;
+    const path = try writeTestFile(tmp.dir, io, "weights.bin", &.{ 1, 2, 3, 4 }, &path_buffer);
+    var source: safetensors.Tensor = .{ .file_uri = path, .name = "x", .shape = .init(.{4}, .u8), .offset = 0 };
+    var output: Buffer = .{ ._platform = platform, ._shape = source.shape, ._shards = .empty };
+    defer output.deinit();
+    const loader = try Loader.create(failing.allocator(), io, platform, .{ .read_parallelism = 2, .direct_io = .off });
+    defer loader.destroy();
+    const parts = [_]LoadPart{.whole(&source)};
+    failing.arm(loader);
+    try expectSubmitError(loader, &.{.{ .shape = source.shape, .output = &output, .parts = &parts }}, error.UnexpectedEndOfFile);
 }
 
 test "source slots keep their own copy of each path" {
