@@ -6,9 +6,11 @@
 //!
 //! The store owns those entries, the bindings, and every source and program
 //! value (its arena). Views and sources point to it: once `view` was
-//! called it must not move, and it must outlive them. It borrows the meshes
-//! of `Options.meshes`, which belong to the platform. Binding cannot fail:
-//! a missing key panics with the key.
+//! called it must not move, and it must outlive them and every load
+//! started from it (`Loader.start` borrows it until `wait` or `cancel`).
+//! It borrows the meshes of `Options.meshes`, which belong to the platform.
+//! Binding cannot fail: a missing key panics with the key, and what the
+//! loader cannot fill is its error (`Loader.start`'s `InvalidBinding`).
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -252,7 +254,8 @@ pub fn init(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry,
 }
 
 /// Frees the bindings, the sources and programs, then the registry entries
-/// `init` took.
+/// `init` took. No load started from the store may still run: `wait` or
+/// `cancel` it first.
 pub fn deinit(self: *TensorStore) void {
     self.id_to_sources.deinit(self.allocator);
     self.arena.deinit();
