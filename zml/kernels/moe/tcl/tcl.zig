@@ -9,6 +9,13 @@
 //! device loop over the used chunks of `BGi` blocks gathers each block's
 //! expert weights and runs both projections; outputs are gathered back per
 //! route and weighted.
+//!
+//! Experts split across devices (expert parallel): each device runs its own
+//! experts for the routes that reach them and an all-reduce sums the devices'
+//! outputs. Up to `expert_stationary_tokens` tokens, expert stationary: a
+//! device loop over the used experts, a few at a time, reads each once and
+//! runs it for every token, scaled by the token's routing weight (zero for
+//! the tokens it does not serve); more tokens take blockwise.
 const std = @import("std");
 
 const builder = @import("dsl/tcl/builder");
@@ -21,29 +28,89 @@ const tcl = zml.kernel.tcl;
 
 /// `input` is `{.t, .d}`, `topk_ids` and `topk_weights` `{.t, .topk}`, `gate_up` `{.expert, .dout = 2 * inter (gate then up), .d}`
 /// and `down` `{.expert, .d, .dout = inter}`, all bf16 but the ids (i32).
-/// SwiGLU, routing weights applied after the down projection.
+/// SwiGLU or GeGLU (tanh), routing weights applied after the down projection.
 pub fn fusedExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: zml.moe.Options) Tensor {
     stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL MoE applies routing weights after the down projection, without FP8 input quantization", .{});
-    stdx.debug.assert(opts.activation == .swiglu and std.meta.eql(opts.activation.swiglu, .{}), "TCL MoE supports SwiGLU without limit, scale or bias", .{});
+    stdx.debug.assert(opts.activation == .geglu_tanh or (opts.activation == .swiglu and std.meta.eql(opts.activation.swiglu, .{})), "TCL MoE supports GeGLU (tanh) and SwiGLU without limit, scale or bias", .{});
     stdx.debug.assert(gate_up_linear.quantization == null and down_linear.quantization == null, "TCL MoE takes bf16 experts", .{});
     stdx.debug.assert(gate_up_linear.bias == null and down_linear.bias == null, "TCL MoE takes experts without bias", .{});
     const gate_up = gate_up_linear.weight;
     const down = down_linear.weight;
     stdx.debug.assert(input.dtype() == .bf16 and gate_up.dtype() == .bf16 and down.dtype() == .bf16 and topk_ids.dtype() == .i32, "TCL MoE takes bf16 activations and experts, i32 ids", .{});
-    const t = input.dim(.t);
-    const k = topk_ids.dim(.topk);
+    const geglu = opts.activation == .geglu_tanh;
+    const weights = topk_weights.convert(.f32);
+    if (!gate_up.shape().partition(.expert).isSharded()) return runExperts(input, topk_ids, weights, gate_up, down, geglu);
+    return zml.ops.manualComputation(ExpertParallel.body, .{
+        .input = input,
+        .ids = topk_ids,
+        .weights = weights,
+        .gate_up = gate_up,
+        .down = down,
+        .geglu = geglu,
+    }, input.shape());
+}
+
+const ExpertParallel = struct {
+    input: Tensor,
+    ids: Tensor,
+    weights: Tensor,
+    gate_up: Tensor,
+    down: Tensor,
+    geglu: bool,
+
+    fn body(self: ExpertParallel, _: zml.Shape) Tensor {
+        const experts = self.gate_up.dim(.expert);
+        const start = zml.ops.partitionId().convert(.i32).scale(experts).convert(.i32);
+        const ids = self.ids.sub(start.broad(self.ids.shape()));
+        const mine = ids.cmp(.GE, Tensor.scalar(0, .i32).broad(ids.shape())).logical(.AND, ids.cmp(.LT, Tensor.scalar(experts, .i32).broad(ids.shape())));
+        const local = localExperts(self.input, mine.select(ids, Tensor.scalar(-1, .i32)), mine.select(self.weights, Tensor.scalar(0, .f32)), self.gate_up, self.down, self.geglu);
+        return zml.ops.allReduce(local, Tensor.add);
+    }
+};
+
+/// Tokens up to which a device runs its experts stationary.
+pub const expert_stationary_tokens = 64;
+
+/// One device's share of expert-parallel experts: `topk_ids` index the
+/// device's own experts, -1 for routes to other devices' (weight zero).
+pub fn localExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, geglu: bool) Tensor {
+    const cfg = config(input, topk_ids, gate_up, down, geglu);
+    if (cfg.t > expert_stationary_tokens) {
+        // Other devices' routes run this device's first expert, unweighted.
+        const valid = topk_ids.cmp(.GE, Tensor.scalar(0, .i32).broad(topk_ids.shape()));
+        return runExperts(input, valid.select(topk_ids, Tensor.scalar(0, .i32)), topk_weights, gate_up, down, geglu);
+    }
+    // WORKAROUND (TCC 2026.5.0b0): a token count other than a power of two
+    // panics its adder tree ("Fail to cover valid range", 5 tokens padded
+    // to 8): pad with unrouted tokens.
+    var padded = cfg;
+    padded.t = @intCast(std.math.ceilPowerOfTwo(u64, @intCast(cfg.t)) catch unreachable);
+    const pad = padded.t - cfg.t;
+    const x = input.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.d });
+    const ids = topk_ids.pad(-1, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
+    const weights = topk_weights.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
+    const y = ExpertStationary.call(.{ .x = x, .ids = ids, .w = weights, .gate_up = gate_up, .down = down }, .{ .y = x.shape() }, .{ .cfg = padded }).y;
+    return y.slice(0, .{ .end = cfg.t }).reshape(input.shape());
+}
+
+fn config(input: Tensor, topk_ids: Tensor, gate_up: Tensor, down: Tensor, geglu: bool) Cfg {
     const cfg: Cfg = .{
-        .t = t,
-        .k = k,
+        .t = input.dim(.t),
+        .k = topk_ids.dim(.topk),
         .e = gate_up.dim(.expert),
         .d = input.dim(.d),
         .i = down.dim(.dout),
+        .geglu = geglu,
     };
     stdx.debug.assert(gate_up.dim(.dout) == 2 * cfg.i and down.dim(.d) == cfg.d and gate_up.dim(.d) == cfg.d, "TCL MoE: mismatched expert shapes", .{});
+    return cfg;
+}
 
-    const x = input.reshape(.{ t, cfg.d });
-    const ids = topk_ids.reshape(.{ t, k });
-    const weights = topk_weights.convert(.f32).reshape(.{ t, k });
+fn runExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, geglu: bool) Tensor {
+    const cfg = config(input, topk_ids, gate_up, down, geglu);
+    const x = input.reshape(.{ cfg.t, cfg.d });
+    const ids = topk_ids.reshape(.{ cfg.t, cfg.k });
+    const weights = topk_weights.reshape(.{ cfg.t, cfg.k });
     const out_shape = x.shape();
     const y = if (cfg.t * cfg.k <= cfg.e)
         ActivationStationary.call(.{ .x = x, .ids = ids, .w = weights, .gate_up = gate_up, .down = down }, .{ .y = out_shape }, .{ .cfg = cfg }).y
@@ -52,7 +119,7 @@ pub fn fusedExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_
     return y.reshape(input.shape());
 }
 
-pub const Cfg = struct { t: i64, k: i64, e: i64, d: i64, i: i64 };
+pub const Cfg = struct { t: i64, k: i64, e: i64, d: i64, i: i64, geglu: bool = false };
 
 const Axes = struct {
     T: tcl.Axis,
@@ -91,9 +158,9 @@ fn args(b: *tcl.Builder, a: Axes) tcl.FinishError!Args {
 
 const Args = struct { x: builder.Tensor, ids: builder.Tensor, w: builder.Tensor, gate_up: builder.Tensor, down: builder.Tensor };
 
-/// `silu(gate) * up` of `h = [batch..., S2, I]` (gate first), times
-/// `weights` (`[batch...]`) unless null.
-fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, weights: ?builder.Tensor) tcl.FinishError!builder.Tensor {
+/// `silu(gate) * up` or `gelu_tanh(gate) * up` of `h = [batch..., S2, I]`
+/// (gate first), times `weights` (`[batch...]`) unless null.
+fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, weights: ?builder.Tensor, geglu: bool) tcl.FinishError!builder.Tensor {
     var sliced: [4]tcl.Axis = undefined;
     var flat: [3]tcl.Axis = undefined;
     @memcpy(sliced[0..batch.len], batch);
@@ -108,7 +175,9 @@ fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, w
     // Interleaving requires one binary instruction; SwiGLU chains several.
     const op = b.tensorOperation(.{ .tactic = .elementwise });
     const g = op.fetch(gate, .{});
-    var v = g.sigmoid().mulf(g).mulf(op.fetch(up, .{}));
+    // gelu_tanh(g) = g * sigmoid(2 * sqrt(2 / pi) * (g + 0.044715 * g^3)).
+    const z = if (geglu) g.mulf(g).mulf(0.044715).addf(1.0).mulf(g).mulf(1.5957691216057308) else g;
+    var v = z.sigmoid().mulf(g).mulf(op.fetch(up, .{}));
     if (weights) |w| v = v.mulf(op.fetch(w, .{}));
     return op.commit(v, .{ .dtype = .bf16 });
 }
@@ -167,7 +236,7 @@ pub const ActivationStationary = tcl.Kernel(Cfg, .{
             const h = try op.commit(op.contract(in.x, gu, &.{ a.T, a.K, a.S2, a.I }), .{});
             // Routing weights scale the activations, so the down projection
             // also sums over the experts.
-            const act = try gated(b, a, h, &.{ a.T, a.K }, in.w);
+            const act = try gated(b, a, h, &.{ a.T, a.K }, in.w, cfg.geglu);
             op = b.tensorOperation(.{});
             b.ret(&.{try op.commit(op.contract(act, dn, &.{ a.T, a.D }), .{ .dtype = .bf16 })});
         }
@@ -243,7 +312,7 @@ pub const Blockwise = tcl.Kernel(Cfg, .{
                 const dn = try b.gather(in.down, ids, E, &.{ BGi, D, I }, .{});
                 op = b.tensorOperation(.{});
                 const h = try op.commit(op.contract(chunk, gu, &.{ BGi, BB, a.S2, I }), .{});
-                const act = try gated(b, a, h, &.{ BGi, BB }, null);
+                const act = try gated(b, a, h, &.{ BGi, BB }, null, cfg.geglu);
                 op = b.tensorOperation(.{});
                 const y = try op.commit(op.contract(act, dn, &.{ BGi, BB, D }), .{ .dtype = .bf16 });
                 try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, y)});
@@ -257,6 +326,87 @@ pub const Blockwise = tcl.Kernel(Cfg, .{
     }.run,
 });
 
+/// Experts per `ExpertStationary` loop step: more as the routes, so the
+/// experts they use, grow.
+pub fn stationaryChunk(cfg: Cfg) i64 {
+    const routes: u64 = @intCast(std.math.divCeil(i64, cfg.t * cfg.k, 16) catch unreachable);
+    return @intCast(std.math.clamp(std.math.ceilPowerOfTwo(u64, routes) catch unreachable, 2, 16));
+}
+
+/// The experts that `ids` use (-1 for none), `stationaryChunk` at a time in a
+/// device loop: each is read once and runs for every token, the activations
+/// scaled by the token's routing weight for it (zero when unrouted); the
+/// steps' outputs are summed.
+pub const ExpertStationary = tcl.Kernel(Cfg, .{
+    .name = "moe_expert_stationary",
+    .inputs = &.{ "x", "ids", "w", "gate_up", "down" },
+    .outputs = &.{"y"},
+    .run = struct {
+        fn run(b: *tcl.Builder, cfg: Cfg) tcl.FinishError!void {
+            configure(b, false);
+            const a: Axes = .init(b, cfg);
+            const in = try args(b, a);
+            const chunk = stationaryChunk(cfg);
+            const steps = std.math.divCeil(i64, @min(cfg.e, cfg.t * cfg.k), chunk) catch unreachable;
+            const C = b.axis("C", chunk);
+            const Go = b.axis("Go", steps);
+            const J = b.axis("J", steps * chunk);
+            const T, const K, const E, const D, const I = .{ a.T, a.K, a.E, a.D, a.I };
+
+            // Each token's routing weight per expert, and the used experts.
+            const experts = try b.arange(cfg.e, .i32, &.{E}, .{});
+            var op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
+            const dist = try op.commit(op.fetch(in.ids, .{}).subi(op.fetch(experts, .{})), .{});
+            op = b.tensorOperation(.{});
+            const gate = try op.commit(op.where(op.fetch(dist, .{}), .eq, 0, op.fetch(in.w, .{ .broadcast_to = &.{ T, K, E } }), 0.0).reduce(&.{K}, .addf), .{});
+            op = b.tensorOperation(.{});
+            const onehot = try op.commit(op.where(dist, .eq, 0, 1, 0), .{});
+            op = b.tensorOperation(.{});
+            const counts = try op.commit(op.fetch(onehot, .{}).reduce(&.{ T, K }, .addi), .{});
+            op = b.tensorOperation(.{});
+            const used = try op.commit(op.where(counts, .gt, 0, 1, 0), .{});
+            op = b.tensorOperation(.{});
+            const position = try op.commit(op.fetch(used, .{}).cumsum(&.{E}), .{});
+            // A used expert's rank among them, -1 for the others.
+            op = b.tensorOperation(.{});
+            const rank = try op.commit(op.fetch(position, .{}).muli(op.fetch(used, .{})).subi(1), .{});
+            const trips = try b.symExpr(.div, try b.symExpr(.add, try b.reduceMaxI32(position), chunk - 1), chunk);
+
+            // Slot j holds the used expert of rank j and its tokens' weights;
+            // slots past the last hold expert 0 with no weight.
+            const ranks = try b.arange(steps * chunk, .i32, &.{J}, .{});
+            op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
+            const offset = try op.commit(op.fetch(rank, .{}).subi(op.fetch(ranks, .{})), .{});
+            op = b.tensorOperation(.{});
+            const slot_experts = try op.commit(op.where(op.fetch(offset, .{}), .eq, 0, op.fetch(experts, .{ .broadcast_to = &.{ E, J } }), 0).reduce(&.{E}, .addi), .{ .dtype = .i32 });
+            // A reduction's condition is read plainly, so broadcast it first.
+            op = b.tensorOperation(.{});
+            const token_offset = try op.commit(op.fetch(offset, .{ .broadcast_to = &.{ T, E, J } }), .{});
+            op = b.tensorOperation(.{});
+            const slot_gate = try op.commit(op.where(op.fetch(token_offset, .{}), .eq, 0, op.fetch(gate, .{ .broadcast_to = &.{ T, E, J } }), 0.0).reduce(&.{E}, .addf), .{ .dtype = .f32, .axes = &.{ J, T } });
+            const step_experts = try b.reshape(slot_experts, &.{ Go, C }, .{});
+            const step_gate = try b.reshape(slot_gate, &.{ Go, C, T }, .{});
+            const gate_up = try b.reshape(in.gate_up, &.{ E, a.S2, I, D }, .{});
+
+            var loop = b.openFor(trips, .{try b.full(0, .f32, &.{ Go, T, D })});
+            {
+                const ids = try b.indexRead(step_experts, loop.iv);
+                const weights = try b.indexRead(step_gate, loop.iv);
+                const gu = try b.gather(gate_up, ids, E, &.{ C, a.S2, I, D }, .{});
+                const dn = try b.gather(in.down, ids, E, &.{ C, D, I }, .{});
+                op = b.tensorOperation(.{});
+                const h = try op.commit(op.contract(in.x, gu, &.{ C, T, a.S2, I }), .{});
+                const act = try gated(b, a, h, &.{ C, T }, weights, cfg.geglu);
+                op = b.tensorOperation(.{});
+                const y = try op.commit(op.contract(act, dn, &.{ T, D }), .{ .dtype = .f32 });
+                try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, y)});
+            }
+            op = b.tensorOperation(.{});
+            b.ret(&.{try op.commit(op.fetch(loop.results[0], .{}).reduce(&.{Go}, .addf), .{ .dtype = .bf16 })});
+        }
+    }.run,
+});
+
 test "tcl fused experts run on furiosa" {
     const platform = zml.testing.env();
     if (platform.target != .furiosa) return error.SkipZigTest;
@@ -264,8 +414,12 @@ test "tcl fused experts run on furiosa" {
     const io = std.testing.io;
     const bf16 = zml.floats.BFloat16;
 
-    // 2 * 4 <= 8 experts is activation stationary, 16 tokens is blockwise.
-    for ([_]i64{ 4, 16 }) |t| {
+    // 2 * 4 <= 8 experts is activation stationary, 16 tokens is blockwise;
+    // one device's share of expert-parallel experts, some routes elsewhere
+    // (-1), is expert stationary.
+    const Case = struct { t: i64, local: bool = false, geglu: bool = false };
+    for ([_]Case{ .{ .t = 4 }, .{ .t = 16 }, .{ .t = 1, .local = true }, .{ .t = 5, .local = true, .geglu = true }, .{ .t = 16, .local = true } }) |case| {
+        const t = case.t;
         const k = 2;
         const e = 8;
         const d = 256;
@@ -276,15 +430,16 @@ test "tcl fused experts run on furiosa" {
         const gu: Tensor = .init(.{ .expert = e, .dout = 2 * i, .d = d }, .bf16);
         const dn: Tensor = .init(.{ .expert = e, .d = d, .dout = i }, .bf16);
         const Mod = struct {
-            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor) Tensor {
+            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor, local: bool, geglu: bool) Tensor {
+                if (local) return localExperts(x_, ids_, w_, gu_, dn_, geglu);
                 return fusedExperts(x_, ids_, w_, .init(gu_, null, .dout), .init(dn_, null, .dout), .{
-                    .activation = .{ .swiglu = .{} },
+                    .activation = if (geglu) .geglu_tanh else .{ .swiglu = .{} },
                     .quantize_input = false,
                     .routing_weight_placement = .after_down,
                 });
             }
         };
-        var exe = try zml.module.compile(allocator, io, Mod.forward, .{ x, ids, w, gu, dn }, platform, .{});
+        var exe = try zml.module.compile(allocator, io, Mod.forward, .{ x, ids, w, gu, dn, case.local, case.geglu }, platform, .{});
         defer exe.deinit();
 
         var prng: std.Random.DefaultPrng = .init(@intCast(t));
@@ -303,8 +458,9 @@ test "tcl fused experts run on furiosa" {
         const hw = try allocator.alloc(f32, @intCast(t * k));
         defer allocator.free(hw);
         for (0..@intCast(t)) |tok| for (0..k) |j| {
-            hids[tok * k + j] = @intCast((tok * 3 + j * 5) % e);
-            hw[tok * k + j] = if (j == 0) 0.7 else 0.3;
+            // Another device serves the second route of odd tokens.
+            hids[tok * k + j] = if (case.local and j == 1 and tok % 2 == 1) -1 else @intCast((tok * 3 + j * 5) % e);
+            hw[tok * k + j] = if (hids[tok * k + j] < 0) 0 else if (j == 0) 0.7 else 0.3;
         };
 
         var bx: zml.Buffer = try .fromBytes(io, platform, x.shape(), std.mem.sliceAsBytes(hx));
@@ -326,6 +482,7 @@ test "tcl fused experts run on furiosa" {
         for (0..@intCast(t)) |tok| {
             var expected: [d]f32 = @splat(0);
             for (0..k) |j| {
+                if (hids[tok * k + j] < 0) continue;
                 const ex: usize = @intCast(hids[tok * k + j]);
                 var act: [i]f32 = undefined;
                 for (0..i) |n| {
@@ -336,7 +493,8 @@ test "tcl fused experts run on furiosa" {
                         g += xv * hgu[(ex * 2 * i + n) * d + m].toF32();
                         u += xv * hgu[(ex * 2 * i + i + n) * d + m].toF32();
                     }
-                    act[n] = g / (1 + @exp(-g)) * u;
+                    const z = if (case.geglu) 1.5957691216057308 * (g + 0.044715 * g * g * g) else g;
+                    act[n] = g / (1 + @exp(-z)) * u;
                 }
                 for (0..d) |m| {
                     var y: f32 = 0;
