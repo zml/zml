@@ -21,6 +21,8 @@ pub const GCS = @import("gcs.zig").GCS;
 pub const HF = @import("hf.zig").HF;
 pub const HTTP = @import("http.zig").HTTP;
 pub const S3 = @import("s3.zig").S3;
+/// A test-only HTTP origin for tests above this layer (mock_server.zig).
+pub const MockServer = @import("mock_server.zig").MockServer;
 const base_module = @import("base.zig");
 const direct_io = @import("direct_io.zig");
 pub const Backend = base_module.Backend;
