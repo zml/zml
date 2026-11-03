@@ -29,6 +29,7 @@ const log = std.log.scoped(.@"zml/io");
 test {
     _ = @import("io/ShardGrid.zig");
     _ = @import("io/TensorStore.zig");
+    _ = @import("io/backend.zig");
     _ = @import("io/log.zig");
 }
 
