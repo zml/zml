@@ -88,19 +88,20 @@ the actual IR regions.
 | `cute.arch.griddepcontrol_launch_dependents()` | `b.launchDependents()`                      |
 | `x.to(Float32)`                            | `x.to(.f32)`                                    |
 | `if cond:` / `for i in range(...)`         | `b.openIf(cond)` / `b.openFor(0, n, 1, .{})`    |
-| `cpasync.make_tiled_tma_atom(...)`         | `b.makeTiledTmaLoadAtom(...)`                   |
+| `cpasync.make_tiled_tma_atom(...)`         | `b.makeTiledTmaAtom(...)`                       |
 | `cpasync.tma_partition(...)`               | `b.tmaPartition(...)`                           |
-| `cute.copy(atom, src, dst)`                | `b.copy(atom, src, dst, pred)`                  |
+| `cute.copy(atom, src, dst)`                | `b.copy(atom, src, dst, .{})`                   |
 | `cute.make_tiled_mma(atom)`                | `b.makeTiledMma(atom, result_type)`             |
 | `tiled_mma.make_fragment_A/B/C(...)`       | `b.mmaMakeFragment(...)`                        |
 | `cute.gemm(...)`                           | `b.gemm(...)`                                   |
 | `cute.arch.alloc_tmem(...)`                | `b.allocTmem(...)`                              |
 | `cute.arch.retrieve_tmem_ptr(...)`         | `b.retrieveTmemPtr(...)`                        |
 
-* **Layouts are static.** `makeLayout` takes Zig slices and emits one
-  `cute.static`; the tensor keeps its shape and stride in Zig, so `dim`,
-  `size` and coordinates need no MLIR queries. Coordinates are tuples of
-  `Value`s and ints; ints stay static in the `!cute.coord` type.
+* **Layouts accept static and dynamic extents.** `makeLayout` takes Zig slices
+  for a tracked static `Layout`, or nested tuples of integers and SSA `Value`s
+  for a `View`. Dynamic shape and stride leaves retain their integer widths.
+  The tracked `Tensor` keeps its shape and stride in Zig; use `makeTensorView`
+  with dynamic layouts. Integers stay static in coordinate types.
 * **Stride defaults differ by origin.** `makeLayout` defaults to CuTe's
   compact left-most stride like `cute.make_layout`; a `tensor` argument
   defaults to XLA's row-major layout, which is what the buffer holds.
@@ -122,7 +123,11 @@ the actual IR regions.
   copies, tensor-memory fragments, and SM100 block-scaled MMA. CuTe derives
   their layouts in the compiler, so callers spell out the resulting CuTe type
   with `View` instead of relying on Python's dynamic type objects.
-* **Not covered yet:** dynamic tensor shapes and automatic CuTe layout algebra.
+* **TMA tilers follow Python.** `makeTiledTmaAtom` accepts a shape tuple, tile,
+  or layout, composes it with the GMEM identity layout, and removes the SMEM
+  stage mode when present. The lower-level `makeTiledTmaLoadAtom` and
+  `makeTiledTmaStoreAtom` take an already composed coordinate map. `copy`
+  makes store atoms executable automatically; loads require `tma_bar_ptr`.
 * **Typed result types.** Operations whose result type CuTe derives
   (`localTile`, `slice`, `tmaPartition`, ...) take an `*mlir.Type` assembled
   with `layoutSpec`, `layoutType`, `memrefType`, `coordTensorType`,

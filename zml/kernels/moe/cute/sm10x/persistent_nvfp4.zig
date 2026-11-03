@@ -699,10 +699,10 @@ fn issueTmaStage(
     var elected = b.openIf(b.electSync());
     b.mbarrierArriveExpectTx(stage.load_barrier, tile.transactionBytes());
     elected.close();
-    b.copy(b.setTmaBarrier(exec_a, stage.load_barrier), .{a_source}, .{stage.a_destination}, null);
-    b.copy(b.setTmaBarrier(exec_b, stage.load_barrier), .{b_source}, .{stage.b_destination}, null);
-    b.copy(b.setTmaBarrier(exec_sfa, stage.load_barrier), .{sfa_source}, .{stage.sfa_destination}, null);
-    b.copy(b.setTmaBarrier(exec_sfb, stage.load_barrier), .{sfb_source}, .{stage.sfb_destination}, null);
+    b.copy(b.setTmaBarrier(exec_a, stage.load_barrier), .{a_source}, .{stage.a_destination}, .{});
+    b.copy(b.setTmaBarrier(exec_b, stage.load_barrier), .{b_source}, .{stage.b_destination}, .{});
+    b.copy(b.setTmaBarrier(exec_sfa, stage.load_barrier), .{sfa_source}, .{stage.sfa_destination}, .{});
+    b.copy(b.setTmaBarrier(exec_sfb, stage.load_barrier), .{sfb_source}, .{stage.sfb_destination}, .{});
 }
 
 fn accumulatorTmemAt(b: *B, comptime tile: Tile, tmem: V, stage: V) V {
@@ -756,10 +756,7 @@ fn runTmaProducer(
         .index = tiles.after_carried[5],
         .phase = tiles.after_carried[6],
     };
-    const first_ready = b.mbarrierWaitParity(
-        barrierAt(b, storage.mma_barriers, first_state.index),
-        first_state.phase,
-    );
+    const first_ready = b.mbarrierTryWait(barrierAt(b, storage.mma_barriers, first_state.index), first_state.phase, .{ .scope = .cta });
     var stages = b.openFor(
         0,
         @as(i32, @intCast(k_tiles)),
@@ -773,7 +770,7 @@ fn runTmaProducer(
     };
     const buffers = stageBuffersAt(b, tile, storage, state.index);
     var pending = b.openIf(stages.carried[0].eq(false));
-    b.mbarrierTryWaitParity(buffers.mma_barrier, state.phase, 10_000_000);
+    b.mbarrierWait(buffers.mma_barrier, state.phase, .{ .scope = .cta, .time_limit = 10_000_000, .test_first = false });
     pending.close();
     issueTmaStage(b, tile, k_tiles, partitioned_a_target, partitioned_b_target, buffers, k, tile_m, group, expert, exec_a, exec_b, exec_sfa, exec_sfb);
     const next_count = stages.carried[1].add(1);
@@ -817,11 +814,7 @@ fn runTmaProducer(
         .phase = tiles.results[6],
     };
     inline for (0..tile.stages) |stage| {
-        b.mbarrierTryWaitParity(
-            barrierAt(b, storage.mma_barriers, tail_state.index),
-            tail_state.phase,
-            10_000_000,
-        );
+        b.mbarrierWait(barrierAt(b, storage.mma_barriers, tail_state.index), tail_state.phase, .{ .scope = .cta, .time_limit = 10_000_000, .test_first = false });
         if (stage + 1 < tile.stages) {
             tail_state = advancePipeline(b, tail_state.index, tail_state.phase, tile.stages);
         }
@@ -843,8 +836,8 @@ const Mainloop = struct {
     sfb_target: V,
 
     pub fn copyScales(self: Mainloop, builder: *B) void {
-        builder.copy(self.sfa_copy, .{self.sfa_source}, .{self.sfa_target}, null);
-        builder.copy(self.sfb_copy, .{self.sfb_source}, .{self.sfb_target}, null);
+        builder.copy(self.sfa_copy, .{self.sfa_source}, .{self.sfa_target}, .{});
+        builder.copy(self.sfb_copy, .{self.sfb_source}, .{self.sfb_target}, .{});
     }
 };
 
@@ -1020,17 +1013,14 @@ fn runMmaConsumer(
         .index = tiles.after_carried[5],
         .phase = tiles.after_carried[6],
     };
-    const first_ready = b.mbarrierWaitParity(
-        barrierAt(b, storage.load_barriers, first_state.index),
-        first_state.phase,
-    );
+    const first_ready = b.mbarrierTryWait(barrierAt(b, storage.load_barriers, first_state.index), first_state.phase, .{ .scope = .cta });
     const accumulator_state: PipelinePosition = .{
         .index = tiles.after_carried[9],
         .phase = tiles.after_carried[10],
     };
     const accumulator_stage = accumulator_state.index;
     const accumulator_empty = barrierAt(b, storage.accumulator_empty_barriers, accumulator_stage);
-    b.mbarrierTryWaitParity(accumulator_empty, accumulator_state.phase, 10_000_000);
+    b.mbarrierWait(accumulator_empty, accumulator_state.phase, .{ .scope = .cta, .time_limit = 10_000_000, .test_first = false });
 
     const persistent_mma: cute.Atom = .{ .inner = tiles.after_carried[7].inner, .kernel = b };
     const initial_mma = b.setMmaAccumulate(persistent_mma, b.constant(.i1, false));
@@ -1043,7 +1033,7 @@ fn runMmaConsumer(
     const k = stages.carried[2];
     const state: PipelinePosition = .{ .index = stages.carried[3], .phase = stages.carried[4] };
     var pending = b.openIf(stages.carried[0].eq(false));
-    b.mbarrierTryWaitParity(barrierAt(b, storage.load_barriers, state.index), state.phase, 10_000_000);
+    b.mbarrierWait(barrierAt(b, storage.load_barriers, state.index), state.phase, .{ .scope = .cta, .time_limit = 10_000_000, .test_first = false });
     pending.close();
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, accumulator_stage);
     const mainloop = staged_mainloop.atStage(b, state.index, accumulator_tmem);
@@ -1058,7 +1048,7 @@ fn runMmaConsumer(
         mainloop.accumulator,
     );
     var commit_lane = b.openIf(b.electSync());
-    b.tcgen05Commit(barrierAt(b, storage.mma_barriers, state.index));
+    b.tcgen05Commit(barrierAt(b, storage.mma_barriers, state.index), .{});
     commit_lane.close();
     const next_count = stages.carried[2].add(1);
     const next_state = advancePipeline(b, state.index, state.phase, tile.stages);
@@ -1066,7 +1056,7 @@ fn runMmaConsumer(
     stages.yield(.{ next_ready, mma.value(), next_count, next_state.index, next_state.phase });
 
     var full_lane = b.openIf(b.electSync());
-    b.tcgen05Commit(barrierAt(b, storage.accumulator_full_barriers, accumulator_stage));
+    b.tcgen05Commit(barrierAt(b, storage.accumulator_full_barriers, accumulator_stage), .{});
     full_lane.close();
     const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
     const next_acc_count = tiles.after_carried[8].add(1);
@@ -1113,11 +1103,7 @@ fn runMmaConsumer(
     inline for (0..accumulator_stages - 1) |_| {
         accumulator_tail = advancePipeline(b, accumulator_tail.index, accumulator_tail.phase, accumulator_stages);
     }
-    b.mbarrierTryWaitParity(
-        barrierAt(b, storage.accumulator_empty_barriers, accumulator_tail.index),
-        accumulator_tail.phase,
-        10_000_000,
-    );
+    b.mbarrierWait(barrierAt(b, storage.accumulator_empty_barriers, accumulator_tail.index), accumulator_tail.phase, .{ .scope = .cta, .time_limit = 10_000_000, .test_first = false });
 }
 
 /// Epilogue operands; which fields are set depends on the `Epilogue`.
@@ -1193,7 +1179,7 @@ fn runEpilogue(
     const expert = operands.expert_ids.get(.{group}, .i32);
     const alpha = operands.alpha.get(.{expert}, .f32);
     const act_scale = if (operands.act_scale) |scales| scales.get(.{expert}, .f32) else null;
-    b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000);
+    b.mbarrierWait(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, .{ .scope = .cta, .time_limit = 10_000_000, .test_first = false });
 
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
     const warp_tmem = b.addOffset(
@@ -1213,7 +1199,7 @@ fn runEpilogue(
         const values = b.tmemLoadVector(chunk_tmem, @intCast(chunk_rows), .{ .num_dp = 32, .num_b = 32, .num_rep = @intCast(chunk_rows) });
         b.fenceTmemLoad();
         if (chunk + 1 == tile_chunks) {
-            b.mbarrierArrive(barrierAt(b, storage.accumulator_empty_barriers, stage), 1);
+            _ = b.mbarrierArrive(barrierAt(b, storage.accumulator_empty_barriers, stage), .{});
         }
         var columns: [@intCast(@min(n, 32))]V = undefined;
         inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32).mul(alpha);
@@ -1239,7 +1225,7 @@ fn runEpilogue(
     var release_warp = b.openIf(warp.eq(0));
     b.relinquishTmemAllocPermit(.{});
     release_warp.close();
-    b.namedBarrier(1, 128);
+    b.barrierCtaSyncAligned(1, 128);
     var dealloc_warp = b.openIf(warp.eq(0));
     b.deallocTmem(tmem, tile.tmem_columns, .{});
     dealloc_warp.close();
@@ -1543,7 +1529,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     tma_warp.close();
 
     var mma_warp = b.openIf(warp.eq(4));
-    b.namedBarrier(2, 160);
+    b.barrierCtaSyncAligned(2, 160);
     runMmaConsumer(b, tile, reduction_tiles, storage, tiled_mma, tmem_holding, active, d.tiles_m);
     mma_warp.close();
 
@@ -1551,7 +1537,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     var alloc_warp = b.openIf(warp.eq(0));
     b.allocTmem(tile.tmem_columns, tmem_holding, .{});
     alloc_warp.close();
-    b.namedBarrier(2, 160);
+    b.barrierCtaSyncAligned(2, 160);
     const shared_operands: EpilogueOperands = .{
         .expert_ids = expert_ids,
         .alpha = view(b, d.alpha),

@@ -513,6 +513,7 @@ pub const cuda_tile = struct {
 };
 
 pub const cute = struct {
+    pub const AlgebraExpr = cute_builder.AlgebraExpr;
     pub const Builder = cute_builder.Builder;
     pub const ArgSpec = cute_builder.ArgSpec;
     pub const Value = cute_builder.Value;
@@ -526,6 +527,16 @@ pub const cute = struct {
     pub const TmaConfig = cute_builder.TmaConfig;
     pub const TmaFormat = cute_builder.TmaFormat;
     pub const BlockScaledMmaConfig = cute_builder.BlockScaledMmaConfig;
+    pub const CtaGroup = cute_builder.CtaGroup;
+    pub const ctaCount = cute_builder.ctaCount;
+    pub const MBarrierScope = cute_builder.MBarrierScope;
+    pub const OperandMajorMode = cute_builder.OperandMajorMode;
+    pub const Tcgen05SmemSwizzle = cute_builder.Tcgen05SmemSwizzle;
+    pub const Tcgen05SmemDesc = cute_builder.Tcgen05SmemDesc;
+    pub const Tcgen05InstrDesc = cute_builder.Tcgen05InstrDesc;
+    pub const CopyBulkTensorTileG2SOp = cute_builder.CopyBulkTensorTileG2SOp;
+    pub const CopyBulkTensor2DGather4G2SOp = cute_builder.CopyBulkTensor2DGather4G2SOp;
+    pub const CopyBulkTensorTileS2GOp = cute_builder.CopyBulkTensorTileS2GOp;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
         return makeKernelContext(cute_builder.registerDialects);

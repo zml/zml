@@ -20,6 +20,7 @@ const operation_names: []const []const u8 = &.{
     "llvm.intr.lifetime.end",
     "llvm.intr.lifetime.start",
     "llvm.inttoptr",
+    "llvm.ptrtoint",
     "llvm.load",
     "llvm.mlir.poison",
     "llvm.mlir.undef",

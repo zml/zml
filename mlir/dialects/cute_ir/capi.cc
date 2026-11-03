@@ -166,6 +166,10 @@ MlirStringRef mlirCuteShapeAttrGetValue(MlirAttribute attr) {
   return getAlgebraValue<cute::ShapeAttr>(attr);
 }
 
+intptr_t mlirCuteShapeAttrGetRank(MlirAttribute attr) {
+  return cutegen::rank(llvm::cast<cute::ShapeAttr>(unwrap(attr)).getRef());
+}
+
 MlirAttribute mlirCuteStrideAttrStaticGet(MlirContext context, int64_t value) {
   return getStaticAttr<cute::StrideAttr>(context, value);
 }
