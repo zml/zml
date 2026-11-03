@@ -19,6 +19,8 @@ bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 
 ## Needed by iree
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2", dev_dependency = True, repo_name = "com_google_googletest")
+
 bazel_dep(name = "libbacktrace", version = "1.0.0-20250926-7939218")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
@@ -51,7 +53,6 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 # repo_name = None prevents rules_swift from eagerly auto-registering toolchains.
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
 bazel_dep(name = "rules_zig", version = "0.17.0")
-
 bazel_dep(name = "tar.bzl", version = "0.10.4")
 bazel_dep(name = "llvm", version = "0.8.24")
 bazel_dep(name = "libxml2", version = "2.15.3")
