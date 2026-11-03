@@ -164,23 +164,6 @@ pub fn quantizeMxfp4(x: Tensor, axis: anytype) QuantizedInput {
     };
 }
 
-pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
-    const platform = zml.Compiler.current().platform;
-
-    const dtype: ?DataType = switch (platform.target) {
-        .cuda, .cpu, .tpu => .f8e4m3fn,
-        .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
-            .cdna4, .rdna4 => .f8e4m3fn,
-            .cdna3 => .f8e4m3fnuz,
-            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => null,
-        } else null,
-        else => null,
-    };
-
-    if (dtype == null) std.debug.panic("MXFP8 is not supported on {}", .{platform.target});
-    return quantizeBlockFp8(x, axis, mx_block_size, dtype.?, .f8e8m0);
-}
-
 fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
     const bits = raw_scale.bitCast(.u32);
     return bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
