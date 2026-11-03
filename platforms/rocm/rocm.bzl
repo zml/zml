@@ -73,6 +73,7 @@ def _rocm_runfile_build_files(loaded_packages):
 
     for pkg_name in _family_runfile_package_names(loaded_packages, "dnn"):
         rocm_packages[pkg_name] = _glob_filegroup("runfiles", [
+            ".kpack/**",
             "lib/libMIOpenCKGroupedConv_*.so",
             "share/miopen/db/**",
         ])

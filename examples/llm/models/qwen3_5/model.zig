@@ -290,7 +290,7 @@ pub const EmbedTokens = struct {
         const tokens = input.tokens.withPartialTags(.{.s});
         return .{ .hidden = input.embedding.embed_tokens.forward(tokens)
             .withPartialTags(.{.d})
-            .withPartitioning(.model, .{ .d = .replicated }) };
+            .replicate() };
     }
 };
 
@@ -657,6 +657,10 @@ pub const SelfAttn = struct {
         k = partitionCachedKv(k, kv_head_sharding);
         v = partitionCachedKv(v, kv_head_sharding);
 
+        const head_partitioning: zml.attention.Partitioning = switch (kv_head_sharding) {
+            .sharded => .head(.model),
+            .replicated => .head(.replicated),
+        };
         const attn_output = zml.attention.attention(
             q,
             k,
@@ -664,6 +668,8 @@ pub const SelfAttn = struct {
             token_index,
             zml.attention.Metadata.init(.fromBackend(.stablehlo)),
             zml.attention.Parameters.init(.fromBackend(.stablehlo)),
+            zml.Compiler.current().mesh(.model),
+            head_partitioning,
         ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());

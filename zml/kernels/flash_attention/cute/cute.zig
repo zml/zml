@@ -34,68 +34,51 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         stdx.debug.assert(token_index.rank() == 0, "Unbatched CuTe attention requires a scalar token position", .{});
     }
 
-    const mesh = zml.Compiler.current().resolveMesh(.{.model});
-    const q_sharded = q.withPartitioning(mesh, .{ .h = .model });
-    const k_sharded = k.withPartitioning(mesh, .{ .h = .model });
-    const v_sharded = v.withPartitioning(mesh, .{ .h = .model });
     const positions = if (batched)
         token_index.convert(.i32).broad(zml.Shape.init(.{ .b = q.dim(.b) }, .i32))
     else
         token_index.convert(.i32);
-    return zml.ops.manualComputation(Context.body, Context{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .positions = positions, .causal = causal }, q.shape().withPartitioning(mesh, .{ .h = .model }));
-}
+    const q_ = if (batched) q.transpose(.{ .b, .q, .h, .hd }) else q.transpose(.{ .q, .h, .hd });
+    const k_ = if (batched) k.transpose(.{ .b, .k, .h, .hd }) else k.transpose(.{ .k, .h, .hd });
+    const v_ = if (batched) v.transpose(.{ .b, .k, .h, .hd }) else v.transpose(.{ .k, .h, .hd });
 
-const Context = struct {
-    q: zml.Tensor,
-    k: zml.Tensor,
-    v: zml.Tensor,
-    positions: zml.Tensor,
-    causal: bool,
+    const splits = kernel.decodeSplits(q_.shape(), k_.shape(), decodeResources(zml.Compiler.current().platform));
 
-    fn body(self: Context, output_shape: zml.Shape) zml.Tensor {
-        const batched = self.q.shape().hasTag(.b) != null;
-        const q = if (batched) self.q.transpose(.{ .b, .q, .h, .hd }) else self.q.transpose(.{ .q, .h, .hd });
-        const k = if (batched) self.k.transpose(.{ .b, .k, .h, .hd }) else self.k.transpose(.{ .k, .h, .hd });
-        const v = if (batched) self.v.transpose(.{ .b, .k, .h, .hd }) else self.v.transpose(.{ .k, .h, .hd });
+    const cfg: kernel.Config = .{
+        .batch = if (batched) q_.dim(.b) else 1,
+        .query_length = q_.dim(.q),
+        .key_length = k_.dim(.k),
+        .query_heads = q_.dim(.h),
+        .kv_heads = k_.dim(.h),
+        .head_dim = q_.dim(.hd),
+        .dtype = zml.kernel.cute.from(q_.dtype()),
+        .splits = splits,
+        .causal = causal,
+    };
 
-        const splits = kernel.decodeSplits(q.shape(), k.shape(), decodeResources(zml.Compiler.current().platform));
-
-        const cfg: kernel.Config = .{
-            .batch = if (batched) q.dim(.b) else 1,
-            .query_length = q.dim(.q),
-            .key_length = k.dim(.k),
-            .query_heads = q.dim(.h),
-            .kv_heads = k.dim(.h),
-            .head_dim = q.dim(.hd),
-            .dtype = zml.kernel.cute.from(q.dtype()),
-            .splits = splits,
-            .causal = self.causal,
-        };
-
-        const out = if (kernel.prefillSupported(cfg))
-            kernel.Prefill.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{ .out = q.shape() }, .{ .cfg = cfg }).out
-        else if (cfg.splits > 1) b: {
-            const partials = kernel.Kernel.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{
-                .out = zml.Shape.init(.{ cfg.batch, cfg.splits, cfg.query_length, cfg.query_heads, cfg.head_dim + 2 }, .f32),
-            }, .{
-                .cfg = cfg,
-                .grid = .{ @intCast(@divTrunc(@divExact(cfg.query_heads, cfg.kv_heads) + 3, 4)), @intCast(cfg.kv_heads * cfg.batch), @intCast(cfg.splits) },
-                .block = kernel.block,
-            }).out;
-            break :b kernel.Merge.call(.{ .partials = partials }, .{ .out = q.shape() }, .{
-                .cfg = cfg,
-                .grid = .{ @intCast(cfg.query_heads), @intCast(cfg.batch), 1 },
-                .block = kernel.block,
-            }).out;
-        } else kernel.Kernel.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{ .out = q.shape() }, .{
+    const out = if (kernel.prefillSupported(cfg))
+        kernel.Prefill.call(.{ .q = q_, .k = k_, .v = v_, .positions = positions }, .{ .out = q_.shape() }, .{ .cfg = cfg }).out
+    else if (cfg.splits > 1) b: {
+        const partials = kernel.Kernel.call(.{ .q = q_, .k = k_, .v = v_, .positions = positions }, .{
+            .out = zml.Shape.init(.{ cfg.batch, cfg.splits, cfg.query_length, cfg.query_heads, cfg.head_dim + 2 }, .f32),
+        }, .{
             .cfg = cfg,
-            .grid = .{ @intCast(@divTrunc(cfg.query_length * @divExact(cfg.query_heads, cfg.kv_heads) + 3, 4)), @intCast(cfg.kv_heads * cfg.batch), 1 },
+            .grid = .{ @intCast(@divTrunc(@divExact(cfg.query_heads, cfg.kv_heads) + 3, 4)), @intCast(cfg.kv_heads * cfg.batch), @intCast(cfg.splits) },
             .block = kernel.block,
         }).out;
+        break :b kernel.Merge.call(.{ .partials = partials }, .{ .out = q_.shape() }, .{
+            .cfg = cfg,
+            .grid = .{ @intCast(cfg.query_heads), @intCast(cfg.batch), 1 },
+            .block = kernel.block,
+        }).out;
+    } else kernel.Kernel.call(.{ .q = q_, .k = k_, .v = v_, .positions = positions }, .{ .out = q_.shape() }, .{
+        .cfg = cfg,
+        .grid = .{ @intCast(@divTrunc(cfg.query_length * @divExact(cfg.query_heads, cfg.kv_heads) + 3, 4)), @intCast(cfg.kv_heads * cfg.batch), 1 },
+        .block = kernel.block,
+    }).out;
 
-        return out.transpose(output_shape);
-    }
-};
+    return out.transpose(q.shape());
+}
 
 /// Returns the minimum number of multiprocessors and shared memory per block across all devices in the platform.
 /// If there are no devices, returns 0 for both values.

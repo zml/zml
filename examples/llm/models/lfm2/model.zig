@@ -571,6 +571,8 @@ pub const Attention = struct {
         v = new_kv_cache.values(cache_index);
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
+        const mesh = zml.Compiler.current().mesh(.model);
+        const partitioning: zml.attention.Partitioning = .head(.model);
         const attn = switch (attention_parameters) {
             .stablehlo => zml.attention.attention(
                 q,
@@ -579,6 +581,8 @@ pub const Attention = struct {
                 tokens_position_offset,
                 attention_metadata,
                 attention_parameters,
+                mesh,
+                partitioning,
             ).merge(.{ .d = .{ .h, .hd } }),
             else => zml.attention.attention(
                 q.squeeze(.batch),
@@ -587,6 +591,8 @@ pub const Attention = struct {
                 tokens_position_offset.squeeze(.batch),
                 attention_metadata,
                 attention_parameters,
+                mesh,
+                partitioning,
             ).merge(.{ .d = .{ .h, .hd } })
                 .rename(.{ .q = .seq })
                 .insertAxes(.seq, .{.batch}),
