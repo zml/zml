@@ -606,6 +606,14 @@ pub const Platform = struct {
         try writer.writeAll(" }");
     }
 
+    /// `shape` placed as a buffer places it: on its mesh, or replicated on
+    /// every device (`replicated_mesh`) when it names none.
+    pub fn placedShape(self: *const Platform, shape: zml.Shape) zml.Shape {
+        var placed = shape;
+        if (placed._sharding.mesh == null) placed._sharding.mesh = self.replicated_mesh;
+        return placed;
+    }
+
     pub fn memoryKind(self: *const Platform, kind: Memory.Kind) []const u8 {
         for (self.memories) |mem| {
             if (mem.isOfKind(kind)) {

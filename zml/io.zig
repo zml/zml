@@ -24,6 +24,12 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
 
+// The new loader's files under io/, which zml does not export: only their
+// tests reach them, from here.
+test {
+    _ = @import("io/ShardGrid.zig");
+}
+
 pub const TensorStore = struct {
     pub const Binding = struct {
         tensors: []*safetensors.Tensor,

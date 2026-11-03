@@ -86,6 +86,7 @@ zig_library(
         "exe.zig",
         "floats.zig",
         "io.zig",
+        "io/ShardGrid.zig",
         "kernel.zig",
         "kernels/flash_attention/flash_attention.zig",
         "kernels/moe/moe.zig",
