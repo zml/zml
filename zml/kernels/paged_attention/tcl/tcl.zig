@@ -1655,7 +1655,7 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
         const q_t: Tensor = .init(.{ .b = tokens, .hkv = hkv, .hg = g, .hd = d }, dims.dtype);
         const Mod = struct {
             pub fn forward(p: paged.Parameters, q: Tensor, k: Tensor, v: Tensor, opts: paged_attention.AttentionOptions) Tensor {
-                return paged_attention.pagedAttention(.{ .tcl = p }, q, k, v, .{ .split = .{ .k = k, .v = v } }, opts);
+                return paged.pagedAttention(p, q, k, v, opts);
             }
         };
         const opts: paged_attention.AttentionOptions = .{
