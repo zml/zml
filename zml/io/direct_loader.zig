@@ -47,7 +47,9 @@
 //! writers and both offsets are contiguous, and its parts may come from
 //! different files and plans. Bytes no part covers go out with the plan of
 //! its first part, as a last fill job that reads nothing and transfers from
-//! the zero block, which no credit owns.
+//! the zero block, which no credit owns. The job of a tensor sharded along
+//! any axis but its first is staged by destination where that saves
+//! submissions (`JobCut.placeDma`).
 //!
 //! Locks. Where several pumps are held, they are taken in device order. A
 //! pump's mutex may be held while a released request gives its credit back
@@ -425,7 +427,7 @@ pub const Loader = struct {
     }
 
     fn workerMain(self: *Loader) void {
-        var scratch = ReadRequest.Scratch.init(self.allocator, self.credits.blocks_per_slot) catch |err| {
+        var scratch = ReadRequest.Scratch.init(self.allocator, self.credits.blocks_per_slot, self.plan_config.block_size) catch |err| {
             self.recordError(err, "allocate source worker scratch: blocks={d}", .{self.credits.blocks_per_slot});
             return;
         };
@@ -529,7 +531,7 @@ pub const Loader = struct {
         else
             @as(f64, @floatFromInt(batch.parts.len)) /
                 @as(f64, @floatFromInt(source_jobs));
-        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, fill_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
+        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, fill_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, staged_jobs={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
             batch.sequence,
             batch.plans.items.len,
             @as(f64, @floatFromInt(planning_ns)) / std.time.ns_per_s,
@@ -539,6 +541,7 @@ pub const Loader = struct {
             batch.parts.len,
             transfers,
             dma_submissions,
+            kinds.get(.dma_land),
             coalescing_ratio,
             average_read_size,
         });
@@ -746,6 +749,10 @@ const Plan = struct {
             /// Read into pinned blocks in file order, where its transfers
             /// address it, then copied to the devices by DMA.
             dma_read: Read,
+            /// Reads its extents, whose items land their bytes in its
+            /// blocks: a read of its plan's file grouped by destination
+            /// box (`Planner.JobCut.stage`).
+            dma_land: Land,
             /// Reads nothing: every transfer goes from the loader's zero
             /// block (`Planner.JobCut.appendFillTransfers`).
             dma_fill,
@@ -759,14 +766,58 @@ const Plan = struct {
             minimum_len: usize,
         };
 
-        /// The blocks of its credit's slot the job reads into; none for a
-        /// fill job.
+        /// A landing job: `len` bytes in its blocks, landed by the
+        /// `extent_len` extents of the plan's `extents` from
+        /// `extent_start`, in order.
+        const Land = struct {
+            len: usize,
+            extent_start: usize,
+            extent_len: usize,
+        };
+
+        /// The blocks of its credit's slot the job reads into or lands
+        /// in; none for a fill job.
         fn blockLen(self: Job, block_size: usize) usize {
             return switch (self.kind) {
                 .dma_read => |read| Planner.blockCount(read.len, block_size),
+                .dma_land => |land| Planner.blockCount(land.len, block_size),
                 .dma_fill => 0,
             };
         }
+    };
+
+    /// Bytes an extent of a landing job places in its blocks: the runs
+    /// `first` to `end` of `lattice`, its source offsets in the file
+    /// and its destination offsets logical, clipped to the logical
+    /// range `[clip_start, clip_end)`. A byte at logical offset `l`,
+    /// which `grid.locate(l)` puts at offset `o` of box `b` of the
+    /// destination's grid, lands at `landings[landing_start + b] +% o`
+    /// of the job's blocks taken end to end (`walkItem`).
+    const Item = struct {
+        destination: *Destination,
+        lattice: backend.Lattice,
+        first: u64 = 0,
+        end: u64 = 1,
+        clip_start: u64,
+        clip_end: u64,
+        landing_start: usize,
+    };
+
+    /// One read of a landing job: `len` bytes from `file_offset` of
+    /// `source_slot`'s file, of which the first `minimum_len` exist,
+    /// landed by the `item_len` items of the plan's `items` from
+    /// `item_start`.
+    const Extent = struct {
+        source_slot: *SourceSlot,
+        file_offset: u64,
+        len: usize,
+        minimum_len: usize,
+        /// Read straight into the job's blocks: an exact read whose
+        /// items' runs tile it, in order. Otherwise read into the
+        /// worker's bounce buffer and copied from there.
+        scatter: bool,
+        item_start: usize,
+        item_len: usize,
     };
 
     /// `len` bytes at `landing` of the job's blocks taken end to end, for
@@ -788,6 +839,11 @@ const Plan = struct {
     source_slot: *SourceSlot,
     jobs: []Job,
     transfers: []Transfer,
+    /// The landing jobs' extents, their items and the items' landing
+    /// tables (one entry per box of the item's destination).
+    extents: []Extent = &.{},
+    items: []Item = &.{},
+    landings: []u64 = &.{},
     requests: []ReadRequest,
     events: []Dma.EventContext,
     /// Event slots handed out so far, one `fetchAdd` per submission from
@@ -820,6 +876,9 @@ const Planner = struct {
         /// The longest read, a whole number of blocks
         /// (`backend.requestSize`).
         request_size: usize,
+        /// Submissions a DMA job must save to be staged (`JobCut.stage`):
+        /// one device's in-flight pieces.
+        minimum_staging_gain: usize = max_dma_pieces_per_device,
     };
 
     /// How each file is read: aligned when it is local and the VFS that
@@ -935,6 +994,11 @@ const Planner = struct {
         /// One part's bytes in a read job: the logical range `[start, end)`
         /// of its destination, from `file_offset` of the file on.
         const Segment = struct { destination: *Destination, start: u64, end: u64, file_offset: u64 };
+        /// A segment's bytes on box `box` of its destination: `len` from
+        /// `box_offset`, and where a staged job lands them.
+        const Entry = struct { segment: u32, box: u32, group: u32 = 0, box_offset: u64, len: u64, landing: u64 = 0 };
+        /// What a staged job lands together.
+        const Group = struct { destination: *Destination, box: u32 };
 
         allocator: std.mem.Allocator,
         parts: []Part,
@@ -946,7 +1010,15 @@ const Planner = struct {
         maximum_job_len: usize,
         jobs: std.ArrayList(Plan.Job) = .empty,
         transfers: std.ArrayList(Plan.Transfer) = .empty,
+        items: std.ArrayList(Plan.Item) = .empty,
+        landings: std.ArrayList(u64) = .empty,
+        extents: std.ArrayList(Plan.Extent) = .empty,
         safe_boundaries: std.ArrayList(u64) = .empty,
+        /// A read job's segments before they are placed, and the staging
+        /// scratch.
+        segments: std.ArrayList(Segment) = .empty,
+        entries: std.ArrayList(Entry) = .empty,
+        groups: std.AutoHashMapUnmanaged(Group, u32) = .empty,
         source_bytes: u64 = 0,
 
         /// The plan of the jobs cut, copied into `arena` with every context
@@ -963,6 +1035,9 @@ const Planner = struct {
                 .source_slot = self.source_slot,
                 .jobs = try arena.dupe(Plan.Job, jobs),
                 .transfers = try arena.dupe(Plan.Transfer, transfers),
+                .extents = try arena.dupe(Plan.Extent, self.extents.items),
+                .items = try arena.dupe(Plan.Item, self.items.items),
+                .landings = try arena.dupe(u64, self.landings.items),
                 .requests = requests,
                 .events = try arena.alloc(Dma.EventContext, submissionCount(transfers)),
                 .source_bytes = self.source_bytes,
@@ -972,7 +1047,13 @@ const Planner = struct {
 
         fn deinit(self: *JobCut) void {
             const allocator = self.allocator;
+            self.groups.deinit(allocator);
+            self.entries.deinit(allocator);
+            self.segments.deinit(allocator);
             self.safe_boundaries.deinit(allocator);
+            self.extents.deinit(allocator);
+            self.landings.deinit(allocator);
+            self.items.deinit(allocator);
             self.transfers.deinit(allocator);
             self.jobs.deinit(allocator);
         }
@@ -984,7 +1065,8 @@ const Planner = struct {
         /// as its block is read. With an alignment (`Reads.alignmentOf`), a
         /// job's read widens to aligned bounds around its range
         /// (`maximumJobLen` leaves room for it), and the transfers address
-        /// the widened read.
+        /// the widened read. Each job's segments are placed in its blocks
+        /// by `placeDma`.
         fn cutRuns(self: *JobCut, order: []const usize) !void {
             const allocator = self.allocator;
             const parts = self.parts;
@@ -1057,6 +1139,9 @@ const Planner = struct {
                     const read_end = if (alignment == 0) job_end else std.mem.alignForward(u64, job_end, alignment);
                     const read_len: usize = @intCast(read_end - read_start);
                     const transfer_start = self.transfers.items.len;
+                    // The job's segments first: where they land in its
+                    // blocks depends on all of them.
+                    self.segments.clearRetainingCapacity();
                     while (candidate_start < run_part_end) {
                         const candidate = parts[order[candidate_start]].fileRange();
                         if (candidate.end > job_start) break;
@@ -1070,19 +1155,21 @@ const Planner = struct {
                         const intersection_end = @min(job_end, range.end);
                         if (intersection_start >= intersection_end) continue;
                         const logical_start = part.lattice.dst_offset + (intersection_start - range.start);
-                        try self.appendRunTransfers(transfer_start, .{
+                        try self.segments.append(allocator, .{
                             .destination = part.destination,
                             .start = logical_start,
                             .end = logical_start + (intersection_end - intersection_start),
                             .file_offset = intersection_start,
-                        }, read_start);
+                        });
                     }
-                    std.debug.assert(self.transfers.items.len != transfer_start);
+                    std.debug.assert(self.segments.items.len != 0);
+                    const read: Plan.Job.Read = .{ .len = read_len, .minimum_len = @intCast(job_end - read_start) };
+                    const kind = try self.placeDma(read, read_start, job_start, job_len);
                     try self.jobs.append(allocator, .{
                         .file_offset = read_start,
                         .transfer_start = transfer_start,
                         .transfer_len = self.transfers.items.len - transfer_start,
-                        .kind = .{ .dma_read = .{ .len = read_len, .minimum_len = @intCast(job_end - read_start) } },
+                        .kind = kind,
                     });
                     self.source_bytes +|= @intCast(job_len);
                     job_start = job_end;
@@ -1091,6 +1178,150 @@ const Planner = struct {
                 std.debug.assert(job_start == run_end);
                 run_cursor = run_part_end;
             }
+        }
+
+        /// Places a DMA job's segments (`segments`, in file order) in its
+        /// blocks. Blocks holding the read in file order give one transfer
+        /// per run (`ShardGrid.run`): a tensor sharded along any axis but
+        /// its first takes one per row and device, as a column-sharded
+        /// `o_proj` or `down_proj` does. A staged job lands its read grouped
+        /// by destination box instead (`stage`), so a box takes one piece
+        /// per block. Llama-3.1-8B sharded like that on four B70, page
+        /// cache warm, planned 1.05M submissions and loaded in 5.1 s (~1.2
+        /// ms per piece, 64 in flight per device); staged, 5,468 and 0.71
+        /// s, against 0.67 s sharded by rows. Staging costs a read
+        /// scattered over the runs, or for a direct read a copy through the
+        /// worker's bounce buffer (`landJob`), so a job is staged only where
+        /// it saves `Config.minimum_staging_gain` submissions, and only when
+        /// its segments tile its bytes once: overlapping parts send a source
+        /// byte to two segments, and one read cannot land it twice.
+        fn placeDma(self: *JobCut, read: Plan.Job.Read, read_start: u64, data_start: u64, job_len: usize) !Plan.Job.Kind {
+            const block_size = self.config.block_size;
+            const transfer_start = self.transfers.items.len;
+            // File order takes a submission per writer of every run, cut by
+            // blocks, less where runs of adjacent segments continue each other
+            // or a run ends where a block does: at most `slack` fewer.
+            var in_file_order: usize = 0;
+            var slack: usize = 0;
+            var tiles = true;
+            var next = data_start;
+            for (self.segments.items) |segment| {
+                if (segment.file_offset != next) tiles = false;
+                next = segment.file_offset + (segment.end - segment.start);
+                const grid = &segment.destination.grid;
+                const landing = segment.file_offset - read_start;
+                const crossings = (landing + segment.end - segment.start - 1) / block_size - landing / block_size;
+                in_file_order += (grid.runCount(segment.start, segment.end) + crossings) * grid.replicas();
+                slack += (1 + crossings) * grid.replicas();
+            }
+            if (tiles and next == data_start + job_len) {
+                if (try self.stage(read, read_start, job_len, in_file_order, slack)) |land| return .{ .dma_land = land };
+            }
+            for (self.segments.items) |segment| try self.appendRunTransfers(transfer_start, segment, read_start);
+            return .{ .dma_read = read };
+        }
+
+        /// Lands the job's segments box by box: their bytes on each box of a
+        /// destination, grouped by (destination, box) in order of first
+        /// appearance, each group in box order. The job's read is its one
+        /// extent, and one `Item` per segment tells the worker where its bytes
+        /// go (`landJob`). Null, with nothing appended, when that saves
+        /// fewer than `Config.minimum_staging_gain` submissions against file
+        /// order, estimated at `in_file_order` and at most `slack` fewer:
+        /// counted exactly, by listing the runs, only when that decides.
+        fn stage(self: *JobCut, read: Plan.Job.Read, read_start: u64, job_len: usize, in_file_order: usize, slack: usize) !?Plan.Job.Land {
+            const allocator = self.allocator;
+            const segments = self.segments.items;
+            self.entries.clearRetainingCapacity();
+            self.groups.clearRetainingCapacity();
+            for (segments, 0..) |segment, index| {
+                const grid = &segment.destination.grid;
+                for (0..grid.box_count) |box| {
+                    const low = grid.rankIn(box, segment.start);
+                    const high = grid.rankIn(box, segment.end);
+                    if (high == low) continue;
+                    const group = try self.groups.getOrPut(allocator, .{ .destination = segment.destination, .box = @intCast(box) });
+                    if (!group.found_existing) group.value_ptr.* = @intCast(self.groups.count() - 1);
+                    try self.entries.append(allocator, .{ .segment = @intCast(index), .box = @intCast(box), .group = group.value_ptr.*, .box_offset = low, .len = high - low });
+                }
+            }
+            const entries = self.entries.items;
+            std.mem.sort(Entry, entries, {}, struct {
+                fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
+                    if (lhs.group != rhs.group) return lhs.group < rhs.group;
+                    if (lhs.box_offset != rhs.box_offset) return lhs.box_offset < rhs.box_offset;
+                    return lhs.segment < rhs.segment;
+                }
+            }.lessThan);
+            // The read's own order when every box of a segment is one run and
+            // the groups come in the order of the runs.
+            var runs: u64 = 0;
+            for (segments) |segment| runs += segment.destination.grid.runCount(segment.start, segment.end);
+            if (runs == entries.len) {
+                const in_order = for (entries[1..], entries[0 .. entries.len - 1]) |entry, previous| {
+                    if (entry.segment < previous.segment or (entry.segment == previous.segment and entry.box < previous.box)) break false;
+                } else true;
+                if (in_order) return null;
+            }
+            const staged_start = self.transfers.items.len;
+            var landing: u64 = 0;
+            for (entries) |*entry| {
+                const destination = segments[entry.segment].destination;
+                entry.landing = landing;
+                try self.appendBlocked(staged_start, .{
+                    .destination = destination,
+                    .landing = @intCast(landing),
+                    .writer_mask = destination.grid.writers[entry.box],
+                    .destination_offset = @intCast(entry.box_offset),
+                    .len = @intCast(entry.len),
+                });
+                landing += entry.len;
+            }
+            std.debug.assert(landing == job_len);
+            const needed = submissionCount(self.transfers.items[staged_start..]) +| self.config.minimum_staging_gain;
+            var file_order_wins = needed > in_file_order;
+            if (!file_order_wins and needed +| slack > in_file_order) {
+                const exact_start = self.transfers.items.len;
+                for (segments) |segment| try self.appendRunTransfers(exact_start, segment, read_start);
+                file_order_wins = needed > submissionCount(self.transfers.items[exact_start..]);
+                self.transfers.shrinkRetainingCapacity(exact_start);
+            }
+            if (file_order_wins) {
+                self.transfers.shrinkRetainingCapacity(staged_start);
+                return null;
+            }
+
+            // A landing table per segment, one entry per box of its
+            // destination.
+            const item_start = self.items.items.len;
+            for (segments) |segment| {
+                const landing_start = self.landings.items.len;
+                try self.landings.appendNTimes(allocator, 0, segment.destination.grid.box_count);
+                try self.items.append(allocator, .{
+                    .destination = segment.destination,
+                    .lattice = .{ .src_offset = segment.file_offset, .dst_offset = segment.start, .width = segment.end - segment.start },
+                    .clip_start = segment.start,
+                    .clip_end = segment.end,
+                    .landing_start = landing_start,
+                });
+            }
+            for (entries) |entry| {
+                const item = self.items.items[item_start + entry.segment];
+                self.landings.items[item.landing_start + entry.box] = entry.landing -% entry.box_offset;
+            }
+            // Only a direct read has padding around its tensor bytes, which
+            // goes through the worker's bounce buffer.
+            const extent_start = self.extents.items.len;
+            try self.extents.append(allocator, .{
+                .source_slot = self.source_slot,
+                .file_offset = read_start,
+                .len = read.len,
+                .minimum_len = read.minimum_len,
+                .scatter = self.alignment == 0,
+                .item_start = item_start,
+                .item_len = segments.len,
+            });
+            return .{ .len = job_len, .extent_start = extent_start, .extent_len = 1 };
         }
 
         /// Appends `segment`'s transfers with its bytes where the read holds
@@ -1386,17 +1617,36 @@ const Scheduler = struct {
 const ReadRequest = struct {
     const Scratch = struct {
         allocator: std.mem.Allocator,
-        /// A read's ranges: one per block of a job (`readBlocks`).
+        /// A read's ranges: one per block of a job (`readBlocks`), or a
+        /// scattered read's, at most one vectored read's worth (`Scatter`).
         iovecs: [][]u8,
+        /// A landing job's reads that do not scatter (`landJob`), allocated
+        /// on first use: as large as a job's blocks, page aligned for
+        /// O_DIRECT.
+        bounce: []align(std.heap.page_size_min) u8 = &.{},
+        bounce_capacity: usize,
 
-        fn init(allocator: std.mem.Allocator, maximum_blocks: usize) !Scratch {
+        fn init(allocator: std.mem.Allocator, maximum_blocks: usize, block_size: usize) !Scratch {
             return .{
                 .allocator = allocator,
-                .iovecs = try allocator.alloc([]u8, maximum_blocks),
+                .iovecs = try allocator.alloc([]u8, @max(maximum_blocks, max_positional_iovecs)),
+                .bounce_capacity = maximum_blocks * block_size,
             };
         }
 
+        /// The ranges a `Scatter` gathers before it reads.
+        fn scatterIovecs(self: *const Scratch) [][]u8 {
+            return self.iovecs[0..max_positional_iovecs];
+        }
+
+        fn bounceBuffer(self: *Scratch, len: usize) ![]u8 {
+            std.debug.assert(len <= self.bounce_capacity);
+            if (self.bounce.len == 0) self.bounce = try self.allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), self.bounce_capacity);
+            return self.bounce[0..len];
+        }
+
         fn deinit(self: *Scratch) void {
+            self.allocator.free(self.bounce);
             self.allocator.free(self.iovecs);
             self.* = undefined;
         }
@@ -1461,6 +1711,7 @@ const ReadRequest = struct {
         const blocks = loader.credits.slotBlocks(self.slot)[0..job.blockLen(block_size)];
         switch (job.kind) {
             .dma_read => |read| try self.readBlocks(scratch, blocks, read),
+            .dma_land => |land| try landJob(loader, self.plan, land, blocks, scratch),
             // Reads nothing: its transfers read the zero block.
             .dma_fill => return Dma.enqueue(self, loader.blocks[0..1]),
         }
@@ -1551,6 +1802,158 @@ fn readSlot(loader: *Loader, slot: *SourceSlot, iovecs: [][]u8, file_offset: u64
     _ = loader.metrics.read_operations.fetchAdd(1, .monotonic);
     _ = loader.metrics.read_bytes.fetchAdd(@intCast(bytes_read), .monotonic);
 }
+
+/// Reads a landing job's extents and lands their items' runs in its blocks
+/// (`Plan.Item`, `walkItem`). An extent marked for it scatters
+/// straight into the blocks, `max_positional_iovecs` ranges per call; any
+/// other lands in the worker's bounce buffer and is copied from there: a
+/// direct read, whose ranges must be aligned.
+fn landJob(
+    loader: *Loader,
+    plan: *const Plan,
+    land: Plan.Job.Land,
+    blocks: []const host_memory.Block,
+    scratch: *ReadRequest.Scratch,
+) !void {
+    for (plan.extents[land.extent_start..][0..land.extent_len]) |extent| {
+        try landExtent(loader, extent, plan.items[extent.item_start..][0..extent.item_len], plan.landings, blocks, scratch);
+    }
+}
+
+fn landExtent(
+    loader: *Loader,
+    extent: Plan.Extent,
+    items: []const Plan.Item,
+    landings: []const u64,
+    blocks: []const host_memory.Block,
+    scratch: *ReadRequest.Scratch,
+) !void {
+    const block_size = loader.plan_config.block_size;
+    if (extent.scatter) {
+        std.debug.assert(extent.len == extent.minimum_len);
+        var scatter: Scatter = .{
+            .loader = loader,
+            .slot = extent.source_slot,
+            .iovecs = scratch.scatterIovecs(),
+            .file_offset = extent.file_offset,
+            .blocks = blocks,
+        };
+        for (items) |item| try walkItem(item, landings, &scatter);
+        try scatter.flush();
+        std.debug.assert(scatter.file_offset == extent.file_offset + extent.len);
+        return;
+    }
+    const bounce = try scratch.bounceBuffer(extent.len);
+    var buffers = [_][]u8{bounce};
+    try readSlot(loader, extent.source_slot, &buffers, extent.file_offset, extent.minimum_len);
+    var sink: CopySink = .{ .bounce = bounce, .file_offset = extent.file_offset, .blocks = blocks, .block_size = block_size };
+    for (items) |item| try walkItem(item, landings, &sink);
+}
+
+/// Hands `sink` every run of `item` as `place(file offset, landing, len)`,
+/// in run order, cut where the destination's box changes
+/// (`ShardGrid.runEnd`).
+fn walkItem(item: Plan.Item, landings: []const u64, sink: anytype) !void {
+    const table = landings[item.landing_start..][0..item.destination.grid.box_count];
+    try walkRuns(item.lattice, item.first, item.end, item.clip_start, item.clip_end, &item.destination.grid, table, sink);
+}
+
+/// `walkItem` for runs `first` to `end` of `lattice`, clipped to the
+/// destination range `[clip_start, clip_end)`.
+fn walkRuns(lattice: backend.Lattice, first: u64, end: u64, clip_start: u64, clip_end: u64, grid: *const ShardGrid, table: []const u64, sink: anytype) !void {
+    if (first >= end) return;
+    var runs: backend.Lattice.Cursor = .init(lattice, first, end);
+    while (runs.next()) |run| {
+        var at = @max(run.dst, clip_start);
+        const stop = @min(run.dst + lattice.width, clip_end);
+        var source = run.src + (at - run.dst);
+        while (at < stop) {
+            const piece_end = grid.runEnd(at, stop);
+            const box, const box_offset = grid.locate(at);
+            try sink.place(source, table[box] +% box_offset, piece_end - at);
+            source += piece_end - at;
+            at = piece_end;
+        }
+    }
+}
+
+/// The ranges a `Scatter` gathers before it reads, as many as one direct
+/// read takes.
+const max_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 else std.posix.IOV_MAX;
+
+/// A read scattered over memory ranges as they come, in file order and
+/// back to back from `file_offset` of `slot`'s file: a range that continues
+/// the previous one in memory merges with it, and one call reads at most
+/// `iovecs.len` ranges. Fed the runs of a walk landing in `blocks`
+/// (`place`), or memory ranges directly (`add`). Every byte read must
+/// exist: a scattered read has no alignment padding.
+const Scatter = struct {
+    loader: *Loader,
+    slot: *SourceSlot,
+    iovecs: [][]u8,
+    count: usize = 0,
+    /// Bytes the pending ranges cover.
+    pending: usize = 0,
+    /// The file offset of the first byte not read yet.
+    file_offset: u64,
+    blocks: []const host_memory.Block = &.{},
+
+    fn add(self: *Scatter, range: []u8) !void {
+        if (self.count != 0) {
+            const last = &self.iovecs[self.count - 1];
+            if (last.ptr + last.len == range.ptr) {
+                last.len += range.len;
+                self.pending += range.len;
+                return;
+            }
+        }
+        if (self.count == self.iovecs.len) try self.flush();
+        self.iovecs[self.count] = range;
+        self.count += 1;
+        self.pending += range.len;
+    }
+
+    /// A run's landing in the blocks, split at block boundaries.
+    fn place(self: *Scatter, source: u64, landing: u64, len: u64) !void {
+        std.debug.assert(source == self.file_offset + self.pending);
+        var at: usize = @intCast(landing);
+        var rest: usize = @intCast(len);
+        while (rest != 0) {
+            const piece = blockPiece(self.blocks, self.loader.plan_config.block_size, at, rest);
+            try self.add(piece);
+            at += piece.len;
+            rest -= piece.len;
+        }
+    }
+
+    fn flush(self: *Scatter) !void {
+        if (self.count == 0) return;
+        try readSlot(self.loader, self.slot, self.iovecs[0..self.count], self.file_offset, self.pending);
+        self.file_offset += self.pending;
+        self.count = 0;
+        self.pending = 0;
+    }
+};
+
+/// Runs copied from a read in the bounce buffer, which starts at
+/// `file_offset`.
+const CopySink = struct {
+    bounce: []const u8,
+    file_offset: u64,
+    blocks: []const host_memory.Block,
+    block_size: usize,
+
+    fn place(self: *CopySink, source: u64, landing: u64, len: u64) !void {
+        var at: usize = @intCast(landing);
+        var rest = self.bounce[@intCast(source - self.file_offset)..][0..@intCast(len)];
+        while (rest.len != 0) {
+            const piece = blockPiece(self.blocks, self.block_size, at, rest.len);
+            @memcpy(piece, rest[0..piece.len]);
+            rest = rest[piece.len..];
+            at += piece.len;
+        }
+    }
+};
 
 /// The bytes from offset `at` of `blocks` taken end to end, `block_size`
 /// bytes each, up to `len` of them or the end of that block.
@@ -2377,12 +2780,16 @@ const CompositeTest = struct {
     const Options = struct {
         block_size: usize,
         request_size: usize,
+        alignment: usize = 0,
+        /// By default nothing is staged.
+        staging_gain: usize = std.math.maxInt(usize),
         /// Whether some piece holds a's last byte and b's first one.
         cross_part_piece: bool,
     };
 
-    /// The replay reads each read job's blocks from the two files as its
-    /// worker would (`jobBlocks`).
+    /// A DMA job is staged where it saves `staging_gain` submissions; the
+    /// replay reads each job's blocks from the two files as its worker
+    /// would (`jobBlocks`).
     fn run(platform: *const Platform, shape: Shape, options: Options) !void {
         const allocator = std.testing.allocator;
         const io = std.testing.io;
@@ -2440,7 +2847,8 @@ const CompositeTest = struct {
             plans[plan_count] = try prepareTestPlan(arena.allocator(), &parts, order[start..end], .{
                 .block_size = block_size,
                 .request_size = options.request_size,
-            }, 0);
+                .minimum_staging_gain = options.staging_gain,
+            }, options.alignment);
             start = end;
         }
         try std.testing.expectEqual(@as(usize, 2), plan_count);
@@ -2482,9 +2890,10 @@ const CompositeTest = struct {
                         try std.testing.expectEqual(@as(usize, 0), transfer.landing);
                         break :fill zeros[0..transfer.len];
                     } else read: {
+                        // a's last byte and b's first one in the same piece,
+                        // where a read's blocks hold the file in order.
                         const file_offset = job.file_offset + transfer.landing;
-                        // a's last byte and b's first one in the same piece.
-                        if (plan.source_slot == &slots[0] and file_offset <= 51 and file_offset + transfer.len > 52) cross_part_piece = true;
+                        if (job.kind == .dma_read and plan.source_slot == &slots[0] and file_offset <= 51 and file_offset + transfer.len > 52) cross_part_piece = true;
                         break :read blocks[transfer.landing..][0..transfer.len];
                     };
                     const index: usize = if (transfer.destination == &destinations[0]) 0 else 1;
@@ -2501,16 +2910,33 @@ const CompositeTest = struct {
         try replays[1].expect(allocator, second_bytes[64..128]);
     }
 
-    /// A read job's blocks taken end to end once its worker has read it,
-    /// in file order.
+    /// A DMA job's blocks taken end to end once its worker has read it:
+    /// the read in file order, or as its worker lands a landing job
+    /// (`landJob`).
     fn jobBlocks(allocator: std.mem.Allocator, loader: *Loader, plan: *const Plan, job: Plan.Job) ![]u8 {
         const block_size = loader.plan_config.block_size;
         const bytes = try allocator.alloc(u8, job.blockLen(block_size) * block_size);
         errdefer allocator.free(bytes);
         @memset(bytes, 0xaa);
-        const read = job.kind.dma_read;
-        var buffers = [_][]u8{bytes[0..read.len]};
-        try readSlot(loader, plan.source_slot, &buffers, job.file_offset, read.minimum_len);
+        const land = switch (job.kind) {
+            .dma_read => |read| {
+                // The end of the file cuts a widened read's padding.
+                var buffers = [_][]u8{bytes[0..read.len]};
+                try readSlot(loader, plan.source_slot, &buffers, job.file_offset, read.minimum_len);
+                return bytes;
+            },
+            .dma_land => |land| land,
+            .dma_fill => unreachable,
+        };
+        // A bounce buffer as large as any of the job's reads.
+        var longest: usize = land.len;
+        for (plan.extents[land.extent_start..][0..land.extent_len]) |extent| longest = @max(longest, extent.len);
+        const blocks = try allocator.alloc(host_memory.Block, job.blockLen(block_size));
+        defer allocator.free(blocks);
+        for (blocks, 0..) |*block, index| block.* = bytes[index * block_size ..][0..block_size];
+        var scratch: ReadRequest.Scratch = try .init(allocator, Planner.blockCount(longest, block_size), block_size);
+        defer scratch.deinit();
+        try landJob(loader, plan, land, blocks, &scratch);
         return bytes;
     }
 
@@ -2617,6 +3043,12 @@ test "composite destinations place each part and zero-fill the rest of every dev
             // cut every row apart and every fill piece to one block.
             try CompositeTest.run(platform, placed, .{ .block_size = 64, .request_size = 128, .cross_part_piece = scenario[2] });
             try CompositeTest.run(platform, placed, .{ .block_size = 16, .request_size = 32, .cross_part_piece = false });
+            // Staged wherever it saves a submission: the column-sharded jobs
+            // land grouped by device, in reads exact or widened.
+            for ([_]usize{ 0, 8 }) |alignment| {
+                try CompositeTest.run(platform, placed, .{ .block_size = 64, .request_size = 128, .alignment = alignment, .staging_gain = 1, .cross_part_piece = scenario[2] });
+                try CompositeTest.run(platform, placed, .{ .block_size = 16, .request_size = 48, .alignment = alignment, .staging_gain = 1, .cross_part_piece = false });
+            }
         }
     }
 }
@@ -3590,4 +4022,68 @@ test "source slots keep their own copy of each path" {
     // The testing allocator overwrites freed bytes: a slot keyed by the
     // first string would miss the second lookup.
     try std.testing.expectEqual(@as(usize, 1), loader.source_slots.count());
+}
+
+test "column-sharded tensors load as one DMA piece per device and block, read exact or widened" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, io, 4);
+    defer devices.deinit();
+    const mesh = try devices.mesh("tp");
+
+    // Rows of 32 bytes, 8 per device; then 12,000 one-byte pieces, more
+    // than one vectored read takes.
+    var rows: [64 * 32]u8 = undefined;
+    var cols: [1024 * 32]u8 = undefined;
+    var narrow: [3000 * 4]u8 = undefined;
+    testing.pattern(&rows, 1);
+    testing.pattern(&cols, 2);
+    testing.pattern(&narrow, 3);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try testing.writeSafetensors(allocator, io, tmp.dir, "staged.safetensors", &registry, &.{
+        .{ .name = "rows", .dtype = "U16", .dims = &.{ 64, 16 }, .bytes = &rows },
+        .{ .name = "cols", .dtype = "U16", .dims = &.{ 1024, 16 }, .bytes = &cols },
+        .{ .name = "narrow", .dtype = "U8", .dims = &.{ 3000, 4 }, .bytes = &narrow },
+    });
+    const names = [_][]const u8{ "rows", "cols", "narrow" };
+    const shapes = [_]Shape{
+        Shape.init(.{ .row = 64, .col = 16 }, .u16).withPartitioning(&mesh, .{ .row = .model }),
+        Shape.init(.{ .row = 1024, .col = 16 }, .u16).withPartitioning(&mesh, .{ .col = .model }),
+        Shape.init(.{ .row = 3000, .col = 4 }, .u8).withPartitioning(&mesh, .{ .col = .model }),
+    };
+    const globals = [_][]const u8{ &rows, &cols, &narrow };
+    const row_pieces = 1024 * 4 + 3000 * 4;
+
+    for ([_]usize{ 0, 64 }) |alignment| {
+        var parts: [names.len]LoadPart = undefined;
+        var specs: [names.len]LoadSpec = undefined;
+        var outputs: [names.len]Buffer = undefined;
+        for (&parts, &specs, &outputs, names, shapes) |*part, *spec, *output, name, shape| {
+            part.* = .whole(registry.tensors.getPtr(name).?);
+            spec.* = .{ .shape = shape, .output = output, .parts = part[0..1] };
+        }
+        const loader = try Loader.create(allocator, io, devices.platform, .{ .read_parallelism = 2, .direct_io = .off });
+        defer loader.destroy();
+        loader.reads.alignment = alignment;
+        const batch = try loader.submit(&specs, .none);
+        // Every plan is published once `submit` returns.
+        var staged_jobs: usize = 0;
+        var submissions: usize = 0;
+        for (batch.plans.items) |plan| {
+            for (plan.jobs) |job| staged_jobs += @intFromBool(job.kind == .dma_land);
+            submissions += plan.events.len;
+        }
+        try loader.awaitBatch(batch);
+        defer for (&outputs) |*output| output.deinit();
+        for (&outputs, globals) |*output, global| try testing.expectShards(allocator, io, output, global, .default);
+        try std.testing.expect(staged_jobs >= 1);
+        try std.testing.expect(submissions < row_pieces / 100);
+        // Every credit is free once the workers stopped (`stopWorkers`).
+        loader.stopWorkers();
+        try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+    }
 }
