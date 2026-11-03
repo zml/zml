@@ -234,7 +234,7 @@ Python script. Alternatively, Huggingface's web-interface allows to peek into
 ## Loading an individual layer
 
 Currently, the layer is initialized but the weights are still on the disk.
-ZML provides a convenience to automatically load weights from an initialized model:
+ZML provides a convenience to load weights from an initialized model in a test:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -242,7 +242,8 @@ pub fn main(init: std.process.Init) !void {
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
+    var mlp_weights = try zml.testing.load(allocator, io, platform, &mlp, &model_store);
+    defer zml.mem.deinitBufferized(allocator, &mlp_weights);
 }
 ```
 

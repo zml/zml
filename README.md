@@ -162,29 +162,6 @@ const Mnist = struct {
         };
     }
 
-    pub fn load(
-        self: *const Mnist,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *const zml.io.TensorStore,
-        meshes: []const *const zml.Mesh,
-    ) !zml.Bufferized(Mnist) {
-        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
-            .meshes = meshes,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 16 * 1024 * 1024,
-        });
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
-        self.fc1.weight.deinit();
-        self.fc1.bias.deinit();
-        self.fc2.weight.deinit();
-        self.fc2.bias.deinit();
-    }
-
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         var x = input.flatten().convert(.f32).withTags(.{.d});
@@ -195,7 +172,43 @@ const Mnist = struct {
         return x.argMax(0).indices.convert(.u8);
     }
 };
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const path = ...;
+
+    // Local paths. `zml.io.VFS.Remotes` adds hf://, s3://, gs:// and https://.
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
+    defer vfs.deinit();
+    const io = vfs.io();
+
+    const platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
+
+    // Returns at once: the loader calibrates while the model is compiled.
+    var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = path });
+    defer loader.deinit();
+
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{});
+    defer store.deinit();
+    const model: Mnist = .init(store.view());
+
+    const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
+    var exe = try platform.compile(allocator, io, model, .forward, .{input}, .{});
+    defer exe.deinit();
+
+    var weights = try zml.mem.bufferize(allocator, &model);
+    defer zml.mem.deinitBufferized(allocator, &weights);
+    try loader.start(&model, &weights, &store, .none);
+    try loader.wait(); // logs "Loaded weights"
+
+    // ... call `exe` on the weights and an image
+}
 ```
+
+The first `start` waits for whatever calibration is left.
 
 For a full walkthrough, see:
 
