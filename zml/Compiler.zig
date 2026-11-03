@@ -423,7 +423,10 @@ pub fn compile(
 ) Error!Exe {
     return switch (platform.io_impl) {
         .threaded => compileInternal(allocator, io, platform, func_, args, opts),
-        .zio => try zio.blockInPlace(struct {
+        // A compile holds its thread for its whole run, so it takes a pool
+        // worker of its own instead of queuing behind other jobs; concurrent
+        // compiles run in parallel.
+        .zio => try zio.blockInPlaceReserved(struct {
             fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const Platform, args_: @TypeOf(args), opts_: Options) Error!Exe {
                 return try compileInternal(allocator_, io_, platform_, func_, args_, opts_);
             }
@@ -448,7 +451,7 @@ pub fn compileInternal(
     // in mind we might want to revisit that later.
     //
     // This is NOT compatible with std.Io.Evented.
-    // It is compatible with zio, hence the blockInPlace above.
+    // It is compatible with zio, hence the blockInPlaceReserved above.
 
     const span_name = try tracer.formatSpanName(allocator, "zml.module.compile", .{
         .program_name = opts.program_name,
@@ -1016,7 +1019,6 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
         platform.pjrt_client,
         platform.pjrt_api,
         compiler.allocator,
-        compiler.io,
         compiler.module,
         try upb.serialize(options, upb_arena),
     );
