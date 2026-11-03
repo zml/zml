@@ -57,8 +57,8 @@ fn toSlice(allocator: std.mem.Allocator, io: std.Io, slice_or_buffer: anytype) !
     } else .{ slice_or_buffer, false };
 }
 
-/// Testing utility. Accepts both zml.Buffer and zml.HostBuffer but zml.Buffer will be copied to the
-/// host for comparison !
+/// Testing utility. Accepts both zml.Buffer and zml.Slice; a zml.Buffer is copied to the host for
+/// comparison.
 pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpts) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
     var left: Slice, const should_free_left = try toSlice(allocator, io, left_);
@@ -363,10 +363,6 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
 
     std.debug.print("Expected {f}, got {f}", .{ expected, actual });
     return error.TestExpectedEqual;
-}
-
-fn BufferizedWithArgs(comptime T: type) type {
-    return zml.meta.MapType(zml.Tensor, zml.Buffer).map(T);
 }
 
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
