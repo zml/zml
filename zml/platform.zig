@@ -37,6 +37,10 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
         return error.MissingDevices;
     }
+    if (num_devices > Platform.MAX_NUM_DEVICES) {
+        log.err("Platform {} got {} devices, but ZML supports up to {}", .{ target, num_devices, Platform.MAX_NUM_DEVICES });
+        return error.InvalidDeviceCount;
+    }
     switch (target) {
         .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
@@ -313,11 +317,9 @@ pub const Platform = struct {
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
+        errdefer pjrt_client.deinit(api);
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
-        if (pjrt_devices.len > MAX_NUM_DEVICES) {
-            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
-        }
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
 
@@ -351,6 +353,7 @@ pub const Platform = struct {
 
         const arena = platform.arena.allocator();
         errdefer platform.arena.deinit();
+        errdefer if (comptime Target.cuda.isEnabled()) platform.state.deinit();
         try platform.meshes.ensureTotalCapacity(arena, 8);
 
         {
