@@ -534,7 +534,7 @@ pub const S3 = struct {
                 const handle = self.getFileHandle(o.file);
                 const total = self.performRead(handle, o.data, handle.pos) catch |err| {
                     log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = error.EndOfStream };
+                    return .{ .file_read_streaming = error.InputOutput };
                 };
 
                 if (total == 0) {

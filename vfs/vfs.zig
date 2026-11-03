@@ -9,6 +9,10 @@ pub const HTTP = @import("http.zig").HTTP;
 pub const S3 = @import("s3.zig").S3;
 pub const VFSBase = @import("base.zig").VFSBase;
 
+test {
+    _ = @import("gcs.zig");
+}
+
 const log = std.log.scoped(.@"zml/vfs");
 
 /// Indices 0-2 are the standard streams, so `std.Io.File.stdout()` and

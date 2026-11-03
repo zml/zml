@@ -8,7 +8,6 @@ const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/vfs/gcs");
 
-const EndpointUrl = "https://storage.googleapis.com";
 const MetadataUrl = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
 /// Check if running on Google Compute Engine / Cloud Run host infrastructure,
@@ -51,29 +50,11 @@ const Credentials = union(enum) {
     };
 
     const ServiceAccount = struct {
-        pub const JwtAssertion = struct {
-            iss: []const u8,
-            scope: []const u8 = "https://www.googleapis.com/auth/devstorage.read_only",
-            aud: []const u8 = "https://oauth2.googleapis.com/token",
-            exp: i64,
-            iat: i64,
-            sub: ?[]const u8 = null,
-        };
-
         type: []const u8,
         client_email: []const u8,
         private_key: []const u8,
         token_uri: []const u8,
         quota_project_id: ?[]const u8 = null,
-
-        pub fn makeAssertion(self: *const ServiceAccount, io_: std.Io) JwtAssertion {
-            const now: std.Io.Timestamp = .now(io_, .real);
-            return .{
-                .iss = self.client_email,
-                .iat = now.toSeconds(),
-                .exp = now.addDuration(.fromSeconds(3600)).toSeconds(),
-            };
-        }
     };
 
     authorized_user: AuthorizedUser,
@@ -274,7 +255,6 @@ pub const GCS = struct {
     pub const Config = struct {
         credentials: ?Credentials = null,
         endpoint_uri: std.Uri,
-        region: []const u8 = "auto",
     };
 
     const Handle = struct {
@@ -317,7 +297,6 @@ pub const GCS = struct {
             metadata_server: void,
         } = null,
         endpoint_url: []const u8 = "https://storage.googleapis.com",
-        region: []const u8 = "auto",
         read_pool: parallel_read.InitOpts = .{
             .chunk_size = 16 << 20,
             .num_workers = 32,
@@ -359,7 +338,6 @@ pub const GCS = struct {
                 .metadata_server => .{ .metadata_server = {} },
             } else null,
             .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, opts.endpoint_url)) catch return InitError.Unexpected,
-            .region = try arena.allocator().dupe(u8, opts.region),
         };
 
         const token: Token = .{
@@ -469,44 +447,6 @@ pub const GCS = struct {
         _ = service_account;
         _ = buffer;
         return error.Unimplemented;
-
-        // const assertion = service_account.makeAssertion(io_);
-
-        // var tmp_buffer: [8 * 1024]u8 = undefined;
-
-        // var buffer_writer: std.Io.Writer = .fixed(buffer);
-        // var signing_input_buffer: [2 * 1024]u8 = undefined;
-        // var signing_input_writer: std.Io.Writer = .fixed(signing_input_buffer);
-
-        // const encoded_rs256_header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
-        // try signing_input_writer.print("{s}.", .{encoded_rs256_header});
-        // std.base64.url_safe_no_pad.Encoder.encodeWriter(
-        //     signing_input_writer,
-        //     try std.fmt.bufPrint(tmp_buffer, "{f}", .{
-        //         std.json.fmt(assertion, .{}),
-        //     }),
-        // );
-        // const signing_input = signing_input_writer.buffered();
-        // _ = signing_input;
-
-        // const result = try client.fetch(.{
-        //     .location = .{ .url = "https://oauth2.googleapis.com/token" },
-        //     .method = .POST,
-        //     .payload = try std.fmt.bufPrint(buffer, "grant_type=refresh_token&client_id={f}&client_secret={f}&refresh_token={f}", .{
-        //         std.fmt.alt(std.Uri.Component{ .raw = service_account.client_id }, .formatQuery),
-        //         std.fmt.alt(std.Uri.Component{ .raw = authorized_user.client_secret }, .formatQuery),
-        //         std.fmt.alt(std.Uri.Component{ .raw = authorized_user.refresh_token }, .formatQuery),
-        //     }),
-        //     .headers = .{
-        //         .accept_encoding = .{ .override = "identity" },
-        //         .content_type = .{ .override = "application/x-www-form-urlencoded" },
-        //     },
-        //     .response_writer = &response_writer,
-        // });
-        // if (result.status != .ok) {
-        //     log.err("Failed to refresh ADC token: {s}", .{response_writer.buffered()});
-        //     return error.RequestFailed;
-        // }
     }
 
     fn refreshToken(self: *GCS) !void {
@@ -642,7 +582,7 @@ pub const GCS = struct {
                 const handle = self.getFileHandle(o.file);
                 const total = self.performRead(handle, o.data, handle.pos) catch |err| {
                     log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = error.EndOfStream };
+                    return .{ .file_read_streaming = error.InputOutput };
                 };
 
                 if (total == 0) {
@@ -864,25 +804,6 @@ pub const GCS = struct {
         return path.len;
     }
 
-    fn getTimestamp(self: *GCS, buf: []u8) ![]const u8 {
-        const now_ts = std.Io.Clock.now(.real, self.base.inner);
-
-        const now: u64 = @intCast(@divFloor(now_ts.nanoseconds, std.time.ns_per_s));
-        const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = now };
-        const year_day = epoch_secs.getEpochDay().calculateYearDay();
-        const month_day = year_day.calculateMonthDay();
-        const day_seconds = epoch_secs.getDaySeconds();
-
-        return try std.fmt.bufPrint(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
-            year_day.year,
-            @backingInt(month_day.month),
-            month_day.day_index + 1,
-            day_seconds.getHoursIntoDay(),
-            day_seconds.getMinutesIntoHour(),
-            day_seconds.getSecondsIntoMinute(),
-        });
-    }
-
     fn pathComponents(_: *GCS, path_: []const u8) struct { []const u8, []const u8 } {
         const path = std.mem.trim(u8, path_, "/");
 
@@ -893,42 +814,15 @@ pub const GCS = struct {
         }
     }
 
-    fn gcsUri(self: *GCS, path: []const u8) std.Uri {
+    /// The object's URI. A VFS path is `bucket/key`; the request target
+    /// needs `/bucket/key`, formatted into `buffer`, which the URI borrows.
+    fn gcsUri(self: *GCS, path: []const u8, buffer: []u8) !std.Uri {
         var uri = self.config.endpoint_uri;
-        uri.path = .{ .raw = path };
+        const absolute = if (std.mem.startsWith(u8, path, "/")) path else std.fmt.bufPrint(buffer, "/{s}", .{path}) catch return error.NameTooLong;
+        uri.path = .{ .raw = absolute };
         uri.query = .{ .percent_encoded = "alt=media" };
         return uri;
     }
-
-    // fn authHeaders(self: *GCS, _: std.http.Method, _: std.Uri, _: []const u8, authorization_buffer: []u8) !struct {
-    //     authorization: ?[]const u8,
-    //     extra_headers: [3]?std.http.Header,
-    //     extra_len: usize,
-    // } {
-    //     if (self.config.oauth_access_token == null) {
-    //         if (self.config.googleCredentialsJsonStr) |json| {
-    //             const oauth = try refreshAuthorizedUserTokenFromJson(self.allocator, self.base.inner, json);
-    //             if (self.config.oauth_access_token) |old_token| self.allocator.free(old_token);
-    //             if (self.config.quota_project_id) |old_project| self.allocator.free(old_project);
-    //             self.config.oauth_access_token = oauth.access_token;
-    //             self.config.quota_project_id = oauth.quota_project_id;
-    //         }
-    //     }
-
-    //     const token = self.config.oauth_access_token orelse return error.MissingCredentials;
-    //     const authorization = try std.fmt.bufPrint(authorization_buffer, "Bearer {s}", .{token});
-    //     var extra_headers: [3]?std.http.Header = .{ null, null, null };
-    //     var extra_len: usize = 0;
-    //     if (self.config.quota_project_id) |project| {
-    //         extra_headers[0] = .{ .name = "x-goog-user-project", .value = project };
-    //         extra_len = 1;
-    //     }
-    //     return .{
-    //         .authorization = authorization,
-    //         .extra_headers = extra_headers,
-    //         .extra_len = extra_len,
-    //     };
-    // }
 
     fn listObjectsBody(self: *GCS, bucket: []const u8, key_prefix: []const u8) ![]u8 {
         var query_buf: [4096]u8 = undefined;
@@ -1033,7 +927,8 @@ pub const GCS = struct {
     fn fetchSize(self: *GCS, dir: std.Io.Dir, sub_path: []const u8) !u64 {
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = try self.resolvePath(dir, sub_path, &path_buffer);
-        const uri = self.gcsUri(path);
+        var uri_path_buffer: [8 * 1024 + 1]u8 = undefined;
+        const uri = try self.gcsUri(path, &uri_path_buffer);
         var req = try self.client.request(.HEAD, uri, .{
             .redirect_behavior = .not_allowed,
             .headers = .{
@@ -1067,7 +962,8 @@ pub const GCS = struct {
         const read_size = parallel_read.readSize(handle.size, offset, data);
         if (read_size == 0) return 0;
 
-        const uri = self.gcsUri(handle.uri);
+        var uri_path_buffer: [8 * 1024 + 1]u8 = undefined;
+        const uri = try self.gcsUri(handle.uri, &uri_path_buffer);
         const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
         const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
         defer self.allocator.free(jobs);
@@ -1099,6 +995,17 @@ pub const GCS = struct {
         return read_size;
     }
 };
+
+test "GCS object URIs are rooted at the endpoint" {
+    var backend: GCS = undefined;
+    backend.config = .{ .endpoint_uri = try std.Uri.parse("https://storage.googleapis.com") };
+
+    var path_buffer: [64]u8 = undefined;
+    const uri = try backend.gcsUri("bucket/dir/object.bin", &path_buffer);
+    var uri_buffer: [128]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(&uri_buffer, "{f}", .{uri});
+    try std.testing.expectEqualStrings("https://storage.googleapis.com/bucket/dir/object.bin?alt=media", formatted);
+}
 
 test "GCS parses XML bucket listing objects and common prefixes" {
     const xml =
