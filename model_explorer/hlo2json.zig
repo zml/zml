@@ -220,89 +220,122 @@ pub const Converter = struct {
         }
         try groups.close();
 
+        // Render partition IDs beside each use so they do not connect unrelated stages.
+        var used_partition_ids: std.AutoHashMapUnmanaged(i64, void) = .{};
+        defer used_partition_ids.deinit(self.allocator);
+        for (computation.instructions.items) |instr| {
+            for (instr.operand_ids.items) |input_id| {
+                const input = self.instructions.get(input_id) orelse continue;
+                if (std.mem.eql(u8, input.opcode, "partition-id")) try used_partition_ids.put(self.allocator, input_id, {});
+            }
+        }
         var nodes = try graph.openList("nodes");
         for (computation.instructions.items) |instr| {
             if (std.mem.eql(u8, instr.opcode, "get-tuple-element")) continue;
-            var node = try nodes.openDict();
-            // node name + attrs
-            try node.writeTemplate("id", "\"{d}\"", .{instr.id});
-            try node.write("namespace", namespaces[partition.instructions.get(instr.id).?]);
-            try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}\nreads: {?B:.1}", .{ self.instrLabel(instr), self.instructionReads(instr) }));
-            {
-                var attrs = try node.openList("attrs");
-                try self.writeAttr(Writer, &attrs, instr, comp_caller);
-                try attrs.writeTemplate("{{\"key\":\"read bytes\",\"value\":\"{?d}\"}}", .{self.instructionReads(instr)});
-                try attrs.close();
+            if (used_partition_ids.contains(instr.id) and instr.id != computation.root_id) continue;
+            const namespace = namespaces[partition.instructions.get(instr.id).?];
+            for (instr.operand_ids.items, 0..) |input_id, i| {
+                const input = self.instructions.get(input_id) orelse continue;
+                if (std.mem.eql(u8, input.opcode, "partition-id")) {
+                    try self.emitInstruction(Writer, &nodes, input.*, try self.partitionUseId(instr.id, i), namespace, computation, comp_caller);
+                }
+            }
+            try self.emitInstruction(Writer, &nodes, instr, try std.fmt.allocPrint(self.allocator, "{d}", .{instr.id}), namespace, computation, comp_caller);
+        }
+        try nodes.close();
+    }
+
+    fn partitionUseId(self: *const Converter, consumer_id: i64, operand_index: usize) ![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "partition-id_{d}_{d}", .{ consumer_id, operand_index });
+    }
+
+    fn emitInstruction(self: *const Converter, Writer: type, nodes: *json_writer.List(Writer), instr: hlo.HloInstructionProto, node_id: []const u8, namespace: []const u8, computation: hlo.HloComputationProto, comp_caller: ?*const hlo.HloInstructionProto) !void {
+        var node = try nodes.openDict();
+        // node name + attrs
+        try node.write("id", node_id);
+        try node.write("namespace", namespace);
+        try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}\nreads: {?B:.1}", .{ self.instrLabel(instr), self.instructionReads(instr) }));
+        {
+            var attrs = try node.openList("attrs");
+            try self.writeAttr(Writer, &attrs, instr, comp_caller);
+            try attrs.writeTemplate("{{\"key\":\"read bytes\",\"value\":\"{?d}\"}}", .{self.instructionReads(instr)});
+            try attrs.close();
+        }
+
+        {
+            var outputs = try node.openList("outputsMetadata");
+            const out_shape = instr.shape.?;
+            var out_shapes: []const @TypeOf(out_shape) = &.{out_shape};
+            if (out_shapes[0].element_type == .TUPLE) {
+                out_shapes = out_shapes[0].tuple_shapes.items;
             }
 
-            {
-                var outputs = try node.openList("outputsMetadata");
-                const out_shape = instr.shape.?;
-                var out_shapes: []const @TypeOf(out_shape) = &.{out_shape};
-                if (out_shapes[0].element_type == .TUPLE) {
-                    out_shapes = out_shapes[0].tuple_shapes.items;
-                }
-
-                for (0.., out_shapes) |o, o_shape| {
-                    var output = try outputs.openDict();
-                    try output.write("id", try std.fmt.allocPrint(self.allocator, "{d}", .{o}));
-                    var attrs = try output.openList("attrs");
-                    try attrs.write(.{ .key = "tensor_shape", .value = try std.fmt.allocPrint(self.allocator, "{f}", .{InstrShape{ .shape = &o_shape }}) });
-                    if (logicalBytes(o_shape)) |bytes| try attrs.write(.{ .key = "local logical bytes", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
-                    if (computation.id == self.entry_id) {
-                        if (self.referenceInstruction(instr)) |ref| {
-                            if (ref.shape) |global| {
-                                if (global.element_type != .TUPLE and o_shape.element_type == global.element_type and global.dimensions.items.len == o_shape.dimensions.items.len) {
-                                    try attrs.write(.{ .key = "pre-SPMD shape", .value = try std.fmt.allocPrint(self.allocator, "{f}", .{InstrShape{ .shape = &global }}) });
-                                    try attrs.write(.{ .key = "shape source", .value = try std.fmt.allocPrint(self.allocator, "before_optimizations: {s} ({s})", .{ ref.name, if (std.mem.eql(u8, instr.opcode, "parameter")) "parameter number" else "operation provenance; may describe an earlier value" }) });
-                                    if (ref.sharding) |sharding| try attrs.write(.{ .key = "pre-SPMD sharding", .value = try shardingText(self.allocator, sharding) });
-                                }
+            for (0.., out_shapes) |o, o_shape| {
+                var output = try outputs.openDict();
+                try output.write("id", try std.fmt.allocPrint(self.allocator, "{d}", .{o}));
+                var attrs = try output.openList("attrs");
+                try attrs.write(.{ .key = "tensor_shape", .value = try std.fmt.allocPrint(self.allocator, "{f}", .{InstrShape{ .shape = &o_shape }}) });
+                if (logicalBytes(o_shape)) |bytes| try attrs.write(.{ .key = "local logical bytes", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
+                if (computation.id == self.entry_id) {
+                    if (self.referenceInstruction(instr)) |ref| {
+                        if (ref.shape) |global| {
+                            if (global.element_type != .TUPLE and o_shape.element_type == global.element_type and global.dimensions.items.len == o_shape.dimensions.items.len) {
+                                try attrs.write(.{ .key = "pre-SPMD shape", .value = try std.fmt.allocPrint(self.allocator, "{f}", .{InstrShape{ .shape = &global }}) });
+                                try attrs.write(.{ .key = "shape source", .value = try std.fmt.allocPrint(self.allocator, "before_optimizations: {s} ({s})", .{ ref.name, if (std.mem.eql(u8, instr.opcode, "parameter")) "parameter number" else "operation provenance; may describe an earlier value" }) });
+                                if (ref.sharding) |sharding| try attrs.write(.{ .key = "pre-SPMD sharding", .value = try shardingText(self.allocator, sharding) });
                             }
                         }
                     }
-                    try attrs.write(.{ .key = "recorded sharding", .value = if (instr.sharding) |sharding| try shardingText(self.allocator, sharding) else "unknown (not recorded after partitioning)" });
-                    try attrs.close();
-                    try output.close();
                 }
-                try outputs.close();
+                try attrs.write(.{ .key = "recorded sharding", .value = if (instr.sharding) |sharding| try shardingText(self.allocator, sharding) else "unknown (not recorded after partitioning)" });
+                try attrs.close();
+                try output.close();
             }
-
-            // node edges
-            {
-                var edges = try node.openList("incomingEdges");
-                for (instr.operand_ids.items, 0..) |input_id, i| {
-                    const input_instr = self.instructions.get(input_id) orelse continue;
-
-                    // The source node, and output_id to handle when input node produces several values.
-                    var source_id: i64 = input_id;
-                    var source_output_id: i64 = 0;
-                    if (std.mem.eql(u8, input_instr.opcode, "get-tuple-element")) {
-                        source_id = input_instr.operand_ids.items[0];
-                        source_output_id = input_instr.tuple_index;
-                    }
-                    // edge_metadata could be added here if needed.
-                    try edges.writeTemplate(
-                        \\{{"sourceNodeId":"{d}","sourceNodeOutputId":"{d}", "targetNodeInputId":"{d}"}}
-                    , .{ source_id, source_output_id, i });
-                }
-                try edges.close();
-            }
-
-            if (instr.called_computation_ids.items.len > 0) {
-                var subpgraphs = try node.openList("subgraphIds");
-                for (instr.called_computation_ids.items) |called| {
-                    if (self.computation_caller.get(called)) |meta| {
-                        try subpgraphs.write(meta.name);
-                    } else {
-                        const called_comp = self.computations.get(called).?;
-                        try subpgraphs.write(called_comp.name);
-                    }
-                }
-                try subpgraphs.close();
-            }
-            try node.close();
+            try outputs.close();
         }
-        try nodes.close();
+
+        // node edges
+        {
+            var edges = try node.openList("incomingEdges");
+            for (instr.operand_ids.items, 0..) |input_id, i| {
+                const input_instr = self.instructions.get(input_id) orelse continue;
+
+                // The source node, and output_id to handle when input node produces several values.
+                var source_id: i64 = input_id;
+                var source_output_id: i64 = 0;
+                if (std.mem.eql(u8, input_instr.opcode, "get-tuple-element")) {
+                    source_id = input_instr.operand_ids.items[0];
+                    source_output_id = input_instr.tuple_index;
+                }
+                if (std.mem.eql(u8, input_instr.opcode, "partition-id")) {
+                    try edges.write(.{
+                        .sourceNodeId = try self.partitionUseId(instr.id, i),
+                        .sourceNodeOutputId = "0",
+                        .targetNodeInputId = try std.fmt.allocPrint(self.allocator, "{d}", .{i}),
+                    });
+                    continue;
+                }
+                // edge_metadata could be added here if needed.
+                try edges.writeTemplate(
+                    \\{{"sourceNodeId":"{d}","sourceNodeOutputId":"{d}", "targetNodeInputId":"{d}"}}
+                , .{ source_id, source_output_id, i });
+            }
+            try edges.close();
+        }
+
+        if (instr.called_computation_ids.items.len > 0) {
+            var subpgraphs = try node.openList("subgraphIds");
+            for (instr.called_computation_ids.items) |called| {
+                if (self.computation_caller.get(called)) |meta| {
+                    try subpgraphs.write(meta.name);
+                } else {
+                    const called_comp = self.computations.get(called).?;
+                    try subpgraphs.write(called_comp.name);
+                }
+            }
+            try subpgraphs.close();
+        }
+        try node.close();
     }
 
     fn partitionMetrics(self: *const Converter, computation: hlo.HloComputationProto, partition: *const graph_partitioner.ComputationPartition) ![]PartitionMetrics {
@@ -1316,4 +1349,51 @@ fn loadGpuInfo(allocator: std.mem.Allocator, io: std.Io, input: []const u8) !?Gp
     const content = try reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
     defer allocator.free(content);
     return gpu_info.parse(content);
+}
+
+test "partition IDs are rendered per operand use in the consumer namespace" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const shape: hlo.ShapeProto = .{ .element_type = .U32 };
+    var instructions = [_]hlo.HloInstructionProto{
+        .{ .id = 1, .name = "partition-id", .opcode = "partition-id", .shape = shape },
+        .{ .id = 2, .opcode = "add", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{ 1, 1 })) },
+        .{ .id = 3, .opcode = "all-gather", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{2})) },
+        .{ .id = 4, .opcode = "add", .shape = shape, .operand_ids = .fromOwnedSlice(@constCast(&[_]i64{ 3, 1 })) },
+        .{ .id = 5, .opcode = "partition-id", .shape = shape },
+    };
+    var computations = [_]hlo.HloComputationProto{.{ .id = 10, .name = "entry", .root_id = 4, .instructions = .fromOwnedSlice(&instructions) }};
+    var converter: Converter = .{ .allocator = allocator };
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    try converter.emitModule(&output.writer, .{ .hlo_module = .{ .computations = .fromOwnedSlice(&computations) } }, null);
+    const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    const nodes = json.value.object.get("graphs").?.array.items[0].object.get("nodes").?.array.items;
+    var by_id: std.StringHashMapUnmanaged(std.json.Value) = .{};
+    for (nodes) |node| {
+        const result = try by_id.getOrPut(allocator, node.object.get("id").?.string);
+        try std.testing.expect(!result.found_existing);
+        result.value_ptr.* = node;
+    }
+    try std.testing.expectEqual(@as(usize, 7), nodes.len);
+    try std.testing.expect(!by_id.contains("1"));
+    try std.testing.expect(by_id.contains("5"));
+    var uses: usize = 0;
+    for (nodes) |node| {
+        for (node.object.get("incomingEdges").?.array.items) |edge| {
+            const source_id = edge.object.get("sourceNodeId").?.string;
+            const source = by_id.get(source_id).?;
+            if (!std.mem.startsWith(u8, source_id, "partition-id_")) continue;
+            uses += 1;
+            try std.testing.expectEqualStrings(node.object.get("namespace").?.string, source.object.get("namespace").?.string);
+            try std.testing.expectEqual(@as(usize, 0), source.object.get("incomingEdges").?.array.items.len);
+            try std.testing.expectEqualStrings("tensor<U32>", source.object.get("outputsMetadata").?.array.items[0].object.get("attrs").?.array.items[0].object.get("value").?.string);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), uses);
+    const add_edges = by_id.get("2").?.object.get("incomingEdges").?.array.items;
+    try std.testing.expectEqualStrings("partition-id_2_0", add_edges[0].object.get("sourceNodeId").?.string);
+    try std.testing.expectEqualStrings("partition-id_2_1", add_edges[1].object.get("sourceNodeId").?.string);
+    try std.testing.expectEqualStrings("1", add_edges[1].object.get("targetNodeInputId").?.string);
+    try std.testing.expectEqualStrings("3", by_id.get("4").?.object.get("incomingEdges").?.array.items[0].object.get("sourceNodeId").?.string);
 }
