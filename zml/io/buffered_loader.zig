@@ -4,12 +4,13 @@
 //! part read at its offset (a strided part reads its source range once and
 //! copies each run where it lands), then the whole tensor is placed as any
 //! other. Each batch runs up to the read width of workers over its specs;
-//! one byte budget bounds the host staging, live and kept for reuse. There
-//! is no calibration and no pinned memory. The shared front end owns source
-//! lookup, programs and admission.
+//! read permits bound the source reads and one byte budget the host
+//! staging, live and kept for reuse. There is no calibration and no pinned
+//! memory. The shared front end owns source lookup, programs and admission.
 const std = @import("std");
 
 const stdx = @import("stdx");
+const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
 const Platform = @import("../platform.zig").Platform;
@@ -25,7 +26,8 @@ const log = @import("log.zig").load;
 /// largest staging request submitted (`stagingBytes`), for the buffers in
 /// use and those kept for reuse alike. Twelve rather than the read width:
 /// at a high-latency width of 32 the read width would nearly triple the
-/// host staging for nothing this path can use.
+/// host staging for nothing this path can use (on such a source a tensor
+/// splits its read across the free permits).
 const staging_tensors: usize = 12;
 
 pub const Loader = struct {
@@ -33,8 +35,19 @@ pub const Loader = struct {
     io: std.Io,
     platform: *const Platform,
     /// Workers per batch, so the threads grow with the batches in flight:
-    /// the staging budget bounds their bytes, not their number.
+    /// the read permits bound their reads and the staging budget their
+    /// bytes, not their number.
     width: usize,
+    /// The smallest claim of a tensor's read split across helpers
+    /// (`ChunkedRead.claim`). A tensor is one positional read unless spare
+    /// permits split it on a high-latency source.
+    read_chunk_size: usize,
+    /// The widest fan-out one tensor may take. One on a source whose reads
+    /// are bandwidth-bound rather than round-trip bound: splitting there only
+    /// spends tasks, and measurably so -- a replicated local load, whose long
+    /// transfers keep permits free, loses time to helpers it has no use for.
+    tensor_workers: usize,
+    permits: ReadPermits,
     staging: Staging,
     first_error: stdx.FirstError(anyerror) = .{},
 
@@ -51,6 +64,11 @@ pub const Loader = struct {
             .platform = platform,
             .width = opts.read_parallelism,
             .staging = .{ .slots = @min(opts.read_parallelism, staging_tensors) },
+            .read_chunk_size = opts.read_hints.read_chunk_size,
+            // A high-latency source may use spare read permits to split a
+            // tensor already staging: more concurrency without more host memory.
+            .tensor_workers = if (opts.read_hints.high_latency) opts.read_parallelism else 1,
+            .permits = .{ .free = opts.read_parallelism },
         };
         return self;
     }
@@ -159,14 +177,14 @@ pub const Loader = struct {
             const lattice = part.lattice;
             if (lattice.dims.len == 0) {
                 const start: usize = @intCast(lattice.dst_offset);
-                part.source.readRange(self.io, file, tensor[start..][0..@intCast(lattice.width)], lattice.src_offset) catch |err|
+                self.readInto(part.source, file, lattice.src_offset, tensor[start..][0..@intCast(lattice.width)]) catch |err|
                     return self.fail(err, "read", spec, part);
                 continue;
             }
             // A strided part: its source range once, into the staging past
             // the tensor, then each run where it lands.
             const source = staging[tensor_bytes..][0..@intCast(lattice.spans().?.src)];
-            part.source.readRange(self.io, file, source, lattice.src_offset) catch |err|
+            self.readInto(part.source, file, lattice.src_offset, source) catch |err|
                 return self.fail(err, "read", spec, part);
             lattice.copyRuns(0, lattice.runs(), @intFromPtr(tensor.ptr), @intFromPtr(source.ptr) -% @as(usize, @intCast(lattice.src_offset)));
         }
@@ -181,6 +199,73 @@ pub const Loader = struct {
     /// Fails the loader with `err`, which `step` of `spec` met at `part`.
     fn fail(self: *Loader, err: anyerror, step: []const u8, spec: LoadSpec, part: *const LoadPart) void {
         self.recordError(err, "{s} tensor {s}: file={s}, offset={d}, source_bytes={d}, parts={d}, destination_bytes={d}", .{ step, part.source.name, part.source.file_uri, part.source.offset, part.source.byteSize(), spec.parts.len, spec.shape.byteSize() });
+    }
+
+    /// Fills `destination` from `source`'s bytes at `source_offset`, read
+    /// from `file`, splitting it across helper tasks when the source permits
+    /// are free. The permits are released before the caller's transfer, so a
+    /// tensor staging to the device lends its read budget to one still
+    /// reading.
+    fn readInto(
+        self: *Loader,
+        source: *const safetensors.Tensor,
+        file: std.Io.File,
+        source_offset: u64,
+        destination: []u8,
+    ) safetensors.Tensor.RangeError!void {
+        var chunked: ChunkedRead = .{
+            .io = self.io,
+            .source = source,
+            .file = file,
+            .source_offset = source_offset,
+            .destination = destination,
+            .chunk_size = self.read_chunk_size,
+        };
+        // Splitting below the read chunk buys nothing, so that is the
+        // most workers this tensor can use.
+        var useful_workers = @min(
+            self.tensor_workers,
+            destination.len / self.read_chunk_size +
+                @intFromBool(destination.len % self.read_chunk_size != 0),
+        );
+
+        self.permits.acquire(self.io);
+        var held: usize = 1;
+        var group: std.Io.Group = .init;
+        while (true) {
+            // Helpers only ever take permits that are already free, so a busy
+            // source sees one read per tensor. The check repeats between
+            // claims because the tensors that finish first hand their budget
+            // to the one still reading -- which is the long tensor that
+            // needed the help.
+            // Nothing unclaimed means a helper would only start and stop.
+            if (held < useful_workers and chunked.next.load(.monotonic) < destination.len) {
+                const extra = self.permits.tryAcquire(self.io, useful_workers - held);
+                if (extra != 0) {
+                    // Claims size themselves by the width, so it is raised
+                    // before a helper can claim. `concurrent`, since a busy
+                    // io runs `async` inline, on this task.
+                    chunked.workers.store(held + extra, .monotonic);
+                    var started: usize = 0;
+                    while (started < extra) : (started += 1) {
+                        group.concurrent(self.io, ChunkedRead.run, .{&chunked}) catch break;
+                    }
+                    held += started;
+                    if (started < extra) {
+                        // The io starts no more: the rest of the permits go
+                        // back, and this tensor stops asking.
+                        self.permits.release(self.io, extra - started);
+                        chunked.workers.store(held, .monotonic);
+                        useful_workers = held;
+                    }
+                }
+            }
+            if (!chunked.readOne()) break;
+        }
+        group.await(self.io) catch {};
+        self.permits.release(self.io, held);
+
+        if (chunked.failure.get()) |err| return err;
     }
 };
 
@@ -200,6 +285,100 @@ pub const Batch = struct {
     progress: std.Progress.Node,
     next: std.atomic.Value(usize) = .init(0),
     workers: std.Io.Group = .init,
+};
+
+/// Source reads in flight across every task of the buffered backend, at most
+/// `read_parallelism`. On a high-latency source, a tensor wider than the
+/// hints' `read_chunk_size` may split its read across the permits that are
+/// free, for parallel streams.
+const ReadPermits = struct {
+    mutex: std.Io.Mutex = .init,
+    available: std.Io.Condition = .init,
+    free: usize,
+
+    fn acquire(self: *ReadPermits, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (self.free == 0) self.available.waitUncancelable(io, &self.mutex);
+        self.free -= 1;
+    }
+
+    /// Up to `count` permits, without waiting: how many were free is how much
+    /// concurrency this tensor gets, so a loaded source is left alone.
+    fn tryAcquire(self: *ReadPermits, io: std.Io, count: usize) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const taken = @min(count, self.free);
+        self.free -= taken;
+        return taken;
+    }
+
+    fn release(self: *ReadPermits, io: std.Io, count: usize) void {
+        if (count == 0) return;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.free += count;
+        for (0..count) |_| self.available.signal(io);
+    }
+};
+
+/// One tensor's read, claimed from a shared byte cursor by the owning task
+/// and its helpers. Positional reads leave the file as it was, so they can
+/// run concurrently on one file.
+///
+/// A claim is the tensor split `workers` ways, and never smaller than the
+/// hints' `read_chunk_size` -- that field is a minimum request size, and
+/// on a high-latency source a request costs a round trip whether or not it
+/// runs beside another. So one worker takes the whole tensor in a single
+/// read, and only the concurrency the source can actually carry turns into
+/// extra requests.
+const ChunkedRead = struct {
+    io: std.Io,
+    source: *const safetensors.Tensor,
+    file: std.Io.File,
+    /// Where `destination` starts in the tensor's bytes.
+    source_offset: u64 = 0,
+    destination: []u8,
+    chunk_size: usize,
+    /// Reads this tensor may have in flight: the owner raises it before it
+    /// starts helpers on newly taken permits, and lowers it to the helpers
+    /// that started.
+    workers: std.atomic.Value(usize) = .init(1),
+    /// Bytes already claimed.
+    next: std.atomic.Value(usize) = .init(0),
+    failure: stdx.FirstError(safetensors.Tensor.RangeError) = .{},
+
+    fn run(self: *ChunkedRead) void {
+        while (self.readOne()) {}
+    }
+
+    /// Reads the next unclaimed span. False once the tensor is fully claimed,
+    /// or once a read failed.
+    fn readOne(self: *ChunkedRead) bool {
+        if (self.failure.get() != null) return false;
+        const span = self.claim() orelse return false;
+        self.source.readRange(self.io, self.file, span.bytes, self.source_offset + span.offset) catch |err| {
+            _ = self.failure.set(err);
+            return false;
+        };
+        return true;
+    }
+
+    fn claim(self: *ChunkedRead) ?struct { offset: usize, bytes: []u8 } {
+        var start = self.next.load(.monotonic);
+        while (start < self.destination.len) {
+            const workers = self.workers.load(.monotonic);
+            const share = self.destination.len / workers +
+                @intFromBool(self.destination.len % workers != 0);
+            const len = @min(@max(self.chunk_size, share), self.destination.len - start);
+            if (self.next.cmpxchgWeak(start, start + len, .monotonic, .monotonic)) |actual| {
+                start = actual;
+                continue;
+            }
+            return .{ .offset = start, .bytes = self.destination[start..][0..len] };
+        }
+        return null;
+    }
 };
 
 /// Host staging for the buffered backend: one budget for the buffers the
@@ -307,6 +486,39 @@ const Staging = struct {
         return index;
     }
 };
+
+test "chunked read splits a tensor only as wide as it has workers" {
+    var destination: [1000]u8 = undefined;
+    var work: ChunkedRead = .{
+        .io = undefined,
+        .source = undefined,
+        .file = undefined,
+        .destination = &destination,
+        .chunk_size = 100,
+    };
+
+    // One worker reads the whole tensor, exactly as an unsplit read would.
+    const whole = work.claim().?;
+    try std.testing.expectEqual(@as(usize, 0), whole.offset);
+    try std.testing.expectEqual(@as(usize, 1000), whole.bytes.len);
+    try std.testing.expect(work.claim() == null);
+
+    // Four workers take a quarter each.
+    work.next = .init(0);
+    work.workers = .init(4);
+    for (0..4) |i| {
+        const span = work.claim().?;
+        try std.testing.expectEqual(i * 250, span.offset);
+        try std.testing.expectEqual(@as(usize, 250), span.bytes.len);
+    }
+    try std.testing.expect(work.claim() == null);
+
+    // Never below the read chunk, however many workers there are.
+    work.next = .init(0);
+    work.workers = .init(50);
+    const floored = work.claim().?;
+    try std.testing.expectEqual(@as(usize, 100), floored.bytes.len);
+}
 
 test "staging holds live and retained bytes within one budget" {
     const allocator = std.testing.allocator;
@@ -562,11 +774,16 @@ test "buffered loader runs overlapping batches over their cursors, with or witho
     var no_concurrency: std.Io.Threaded = .init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
     defer no_concurrency.deinit();
     for ([_]std.Io{ std.testing.io, no_concurrency.io() }) |io| {
-        const loader = try Loader.create(allocator, io, devices.platform, .{ .read_parallelism = 4 });
+        // A high-latency source with 32-byte chunks: helpers split each
+        // tensor whenever a permit is free.
+        const loader = try Loader.create(allocator, io, devices.platform, .{
+            .read_parallelism = 4,
+            .read_hints = .{ .read_chunk_size = 32, .high_latency = true },
+        });
         defer loader.destroy();
         // Both batches are in flight before either is awaited, each with
-        // its own workers: the staging budget bounds their bytes
-        // (`Staging.acquire` asserts it).
+        // its own workers: the permits bound their reads and the staging
+        // budget their bytes (`Staging.acquire` asserts it).
         const first = try loader.submit(specs[0 .. count / 2], .none);
         const second = try loader.submit(specs[count / 2 ..], .none);
         try loader.awaitBatch(first);
@@ -575,5 +792,47 @@ test "buffered loader runs overlapping batches over their cursors, with or witho
         for (&outputs, entries) |*output, entry| try testing.expectShards(allocator, io, output, entry.bytes, .default);
         try std.testing.expect(loader.staging.retained_bytes <= loader.staging.budget);
         try std.testing.expectEqual(@as(usize, 0), loader.staging.live_bytes);
+        try std.testing.expectEqual(@as(usize, 4), loader.permits.free);
     }
+}
+
+test "a tensor from a high-latency HTTP source splits its read over the free permits" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, io, 1);
+    defer devices.deinit();
+
+    var object: [4096]u8 = undefined;
+    testing.pattern(&object, 1);
+    var server = try VFS.MockServer.init(io, &object, .{});
+    defer server.deinit(io);
+    try server.start(io);
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var http: VFS.HTTP = try .init(allocator, io, &client, .{ .protocol = .http });
+    defer http.deinit();
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    try vfs.registerBackend("http", http.backend());
+
+    var url_buffer: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
+    const source: safetensors.Tensor = .{ .file_uri = url, .name = "x", .shape = .init(.{object.len}, .u8), .offset = 0 };
+    const parts = [_]LoadPart{.whole(&source)};
+
+    // Four free permits and a quarter of the tensor as the read chunk: the
+    // worker and three helpers each read a quarter, one range GET each.
+    const loader = try Loader.create(allocator, vfs.io(), devices.platform, .{
+        .read_parallelism = 4,
+        .read_hints = .{ .read_chunk_size = object.len / 4, .high_latency = true },
+    });
+    defer loader.destroy();
+    var output: Buffer = undefined;
+    try loader.awaitBatch(try loader.submit(&.{.{ .shape = source.shape, .output = &output, .parts = &parts }}, .none));
+    defer output.deinit();
+    try server.stop(io);
+    try testing.expectShards(allocator, io, &output, &object, .default);
+    try std.testing.expectEqual(@as(usize, 4), server.get_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 4), loader.permits.free);
 }
