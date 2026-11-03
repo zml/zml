@@ -24,14 +24,14 @@ pub const MAX_MESH_RANK = 4;
 
 /// Full replication across participating devices.
 /// For buffers, each device holds a complete copy. Applied as a graph constraint,
-/// this closes every dimension to partitioning. `Shape.init` uses this sharding;
-/// unconstrained graph results use `open` instead.
+/// this closes every dimension to partitioning. `Shape.init` uses this sharding.
+/// Unconstrained graph results use `open` instead.
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
 
 /// Unspecified sharding for graph results. During compilation, the partitioner
 /// may infer sharding from surrounding constraints or leave the value replicated.
 /// Executable inputs require closed sharding. An executable output with this
-/// unspecified sharding defaults to replication; an explicitly declared output
+/// unspecified sharding defaults to replication. An explicitly declared output
 /// sharding containing open dimensions is rejected.
 pub const open: Sharding = .{ .mesh = null, .partition = .open(Shape.MAX_RANK) };
 
@@ -118,7 +118,7 @@ test isCompatible {
 /// - `replicated`: keep this dimension whole on each shard.
 /// - `?`: leave this dimension to partitioner inference during compilation.
 /// - `@dp`: the mesh name.
-/// Trailing `.out_of_bound` entries are omitted; any remaining ones print as `!`.
+/// Trailing `.out_of_bound` entries are omitted. Any remaining ones print as `!`.
 pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
     const mesh = self.mesh orelse return writer.writeAll(if (self.isFullyReplicated()) "{replicated}" else "{open}");
     const specs = self.partition.toArray();
@@ -139,7 +139,7 @@ pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
 }
 
 /// Describes how one tensor dimension is distributed across a logical mesh.
-/// A mesh axis splits the dimension; `.replicated` keeps it whole on each shard.
+/// A mesh axis splits the dimension. `.replicated` keeps it whole on each shard.
 /// In a graph constraint, `.open` lets the partitioner choose either behavior.
 /// Executable buffers require closed sharding specs: a mesh axis or `.replicated`.
 pub const PartitionSpec = enum(u4) {
@@ -1700,8 +1700,8 @@ pub const Mesh = struct {
     }
 
     /// Converts `shape`'s declared partitioning into a `#sdy.sharding` attribute
-    /// referencing this mesh. Entries in `[...]` follow tensor dimension order;
-    /// mesh axis indices in the specs resolve to this mesh's logical axis names.
+    /// referencing this mesh. Entries in `[...]` follow tensor dimension order.
+    /// Mesh axis indices in the specs resolve to this mesh's logical axis names.
     /// The tensor rank and logical mesh rank are independent.
     ///
     /// Each dimension spec is encoded as follows:
@@ -1726,7 +1726,7 @@ pub const Mesh = struct {
     /// Partitioning: .{ .batch = .data, .hidden = .open }
     /// #sdy.sharding<@dp_mp, [{"data"}, {?}]>
     /// ```
-    /// `batch` is split over `data`; the partitioner may assign `model` to `hidden`.
+    /// `batch` is split over `data`. The partitioner may assign `model` to `hidden`.
     /// The unused `model` axis stays available because an open dimension exists.
     ///
     /// ```

@@ -966,26 +966,6 @@ pub const Shape = struct {
         try testing.expect(!shape.isFullyPartitioned());
     }
 
-    /// Returns whether this shape's sharding is associated with a logical mesh.
-    /// The dimensions may be sharded, replicated, or open.
-    pub fn hasMesh(self: Shape) bool {
-        return self._sharding.mesh != null;
-    }
-
-    test hasMesh {
-        const replicated: Shape = .init(.{ .a = 10, .b = 20 }, .f32);
-        try testing.expect(!replicated.hasMesh());
-
-        var unspecified = replicated;
-        unspecified._sharding = .open;
-        try testing.expect(!unspecified.hasMesh());
-
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .feature }).hasMesh());
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .replicated, .b = .replicated }).hasMesh());
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .open }).hasMesh());
-        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .open, .b = .open }).hasMesh());
-    }
-
     pub fn isFullyReplicated(self: Shape) bool {
         return self._sharding.isFullyReplicated();
     }

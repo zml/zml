@@ -100,7 +100,7 @@ pub const Error = std.mem.Allocator.Error ||
     mlir.Error ||
     upb.SerializeError ||
     pjrtx.Client.CompileError ||
-    error{ MissingDeviceInTile, OpenBoundarySharding };
+    error{ MissingDeviceInTile, OpenShardingAtBoundaries };
 
 pub const Donation = union(enum) {
     implicit: u32,
@@ -595,6 +595,7 @@ fn emitMlir(compiler: *Compiler, comptime func_: anytype, args: std.meta.ArgsTup
         defer compiler.deactivate();
 
         var result = @call(.auto, func_, args);
+        // Output collection can emit replication constraints, so it is part of tracing.
         break :blk try collectOutputInfo(compiler, fn_scope, &result);
     };
     errdefer output_info.deinit(compiler.allocator);
@@ -603,7 +604,7 @@ fn emitMlir(compiler: *Compiler, comptime func_: anytype, args: std.meta.ArgsTup
     return try finalizeMlirFunc(compiler, fn_scope, input_info, output_info);
 }
 
-fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutOfMemory, OpenBoundarySharding }!std.MultiArrayList(TensorInfo) {
+fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutOfMemory, OpenShardingAtBoundaries }!std.MultiArrayList(TensorInfo) {
     const CreateBlockArgumentsCb = struct {
         compiler: *Compiler,
         scope: *Scope,
@@ -611,12 +612,12 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{ O
         current_argument_id: u32 = 0,
         infos: std.MultiArrayList(TensorInfo) = .empty,
 
-        fn cb(ctx: *@This(), tensor: *const Tensor) error{ OutOfMemory, OpenBoundarySharding }!void {
+        fn cb(ctx: *@This(), tensor: *const Tensor) error{ OutOfMemory, OpenShardingAtBoundaries }!void {
             // Declare the program argument as a packed u8
             const og_shape = tensor._shape;
             if (og_shape.containsPartitionSpec(.open)) {
                 log.err("Executable input {d} has open sharding: {f}. Specify a logical mesh axis or .replicated for every dimension.", .{ ctx.current_argument_id, og_shape });
-                return error.OpenBoundarySharding;
+                return error.OpenShardingAtBoundaries;
             }
             const packed_shape = og_shape.packedShape();
             const mlir_type = mlirx.Type.rankedTensor(ctx.compiler.mlir_ctx, packed_shape);
@@ -651,7 +652,7 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{ O
     return context.infos;
 }
 
-fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutOfMemory, OpenBoundarySharding }!std.MultiArrayList(TensorInfo) {
+fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutOfMemory, OpenShardingAtBoundaries }!std.MultiArrayList(TensorInfo) {
     const CollectOutputInfoCb = struct {
         compiler: *Compiler,
         scope: *Scope,
@@ -661,11 +662,11 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutO
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
             // Outputs with no declared sharding default to replication. Constrain the
             // returned value so the partitioner produces a replicated output buffer.
-            const output = if (tensor.shape().hasMesh() or tensor.shape().isFullyReplicated()) tensor.* else tensor.replicate();
+            const output = if (tensor.shape()._sharding.mesh != null or tensor.shape().isFullyReplicated()) tensor.* else tensor.replicate();
             const og_shape = output.shape();
             if (og_shape.containsPartitionSpec(.open)) {
                 log.err("Executable output {d} has open sharding: {f}. Specify a logical mesh axis or .replicated for every dimension.", .{ ctx.infos.len, og_shape });
-                return error.OpenBoundarySharding;
+                return error.OpenShardingAtBoundaries;
             }
             var value = ctx.scope.id_to_argument.get(output.id) orelse
                 output._value orelse

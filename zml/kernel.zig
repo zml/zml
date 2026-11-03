@@ -1518,8 +1518,8 @@ test "tcl multi-chip kernels run on two furiosa chips" {
     const allocator = std.testing.allocator;
     const platform = zml.testing.env();
     if (platform.target != .furiosa or platform.devices.len != 2) return error.SkipZigTest;
-    const model = platform.meshes.get("model").?;
-    const x_shape = Shape.init(.{ .c = 2, .a = 1024 }, .f32).withPartitioning(model, .{ .c = .model });
+    const tp = zml.testing.tpMesh();
+    const x_shape = Shape.init(.{ .c = 2, .a = 1024 }, .f32).withPartitioning(tp, .{ .c = .model });
     const Mod = struct {
         pub fn forward(x: Tensor) [2]Tensor {
             const r = zml.ops.manualComputation(TclSplitExp.body, .{ .x = x }, .{ x.shape(), Shape.init(.{ .c = 2, .a = 1024 }, .f32) });
@@ -1527,7 +1527,7 @@ test "tcl multi-chip kernels run on two furiosa chips" {
         }
     };
     const x: Tensor = .fromShape(x_shape);
-    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{x}, platform, .{ .meshes = &.{model} });
+    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{x}, platform, .{ .meshes = &.{tp} });
     defer exe.deinit();
     var hx: [2 * 1024]f32 = undefined;
     for (&hx, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 13)) * 0.125 - 0.5;

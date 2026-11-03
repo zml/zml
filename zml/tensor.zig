@@ -270,7 +270,7 @@ pub const Tensor = struct {
         try std.testing.expectEqual(Sharding.PartitionSpec.replicated, x2_replicated.shape().partition(.h));
     }
 
-    /// Copy the given tensor to the specified memory.
+    /// Copy the given tensor to the specified memory, preserving its sharding.
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
@@ -301,7 +301,8 @@ pub const Tensor = struct {
             ctx.location,
         ).appendTo(currentBlock());
 
-        const res = _result(self._shape, op.result(0));
+        var res = _result(self._shape, op.result(0));
+        res._shape._sharding = self._shape._sharding;
         ctx.currentScope().id_to_memory.putNoClobber(ctx.currentScope().arena.allocator(), res.id, kind) catch @panic("OOM");
         return res;
     }
