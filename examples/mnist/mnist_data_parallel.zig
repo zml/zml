@@ -177,6 +177,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // This performs a host to host pinned memcpy.
+    // TODO: show how to allocate a Host pinned buffer and write into it.
     var input_buffer: zml.Buffer = try .fromBytesOpts(io, platform, input.shape(), std.mem.sliceAsBytes(batch), .{ .memory = .host_pinned });
     defer input_buffer.deinit();
 
