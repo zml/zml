@@ -38,7 +38,9 @@ pub const Loader = struct {
     platform: *const Platform,
     /// The pinned arenas, grown once at creation and cut into `blocks`.
     workspace: host_memory.Workspace,
-    /// The workspace's blocks (`carve`): the credits' slots (`Credits`).
+    /// The workspace's blocks (`carve`): the zero block first, then the
+    /// credits' slots (`Credits`). The zero block is in no credit's slot
+    /// and is never written after `create`.
     blocks: []const host_memory.Block,
     scheduler: Scheduler,
     /// One permit per source read in flight (`readSlot`), `read_width` of
@@ -48,7 +50,12 @@ pub const Loader = struct {
     /// while the memory bounds stay.
     read_permits: std.Io.Semaphore,
     read_width: usize,
-    /// Lifecycle credits (`Credits`).
+    /// Lifecycle credits (`Credits`), beyond the workers' through the DMA
+    /// reserve. One credit beyond the width fed the DMA engines one request
+    /// at a time: on a GB300 loading DeepSeek-V4 (pieces of 4 MiB and 256
+    /// KiB) that was 24.3 GiB/s at width 16 against 43.8 GiB/s with eight
+    /// requests queued, and the workers spent 9 ms per request waiting for a
+    /// credit against 3 ms reading.
     credits: Credits,
     /// The sticky first error (`recordError`).
     first_error: stdx.FirstError(anyerror) = .{},
@@ -82,14 +89,47 @@ pub const Loader = struct {
 
         var workspace: host_memory.Workspace = try .init(allocator, io, platform);
         errdefer workspace.deinit();
-        // Every read is exact: no alignment.
+        // The options' block for the whole load; every read is exact.
         const block_size = opts.dmaBlockSizes()[0];
         const request_size = backend.requestSize(opts.read_hints.read_chunk_size, block_size, 0).?;
         const blocks_per_request = request_size / block_size;
-        const width = opts.read_parallelism;
+        // The DMA stage of every device, kept mapped beside the source
+        // working set; at least one maximal source request, so a single
+        // request always fits beside it.
+        const dma_reserve = @max(
+            dma_depth * platform.devices.len,
+            Planner.blockCount(backend.max_read_request_size, block_size),
+        );
+        // One more block for the zeros, which no credit owns.
+        const zero_blocks = 1;
+        const available = workspace.capacity(block_size);
+        const width = @min(
+            opts.read_parallelism,
+            (available -| dma_reserve -| zero_blocks) / blocks_per_request -| 1,
+        );
+        if (width == 0) {
+            load_log.err("host memory ceiling {Bi:.2} fits no source request beside the DMA reserve: available_blocks={d}, reserve_blocks={d}, blocks_per_request={d}: OutOfMemory", .{ host_memory.Workspace.mapped_bytes_ceiling, available, dma_reserve, blocks_per_request });
+            return error.OutOfMemory;
+        }
+        if (width < opts.read_parallelism) {
+            load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}", .{
+                width,
+                opts.read_parallelism,
+            });
+        }
+        // Two arenas, the reserve first: ROCm balances bytes across its host
+        // nodes per allocation, and that split is recorded.
+        const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
         // The workspace logs what it fails to map.
-        const blocks = try workspace.carve(block_size, 0, (width + 1) * blocks_per_request);
-        var credits: Credits = try .init(allocator, blocks, blocks_per_request);
+        const blocks = try workspace.carve(block_size, dma_reserve, (width + 1) * blocks_per_request + dma_reserve + zero_blocks);
+        const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
+        load_log.debug("host workspace pregrown: mapped={Bi:.2}, pregrowth_ms={d:.3}", .{
+            workspace.mappedBytes(),
+            @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
+        });
+        std.debug.assert(blocks.len != 0);
+        @memset(blocks[0], 0);
+        var credits: Credits = try .init(allocator, blocks[1..], blocks_per_request);
         errdefer credits.deinit(allocator);
         const workers = width + 1;
         std.debug.assert(credits.count() >= workers);
@@ -122,6 +162,16 @@ pub const Loader = struct {
             load_log.err("start {d} source workers: {s}", .{ workers, @errorName(err) });
             return err;
         };
+        load_log.debug("live loader ready: target={s}, request_size={Bi:.2}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
+            @tagName(platform.target),
+            request_size,
+            block_size,
+            self.dma_budget_bytes,
+            width,
+            self.credits.count(),
+            workers,
+            self.workspace.mappedBytes(),
+        });
         return self;
     }
 
@@ -2131,9 +2181,9 @@ test "the submission that completes a target's bytes carries the last flag" {
 
 /// A single-device loader without PJRT, workers or pinned arenas: enough
 /// for request, credit and batch lifecycle tests, with 64-byte blocks cut
-/// as `create` cuts them, `slots` credits of one block. `platform` and
-/// `workspace` are its only undefined fields: what these tests run reaches
-/// the platform only through a non-null PJRT event
+/// as `create` cuts them, the zero block then `slots` credits of one block.
+/// `platform` and `workspace` are its only undefined fields: what these
+/// tests run reaches the platform only through a non-null PJRT event
 /// (`Dma.EventContext.destroyEvent`). Must not move after `init`.
 const TestLoader = struct {
     memory: []u8,
@@ -2142,11 +2192,12 @@ const TestLoader = struct {
 
     fn init(self: *TestLoader, slots: usize) !void {
         const allocator = std.testing.allocator;
-        const memory = try allocator.alloc(u8, slots * 64);
+        const memory = try allocator.alloc(u8, (slots + 1) * 64);
         errdefer allocator.free(memory);
-        const blocks = try allocator.alloc(host_memory.Block, slots);
+        const blocks = try allocator.alloc(host_memory.Block, slots + 1);
         errdefer allocator.free(blocks);
         for (blocks, 0..) |*block, index| block.* = memory[index * 64 ..][0..64];
+        @memset(blocks[0], 0);
         self.* = .{ .memory = memory, .loader = undefined };
         self.loader = .{
             .allocator = allocator,
@@ -2157,7 +2208,7 @@ const TestLoader = struct {
             .scheduler = .init(allocator),
             .read_permits = .{ .permits = 1 },
             .read_width = 1,
-            .credits = try .init(allocator, blocks, 1),
+            .credits = try .init(allocator, blocks[1..], 1),
             .pumps = &self.pumps,
             .dma_budget_bytes = 64,
             .plan_config = .{ .block_size = 64, .request_size = 64 },
