@@ -144,9 +144,14 @@ pub const Loader = struct {
     stats: Stats = .{},
 
     pub const Options = struct {
-        /// The checkpoint's path or URI, read by `init` only. When `io` is a
-        /// VFS, the VFS backend serving it sizes the reads
-        /// (`VFS.readHints`). Null, or a plain `io`: local sizing.
+        /// The checkpoint's path or URI, read by `init` only, which copies a
+        /// local one the VFS may read direct for the set-up task
+        /// (`backend.Options.checkpoint`). When `io` is a VFS, the VFS
+        /// backend serving it sizes the reads (`VFS.readHints`), and the
+        /// direct backend decides at set-up how such a local one's files
+        /// read, and places its pinned memory for that
+        /// (`direct_loader.Loader.create`). Null, or a plain `io`: local
+        /// sizing, pinned memory near the devices.
         checkpoint: ?[]const u8 = null,
         /// Concurrent source reads, 1 to `max_read_parallelism`, fixed for
         /// the load. Null: 16 for a local checkpoint, 32 for a high-latency
@@ -193,14 +198,18 @@ pub const Loader = struct {
     /// (`Options.dma_block_size`), a checkpoint whose scheme the VFS does
     /// not serve, a block calibration may select whose request (the read
     /// chunk rounded up to whole blocks) passes 32 MiB, or a request too
-    /// short for a widened direct read is `InvalidOptions`, logged.
+    /// short for a widened direct read is `InvalidOptions`, logged. A copy
+    /// of the path of a local checkpoint the VFS may read direct
+    /// (`Options.checkpoint`) that cannot be allocated is `OutOfMemory`,
+    /// unlogged.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
         opts: Options,
-    ) error{InvalidOptions}!Loader {
-        const backend_opts = try backendOptions(io, opts);
+    ) error{ InvalidOptions, OutOfMemory }!Loader {
+        var backend_opts = try backendOptions(io, opts);
+        if (backend_opts.checkpoint) |path| backend_opts.checkpoint = try allocator.dupe(u8, path);
         const setup_args = .{ allocator, io, platform, backend_opts };
         return .{
             .allocator = allocator,
@@ -211,8 +220,11 @@ pub const Loader = struct {
         };
     }
 
-    /// `init`'s task: the device allocators warmed, then the backend.
+    /// `init`'s task: the device allocators warmed, then the backend. It
+    /// owns `opts.checkpoint`, `init`'s copy, and runs to its end even when
+    /// `deinit` cancels it.
     fn setUp(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: backend.Options) anyerror!Backend {
+        defer if (opts.checkpoint) |path| allocator.free(path);
         platform.warmupDeviceAllocators(io) catch |err| {
             load_log.failure(err, "warm the device allocators", .{});
             return err;
@@ -1157,8 +1169,9 @@ fn checkPlacement(platform: *const Platform, target: Target, from: []const u8) e
 }
 
 /// `opts` as the backends take them, the checkpoint resolved to the read
-/// hints of the VFS backend serving it and the read width to its default.
-/// Every option is checked here, once.
+/// hints of the VFS backend serving it and the read width to its default,
+/// and borrowed when it is local and may read direct
+/// (`backend.Options.checkpoint`). Every option is checked here, once.
 fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backend.Options {
     const hints: VFS.ReadHints = hints: {
         const path = opts.checkpoint orelse break :hints .local;
@@ -1179,7 +1192,7 @@ fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backen
         load_log.err("invalid loader options: checkpoint={?s}, read_chunk_size={d}, expected 1..{d}: InvalidOptions", .{ opts.checkpoint, hints.read_chunk_size, max_request });
         return error.InvalidOptions;
     }
-    const options: backend.Options = .{
+    var options: backend.Options = .{
         .read_parallelism = opts.read_parallelism orelse if (hints.high_latency)
             Loader.Options.high_latency_read_parallelism
         else
@@ -1196,6 +1209,10 @@ fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backen
             return error.InvalidOptions;
         }
     }
+    // A nonzero alignment means a VFS that may read a local file direct.
+    // `isLocal` opens nothing.
+    const path = opts.checkpoint orelse return options;
+    if (alignment != 0 and VFS.fromIo(io).?.isLocal(path)) options.checkpoint = path;
     return options;
 }
 
@@ -1724,6 +1741,42 @@ test "init checks every option and returns InvalidOptions" {
     // `deinit` cancels the set-up or destroys what it built.
     var loader = try Loader.init(allocator, io, platform, .{ .checkpoint = "missing://bucket/model" });
     loader.deinit();
+}
+
+test "init copies a local checkpoint's path for its set-up" {
+    if (VFS.direct_io_alignment == 0) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = testing.env();
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const unit: [VFS.direct_io_alignment]u8 = @splat(7);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &unit });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/model.safetensors", .{root});
+
+    // The copy is the only allocation of `init`: nothing is left to free
+    // when it fails.
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    if (Loader.init(failing.allocator(), vfs.io(), platform, .{ .checkpoint = path })) |value| {
+        var loader = value;
+        loader.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+
+    // The set-up frees `init`'s copy once, whether it ran to its end or
+    // `deinit` canceled it before any `start`.
+    var loader = try Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = path });
+    defer loader.deinit();
+    try loader.awaitSetup();
+    for ([_]VFS.DirectIo{ .on, .auto }) |policy| {
+        var unstarted = try Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = path, .direct_io = policy });
+        unstarted.deinit();
+    }
 }
 
 test "a failed set-up fails the first start, and deinit frees the rest" {

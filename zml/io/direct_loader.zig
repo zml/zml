@@ -39,7 +39,11 @@
 //! its range, into blocks that are whole units, and its transfers address
 //! the widened read. A job's range is at most a request less two units, so
 //! its widened read still fits its credit's slot. Every other file is read
-//! exact.
+//! exact. The arenas are placed for how the checkpoint reads, predicted
+//! before calibration maps the first (`Planner.Reads.predict`): over every
+//! allowed node when at least four fifths of its bytes will read direct
+//! (host_memory.zig). The files predicted then read as predicted, and every
+//! other file as its own decision says.
 //!
 //! Destinations. A part's source bytes map to its destination's logical
 //! offsets, which the destination's `ShardGrid` places on the devices by
@@ -85,6 +89,7 @@ const builtin = @import("builtin");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 const VFS = @import("vfs");
+const zio = @import("zio");
 
 const Buffer = @import("../buffer.zig").Buffer;
 const pjrtx = @import("../pjrtx.zig");
@@ -184,7 +189,31 @@ pub const Loader = struct {
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
 
-        var workspace: host_memory.Workspace = try .init(allocator, io, platform);
+        var reads: Planner.Reads = .init(io, opts.direct_io);
+        errdefer reads.deinit(allocator);
+        // The arenas are placed for how the checkpoint reads before
+        // calibration maps the first: registered pages never move.
+        const probe_started: std.Io.Timestamp = .now(io, .awake);
+        const predicted = switch (platform.io_impl) {
+            .threaded => try reads.predict(allocator, opts.checkpoint),
+            // zio hands a file operation its event loop does not run (a
+            // real path; any, where it falls back to epoll) to a pool
+            // worker, and the compiles hold theirs for their whole run
+            // (`Compiler.compile`): the prediction takes a worker of its own
+            // rather than queue behind them, so the set-up overlaps them.
+            .zio => try zio.blockInPlaceReserved(Planner.Reads.predict, .{ &reads, allocator, opts.checkpoint }),
+        };
+        if (opts.checkpoint != null) {
+            const probe_ns: u64 = @intCast(@max(probe_started.untilNow(io, .awake).nanoseconds, 0));
+            load_log.debug("checkpoint reads predicted: files={d}, direct={Bi:.2} of {Bi:.2}, direct_reads={}, probe_ms={d:.3}", .{
+                predicted.files,
+                predicted.direct_bytes,
+                predicted.bytes,
+                predicted.direct(),
+                @as(f64, @floatFromInt(probe_ns)) / std.time.ns_per_ms,
+            });
+        }
+        var workspace: host_memory.Workspace = try .init(allocator, io, platform, predicted.direct());
         errdefer workspace.deinit();
         // At debug when canceled (`zml.io.next.Loader.deinit` cancels a
         // set-up no `start` waited for) or out of memory (the workspace logs
@@ -193,7 +222,6 @@ pub const Loader = struct {
             load_log.failure(err, "calibrate DMA: target={t}", .{platform.target});
             return err;
         };
-        const reads: Planner.Reads = .init(io, opts.direct_io);
         const request_size = backend.requestSize(opts.read_hints.read_chunk_size, block_size, reads.alignment).?;
         const blocks_per_request = request_size / block_size;
         // The DMA stage of every device, kept mapped beside the source
@@ -439,6 +467,7 @@ pub const Loader = struct {
             self.allocator.destroy(slot.*);
         }
         self.source_slots.deinit(self.allocator);
+        self.reads.deinit(self.allocator);
         std.debug.assert(self.credits.inUse(self.io) == 0);
         for (self.pumps) |*device_pump| {
             std.debug.assert(device_pump.active_pieces == 0);
@@ -1061,11 +1090,12 @@ const Planner = struct {
     };
 
     /// How each file is read: aligned when it is local and the VFS that
-    /// opens it reads it directly under `policy`, decided once per file and
-    /// kept in its slot. A remote file is read exact without being opened
-    /// here. Without a VFS (`io` is none, or no alignment) every file takes
-    /// `alignment`. A gather job reads files other than its plan's, so it
-    /// asks here for each.
+    /// opens it reads it directly under `policy`, or as `predict` answered
+    /// for it, decided once per file and kept in its slot. A remote file is
+    /// read exact without being opened here. Without a VFS (`io` is none, or
+    /// no alignment) every file takes `alignment`. A gather job reads files
+    /// other than its plan's, so it asks here for each. `predict` tells,
+    /// before any file is planned, how the checkpoint's files will read.
     /// Widening buffered reads is not free: a widened read served from the
     /// page cache costs the DMA sources their block alignment for nothing,
     /// and warm replicated Llama on four GB300 lost 3-6% when its first
@@ -1080,23 +1110,45 @@ const Planner = struct {
         /// Every read of a file read directly starts and ends at a multiple
         /// of this; 0 reads every file exact.
         alignment: usize,
+        /// The files `predict` answered for, by real path as the registry
+        /// names them (`safetensors.Tensor.file_uri`), each with the policy
+        /// that decides it as answered: under `auto`, `on` for a file that
+        /// reads direct and `off` for one that reads buffered. Under `on`,
+        /// which samples nothing, every file keeps `on`, and a filesystem
+        /// refusing the flag is logged when the file is planned. Owned until
+        /// `deinit`.
+        predicted: std.StringHashMapUnmanaged(VFS.DirectIo) = .empty,
 
         fn init(io: std.Io, policy: VFS.DirectIo) Reads {
             const alignment = backend.readAlignment(io, policy);
             return .{ .io = io, .vfs = if (alignment != 0) VFS.fromIo(io) else null, .policy = policy, .alignment = alignment };
         }
 
+        fn deinit(self: *Reads, allocator: std.mem.Allocator) void {
+            var paths = self.predicted.keyIterator();
+            while (paths.next()) |path| allocator.free(path.*);
+            self.predicted.deinit(allocator);
+        }
+
         /// The file's alignment, decided the first time it is asked: a
-        /// local file is opened here. One that fails to open is read exact:
+        /// local file is opened here, and decided as `predict` answered for
+        /// it, else under `policy`. One that fails to open is read exact:
         /// its reads fail with the same error (`LazyOnce`), which `readSlot`
         /// logs with the path.
         fn alignmentOf(self: Reads, slot: *SourceSlot) error{Canceled}!usize {
             const vfs = self.vfs orelse return self.alignment;
             if (slot.alignment) |known| return known;
+            // A predicted file is decided as predicted, not sampled again:
+            // the prediction's sample queued the read of each page it missed
+            // and of the kernel's readahead, and a second sample of those
+            // pages once the reads have landed finds the file cached
+            // (`VFS.predictDirectIo`). Under `on`, a filesystem refusing the
+            // flag still reads it buffered.
+            const policy = self.predicted.get(slot.uri) orelse self.policy;
             const direct = vfs.isLocal(slot.uri) and vfs.useDirectIo(slot.ensure(self.io) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => return 0,
-            }, self.policy);
+            }, policy);
             const alignment = if (direct) self.alignment else 0;
             slot.alignment = alignment;
             return alignment;
@@ -1108,6 +1160,76 @@ const Planner = struct {
             const vfs = self.vfs orelse return self.alignment;
             return if (vfs.isLocal(uri)) self.alignment else 0;
         }
+
+        /// How the checkpoint's local safetensors files will read, asked
+        /// once, before any is planned, to place the arenas: each as
+        /// `VFS.predictDirectIo` answers under `policy`, an answer kept in
+        /// `predicted` for `alignmentOf` to decide the file by. The files
+        /// are those `TensorRegistry.fromPath` reads for the checkpoint
+        /// (`safetensors.checkpointFiles`, which reads its index). Nothing
+        /// without a VFS, for a checkpoint that is not local, or for files
+        /// that do not resolve or open: the registry reports those. Keeps
+        /// no file open, and logs nothing. A wrong prediction (residency
+        /// changing before the file is planned) costs speed, never bytes.
+        fn predict(self: *Reads, allocator: std.mem.Allocator, checkpoint: ?[]const u8) error{ Canceled, OutOfMemory }!Prediction {
+            std.debug.assert(self.predicted.count() == 0);
+            const vfs = self.vfs orelse return .{};
+            const path = checkpoint orelse return .{};
+            if (!vfs.isLocal(path)) return .{};
+            var arena: std.heap.ArenaAllocator = .init(allocator);
+            defer arena.deinit();
+            const dir, const names = safetensors.checkpointFiles(arena.allocator(), self.io, path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return .{},
+            };
+            defer dir.close(self.io);
+            var prediction: Prediction = .{};
+            var real_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            for (names) |name| {
+                const real_path_len = dir.realPathFile(self.io, name, &real_path_buffer) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => continue,
+                };
+                const real_path = real_path_buffer[0..real_path_len];
+                // A symlink and the file it leads to are sampled once.
+                if (self.predicted.contains(real_path)) continue;
+                const file = try vfs.predictDirectIo(dir, name, self.policy) orelse continue;
+                const owned = try allocator.dupe(u8, real_path);
+                errdefer allocator.free(owned);
+                try self.predicted.putNoClobber(allocator, owned, if (file.direct or self.policy == .on) .on else .off);
+                prediction.add(file);
+            }
+            return prediction;
+        }
+
+        /// The bytes of a checkpoint's local safetensors files, and of those
+        /// that will read direct (`predict`).
+        const Prediction = struct {
+            files: usize = 0,
+            bytes: u64 = 0,
+            direct_bytes: u64 = 0,
+
+            fn add(self: *Prediction, file: VFS.DirectIoPrediction) void {
+                self.files += 1;
+                self.bytes += file.size;
+                if (file.direct) self.direct_bytes += file.size;
+            }
+
+            /// Whether the arenas are placed for direct reads
+            /// (`host_memory.Workspace.init`): files holding at least four
+            /// fifths of the bytes read direct. In measurements on two GB300
+            /// of one Grace node loading Qwen3.8-27B-FP8 (28.75 GiB),
+            /// spreading the arenas over both nodes saved direct reads about
+            /// 4.2 ms per GiB forced direct and 4.0 cold under auto, and cost
+            /// reads through the page cache 10 to 16 ms per GiB: it pays from
+            /// about 0.71 to 0.80 of the bytes read direct, and four fifths,
+            /// at the top of that range, leans to the devices' nodes, whose
+            /// mistake costs less per GiB.
+            fn direct(self: Prediction) bool {
+                return self.bytes != 0 and self.direct_bytes * 5 >= self.bytes * 4;
+            }
+        };
     };
 
     /// Plans `parts` one file at a time and publishes each plan as soon as
@@ -3283,6 +3405,13 @@ fn fixedReads(alignment: usize) Planner.Reads {
     return .{ .io = undefined, .vfs = null, .policy = .off, .alignment = alignment };
 }
 
+/// What a loader's `Planner.Reads` predicts for `checkpoint` under `policy`.
+fn testPrediction(io: std.Io, policy: VFS.DirectIo, checkpoint: ?[]const u8) !Planner.Reads.Prediction {
+    var reads: Planner.Reads = .init(io, policy);
+    defer reads.deinit(std.testing.allocator);
+    return reads.predict(std.testing.allocator, checkpoint);
+}
+
 /// `Planner.preparePlan` with every file read at `alignment`, kept in
 /// `arena`; the testing allocator checks the cut for leaks.
 fn prepareTestPlan(arena: std.mem.Allocator, parts: []Part, order: []const usize, config: Planner.Config, alignment: usize) !*Plan {
@@ -3360,6 +3489,166 @@ test "the planner opens only local files to ask about direct I/O" {
     const alignment = try reads.alignmentOf(&local);
     const file = local.file.readyValue().?.*;
     try std.testing.expectEqual(@as(usize, if (vfs.useDirectIo(file, .on)) 4096 else 0), alignment);
+}
+
+test "the checkpoint's reads are predicted as the VFS will decide the files its registry reads" {
+    if (VFS.direct_io_alignment == 0) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const long: [2 * VFS.direct_io_alignment + 100]u8 = @splat(7);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.safetensors", .data = &long });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.safetensors", .data = &long });
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.safetensors", .data = long[0..100] });
+    // The index lists a, b, c and a symlink to a; the registry does not
+    // read the consolidated file beside them (Mistral's format). The files
+    // hold no header: none is read.
+    try tmp.dir.symLink(io, "a.safetensors", "alias.safetensors", .{});
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"x\":\"a.safetensors\",\"y\":\"b.safetensors\",\"z\":\"c.safetensors\",\"w\":\"alias.safetensors\"}}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "consolidated.safetensors", .data = &long });
+    // A snapshot whose file links into blobs, as a Hugging Face cache's do.
+    const blob: [8 * 1024]u8 = @splat(9);
+    try tmp.dir.createDir(io, "blobs", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "blobs/x", .data = &blob });
+    try tmp.dir.createDir(io, "snapshot", .default_dir);
+    try tmp.dir.symLink(io, "../blobs/x", "snapshot/model.safetensors", .{});
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.fs.max_path_bytes + 64]u8 = undefined;
+
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    // A remote scheme: nothing is predicted for a checkpoint there.
+    try vfs.registerBackend("remote", .{ .io = io });
+    const vfs_io = vfs.io();
+
+    // The listed files as fresh handles decide them under `on`: c, shorter
+    // than a unit, never direct.
+    var expected: Planner.Reads.Prediction = .{};
+    const dir = try std.Io.Dir.openDir(.cwd(), vfs_io, root, .{});
+    defer dir.close(vfs_io);
+    for ([_][]const u8{ "a.safetensors", "b.safetensors", "c.safetensors" }) |name| {
+        const file = try dir.openFile(vfs_io, name, .{});
+        defer file.close(vfs_io);
+        const size = (try file.stat(vfs_io)).size;
+        expected.files += 1;
+        expected.bytes += size;
+        if (vfs.useDirectIo(file, .on)) expected.direct_bytes += size;
+    }
+    try std.testing.expectEqual(@as(u64, 2 * long.len + 100), expected.bytes);
+
+    var on_reads: Planner.Reads = .init(vfs_io, .on);
+    defer on_reads.deinit(allocator);
+    // The symlink is predicted once, with a.
+    try std.testing.expectEqual(expected, try on_reads.predict(allocator, root));
+    // Each answer is kept by the file's real path, none for the
+    // consolidated file. Under `on` each keeps `on`, c too: planning
+    // decides it, and it reads buffered.
+    try std.testing.expectEqual(@as(usize, 3), on_reads.predicted.count());
+    try std.testing.expectEqual(VFS.DirectIo.on, on_reads.predicted.get(try std.fmt.bufPrint(&path_buffer, "{s}/c.safetensors", .{root})).?);
+    try std.testing.expectEqual(expected, try testPrediction(vfs_io, .on, try std.fmt.bufPrint(&path_buffer, "{s}/model.safetensors.index.json", .{root})));
+    const one = try testPrediction(vfs_io, .on, try std.fmt.bufPrint(&path_buffer, "{s}/a.safetensors", .{root}));
+    try std.testing.expectEqual(@as(usize, 1), one.files);
+    try std.testing.expectEqual(@as(u64, long.len), one.bytes);
+    const snapshot = try testPrediction(vfs_io, .on, try std.fmt.bufPrint(&path_buffer, "{s}/snapshot", .{root}));
+    try std.testing.expectEqual(@as(usize, 1), snapshot.files);
+    try std.testing.expectEqual(@as(u64, blob.len), snapshot.bytes);
+
+    // Just written, so cached: none reads direct under `auto`, and each is
+    // kept as buffered.
+    var auto_reads: Planner.Reads = .init(vfs_io, .auto);
+    defer auto_reads.deinit(allocator);
+    const cached = try auto_reads.predict(allocator, root);
+    try std.testing.expectEqual(@as(usize, 3), cached.files);
+    try std.testing.expectEqual(@as(u64, 0), cached.direct_bytes);
+    var answers = auto_reads.predicted.valueIterator();
+    while (answers.next()) |answer| try std.testing.expectEqual(VFS.DirectIo.off, answer.*);
+
+    // Nothing to predict: no direct I/O, no VFS, a remote or no checkpoint,
+    // or none there.
+    const nothing = [_]Planner.Reads.Prediction{
+        try testPrediction(vfs_io, .off, root),
+        try testPrediction(io, .on, root),
+        try testPrediction(vfs_io, .on, "remote://bucket/model"),
+        try testPrediction(vfs_io, .on, null),
+        try testPrediction(vfs_io, .on, try std.fmt.bufPrint(&path_buffer, "{s}/missing", .{root})),
+        try testPrediction(vfs_io, .on, try std.fmt.bufPrint(&path_buffer, "{s}/blobs", .{root})),
+    };
+    for (nothing) |prediction| try std.testing.expectEqual(@as(usize, 0), prediction.files);
+}
+
+test "a file predicted to read direct is planned direct, though the prediction's sample cached it" {
+    if (comptime VFS.direct_io_alignment == 0) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A snapshot whose file links into blobs, as a Hugging Face cache's
+    // does. 64 KiB: every page of it is sampled, on 4 KiB pages too.
+    const data: [64 * 1024]u8 = @splat(7);
+    const blobs = try tmp.dir.createDirPathOpen(io, "blobs", .{});
+    defer blobs.close(io);
+    try testing.writeSafetensorsFile(allocator, io, blobs, "x", &.{
+        .{ .name = "w", .dtype = "U8", .dims = &.{data.len}, .bytes = &data },
+    });
+    try tmp.dir.createDir(io, "snapshot", .default_dir);
+    try tmp.dir.symLink(io, "../blobs/x", "snapshot/model.safetensors", .{});
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const checkpoint = try std.fmt.bufPrint(&path_buffer, "{s}/snapshot", .{root});
+
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    const vfs_io = vfs.io();
+    // The planner's slot takes the registry's name for the file: the blob.
+    var registry: safetensors.TensorRegistry = try .fromPath(allocator, vfs_io, checkpoint);
+    defer registry.deinit();
+    const uri = registry.tensors.get("w").?.file_uri;
+    {
+        const file = try blobs.openFile(io, "x", .{});
+        defer file.close(io);
+        try file.sync(io);
+        _ = std.os.linux.fadvise(file.handle, 0, 0, std.os.linux.POSIX_FADV.DONTNEED);
+    }
+
+    var reads: Planner.Reads = .init(vfs_io, .auto);
+    defer reads.deinit(allocator);
+    const predicted = try reads.predict(allocator, checkpoint);
+    // A filesystem that kept the file cached (tmpfs) or refuses direct
+    // reads says nothing here.
+    if (predicted.direct_bytes == 0) return error.SkipZigTest;
+    // Once the sample's reads landed, a probe of its own finds the file
+    // cached (a kernel that queues no read for a missed sample shows
+    // nothing).
+    try io.sleep(.fromMilliseconds(250), .awake);
+    {
+        const file = try std.Io.Dir.openFile(.cwd(), vfs_io, uri, .{ .mode = .read_only });
+        defer file.close(vfs_io);
+        if (vfs.useDirectIo(file, .auto)) return error.SkipZigTest;
+    }
+
+    // Planning reads it as predicted: direct, the handle decided so.
+    var slot: SourceSlot = .{ .uri = uri };
+    defer slot.deinit(vfs_io);
+    try std.testing.expectEqual(reads.alignment, try reads.alignmentOf(&slot));
+    try std.testing.expect(vfs.useDirectIo(slot.file.readyValue().?.*, .auto));
+}
+
+test "arenas are placed for direct reads from four fifths of the checkpoint's bytes" {
+    const Case = struct { direct_bytes: u64, bytes: u64, direct: bool };
+    const cases = [_]Case{
+        .{ .direct_bytes = 0, .bytes = 0, .direct = false },
+        .{ .direct_bytes = 4, .bytes = 5, .direct = true },
+        .{ .direct_bytes = 79, .bytes = 100, .direct = false },
+        .{ .direct_bytes = 80, .bytes = 100, .direct = true },
+        .{ .direct_bytes = 0, .bytes = 100, .direct = false },
+    };
+    for (cases) |case| {
+        const prediction: Planner.Reads.Prediction = .{ .bytes = case.bytes, .direct_bytes = case.direct_bytes };
+        try std.testing.expectEqual(case.direct, prediction.direct());
+    }
 }
 
 test "a strided part whose source runs are not back to back counts its whole source range" {

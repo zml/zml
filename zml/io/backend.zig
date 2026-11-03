@@ -55,6 +55,13 @@ pub const Options = struct {
     read_hints: VFS.ReadHints = .local,
     dma_block_size: ?usize = null,
     direct_io: VFS.DirectIo = .auto,
+    /// The loader's checkpoint (loader.zig, `Loader.Options.checkpoint`)
+    /// when it is local and the VFS may read it direct (`readAlignment` is
+    /// not 0), else null; owned by the loader's set-up task. The direct
+    /// backend predicts from it how the checkpoint's files read, places its
+    /// arenas for that, and reads each of those files as predicted
+    /// (`direct_loader.Loader.create`); it keeps nothing of the path.
+    checkpoint: ?[]const u8 = null,
 
     /// The blocks calibration may select: `dma_block_size`, else
     /// `dma_calibration.default_block_sizes`.

@@ -10,9 +10,9 @@
 //! transfer path are separate decisions: CPU loads through the direct
 //! backend too. When the task's cpuset and memory policy allow several
 //! memory-bearing NUMA nodes, page-backed arenas interleave over those of the
-//! platform's devices (all of them when a device's node is unknown or none of
-//! theirs is allowed); ROCm balances whole arenas across its devices' host
-//! nodes.
+//! platform's devices (all of them when the load reads past the page cache,
+//! a device's node is unknown, or none of theirs is allowed); ROCm balances
+//! whole arenas across its devices' host nodes.
 //! `Workspace.mapped_bytes_ceiling` (16 GiB) is a safety guard, not a
 //! target. A failed allocation or registration, or a growth past the
 //! ceiling, is logged with its cause and returns `OutOfMemory`.
@@ -77,10 +77,11 @@ const ArenaKind = union(enum) {
         allocator: Allocator,
         io: std.Io,
         platform: *const Platform,
+        direct_reads: bool,
     ) Allocator.Error!ArenaKind {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .pages = .{ .platform = platform, .numa_mask = pagesNumaMask(allocator, io, platform) } },
-            .cpu => .{ .pages = .{ .platform = null, .numa_mask = pagesNumaMask(allocator, io, platform) } },
+            .cuda, .oneapi => .{ .pages = .{ .platform = platform, .numa_mask = pagesNumaMask(allocator, io, platform, direct_reads) } },
+            .cpu => .{ .pages = .{ .platform = null, .numa_mask = pagesNumaMask(allocator, io, platform, direct_reads) } },
             // Furiosa backs `.host_pinned` with SDK pinned (dma-buf) memory
             // from `/dev/dma_heap/system`, which the SDK recognizes by
             // address and transfers without pinning pages on every request.
@@ -295,15 +296,19 @@ pub const Workspace = struct {
     /// The arenas cut into blocks, set by `carve`: nothing maps after it.
     blocks: ?[]Block = null,
 
+    /// `direct_reads`: the load reads its checkpoint past the page cache, so
+    /// page-backed arenas spread over every candidate node
+    /// (`placementMask`).
     pub fn init(
         allocator: Allocator,
         io: std.Io,
         platform: *const Platform,
+        direct_reads: bool,
     ) Allocator.Error!Workspace {
         return .{
             .allocator = allocator,
             .io = io,
-            .kind = try .init(allocator, io, platform),
+            .kind = try .init(allocator, io, platform, direct_reads),
         };
     }
 
@@ -441,10 +446,11 @@ fn cpusetMemsMask() u64 {
 
 /// The nodes page-backed arenas interleave over (`placementMask`): the
 /// memory-bearing nodes the task's cpuset and memory policy allow, narrowed
-/// to the nodes of the platform's devices.
-fn pagesNumaMask(allocator: Allocator, io: std.Io, platform: *const Platform) u64 {
+/// to the nodes of the platform's devices, unless the load reads past the
+/// page cache.
+fn pagesNumaMask(allocator: Allocator, io: std.Io, platform: *const Platform, direct_reads: bool) u64 {
     const candidates = memoryNodeMask(allocator, io) & cpusetMemsMask() & taskMemoryPolicyMask();
-    return placementMask(candidates, deviceNodeMask(platform));
+    return placementMask(candidates, deviceNodeMask(platform), direct_reads);
 }
 
 /// The nodes of the platform's devices (`Device.numaNode`), or null when a
@@ -461,19 +467,30 @@ fn deviceNodeMask(platform: *const Platform) ?u64 {
 
 /// Zero leaves placement to the kernel: with one candidate node or none
 /// there is nothing to choose, and the task's policy or the only node decides.
-/// Among several candidates, the arenas go to the devices' nodes: an arena on
-/// another node crosses the inter-socket link on every H2D copy. Two GB300
-/// on one Grace node loaded Qwen3.8-27B-FP8 in 1.265 s with a task policy
-/// holding the arenas to that node, against 1.64 s interleaved over both
-/// nodes. Devices on several nodes share one pool interleaved over theirs:
-/// four GB300 on two nodes loaded replicated DeepSeek-V4-Flash in 4.35 s
-/// against 4.92 s with per-node pools. When a device's node is unknown, or
-/// none is a candidate, the arenas interleave over every candidate, which no
-/// single node beat everywhere. A single node is placed too, since unplaced
-/// CUDA arenas follow the registering thread's node; the kernel still falls
-/// back when it is full.
-fn placementMask(candidates: u64, device_nodes: ?u64) u64 {
+/// For reads through the page cache, the arenas go to the devices' nodes
+/// among several candidates: an arena on another node crosses the
+/// inter-socket link on every H2D copy. Two GB300 on one Grace node loaded
+/// Qwen3.8-27B-FP8 in 1.265 s with a task policy holding the arenas to that
+/// node, against 1.64 s interleaved over both nodes. Devices on several
+/// nodes share one pool interleaved over theirs: four GB300 on two nodes
+/// loaded replicated DeepSeek-V4-Flash in 4.35 s against 4.92 s with
+/// per-node pools. When a device's node is unknown, or none is a candidate,
+/// the arenas interleave over every candidate, which no single node beat
+/// everywhere. A single node is placed too, since unplaced CUDA arenas
+/// follow the registering thread's node; the kernel still falls back when
+/// it is full.
+/// A load read past the page cache (`direct_reads`) spreads the arenas over
+/// every candidate instead: the drives write into them, and interleaving
+/// splits that traffic, and the copies out of them, between the candidates'
+/// memory. Over an md RAID0 of four NVMe drives, two on each node, the same
+/// two GB300 loaded the same checkpoint forced direct in 1.752 s with the
+/// arenas interleaved over both nodes, against 1.873 s with them on the
+/// devices' node: staging a read took 0.52 against 0.64 ms, and a 16 MiB
+/// read 1.90 against 1.87 ms. The drives' own nodes are not consulted: every
+/// candidate matched them on the one host measured.
+fn placementMask(candidates: u64, device_nodes: ?u64, direct_reads: bool) u64 {
     if (@popCount(candidates) < 2) return 0;
+    if (direct_reads) return candidates;
     const near = candidates & (device_nodes orelse candidates);
     return if (near != 0) near else candidates;
 }
@@ -502,20 +519,29 @@ fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
 }
 
-test "automatic NUMA placement keeps the devices' nodes among several candidates" {
+test "automatic NUMA placement keeps the devices' nodes for buffered reads and spreads direct reads over every candidate" {
     // One candidate or none: the kernel places.
-    try std.testing.expectEqual(@as(u64, 0), placementMask(0, 0b10));
-    try std.testing.expectEqual(@as(u64, 0), placementMask(0b1, 0b1));
-    try std.testing.expectEqual(@as(u64, 0), placementMask(0b1000, null));
+    try std.testing.expectEqual(@as(u64, 0), placementMask(0, 0b10, false));
+    try std.testing.expectEqual(@as(u64, 0), placementMask(0b1, 0b1, false));
+    try std.testing.expectEqual(@as(u64, 0), placementMask(0b1000, null, false));
     // Devices on one of two nodes: that node; on both: both.
-    try std.testing.expectEqual(@as(u64, 0b10), placementMask(0b11, 0b10));
-    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b11));
+    try std.testing.expectEqual(@as(u64, 0b10), placementMask(0b11, 0b10, false));
+    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b11, false));
     // Unknown device nodes, or none among the candidates: every candidate.
-    try std.testing.expectEqual(@as(u64, 0b1001), placementMask(0b1001, null));
-    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b100));
+    try std.testing.expectEqual(@as(u64, 0b1001), placementMask(0b1001, null, false));
+    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b100, false));
     // A cpuset of nodes 0 and 2 of four, devices on node 1: the cpuset's
     // nodes, as `pagesNumaMask` narrows the candidates to them first.
-    try std.testing.expectEqual(@as(u64, 0b101), placementMask(0b1111 & 0b101, 0b10));
+    try std.testing.expectEqual(@as(u64, 0b101), placementMask(0b1111 & 0b101, 0b10, false));
+
+    // Direct reads: every candidate, wherever the devices are.
+    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b10, true));
+    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b11, true));
+    try std.testing.expectEqual(@as(u64, 0b1001), placementMask(0b1001, null, true));
+    // Still nothing to choose with one candidate, and still within the
+    // cpuset.
+    try std.testing.expectEqual(@as(u64, 0), placementMask(0b1, 0b1, true));
+    try std.testing.expectEqual(@as(u64, 0b101), placementMask(0b1111 & 0b101, 0b10, true));
 }
 
 test "parseNodeList accepts kernel node lists" {
