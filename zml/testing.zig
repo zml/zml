@@ -373,6 +373,22 @@ pub const TensorBytes = struct {
     bytes: []const u8,
 };
 
+/// Writes `tensors` as the safetensors file `sub_path` of `dir`, in order,
+/// and registers them from it.
+pub fn writeSafetensors(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    registry: *zml.safetensors.TensorRegistry,
+    tensors: []const TensorBytes,
+) !void {
+    try writeSafetensorsFile(allocator, io, dir, sub_path, tensors);
+    const file = try dir.openFile(io, sub_path, .{});
+    defer file.close(io);
+    try zml.safetensors.parseSafetensors(io, registry, file, "");
+}
+
 /// Writes `tensors` as the safetensors file `sub_path` of `dir`, in order.
 pub fn writeSafetensorsFile(
     allocator: std.mem.Allocator,
