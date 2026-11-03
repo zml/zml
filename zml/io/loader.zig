@@ -41,6 +41,7 @@ const Exe = @import("../exe.zig").Exe;
 const mem = @import("../mem.zig");
 const Bufferized = mem.Bufferized;
 const meta = @import("../meta.zig");
+const ops = @import("../ops.zig");
 const platform_mod = @import("../platform.zig");
 const Memory = TensorStore.Memory;
 const Platform = platform_mod.Platform;
@@ -54,6 +55,7 @@ const Backend = backend.Backend;
 const buffered_loader = @import("buffered_loader.zig");
 const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
+const direct_loader = @import("direct_loader.zig");
 const load_log = @import("log.zig").load;
 const TensorStore = @import("TensorStore.zig");
 
@@ -259,8 +261,8 @@ pub const Loader = struct {
     /// rounded up to whole blocks of the smallest it may pick, 2 MiB or a
     /// pinned `dma_block_size`), a sub-byte last dimension that does not
     /// pack into whole bytes, a placement its mesh does not divide or on
-    /// devices the platform lacks, and a memory kind the platform cannot
-    /// take are `error.InvalidBinding`.
+    /// devices the platform lacks, and a host kind the platform cannot take
+    /// are `error.InvalidBinding`.
     ///
     /// `buffers` is `mem.bufferize` of `model`, whose buffers are empty. A
     /// tree of another structure (other union arms, optionals or slice
@@ -1161,6 +1163,42 @@ test "tensors of one program and equal args share one compile, and one group run
     try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.stats.bytes_loaded);
 }
 
+test "loader delivers host bindings into pinned host memory" {
+    for ([_]Memory{ .host_pinned, .host_mapped }) |kind| try expectHostDelivery(kind);
+}
+
+fn expectHostDelivery(kind: Memory) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    const platform = fixture.platform;
+    const pinned = fixture.store.view().createReplicatedTensor("second", null);
+    fixture.store.view().setMemory(pinned, kind);
+    try std.testing.expectEqual(kind, fixture.store.bindingOf(pinned.id).?.load.memory);
+
+    var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+    const Model = struct { device: Tensor, host: Tensor };
+    const model: Model = .{ .device = fixture.value, .host = pinned };
+    var buffers = try mem.bufferize(allocator, &model);
+    defer mem.deinitBufferized(allocator, &buffers);
+
+    if (!backend.supportsMemory(platform, kind)) {
+        // Refused before anything is submitted.
+        try std.testing.expectError(error.InvalidBinding, loader.start(&model, &buffers, &fixture.store, .none));
+        try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
+        return;
+    }
+    try loader.start(&model, &buffers, &fixture.store, .none);
+    try loader.wait();
+    try testing.expectShards(allocator, io, &buffers.device, &LoaderTestFixture.contents, .default);
+    // One shard per device, each in that device's pinned host memory space
+    // or, `host_mapped`, a view of pinned memory in its default space.
+    try testing.expectShards(allocator, io, &buffers.host, &LoaderTestFixture.second_contents, kind);
+}
+
 test "a program frees its donated and non-donated inputs once" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -1452,8 +1490,7 @@ test "a rejected binding or a program of the wrong output fails the loader" {
     const splits = platform.devices.len > 1 and 4 % platform.devices.len == 0;
 
     // No binding, an empty source or program input, a mesh of other
-    // devices, a host kind the platform cannot take, and a program of the
-    // wrong shape or placement.
+    // devices, and a program of the wrong shape or placement.
     const Case = struct { tensor: Tensor, at_wait: bool = false, skip: bool = false };
     const cases = [_]Case{
         .{ .tensor = Tensor.fromShape(fixture.value.shape()) },
@@ -1462,7 +1499,6 @@ test "a rejected binding or a program of the wrong output fails the loader" {
         .{ .tensor = foreign[0] },
         .{ .tensor = foreign[1] },
         .{ .tensor = fixture.computed("value", foreign[2], LoaderTestFixture.Identity{}) },
-        .{ .tensor = pinned, .skip = backend.supportsMemory(platform, .host_pinned) },
         .{ .tensor = fixture.computed("value", fixture.value, Rows{}), .at_wait = true },
         .{ .tensor = fixture.computed("value", misplaced, LoaderTestFixture.Identity{}), .at_wait = true, .skip = !splits },
     };
@@ -2095,6 +2131,216 @@ test "a program takes its inputs from sources, in order" {
     defer output.deinit();
     // { 1, 2, 7, 8 } - { 5, 6, 7, 8 }, wrapping.
     try testing.expectShards(allocator, io, &output, &.{ 252, 252, 0, 0 }, .default);
+}
+
+test "a padded host-mapped table stays in host memory and serves device gathers in place" {
+    // The engram arrangement: one source of 264-byte rows, an odd row count
+    // padded to a multiple of 8, rows sharded over every device, delivered
+    // as device-kind views of pinned host memory. A program gathers rows
+    // from each device's local shard.
+    try expectHostTableGathers(.rows);
+}
+
+test "a replicated host-mapped table is one allocation that every device reads in place" {
+    // The same table on every device: the direct loader makes it one
+    // allocation (`direct_loader.DestinationState.initHost`), each device's
+    // shard a view of it, and every device's kernels gather from it.
+    try expectHostTableGathers(.replicated);
+}
+
+/// Loads a padded table as `host_mapped`, rows sharded over every device or
+/// replicated on each, and gathers rows of each device's shard on that
+/// device. The table is freed while the gather is queued behind matrix
+/// products: its memory must outlive the read, and go once it is done.
+fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const rows: usize = 100_003;
+    const row_bytes: usize = 264;
+    const gathered: usize = 256;
+
+    // The accelerator under test, or four CPU devices.
+    const shared = testing.env();
+    const owned: ?*Platform = if (shared.target == .cpu)
+        try Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 4 } })
+    else
+        null;
+    defer if (owned) |platform| platform.deinit(allocator, io);
+    const platform: *const Platform = if (owned) |p| p else shared;
+    const api = platform.pjrt_api;
+    const mesh: *const Sharding.Mesh = if (owned) |p|
+        try p.registerMesh("model", .mesh(.{ .model = .high_bandwidth }))
+    else
+        shared.meshes.get("model").?;
+    if (!backend.supportsMemory(platform, .host_mapped)) return error.SkipZigTest;
+    const devices = mesh.devicesInCanonicalOrder();
+    const shard_count = devices.len;
+
+    const padded_rows = std.mem.alignForward(usize, rows, 8);
+    const shard_rows = if (placement == .rows) padded_rows / shard_count else padded_rows;
+    if (placement == .rows) try std.testing.expectEqual(padded_rows, shard_rows * shard_count);
+    const padded = try allocator.alloc(u8, padded_rows * row_bytes);
+    defer allocator.free(padded);
+    @memset(padded, 0);
+    for (0..rows) |row| {
+        const bytes = padded[row * row_bytes ..][0..row_bytes];
+        // The row's number first, so a misplaced row cannot pass for another.
+        std.mem.writeInt(u32, bytes[0..4], @intCast(row + 1), .little);
+        for (bytes[4..], 4..) |*byte, column| byte.* = @as(u8, @truncate(row *% 131 +% column *% 7)) | 1;
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try testing.writeSafetensors(allocator, io, tmp.dir, "table.safetensors", &registry, &.{
+        .{ .name = "table", .dtype = "U8", .dims = &.{ @intCast(rows), @intCast(row_bytes) }, .bytes = padded[0 .. rows * row_bytes] },
+    });
+    var store: TensorStore = .init(allocator, &registry, .{ .meshes = &.{mesh} });
+    defer store.deinit();
+    const source = store.view().source("table", .{ .row, .channel })
+        .pad(0, .{ .row = TensorStore.Source.Pad{ .high = @intCast(padded_rows - rows) } });
+    const table = switch (placement) {
+        .rows => source.withPartitioning(.model, .{ .row = .model }).bind(),
+        .replicated => source.withPartitioning(.model, .{}).bind(),
+    };
+    store.view().setMemory(table, .host_mapped);
+    try std.testing.expectEqual(@as(i64, @intCast(padded_rows)), table.dim(.row));
+
+    const live_before = direct_loader.liveHostAllocations();
+    var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 4 });
+    defer loader.deinit();
+    // The device allocators' counts, once the set-up's calibration has
+    // allocated on the devices. Bytes in use would not do: CUDA's counts
+    // what its pool holds, which freed memory leaves room in. CPU's plugin
+    // counts nothing.
+    try loader.awaitSetup();
+    var allocations: [Platform.MAX_NUM_DEVICES]?u64 = undefined;
+    for (devices) |device| allocations[device.id] = platform.devices[device.id].memoryStats().num_allocs;
+    var device_table: Buffer = undefined;
+    try loader.start(&table, &device_table, &store, .none);
+    try loader.wait();
+    var freed = false;
+    defer if (!freed) device_table.deinit();
+    // The table took no device memory: nothing was allocated on a device.
+    for (devices) |device| if (allocations[device.id]) |before| {
+        try std.testing.expectEqual(before, platform.devices[device.id].memoryStats().num_allocs.?);
+    };
+    try std.testing.expectEqual(padded.len, loader.stats.bytes_loaded);
+    try testing.expectShards(allocator, io, &device_table, padded, .host_mapped);
+    // A row shard is one allocation per device, a replicated table one.
+    try std.testing.expectEqual(live_before + if (placement == .rows) shard_count else 1, direct_loader.liveHostAllocations());
+
+    const first_pointer = try device_table._shards.get(0).opaqueDeviceMemoryDataPointer(api);
+    for (devices, device_table._shards.constSlice()) |device, shard| {
+        // Replicas share one allocation; row shards never do.
+        const pointer = try shard.opaqueDeviceMemoryDataPointer(api);
+        const shares = placement == .replicated and shard_count > 1;
+        if (device.id != devices[0].id) try std.testing.expectEqual(shares, pointer == first_pointer);
+    }
+
+    // Each device gathers `gathered` rows of its own shard, the padding
+    // rows of the last one included (of every replica, replicated), once
+    // a chain of matrix products is done: the indices depend on them.
+    const Gather = struct {
+        fn forward(table_: Tensor, indices: Tensor, ballast: Tensor) Tensor {
+            var product = ballast;
+            for (0..8) |_| product = product.dot(product.withTags(.{ .k, .j }), .k).withTags(.{ .i, .k });
+            // Zero, as every product keeps the ballast's positive entries.
+            const offset: Tensor = .select(
+                product.sum(.i).sum(.k).reshape(Shape.init(.{}, .f32)).cmp(.LT, .scalar(0, .f32)),
+                .scalar(1, .u32),
+                .scalar(0, .u32),
+            );
+            const output: Shape = Shape.init(.{ .shard = indices.dim(.shard), .bytes = indices.dim(.k) * table_.dim(.channel) }, .u8)
+                .withPartitioning(table_.shape()._sharding.mesh.?, .{ .shard = .model });
+            return ops.manualComputation((struct {
+                fn body(inputs: struct { table: Tensor, indices: Tensor, offset: Tensor }, local: Shape) Tensor {
+                    const shifted = inputs.indices.add(inputs.offset.broad(inputs.indices.shape()));
+                    return inputs.table.gather(.{ .row = shifted }, .{}).reshape(local);
+                }
+            }).body, .{ .table = table_, .indices = indices, .offset = offset }, output);
+        }
+    };
+    const indices_shape = Shape.init(.{ .shard = shard_count, .k = gathered }, .u32).withPartitioning(mesh, .{ .shard = .model });
+    const indices = try allocator.alloc(u32, shard_count * gathered);
+    defer allocator.free(indices);
+    for (0..shard_count) |shard| {
+        const local = indices[shard * gathered ..][0..gathered];
+        for (local, 0..) |*index, k| index.* = @intCast((k * 7919 + shard * 104_729) % shard_rows);
+        // The first and last rows of every shard; on the last device these
+        // are padding.
+        local[0] = 0;
+        local[1] = @intCast(shard_rows - 1);
+        local[2] = @intCast(shard_rows - 2);
+    }
+    var indices_buffer: Buffer = try .from(io, platform, indices_shape, std.mem.sliceAsBytes(indices), .{});
+    defer indices_buffer.deinit();
+    // Milliseconds of products on an accelerator; a token amount on CPU.
+    const ballast_dim: usize = if (platform.target == .cpu) 32 else 4096;
+    const ballast_shape = Shape.init(.{ .i = ballast_dim, .k = ballast_dim }, .f32).withPartitioning(mesh, .{});
+    const ballast = try allocator.alloc(f32, ballast_dim * ballast_dim);
+    defer allocator.free(ballast);
+    @memset(ballast, 1.0 / @as(f32, @floatFromInt(ballast_dim)));
+    var ballast_buffer: Buffer = try .from(io, platform, ballast_shape, std.mem.sliceAsBytes(ballast), .{});
+    defer ballast_buffer.deinit();
+
+    const exe = try platform.compileFn(allocator, io, Gather.forward, .{ Tensor.fromShape(table.shape()), Tensor.fromShape(indices_shape), Tensor.fromShape(ballast_shape) }, .{ .meshes = &.{mesh} });
+    defer exe.deinit();
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+    args.set(.{ device_table, indices_buffer, ballast_buffer });
+    try exe.call(io, args, &results, .{});
+    var output = results.get(Buffer);
+    defer output.deinit();
+
+    // The table goes while the gather may still have to read it. Pinned
+    // buffers of its size and another pattern would take its memory had it
+    // gone early, and the gather would return their bytes.
+    device_table.deinit();
+    freed = true;
+    const decoy_bytes = try allocator.alloc(u8, padded.len);
+    defer allocator.free(decoy_bytes);
+    @memset(decoy_bytes, 0xee);
+    var decoy: Buffer = try .from(io, platform, table.shape(), decoy_bytes, .{ .memory = .host_pinned });
+    defer decoy.deinit();
+
+    const expected = try allocator.alloc(u8, shard_count * gathered * row_bytes);
+    defer allocator.free(expected);
+    for (0..shard_count) |shard| {
+        for (0..gathered) |k| {
+            const first_row = if (placement == .rows) shard * shard_rows else 0;
+            const row = first_row + indices[shard * gathered + k];
+            @memcpy(expected[(shard * gathered + k) * row_bytes ..][0..row_bytes], padded[row * row_bytes ..][0..row_bytes]);
+        }
+    }
+    try testing.expectShards(allocator, io, &output, expected, .default);
+
+    // The allocations go with their last views, once nothing reads them;
+    // PJRT may drop the views on its own threads just after the output is
+    // ready.
+    var polls: usize = 0;
+    while (direct_loader.liveHostAllocations() != live_before) : (polls += 1) {
+        if (polls == 5000) return error.TestUnexpectedResult;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+
+    // The control: the same table in device memory is allocated on every
+    // device, so the check after the load above can fail.
+    const device_copy = switch (placement) {
+        .rows => source.withPartitioning(.model, .{ .row = .model }).bind(),
+        .replicated => source.withPartitioning(.model, .{}).bind(),
+    };
+    for (devices) |device| allocations[device.id] = platform.devices[device.id].memoryStats().num_allocs;
+    var device_buffer: Buffer = undefined;
+    try loader.start(&device_copy, &device_buffer, &store, .none);
+    try loader.wait();
+    defer device_buffer.deinit();
+    for (devices) |device| if (allocations[device.id]) |before| {
+        try std.testing.expect(platform.devices[device.id].memoryStats().num_allocs.? > before);
+    };
 }
 
 /// A loader on the buffered backend, whichever backend `platform` loads
