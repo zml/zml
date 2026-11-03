@@ -49,12 +49,12 @@ pub fn main(init: std.process.Init) !void {
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
-    var loader: zml.io.Loader = try .init(allocator, platform, .{ .dma_chunks = 32, .dma_chunk_size = 256 * zml.MiB, .parallelism = 16 });
+    var loader: zml.io.Loader = try .init(allocator, io, platform, .{});
     defer loader.deinit();
     var model_buffers = try zml.mem.bufferize(allocator, &repo_model.inner);
     defer zml.mem.deinitBufferized(allocator, &model_buffers);
-    try loader.load(io, lfm2.Model, &repo_model.inner, &model_buffers, &store, .{ .progress = &progress });
-    try loader.await(io);
+    try loader.start(&repo_model.inner, &model_buffers, &store, progress);
+    try loader.wait();
 
     const backend: zml.attention.Backend = if (args.backend) |selected| switch (selected) {
         .stablehlo => .{ .stablehlo = {} },

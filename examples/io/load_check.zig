@@ -1,7 +1,7 @@
-//! Loads every tensor of a checkpoint through `zml.io.next` and checks the
+//! Loads every tensor of a checkpoint with `zml.io.Loader` and checks the
 //! bytes the devices hold against the checkpoint's. Tooling, not an
-//! example: the harness the new loader's backends are validated with on
-//! each host.
+//! example: the harness the loader's backends are validated with on each
+//! host.
 //!
 //!     bazel run //examples/io:load_check -- <checkpoint> [replicated|sharded|tp]
 //!     bazel run //examples/io:load_check -- dma-bench
@@ -21,7 +21,7 @@
 //! A scalar is replicated in every mode.
 //!
 //! `dma-bench` loads nothing: it runs the direct backend's DMA calibration
-//! (`zml.io.next.dma_calibration.measure`) on the platform and logs the
+//! (`zml.io.dma_calibration.measure`) on the platform and logs the
 //! block it selects. A platform that loads through the buffered backend has
 //! no DMA to measure, and CPU selects the smallest block unmeasured. Its
 //! knobs, beside the platform's below, are the screen's options, at their
@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArgument;
     };
     const dma_block_mib = try envNumber(u32, init.environ_map, "ZML_DMA_BENCH_BLOCK_MIB");
-    const memory = std.meta.stringToEnum(zml.io.next.TensorStore.Memory, init.environ_map.get("ZML_LOAD_MEMORY") orelse "default") orelse {
+    const memory = std.meta.stringToEnum(zml.io.TensorStore.Memory, init.environ_map.get("ZML_LOAD_MEMORY") orelse "default") orelse {
         log.err("ZML_LOAD_MEMORY must be default, host_pinned or host_mapped", .{});
         return error.InvalidArgument;
     };
@@ -118,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Returns at once: the loader sets its backend up while the
     // checkpoint's headers are read and its tensors bound.
-    var loader: zml.io.next.Loader = try .init(allocator, io, platform, .{
+    var loader: zml.io.Loader = try .init(allocator, io, platform, .{
         .checkpoint = path,
         .read_parallelism = try envNumber(usize, init.environ_map, "ZML_LOAD_READ_PARALLELISM"),
         .dma_block_size = if (dma_block_mib) |mib| @as(usize, mib) * zml.MiB else null,
@@ -134,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
     const rows: zml.Sharding.Partitioning = .init(&.{.sharded(model_axis)});
     const columns: zml.Sharding.Partitioning = .init(&.{ .replicated, .sharded(model_axis) });
 
-    var store: zml.io.next.TensorStore = .init(allocator, &registry, .{ .meshes = &.{tensor_parallel} });
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{tensor_parallel} });
     defer store.deinit();
 
     const Model = struct { tensors: []zml.Tensor };
@@ -174,9 +174,9 @@ fn dmaBench(init: std.process.Init) !void {
     const io = init.io;
     const environ_map = init.environ_map;
 
-    const defaults: zml.io.next.dma_calibration.Options = .{};
+    const defaults: zml.io.dma_calibration.Options = .{};
     const window_ms = try envNumber(i64, environ_map, "ZML_DMA_BENCH_WINDOW_MS");
-    const opts: zml.io.next.dma_calibration.Options = .{
+    const opts: zml.io.dma_calibration.Options = .{
         .block_sizes = try envMibList(init.arena.allocator(), environ_map, "ZML_DMA_BENCH_BLOCK_MIB") orelse defaults.block_sizes,
         .block_parallelism = try envNumber(usize, environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM") orelse defaults.block_parallelism,
         .minimum_duration = if (window_ms) |ms| .fromMilliseconds(ms) else defaults.minimum_duration,
@@ -187,7 +187,7 @@ fn dmaBench(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, try platformOptions(environ_map));
     defer platform.deinit(allocator, io);
 
-    const block_size = try zml.io.next.dma_calibration.measure(allocator, io, platform, opts);
+    const block_size = try zml.io.dma_calibration.measure(allocator, io, platform, opts);
     log.info("dma_benchmark block_bytes={d} parallelism={d}", .{ block_size, opts.block_parallelism });
 }
 

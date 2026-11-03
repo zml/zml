@@ -3,8 +3,6 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
-const log = std.log.scoped(.vfs);
-
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
@@ -140,6 +138,11 @@ pub fn main(init: std.process.Init) !void {
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
 
+            // Returns at once: the loader sets its backend up while the
+            // checkpoint's headers are read and its tensors bound.
+            var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = path });
+            defer loader.deinit();
+
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
@@ -149,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
             );
             const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
 
+            // The store takes the registry's entries.
             var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{tensor_parallel} });
             defer store.deinit();
 
@@ -156,51 +160,28 @@ pub fn main(init: std.process.Init) !void {
                 tensors: []zml.Tensor,
             };
 
-            const tensor_count = registry.tensors.count();
-
-            const tensors = try allocator.alloc(zml.Tensor, tensor_count);
+            const tensors = try allocator.alloc(zml.Tensor, store.registry.tensors.count());
             defer allocator.free(tensors);
 
-            var registry_it = registry.tensors.iterator();
-            var load_count: usize = 0;
-            while (registry_it.next()) |entry| : (load_count += 1) {
-                tensors[load_count] = switch (mesh_type) {
-                    .replicated => store.view().createReplicatedTensor(entry.key_ptr.*, null),
-                    .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)
+            for (tensors, store.registry.tensors.keys(), store.registry.tensors.values()) |*tensor, key, entry| {
+                tensor.* = switch (mesh_type) {
+                    .replicated => store.view().createReplicatedTensor(key, null),
+                    .sharded => if (entry.shape.rank() > 0)
+                        store.view().createTensor(key, null, .tp, tp_partitioning)
                     else
-                        store.view().createReplicatedTensor(entry.key_ptr.*, null),
+                        store.view().createReplicatedTensor(key, null),
                 };
             }
 
             const model: AllTensorsModel = .{ .tensors = tensors };
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
-            progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
 
-            const now: std.Io.Timestamp = .now(io, .awake);
-
             var buffers = try zml.mem.bufferize(allocator, &model);
-            defer {
-                for (buffers.tensors) |*b| b.deinit();
-                allocator.free(buffers.tensors);
-            }
-
-            var loader: zml.io.Loader = try .init(allocator, platform, .{
-                .parallelism = 8,
-                .dma_chunks = 16,
-                .dma_chunk_size = 256 * zml.MiB,
-            });
-            defer loader.deinit();
-
-            try loader.load(io, AllTensorsModel, &model, &buffers, &store, .{ .progress = &progress });
-            try loader.await(io);
-
-            const took = now.untilNow(io, .awake);
-            const total_bytes: u64 = loader.bytes_loaded.raw;
-            const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+            defer zml.mem.deinitBufferized(allocator, &buffers);
+            try loader.start(&model, &buffers, &store, progress);
+            try loader.wait(); // logs "Loaded weights"
         },
     }
 }

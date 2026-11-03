@@ -37,32 +37,6 @@ const Mnist = struct {
         };
     }
 
-    pub fn load(
-        self: *const Mnist,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *const zml.io.TensorStore,
-    ) !zml.Bufferized(Mnist) {
-        var buffers = try zml.mem.bufferize(allocator, self);
-        errdefer unloadBuffers(&buffers);
-
-        var loader: zml.io.Loader = try .init(allocator, platform, .default);
-        errdefer loader.deinit();
-
-        try loader.load(io, Mnist, self, &buffers, store, .{});
-        try loader.await(io);
-
-        return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
-        self.fc1.weight.deinit();
-        self.fc1.bias.deinit();
-        self.fc2.weight.deinit();
-        self.fc2.bias.deinit();
-    }
-
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         var x = input.flatten().convert(.f32).withTags(.{.d});
@@ -80,24 +54,32 @@ const Mnist = struct {
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena;
     const allocator = init.gpa;
-    const io = init.io;
 
     // Parse program args
     const process_args = try init.minimal.args.toSlice(arena.allocator());
     const model_path = process_args[1];
     const t10kfilename = process_args[2];
 
-    // Read model shapes.
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
-    defer registry.deinit();
+    // Local paths. `zml.io.VFS.Remotes` adds hf://, s3://, gs:// and https://.
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
+    defer vfs.deinit();
+    const io = vfs.io();
 
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    // Init model
-    var store: zml.io.TensorStore = .init(allocator, &registry, .{ .meshes = &.{platform.replicated_mesh} });
+    // Returns at once: the loader calibrates while the model is compiled.
+    var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = model_path });
+    defer loader.deinit();
+
+    // Read model shapes.
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{});
     defer store.deinit();
+
+    // Init model
     const mnist_model: Mnist = .init(store.view());
 
     // // Compile model
@@ -110,16 +92,11 @@ pub fn main(init: std.process.Init) !void {
     };
     defer exe.deinit();
 
-    // Load buffers
-    var mnist_buffers = blk: {
-        log.info("Transfering weights....", .{});
-        const start: std.Io.Timestamp = .now(io, .awake);
-        defer log.info("✅ Transferred weights [{f}]", .{
-            start.untilNow(io, .awake),
-        });
-        break :blk try mnist_model.load(init.arena.allocator(), io, platform, &store);
-    };
-    defer Mnist.unloadBuffers(&mnist_buffers);
+    // Load weights
+    var mnist_buffers = try zml.mem.bufferize(allocator, &mnist_model);
+    defer zml.mem.deinitBufferized(allocator, &mnist_buffers);
+    try loader.start(&mnist_model, &mnist_buffers, &store, .none);
+    try loader.wait(); // logs "Loaded weights"
 
     var args = try exe.args(allocator);
     defer args.deinit(allocator);

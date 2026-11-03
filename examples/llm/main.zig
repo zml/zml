@@ -100,9 +100,6 @@ pub fn main(init: std.process.Init) !void {
         },
     };
 
-    var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
-    defer model.deinit(allocator);
-
     //
     // Load the model and compile it
     //
@@ -112,13 +109,28 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
+    var model: models.LoadedModel = undefined;
     var compiled_model = try allocator.create(models.CompiledModel);
     defer allocator.destroy(compiled_model);
-    compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, meshes, args.seqlen, &progress);
-    defer compiled_model.deinit();
+    var model_buffers = buffers: {
+        // Returns at once: the loader sets its backend up on a task of its
+        // own while the model is initialized and compiled. It is freed at
+        // the end of this block, with its pinned host memory, before the
+        // chat starts.
+        var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = args.model });
+        defer loader.deinit();
 
-    // Load buffers after the model compilation to be sure to give enough room to the autotune.
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress);
+        model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
+        errdefer model.deinit(allocator);
+
+        compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, meshes, args.seqlen, &progress);
+        errdefer compiled_model.deinit();
+
+        // Load buffers after the model compilation to be sure to give enough room to the autotune.
+        break :buffers try models.LoadedModel.loadBuffers(&model, allocator, &loader, progress, &store);
+    };
+    defer model.deinit(allocator);
+    defer compiled_model.deinit();
     defer zml.mem.deinitBufferized(allocator, &model_buffers);
 
     progress.end();

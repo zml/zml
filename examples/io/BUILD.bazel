@@ -10,7 +10,7 @@ zig_binary(
     visibility = ["//visibility:public"],
 )
 
-# Tooling: the new loader's validation harness. Its header lists its knobs.
+# Tooling: the loader's validation harness. Its header lists its knobs.
 zig_binary(
     name = "load_check",
     main = "load_check.zig",
