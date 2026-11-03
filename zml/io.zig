@@ -28,6 +28,7 @@ const log = std.log.scoped(.@"zml/io");
 // tests reach them, from here.
 test {
     _ = @import("io/ShardGrid.zig");
+    _ = @import("io/Source.zig");
     _ = @import("io/TensorStore.zig");
     _ = @import("io/backend.zig");
     _ = @import("io/log.zig");

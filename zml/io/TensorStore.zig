@@ -1,11 +1,14 @@
-//! The new loader's store: prefixed views over the entries it takes from a
-//! checkpoint registry. zml does not export it: models and the loader they
-//! use build `zml.io.TensorStore` (io.zig), which borrows its registry, so
-//! production changes go there and the new loader's here.
+//! The new loader's store: it associates model tensors with checkpoint
+//! sources and prefixed views, over the entries it takes from a checkpoint
+//! registry. zml does not export it: models and the loader they use build
+//! `zml.io.TensorStore` (io.zig), which borrows its registry, so production
+//! changes go there and the new loader's here.
 //!
-//! The store owns those entries. Views point to it: once `view` was called
-//! it must not move, and it must outlive them. It borrows the meshes of
-//! `Options.meshes`, which belong to the platform.
+//! The store owns those entries, the bindings, and every source (its
+//! arena). Views and sources point to it: once `view` was called it must
+//! not move, and it must outlive them. It borrows the meshes of
+//! `Options.meshes`, which belong to the platform. Binding cannot fail: a
+//! missing key panics with the key.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -13,13 +16,15 @@ const stdx = @import("stdx");
 const MemorySpace = @import("../platform.zig").Memory.Kind;
 const Quantization = @import("../quantization.zig").Quantization;
 const safetensors = @import("../safetensors.zig");
+const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
+const Tensor = @import("../tensor.zig").Tensor;
 
 const TensorStore = @This();
 
 /// Where the loader delivers a loaded tensor, on every device of its mesh.
-/// The destination is allocated once per device; the host kinds take no
-/// device memory.
+/// The destination is allocated once per device whatever its pieces; the
+/// host kinds take no device memory.
 pub const Memory = enum {
     /// Device memory.
     default,
@@ -50,14 +55,32 @@ pub const Memory = enum {
     }
 };
 
+/// What the loader reads of a bound tensor (`bindingOf`): the source it
+/// fills the tensor from.
+pub const Binding = union(enum) {
+    /// The loader fills the tensor from `source` (`Source.Placed.bind`),
+    /// every byte no piece covers zero.
+    load: Load,
+
+    pub const Load = struct {
+        source: Source.Placed,
+        /// Where the loader delivers this tensor.
+        memory: Memory = .default,
+    };
+};
+
+pub const Source = @import("Source.zig");
+
 registry: safetensors.TensorRegistry,
 meshes: []const *const Sharding.Mesh,
 quantization: ?Quantization.Target,
+id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
+allocator: std.mem.Allocator,
 arena: std.heap.ArenaAllocator,
 
 pub const Options = struct {
-    /// The meshes `View.mesh` names. The slice is copied; the meshes must
-    /// outlive the store.
+    /// The meshes `Source.withPartitioning` and `View.mesh` name. The slice
+    /// is copied; the meshes must outlive the store.
     meshes: []const *const Sharding.Mesh = &.{},
     /// How the platform's FP8 GEMMs want block-FP8 weights, for the code
     /// that binds them (`View.quantization`): `.of(platform)`. Required to
@@ -77,6 +100,8 @@ pub fn init(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry,
         .registry = registry.*,
         .meshes = meshes,
         .quantization = opts.quantization,
+        .id_to_sources = .empty,
+        .allocator = allocator,
         .arena = arena,
     };
     registry.* = .init(registry.arena.child_allocator);
@@ -84,11 +109,19 @@ pub fn init(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry,
     return self;
 }
 
-/// Frees the registry entries `init` took.
+/// Frees the bindings and the sources, then the registry entries `init`
+/// took.
 pub fn deinit(self: *TensorStore) void {
+    self.id_to_sources.deinit(self.allocator);
     self.arena.deinit();
     self.registry.tensors.unlockPointers();
     self.registry.deinit();
+}
+
+/// The binding of tensor `id`, as the loader reads it; null when this store
+/// did not bind it.
+pub fn bindingOf(self: *const TensorStore, id: Tensor.Id) ?Binding {
+    return self.id_to_sources.get(id);
 }
 
 /// The root view, with no prefix. It points to this store, which must not
@@ -113,8 +146,8 @@ pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) *const Sharding.Mes
 }
 
 /// What model code holds: a key prefix over the store's checkpoint, to look
-/// tensors up. A value that keeps its own copy of the prefix (256 bytes at
-/// most, longer panics) and points to the store.
+/// tensors up and bind them. A value that keeps its own copy of the prefix
+/// (256 bytes at most, longer panics) and points to the store.
 pub const View = struct {
     store: *TensorStore,
 
@@ -129,7 +162,8 @@ pub const View = struct {
     }
 
     /// This view under `prefix_` and a dot: `withPrefix("model")` then
-    /// `get("embed")` looks up `model.embed`.
+    /// `get("embed")` looks up `model.embed`. It only scopes lookups;
+    /// nothing is bound.
     pub fn withPrefix(self: *const View, prefix_: []const u8) View {
         var buffer: [256]u8 = undefined;
         const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix(), prefix_ });
@@ -167,6 +201,26 @@ pub const View = struct {
         return self.store.registry.tensors.getPtr(key);
     }
 
+    /// The checkpoint tensor `subkey`, with `tags` (null keeps the
+    /// checkpoint's), placed on `mesh_` by `partitioning` and bound:
+    /// `source(subkey, tags).withPartitioning(mesh_, partitioning).bind()`.
+    /// Panics when the checkpoint has no such tensor.
+    pub fn createTensor(self: View, subkey: []const u8, comptime tags: anytype, comptime mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
+        return self.maybeCreateTensor(subkey, tags, mesh_, partitioning) orelse
+            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix(), subkey });
+    }
+
+    /// Like `createTensor`, but null when the checkpoint has no such tensor.
+    pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, comptime mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
+        const source_ = self.maybeSource(subkey, tags) orelse return null;
+        return source_.withPartitioning(mesh_, partitioning).bind();
+    }
+
+    /// `createTensor` replicated on every device, without a mesh.
+    pub fn createReplicatedTensor(self: View, subkey: []const u8, comptime tags: anytype) Tensor {
+        return self.createTensor(subkey, tags, .replicated, .{});
+    }
+
     /// See `TensorStore.mesh`.
     pub fn mesh(self: View, name: @EnumLiteral()) *const Sharding.Mesh {
         return self.store.mesh(name);
@@ -177,6 +231,20 @@ pub const View = struct {
     pub fn quantization(self: View) Quantization.Target {
         return self.store.quantization orelse
             stdx.debug.panic("TensorStore.Options.quantization is unset: block-FP8 weights bind for a platform; pass .of(platform)", .{});
+    }
+
+    /// The checkpoint tensor `subkey` as a `Source`, with `tags` (null keeps
+    /// the checkpoint's). Panics when the checkpoint has no such tensor.
+    pub fn source(self: View, subkey: []const u8, comptime tags: anytype) Source {
+        return self.maybeSource(subkey, tags) orelse
+            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix(), subkey });
+    }
+
+    /// Like `source`, but null when the checkpoint has no such tensor.
+    pub fn maybeSource(self: View, subkey: []const u8, comptime tags: anytype) ?Source {
+        const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
+        const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
+        return .init(self, subkey, if (has_tags) parsed_tags.constSlice() else null);
     }
 
     /// The checkpoint tensors under this view's prefix: a scan of every key.
@@ -219,4 +287,8 @@ test "get finds exact keys, the registry's own entries, and count the keys under
     try std.testing.expectEqualStrings("layer.experts.0.", layer.withPrefix("experts").withLayer(0).prefix());
     try std.testing.expectEqual(1, layer.withPrefix("experts").count());
     try std.testing.expectEqual(0, layer.withPrefix("gate").count());
+
+    // Every binding of the entry holds the entry itself.
+    const tensor = layer.createReplicatedTensor("experts.0.down_proj.weight", null);
+    try std.testing.expectEqual(entry, store.bindingOf(tensor.id).?.load.source.whole().?);
 }
