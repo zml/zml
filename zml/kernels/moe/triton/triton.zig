@@ -35,8 +35,7 @@ test {
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: zml.moe.Options,
@@ -45,18 +44,17 @@ pub fn fusedExperts(
 
     if (gate_up.quantization) |q| switch (q.scheme) {
         .mxfp4 => if (zml.Compiler.current().platform.target == .cuda) {
-            return fusedExpertsMxfp4(input, ids, weights, gate_up, down, options);
+            return fusedExpertsMxfp4(input, routing, gate_up, down, options);
         },
         else => {},
     };
 
-    return fusedExpertsBase(input, ids, weights, gate_up, down, options);
+    return fusedExpertsBase(input, routing, gate_up, down, options);
 }
 
 pub fn fusedExpertsBase(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: zml.moe.Options,
@@ -71,48 +69,15 @@ pub fn fusedExpertsBase(
         .hidden_states = input,
         .gate_up = gate_up,
         .down = down,
-        .topk_weights = topk_weights,
-        .topk_ids = topk_ids,
+        .topk_weights = routing.weights,
+        .topk_ids = routing.ids,
+        .expert_map = routing.expertMap(),
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,
         .gate_up_layout = layout.gate_up,
         .routing_weight_placement = opts.routing_weight_placement,
     };
-    const expert_partition = gate_up.weight.shape().partition(.expert);
-
-    if (!expert_partition.isSharded()) {
-        return fusedExpertsImpl(args);
-    }
-
-    return zml.ops.manualComputation(
-        (struct {
-            args: FusedExpertsArgs,
-            global_num_experts: i64,
-
-            fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                const local_args = self.args;
-                const local_num_experts = local_args.gate_up.weight.dim(.expert);
-                const partition_id = zml.ops.partitionId().convert(.i32);
-                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                // Map global expert ids to local ids, or -1 for experts outside this partition.
-                const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                    .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                var mapped_args = local_args;
-                mapped_args.expert_map = local_expert_mask.select(
-                    global_expert_ids.sub(expert_start),
-                    zml.Tensor.scalar(-1, .i32),
-                );
-
-                const local_output = fusedExpertsImpl(mapped_args);
-                const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
-                return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
-            }
-        }).call,
-        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
-        input.shape(),
-    );
+    return fusedExpertsImpl(args);
 }
 
 pub const FusedExpertsArgs = struct {
@@ -873,51 +838,6 @@ pub fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(opts.activation.swiglu.scale == null, "triton backend requires swiglu scale to be null", .{});
 }
 
-/// Row-major MXFP4 E2M1 weights and linear E8M0 block32 scales.
-/// BF16 activations are quantized on the GPU to FP8 with per-32 E8M0 scales.
-pub fn fusedExpertsMxfp4(
-    input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
-    options: zml.moe.Options,
-) zml.Tensor {
-    validateOptions(options);
-    stdx.debug.assert(input.dtype() == .bf16, "triton backend only supports bf16 inputs, got {}", .{input.dtype()});
-    stdx.debug.assert(gate_up.bias == null and down.bias == null, "triton backend expects gate_up bias and down bias to be null", .{});
-
-    const gq = gate_up.quantization orelse @panic("triton backend requires gate_up quantization to be set");
-    const dq = down.quantization orelse @panic("triton backend requires down quantization to be set");
-    stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "triton expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
-
-    // Weight storage for mxfp4 in HF is expressed as u8 or i8
-    stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "triton expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
-    stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "triton expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
-
-    const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
-
-    const context: Context = .{
-        .input = input,
-        .ids = ids,
-        .weights = weights,
-        .w1 = gate_up.weight.bitCast(.u8),
-        .s1 = gq.scales,
-        .w2 = down.weight.bitCast(.u8),
-        .s2 = dq.scales,
-        .global_experts = gate_up.weight.dim(.expert),
-        .topk = ids.dim(.topk),
-        .limit = options.activation.swiglu.limit.?,
-        .routing_weight_placement = options.routing_weight_placement,
-        .expert_parallel = expert_parallelism,
-    };
-
-    return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape())
-    else
-        context.body(input.shape());
-}
-
 pub const Config = struct {
     tokens: i64,
     hidden: i64,
@@ -984,178 +904,178 @@ pub fn validateInputs(
     if (!s2.shape().eql(shapes.s2)) return error.InvalidInputShape;
 }
 
-const Context = struct {
+/// Row-major MXFP4 E2M1 weights and linear E8M0 block32 scales.
+/// BF16 activations are quantized on the GPU to FP8 with per-32 E8M0 scales.
+pub fn fusedExpertsMxfp4(
     input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
-    w1: zml.Tensor,
-    s1: zml.Tensor,
-    w2: zml.Tensor,
-    s2: zml.Tensor,
-    global_experts: i64,
-    topk: i64,
-    limit: f32,
-    routing_weight_placement: RoutingWeightPlacement,
-    expert_parallel: bool,
+    routing: zml.moe.LocalRouting,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    options: zml.moe.Options,
+) zml.Tensor {
+    validateOptions(options);
+    stdx.debug.assert(input.dtype() == .bf16, "triton backend only supports bf16 inputs, got {}", .{input.dtype()});
+    stdx.debug.assert(gate_up.bias == null and down.bias == null, "triton backend expects gate_up bias and down bias to be null", .{});
 
-    fn body(self: Context, _: zml.Shape) zml.Tensor {
-        const experts = self.w1.dim(.expert);
-        const hidden = self.w2.dim(1);
-        const intermediate = self.w2.dim(2) * 2;
-        var ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
-        const tokens = ids.dim(.token);
-        if (self.expert_parallel) {
-            const partition_id = zml.ops.partitionId().convert(.i32);
-            ids = ids.sub(partition_id.scale(experts));
-        }
-        const x = self.input.reshape(.{ tokens, hidden });
-        const scales = self.weights.convert(.f32).reshape(.{ tokens, self.topk });
+    const gq = gate_up.quantization orelse @panic("triton backend requires gate_up quantization to be set");
+    const dq = down.quantization orelse @panic("triton backend requires down quantization to be set");
+    stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "triton expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
 
-        const cfg: Config = .{
-            .tokens = tokens,
-            .hidden = hidden,
-            .intermediate = intermediate,
-            .experts = experts,
-            .global_experts = self.global_experts,
-            .topk = self.topk,
-            .swiglu_limit = self.limit,
-            .routing_weight_placement = self.routing_weight_placement,
-        };
+    // Weight storage for mxfp4 in HF is expressed as u8 or i8
+    stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "triton expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
+    stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "triton expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
-        cfg.validate() catch @panic("Invalid MXFP4 MoE configuration");
-        validateInputs(cfg, x, ids, scales, self.w1, self.s1, self.w2, self.s2) catch @panic("Invalid MXFP4 tensor layout");
+    const w1 = gate_up.weight.bitCast(.u8);
+    const w2 = down.weight.bitCast(.u8);
+    const topk = routing.ids.dim(.topk);
+    const experts = w1.dim(.expert);
+    const hidden = w2.dim(1);
+    const intermediate = w2.dim(2) * 2;
+    const ids = routing.localIds().convert(.i32).reshape(.{ .token = .auto, .topk = topk });
+    const tokens = ids.dim(.token);
 
-        const bn = 16;
-        const bk = 512;
+    const x = input.reshape(.{ tokens, hidden });
+    const scales = routing.weights.convert(.f32).reshape(.{ tokens, topk });
 
-        const tile_count = kernels.tiles(cfg.tokens, cfg.topk, cfg.experts, bn);
+    const cfg: Config = .{
+        .tokens = tokens,
+        .hidden = hidden,
+        .intermediate = intermediate,
+        .experts = experts,
+        .global_experts = routing.global_num_experts,
+        .topk = topk,
+        .swiglu_limit = options.activation.swiglu.limit.?,
+        .routing_weight_placement = options.routing_weight_placement,
+    };
 
-        // Quantize activations
-        const q = kernels.Quant.Kernel.call(
-            .{ .x = x },
+    cfg.validate() catch @panic("Invalid MXFP4 MoE configuration");
+    validateInputs(cfg, x, ids, scales, w1, gq.scales, w2, dq.scales) catch @panic("Invalid MXFP4 tensor layout");
+
+    const bn = 16;
+    const bk = 512;
+
+    const tile_count = kernels.tiles(cfg.tokens, cfg.topk, cfg.experts, bn);
+
+    // Quantize activations
+    const q = kernels.Quant.Kernel.call(
+        .{ .x = x },
+        .{
+            .q = .init(.{ cfg.tokens, cfg.hidden }, .f8e4m3fn),
+            .s = .init(.{ cfg.tokens, @divTrunc(cfg.hidden, 32) }, .u8),
+        },
+        .{
+            .cfg = .{ .tokens = cfg.tokens, .hidden = cfg.hidden },
+            .grid = .{ @intCast(@divTrunc(cfg.tokens + kernels.quantRows(cfg.tokens) - 1, kernels.quantRows(cfg.tokens))), @intCast(@divTrunc(cfg.hidden, 128)), 1 },
+            .num_warps = 4,
+            .num_stages = 1,
+        },
+    );
+
+    const dummy = zml.Tensor.scalar(0, .i32);
+    var map = dummy;
+    var perm = dummy;
+    var sched = dummy;
+
+    if (cfg.tokens != 1) {
+        const r = kernels.Route.Kernel.call(
+            .{ .ids = ids },
+            .{ .counts = .init(.{cfg.experts}, .i32), .pos = .init(.{cfg.tokens * cfg.topk}, .i32) },
+            .{ .cfg = .{
+                .tokens = cfg.tokens,
+                .topk = cfg.topk,
+                .expert_offset = cfg.expert_offset,
+            }, .grid = .{ @intCast(cfg.experts), 1, 1 }, .num_warps = 4, .num_stages = 1 },
+        );
+
+        const s = kernels.Schedule.Kernel.call(
+            .{ .ids = ids, .counts = r.counts, .pos = r.pos },
+            .{ .map = .init(.{tile_count * bn}, .i32), .perm = .init(.{cfg.tokens * cfg.topk}, .i32), .sched = .init(.{2 * tile_count + 1}, .i32) },
             .{
-                .q = .init(.{ cfg.tokens, cfg.hidden }, .f8e4m3fn),
-                .s = .init(.{ cfg.tokens, @divTrunc(cfg.hidden, 32) }, .u8),
-            },
-            .{
-                .cfg = .{ .tokens = cfg.tokens, .hidden = cfg.hidden },
-                .grid = .{ @intCast(@divTrunc(cfg.tokens + kernels.quantRows(cfg.tokens) - 1, kernels.quantRows(cfg.tokens))), @intCast(@divTrunc(cfg.hidden, 128)), 1 },
+                .cfg = .{
+                    .tokens = cfg.tokens,
+                    .topk = cfg.topk,
+                    .expert_offset = cfg.expert_offset,
+                    .experts = cfg.experts,
+                    .capacity = tile_count,
+                    .group = bn,
+                },
+                .grid = .{ @intCast(@divTrunc(cfg.tokens * cfg.topk + 127, 128)), 1, 1 },
                 .num_warps = 4,
                 .num_stages = 1,
             },
         );
 
-        const dummy = zml.Tensor.scalar(0, .i32);
-        var map = dummy;
-        var perm = dummy;
-        var sched = dummy;
-
-        if (cfg.tokens != 1) {
-            const r = kernels.Route.Kernel.call(
-                .{ .ids = ids },
-                .{ .counts = .init(.{cfg.experts}, .i32), .pos = .init(.{cfg.tokens * cfg.topk}, .i32) },
-                .{ .cfg = .{
-                    .tokens = cfg.tokens,
-                    .topk = cfg.topk,
-                    .expert_offset = cfg.expert_offset,
-                }, .grid = .{ @intCast(cfg.experts), 1, 1 }, .num_warps = 4, .num_stages = 1 },
-            );
-
-            const s = kernels.Schedule.Kernel.call(
-                .{ .ids = ids, .counts = r.counts, .pos = r.pos },
-                .{ .map = .init(.{tile_count * bn}, .i32), .perm = .init(.{cfg.tokens * cfg.topk}, .i32), .sched = .init(.{2 * tile_count + 1}, .i32) },
-                .{
-                    .cfg = .{
-                        .tokens = cfg.tokens,
-                        .topk = cfg.topk,
-                        .expert_offset = cfg.expert_offset,
-                        .experts = cfg.experts,
-                        .capacity = tile_count,
-                        .group = bn,
-                    },
-                    .grid = .{ @intCast(@divTrunc(cfg.tokens * cfg.topk + 127, 128)), 1, 1 },
-                    .num_warps = 4,
-                    .num_stages = 1,
-                },
-            );
-
-            map = s.map;
-            perm = s.perm;
-            sched = s.sched;
-        }
-
-        // Each narrow tile produces 64 activations: two complete scale groups.
-        const up_columns: i64 = if (cfg.tokens <= 8) 64 else 128;
-        const m = kernels.GateUp.Kernel.call(
-            .{ .q = q.q, .s = q.s, .w = self.w1, .ws = self.s1.bitCast(.u8), .ids = ids, .rw = scales, .map = map, .sched = sched },
-            .{ .mid = .init(.{ tile_count * bn, cfg.intermediate }, .f8e4m3fn), .ms = .init(.{ tile_count * bn, @divTrunc(cfg.intermediate, 32) }, .u8) },
-            .{
-                .cfg = .{
-                    .tokens = cfg.tokens,
-                    .hidden = cfg.hidden,
-                    .intermediate = cfg.intermediate,
-                    .experts = cfg.experts,
-                    .topk = cfg.topk,
-                    .expert_offset = cfg.expert_offset,
-                    .swiglu_limit = cfg.swiglu_limit,
-                    .scale_stride = self.s1.dim(2),
-                    .routing_weight_placement = cfg.routing_weight_placement,
-                    .bn = bn,
-                    .bk = bk,
-                },
-                .grid = .{ @intCast(@divTrunc(cfg.intermediate, up_columns)), @intCast(tile_count), 1 },
-                .num_warps = if (cfg.tokens <= 8) 4 else 8,
-                .num_stages = 2,
-                .global_scratch_memory_size = @intCast(128 * @divTrunc(cfg.intermediate, up_columns) * tile_count),
-            },
-        );
-
-        const d = kernels.Down.Kernel.call(
-            .{ .mid = m.mid, .ms = m.ms, .w = self.w2, .ws = self.s2.bitCast(.u8), .ids = ids, .sched = sched },
-            .{ .d = .init(.{ tile_count * bn, cfg.hidden }, .bf16) },
-            .{
-                .cfg = .{
-                    .tokens = cfg.tokens,
-                    .hidden = cfg.hidden,
-                    .intermediate = cfg.intermediate,
-                    .experts = cfg.experts,
-                    .topk = cfg.topk,
-                    .expert_offset = cfg.expert_offset,
-                    .swiglu_limit = cfg.swiglu_limit,
-                    .scale_stride = self.s2.dim(2),
-                    .routing_weight_placement = cfg.routing_weight_placement,
-                    .bn = bn,
-                    .bk = bk,
-                },
-                .grid = .{ @intCast(@divTrunc(cfg.hidden, 128)), @intCast(tile_count), 1 },
-                .num_warps = if (cfg.tokens <= 8) 4 else 8,
-                .num_stages = 2,
-                .global_scratch_memory_size = @intCast(128 * @divTrunc(cfg.hidden, 128) * tile_count),
-            },
-        );
-
-        const result = kernels.Combine.Kernel.call(
-            .{ .d = d.d, .ids = ids, .perm = perm, .rw = scales },
-            .{ .y = x.shape() },
-            .{
-                .cfg = .{
-                    .tokens = cfg.tokens,
-                    .hidden = cfg.hidden,
-                    .topk = cfg.topk,
-                    .expert_offset = cfg.expert_offset,
-                    .experts = cfg.experts,
-                    .routing_weight_placement = cfg.routing_weight_placement,
-                    .bn = bn,
-                },
-                .grid = .{ @intCast(cfg.tokens), @intCast(@divTrunc(cfg.hidden + kernels.combineBlock(cfg.tokens, cfg.hidden) - 1, kernels.combineBlock(cfg.tokens, cfg.hidden))), 1 },
-                .num_warps = 4,
-                .num_stages = 1,
-            },
-        ).y.reshape(self.input.shape().dims()).withTags(self.input.shape());
-
-        return if (self.expert_parallel)
-            zml.ops.allReduce(result, zml.Tensor.add)
-        else
-            result;
+        map = s.map;
+        perm = s.perm;
+        sched = s.sched;
     }
-};
+
+    // Each narrow tile produces 64 activations: two complete scale groups.
+    const up_columns: i64 = if (cfg.tokens <= 8) 64 else 128;
+    const m = kernels.GateUp.Kernel.call(
+        .{ .q = q.q, .s = q.s, .w = w1, .ws = gq.scales.bitCast(.u8), .ids = ids, .rw = scales, .map = map, .sched = sched },
+        .{ .mid = .init(.{ tile_count * bn, cfg.intermediate }, .f8e4m3fn), .ms = .init(.{ tile_count * bn, @divTrunc(cfg.intermediate, 32) }, .u8) },
+        .{
+            .cfg = .{
+                .tokens = cfg.tokens,
+                .hidden = cfg.hidden,
+                .intermediate = cfg.intermediate,
+                .experts = cfg.experts,
+                .topk = cfg.topk,
+                .expert_offset = cfg.expert_offset,
+                .swiglu_limit = cfg.swiglu_limit,
+                .scale_stride = gq.scales.dim(2),
+                .routing_weight_placement = cfg.routing_weight_placement,
+                .bn = bn,
+                .bk = bk,
+            },
+            .grid = .{ @intCast(@divTrunc(cfg.intermediate, up_columns)), @intCast(tile_count), 1 },
+            .num_warps = if (cfg.tokens <= 8) 4 else 8,
+            .num_stages = 2,
+            .global_scratch_memory_size = @intCast(128 * @divTrunc(cfg.intermediate, up_columns) * tile_count),
+        },
+    );
+
+    const d = kernels.Down.Kernel.call(
+        .{ .mid = m.mid, .ms = m.ms, .w = w2, .ws = dq.scales.bitCast(.u8), .ids = ids, .sched = sched },
+        .{ .d = .init(.{ tile_count * bn, cfg.hidden }, .bf16) },
+        .{
+            .cfg = .{
+                .tokens = cfg.tokens,
+                .hidden = cfg.hidden,
+                .intermediate = cfg.intermediate,
+                .experts = cfg.experts,
+                .topk = cfg.topk,
+                .expert_offset = cfg.expert_offset,
+                .swiglu_limit = cfg.swiglu_limit,
+                .scale_stride = dq.scales.dim(2),
+                .routing_weight_placement = cfg.routing_weight_placement,
+                .bn = bn,
+                .bk = bk,
+            },
+            .grid = .{ @intCast(@divTrunc(cfg.hidden, 128)), @intCast(tile_count), 1 },
+            .num_warps = if (cfg.tokens <= 8) 4 else 8,
+            .num_stages = 2,
+            .global_scratch_memory_size = @intCast(128 * @divTrunc(cfg.hidden, 128) * tile_count),
+        },
+    );
+
+    return kernels.Combine.Kernel.call(
+        .{ .d = d.d, .ids = ids, .perm = perm, .rw = scales },
+        .{ .y = x.shape() },
+        .{
+            .cfg = .{
+                .tokens = cfg.tokens,
+                .hidden = cfg.hidden,
+                .topk = cfg.topk,
+                .expert_offset = cfg.expert_offset,
+                .experts = cfg.experts,
+                .routing_weight_placement = cfg.routing_weight_placement,
+                .bn = bn,
+            },
+            .grid = .{ @intCast(cfg.tokens), @intCast(@divTrunc(cfg.hidden + kernels.combineBlock(cfg.tokens, cfg.hidden) - 1, kernels.combineBlock(cfg.tokens, cfg.hidden))), 1 },
+            .num_warps = 4,
+            .num_stages = 1,
+        },
+    ).y.reshape(input.shape().dims()).withTags(input.shape());
+}

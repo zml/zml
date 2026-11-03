@@ -178,6 +178,30 @@ pub const Backend = enum {
     }
 };
 
+/// Global routing with the expert range owned by this local computation.
+/// Kernels select local ids or a global-to-local map to match their routing algorithm.
+/// Kernels return this range's contribution; `forwardMoe` sums contributions.
+pub const LocalRouting = struct {
+    ids: zml.Tensor,
+    weights: zml.Tensor,
+    global_num_experts: i64,
+    local_num_experts: i64,
+    expert_start: ?zml.Tensor = null,
+
+    pub fn localIds(self: LocalRouting) zml.Tensor {
+        const start = self.expert_start orelse return self.ids;
+        const local = self.ids.cmp(.GE, start).logical(.AND, self.ids.cmp(.LT, start.addConstant(self.local_num_experts)));
+        return local.select(self.ids.sub(start), .scalar(-1, .i32));
+    }
+
+    pub fn expertMap(self: LocalRouting) ?zml.Tensor {
+        const start = self.expert_start orelse return null;
+        const ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
+        const local = ids.cmp(.GE, start).logical(.AND, ids.cmp(.LT, start.addConstant(self.local_num_experts)));
+        return local.select(ids.sub(start), .scalar(-1, .i32));
+    }
+};
+
 pub const Options = struct {
     activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
@@ -198,6 +222,8 @@ pub fn validateRoutingInputs(input: zml.Tensor, ids: zml.Tensor, weights: zml.Te
 
 /// Input has shape {.t, .d}; routing IDs and weights have shape {.t, .topk}.
 /// Returns {.t, .d}. Flatten batched input with merge(.{ .t = .{ .b, .s } }).
+/// Every backend runs in a manual computation; the shared operator routes to
+/// local experts and sums their contributions.
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
@@ -208,16 +234,53 @@ pub fn forwardMoe(
     opts: Options,
 ) zml.Tensor {
     validateRoutingInputs(input, topk_ids, topk_weights);
-    return switch (backend) {
-        .stablehlo => stablehlo.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .cute => cute.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .triton => triton.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .fly => fly.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .mosaic_tpu => mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .metal => metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .tcl => tcl.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+    const expert_parallel = gate_up.weight.shape().partition(.expert).isSharded();
+    if (backend == .metal or backend == .tcl) stdx.debug.assert(!expert_parallel, "This MoE backend does not support expert parallelism", .{});
+    const Call = struct {
+        input: zml.Tensor,
+        ids: zml.Tensor,
+        weights: zml.Tensor,
+        gate_up: zml.nn.Linear,
+        down: zml.nn.Linear,
+        backend: Backend,
+        opts: Options,
+        expert_parallel: bool,
+        global_experts: i64,
+
+        fn forward(args: @This(), _: zml.Shape) zml.Tensor {
+            const routing: LocalRouting = .{
+                .ids = args.ids,
+                .weights = args.weights,
+                .global_num_experts = args.global_experts,
+                .local_num_experts = args.gate_up.weight.dim(.expert),
+                .expert_start = if (args.expert_parallel) zml.ops.partitionId().convert(.i32).scale(args.gate_up.weight.dim(.expert)) else null,
+            };
+            const output = switch (args.backend) {
+                .stablehlo => stablehlo.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .cute => cute.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .triton => triton.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .fly => fly.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .mosaic_tpu => mosaic_tpu.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .metal => metal.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .tcl => tcl.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+            };
+            return if (args.expert_parallel) zml.ops.allReduce(output, zml.Tensor.add) else output;
+        }
     };
+    const args: Call = .{
+        .input = input,
+        .ids = topk_ids,
+        .weights = topk_weights,
+        .gate_up = gate_up,
+        .down = down,
+        .backend = backend,
+        .opts = opts,
+        .expert_parallel = expert_parallel,
+        .global_experts = gate_up.weight.dim(.expert),
+    };
+    const mesh = gate_up.weight.shape()._sharding.mesh orelse zml.Compiler.current().platform.replicated_mesh;
+    return zml.ops.manualComputation(Call.forward, args, input.shape().withPartitioning(mesh, .{}));
 }
 
 pub fn unpackedWeight(linear: zml.nn.Linear) zml.Tensor {

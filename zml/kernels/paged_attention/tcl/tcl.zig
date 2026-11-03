@@ -46,7 +46,7 @@ pub const paged = struct {
         stdx.debug.assert(parameters.seq_lens.dim(.b) > 0 and parameters.block_table.dim(.p) > 0 and k_cache.dim(.page) > 0 and k_cache.dim(.k_chunk) > 0, "TCL attention requires nonempty sequence and cache capacities", .{});
         stdx.debug.assert(k_cache.dim(.page) * k_cache.dim(.k_chunk) <= std.math.maxInt(i32) and q.dim(.b) <= std.math.maxInt(i32), "TCL attention indices must fit in I32", .{});
         const compiler = zml.Compiler.current();
-        stdx.debug.assert(compiler.platform.target == .furiosa and compiler.meshes[0].numDevices() == 1, "TCL attention requires one Furiosa chip", .{});
+        stdx.debug.assert(compiler.platform.target == .furiosa and compiler.platform.devices.len == 1, "TCL attention requires one Furiosa chip", .{});
         const attributes = compiler.platform.devices[0].pjrt_device.attributes(compiler.platform.pjrt_api) catch
             std.debug.panic("TCL attention could not verify the Furiosa device's PE range", .{});
         defer attributes.deinit();
