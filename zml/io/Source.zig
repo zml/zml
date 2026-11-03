@@ -1,7 +1,8 @@
 //! A tensor the loader assembles from checkpoint bytes by moving them, never
-//! by computing: a checkpoint tensor, or reshapes, concatenations and stacks
-//! of checkpoint tensors. The ops are `zml.Tensor`'s shape ops, with the
-//! same names, tags and argument conventions.
+//! by computing: a checkpoint tensor, or slices, reshapes, concatenations
+//! and stacks of checkpoint tensors. The ops are `zml.Tensor`'s shape ops,
+//! with the same names, tags and argument conventions; slices are static
+//! and contiguous.
 //!
 //! A source comes from its store (`View.source`) and its pieces live in
 //! the store's arena, where the ops that rewrite them allocate. Nothing is
@@ -170,6 +171,50 @@ fn reshaped(self: Source, new_shape: Shape) Source {
 }
 
 // Ops that move elements.
+
+/// Like `Tensor.slice`, for a static, contiguous slice (`step` 1).
+pub fn slice(self: Source, axis_: anytype, s: Tensor.Slice) Source {
+    stdx.debug.assert(s.dyn_start == null, "Source.slice takes static slices, got {f}", .{s});
+    stdx.debug.assert(s.step == 1, "Source.slice takes contiguous slices, got {f}", .{s});
+    const a = self.axis(axis_);
+    const range = s.absolute(self.dim(a));
+    const lo: u64 = @intCast(range.start);
+    const hi: u64 = @intCast(range.end);
+    const res_shape = self._shape.setDim(a, range.end - range.start);
+    var ctx: Rewrite = .init(self.store);
+    defer ctx.deinit();
+    for (self._pieces) |piece| {
+        for (ctx.decompose(self._shape, piece)) |axis_piece| ctx.clip(res_shape, axis_piece, a, lo, hi);
+    }
+    const sliced = ctx.finish(res_shape);
+    return if (s.singleton) sliced.reshaped(res_shape.remove(a)) else sliced;
+}
+
+/// Like `Tensor.split`; the result lives in the store's arena.
+pub fn split(self: Source, axis_: anytype, split_sizes: []const i64) []Source {
+    const a = self.axis(axis_);
+    var total: i64 = 0;
+    for (split_sizes) |n| total += n;
+    stdx.debug.assert(total == self.dim(a), "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ total, self.dim(a) });
+    const res = self.store.arena.allocator().alloc(Source, split_sizes.len) catch oom();
+    var start: i64 = 0;
+    for (split_sizes, res) |n, *part| {
+        part.* = self.slice(a, .{ .start = start, .end = start + n });
+        start += n;
+    }
+    return res;
+}
+
+pub fn chunkExact(self: Source, axis_: anytype, comptime n_chunks: comptime_int) [n_chunks]Source {
+    const a = self.axis(axis_);
+    const size = @divExact(self.dim(a), n_chunks);
+    var chunks: [n_chunks]Source = undefined;
+    for (&chunks, 0..) |*chunk, i| {
+        const start = @as(i64, @intCast(i)) * size;
+        chunk.* = self.slice(a, .{ .start = start, .end = start + size });
+    }
+    return chunks;
+}
 
 /// Like `Tensor.concatenate`; the sources must share every dimension but
 /// `axis_`, and the dtype.
@@ -499,6 +544,56 @@ const Rewrite = struct {
         }
     }
 
+    /// Emits in `res_shape` the elements of `axis_piece` whose coordinate on
+    /// `a` is in `[lo, hi)`, at that coordinate minus `lo`.
+    fn clip(self: *Rewrite, res_shape: Shape, axis_piece: AxisPiece, a: u3, lo: u64, hi: u64) void {
+        var span: u64 = 0;
+        var outer: ?usize = null;
+        for (axis_piece.dims.constSlice(), 0..) |d, k| {
+            if (d.axis != a or d.count <= 1) continue;
+            span += (d.count - 1) * d.step;
+            if (outer == null or d.step > axis_piece.dims.get(outer.?).step) outer = k;
+        }
+        const o = axis_piece.origin[a];
+        if (o >= lo and o + span < hi) {
+            var kept = axis_piece;
+            kept.origin[a] = o - lo;
+            self.emit(res_shape, kept);
+            return;
+        }
+        if (o + span < lo or o >= hi) return;
+        // Cut along the outermost dimension on `a`: the steps whose whole
+        // sub-lattice is inside stay one piece, the partial ones recurse.
+        const k = outer.?;
+        const d = axis_piece.dims.get(k);
+        const inner = span - (d.count - 1) * d.step;
+        const full_lo: u64 = if (o >= lo) 0 else std.math.divCeil(u64, lo - o, d.step) catch unreachable;
+        const full_hi: u64 = if (o + inner >= hi) 0 else @min(d.count, (hi - 1 - inner - o) / d.step + 1);
+        if (full_lo < full_hi) {
+            var kept = axis_piece;
+            kept.dims.buffer[k].count = full_hi - full_lo;
+            kept.origin[a] = o + full_lo * d.step - lo;
+            kept.offset += full_lo * d.stride;
+            self.emit(res_shape, kept);
+        }
+        const touch_lo: u64 = if (o + inner >= lo) 0 else std.math.divCeil(u64, lo - o - inner, d.step) catch unreachable;
+        const touch_hi: u64 = @min(d.count, (hi - 1 - o) / d.step + 1);
+        const partial = [_][2]u64{
+            .{ touch_lo, @min(full_lo, touch_hi) },
+            .{ @max(full_hi, touch_lo, full_lo), touch_hi },
+        };
+        for (partial) |range| {
+            var j = range[0];
+            while (j < range[1]) : (j += 1) {
+                var part = axis_piece;
+                part.origin[a] = o + j * d.step;
+                part.offset += j * d.stride;
+                _ = part.dims.orderedRemove(k);
+                self.clip(res_shape, part, a, lo, hi);
+            }
+        }
+    }
+
     /// Flattens `axis_piece` in `res_shape` into the result.
     fn emit(self: *Rewrite, res_shape: Shape, axis_piece: AxisPiece) void {
         const strides = elementStrides(res_shape);
@@ -803,6 +898,71 @@ test "Source interleaves expert vectors as Tensor does" {
     }.build);
 }
 
+test "Source slices rows as Tensor does" {
+    try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.row, .{ .start = 1, .end = 4 });
+        }
+    }.build);
+}
+
+test "Source slices columns as Tensor does" {
+    try expectCase(.{.{ .row = 3, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.col, .{ .start = 1, .end = 3 });
+        }
+    }.build);
+}
+
+test "Source slices by length as Tensor does" {
+    try expectCase(.{.{ .row = 6, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.row, .{ .start = 2, .len = 3 });
+        }
+    }.build);
+}
+
+test "Source slices an interleave as Tensor does" {
+    try expectCase(qkv_inputs, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return interleave(T, x, 2).slice(.row, .{ .start = 3, .end = 7 });
+        }
+    }.build);
+}
+
+test "Source takes a single row as Tensor does" {
+    try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].slice(.row, .single(2));
+        }
+    }.build);
+}
+
+test "Source splits then interleaves as Tensor does" {
+    // qwen3_5's in_proj_qkv sliced into q, k and v, interleaved with z.
+    try expectCase(.{ .{ .row = 6, .col = 3 }, .{ .row = 2, .col = 3 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const qkv = x[0];
+            const members = [4]T{
+                qkv.slice(.row, .{ .start = 0, .end = 2 }),
+                qkv.slice(.row, .{ .start = 2, .end = 4 }),
+                qkv.slice(.row, .{ .start = 4, .end = 6 }),
+                x[1],
+            };
+            return interleave(T, &members, 2);
+        }
+    }.build);
+}
+
+test "Source chunks then stacks as Tensor does" {
+    try expectCase(.{.{ .row = 6, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const chunks = x[0].chunkExact(.row, 3);
+            return T.stack(&.{ chunks[2], chunks[0] }, .last, .pair).insertAxes(0, .{.one}).squeeze(0);
+        }
+    }.build);
+}
+
 test "a source binds as its pieces, which the loader lowers to byte parts" {
     var checkpoint: TestCheckpoint = undefined;
     try checkpoint.init(std.testing.allocator, &.{
@@ -911,4 +1071,7 @@ test "lattices stay one piece per source at checkpoint sizes" {
         try std.testing.expectEqual(@as(u64, 4), part.lattice.runs());
         try std.testing.expectEqual(@as(u64, 3584 * 8192), part.lattice.width);
     }
+    // Slicing through the interleave cuts at most a few pieces.
+    const sliced = finest.slice(.row, .{ .start = 1001, .end = 20001 });
+    try std.testing.expect(sliced._pieces.len <= 6);
 }
