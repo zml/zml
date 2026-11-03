@@ -66,9 +66,10 @@
 //! destinations when its read is exact and addresses each byte once, in
 //! order; a widened read, or parts that overlap, goes through its slot's
 //! blocks and is copied from there. Bytes no part covers are zeroed in
-//! place. Each device of a replicated destination holds a copy of its own,
-//! which the worker writes from the first one. Host and DMA parts never
-//! share a job, and no strided part goes to host memory.
+//! place. The devices holding one box share one allocation, through views
+//! of it (`SharedHostAllocation`), so a replicated destination is written
+//! once. Host and DMA parts never share a job, and no strided part goes to
+//! host memory.
 //!
 //! Locks. Where several pumps are held, they are taken in device order. A
 //! pump's mutex may be held while a released request gives its credit back
@@ -77,6 +78,7 @@
 //! a time.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
@@ -2103,11 +2105,10 @@ const ReadRequest = struct {
                     const tensor = transfer.destination.state.readyValue().?;
                     // The planner checked that the transfers cover the read
                     // in order, each source byte once.
-                    try scatter.add(tensor.hostLanding(transfer, @ctz(transfer.writer_mask)));
+                    try scatter.add(tensor.hostLanding(transfer));
                 }
                 try scatter.flush();
                 std.debug.assert(scatter.file_offset == job.file_offset + read.len);
-                for (transfers) |transfer| transfer.destination.state.readyValue().?.copyToReplicas(transfer);
             },
             .host_bounce => |read| {
                 try self.readBlocks(scratch, blocks, read);
@@ -2118,15 +2119,13 @@ const ReadRequest = struct {
                     std.debug.assert(transfer.landing + transfer.len <= read.len);
                     const piece = blockPiece(blocks, block_size, transfer.landing, transfer.len);
                     std.debug.assert(piece.len == transfer.len);
-                    var writers = transfer.writer_mask;
-                    while (writers != 0) : (writers &= writers - 1) @memcpy(tensor.hostLanding(transfer, @ctz(writers)), piece);
+                    @memcpy(tensor.hostLanding(transfer), piece);
                 }
             },
             .host_fill => {
                 for (transfers) |transfer| {
                     const tensor = transfer.destination.state.readyValue().?;
-                    var writers = transfer.writer_mask;
-                    while (writers != 0) : (writers &= writers - 1) @memset(tensor.hostLanding(transfer, @ctz(writers)), 0);
+                    @memset(tensor.hostLanding(transfer), 0);
                 }
                 return;
             },
@@ -2816,7 +2815,7 @@ const DestinationState = struct {
     targets: []Target = &.{},
     /// A host-resident destination's shards in host memory, which workers
     /// write in place, one per device in canonical order; empty for a DMA
-    /// one.
+    /// one. The devices of one box share theirs (`initHost`).
     host: [][*]u8 = &.{},
 
     /// Creates the destination's buffers and writes the output shell: for a
@@ -2867,29 +2866,62 @@ const DestinationState = struct {
 
     /// Creates a host-resident destination's buffers, one per device of its
     /// grid in canonical order, each in that device's pinned host memory
-    /// space, and reads their host pointers for the workers. The buffers are
-    /// complete before any worker writes them, so they report ready from the
-    /// start; the front end hands them out only once the batch is done.
+    /// space, and reads their host pointers for the workers. The devices
+    /// holding one box (`ShardGrid.writers`) share one allocation: every
+    /// device's shard is a view of it, and the allocation lives until the
+    /// last view is gone (`SharedHostAllocation`). A transfer is then
+    /// written once, through its first writer's shard (`hostLanding`).
+    /// Every direct target lets a host allocation of one device back a view
+    /// on another: CPU, CUDA and ROCm allocate portable pinned memory
+    /// (`Buffer.HostAccessible.init`), and on oneAPI four B70 gather from an
+    /// allocation made in the first one's host memory space, and read it
+    /// back. A target that could not would need a copy per device.
+    /// The buffers are complete before any worker writes them, so they
+    /// report ready from the start; the front end hands them out only once
+    /// the batch is done.
     fn initHost(direct: *Loader, destination: *const Destination) StateInitError!DestinationState {
         const allocator = direct.allocator;
         const platform = direct.platform;
         const api = platform.pjrt_api;
         const grid = &destination.grid;
-        const shards = try allocator.alloc([*]u8, grid.devices.len);
+        const shard_count = grid.devices.len;
+        std.debug.assert(shard_count <= Platform.MAX_NUM_DEVICES);
+        const shards = try allocator.alloc([*]u8, shard_count);
         errdefer allocator.free(shards);
         const dims = grid.local.dims();
         const element_type = pjrtx.bufferTypeFromDtype(grid.local.dtype());
         const layout = platform.defaultMemoryLayout(dims, grid.local.dtype());
 
+        // The writers of each device's box; the first of them creates the
+        // allocation the others view.
+        var box_writers: [Platform.MAX_NUM_DEVICES]u64 = undefined;
+        for (grid.writers[0..grid.box_count]) |writers| {
+            var mask = writers;
+            while (mask != 0) : (mask &= mask - 1) box_writers[@ctz(mask)] = writers;
+        }
+
+        // Creation holds a reference to every shared allocation and its
+        // views one each. Declared before the buffers' cleanup, so a failure
+        // destroys the views first and this frees the owners.
+        var shared: [Platform.MAX_NUM_DEVICES]?*SharedHostAllocation = @splat(null);
+        defer for (shared[0..shard_count]) |allocation| if (allocation) |a| a.release();
         var pjrt_buffers: Buffer.Shards = .empty;
         errdefer for (pjrt_buffers.constSlice()) |buffer| buffer.deinit(api);
-        for (grid.devices, shards) |device, *shard| {
+        for (grid.devices, shards, 0..) |device, *shard, index| {
             // The front end only submits host kinds when every device has
             // a pinned host space (`backend.supportsMemory`).
             const host = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
-            const buffer = try createHostBuffer(direct.io, platform, dims, element_type, layout, host);
-            pjrt_buffers.appendAssumeCapacity(buffer);
-            shard.* = @ptrCast(try buffer.opaqueDeviceMemoryDataPointer(api));
+            if (grid.replicas() > 1) {
+                const first: usize = @ctz(box_writers[index]);
+                if (first == index) shared[index] = try .create(direct.io, platform, dims, element_type, layout, host);
+                const allocation = shared[first].?;
+                pjrt_buffers.appendAssumeCapacity(try allocation.view(platform, dims, element_type, layout, host));
+                shard.* = allocation.data;
+            } else {
+                const buffer = try createHostBuffer(direct.io, platform, dims, element_type, layout, host);
+                pjrt_buffers.appendAssumeCapacity(buffer);
+                shard.* = @ptrCast(try buffer.opaqueDeviceMemoryDataPointer(api));
+            }
         }
 
         destination.output.* = .fromPjrtBuffers(platform, destination.shape, pjrt_buffers.constSlice());
@@ -2902,19 +2934,93 @@ const DestinationState = struct {
         allocator.free(self.host);
     }
 
-    /// Where a host transfer's bytes go on `writer`, one of its writers (a
-    /// canonical device index of `writer_mask`).
-    fn hostLanding(self: *const DestinationState, transfer: Plan.Transfer, writer: usize) []u8 {
-        std.debug.assert(writer < self.host.len and transfer.writer_mask >> @as(u6, @intCast(writer)) & 1 != 0);
-        return self.host[writer][transfer.destination_offset..][0..transfer.len];
+    /// Where a host transfer's bytes go: the allocation its writers, the
+    /// devices of one box, share. Writing it once writes every one of them.
+    fn hostLanding(self: *const DestinationState, transfer: Plan.Transfer) []u8 {
+        const first: usize = @ctz(transfer.writer_mask);
+        std.debug.assert(first < self.host.len);
+        return self.host[first][transfer.destination_offset..][0..transfer.len];
+    }
+};
+
+/// One host allocation that the devices of a box read through views of it,
+/// in their pinned host memory space: the owner buffer is not a shard,
+/// every view holds a reference that its deletion callback drops, and the
+/// last drop destroys the owner. PJRT runs a view's callback once the
+/// view's memory is out of use, after any execution still reading it, so
+/// the allocation outlives its readers whatever order the shards are freed
+/// in, including views of the shards (`Buffer.createView`) that their owner
+/// outlives. On the process heap: the last view may go long after the
+/// loader.
+/// Writing through one view shows on every device, so a shard of a
+/// replicated host-resident destination must not be donated to an
+/// execution that writes it, as with `Buffer.HostAccessible.init(.undonatable)`.
+const SharedHostAllocation = struct {
+    /// Allocations not released yet, counted in tests only.
+    var live: if (builtin.is_test) std.atomic.Value(usize) else void = if (builtin.is_test) .init(0) else {};
+
+    api: *const pjrt.Api,
+    owner: *pjrt.Buffer,
+    data: [*]u8,
+    /// One per live view, and one for `DestinationState.initHost` while it
+    /// creates them.
+    references: std.atomic.Value(usize) = .init(1),
+
+    fn create(
+        io: std.Io,
+        platform: *const Platform,
+        dims: []const i64,
+        element_type: pjrt.BufferType,
+        layout: pjrt.MemoryLayout,
+        memory: *const pjrt.Memory,
+    ) StateInitError!*SharedHostAllocation {
+        const api = platform.pjrt_api;
+        const self = try std.heap.smp_allocator.create(SharedHostAllocation);
+        errdefer std.heap.smp_allocator.destroy(self);
+        const owner = try createHostBuffer(io, platform, dims, element_type, layout, memory);
+        errdefer owner.deinit(api);
+        self.* = .{
+            .api = api,
+            .owner = owner,
+            .data = @ptrCast(try owner.opaqueDeviceMemoryDataPointer(api)),
+        };
+        if (builtin.is_test) _ = live.fetchAdd(1, .monotonic);
+        return self;
     }
 
-    /// Copies a host transfer's bytes from its first writer's shard, where a
-    /// direct read put them, to its other writers'.
-    fn copyToReplicas(self: *const DestinationState, transfer: Plan.Transfer) void {
-        const first = self.hostLanding(transfer, @ctz(transfer.writer_mask));
-        var others = transfer.writer_mask & (transfer.writer_mask - 1);
-        while (others != 0) : (others &= others - 1) @memcpy(self.hostLanding(transfer, @ctz(others)), first);
+    /// A shard in `memory`, holding a reference: the pinned host space of
+    /// its device. Every device can read it.
+    fn view(
+        self: *SharedHostAllocation,
+        platform: *const Platform,
+        dims: []const i64,
+        element_type: pjrt.BufferType,
+        layout: pjrt.MemoryLayout,
+        memory: *const pjrt.Memory,
+    ) StateInitError!*pjrt.Buffer {
+        _ = self.references.fetchAdd(1, .monotonic);
+        errdefer self.release();
+        return platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
+            .device_buffer_ptr = self.data,
+            .dims = dims,
+            .element_type = element_type,
+            .layout = layout,
+            .memory = memory,
+            .on_delete_callback = &onViewDeleted,
+            .on_delete_callback_arg = self,
+        });
+    }
+
+    fn onViewDeleted(_: ?*anyopaque, context: ?*anyopaque) callconv(.c) void {
+        const self: *SharedHostAllocation = @ptrCast(@alignCast(context.?));
+        self.release();
+    }
+
+    fn release(self: *SharedHostAllocation) void {
+        if (self.references.fetchSub(1, .acq_rel) != 1) return;
+        self.owner.deinit(self.api);
+        std.heap.smp_allocator.destroy(self);
+        if (builtin.is_test) _ = live.fetchSub(1, .monotonic);
     }
 };
 
@@ -4865,19 +4971,44 @@ const HostResidentTest = struct {
         const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2, .direct_io = .off });
         defer loader.destroy();
         loader.reads.alignment = alignment;
-        const batch = try loader.submit(&specs, .none);
-        try loader.awaitBatch(batch);
-        defer for (&outputs) |*output| output.deinit();
-        // Host shards in each device's pinned host memory.
-        for (&outputs, globals, memories) |*output, global, memory| try testing.expectShards(allocator, io, output, global, memory);
-        // Every credit, with its blocks, came back once the workers stopped
-        // (`stopWorkers`).
-        loader.stopWorkers();
-        try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+        const live_before = SharedHostAllocation.live.load(.acquire);
+        {
+            const batch = try loader.submit(&specs, .none);
+            try loader.awaitBatch(batch);
+            defer for (&outputs) |*output| output.deinit();
+            // Host shards in each device's pinned host memory.
+            for (&outputs, globals, memories) |*output, global, memory| try testing.expectShards(allocator, io, output, global, memory);
+            // Every credit, with its blocks, came back once the workers
+            // stopped (`stopWorkers`).
+            loader.stopWorkers();
+            try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+
+            // The replicated host ones are one allocation.
+            for (outputs[3..5]) |output| {
+                const shards = output._shards.constSlice();
+                const first = try shards[0].opaqueDeviceMemoryDataPointer(platform.pjrt_api);
+                for (shards[1..]) |shard| {
+                    const pointer = try shard.opaqueDeviceMemoryDataPointer(platform.pjrt_api);
+                    try std.testing.expect(pointer == first);
+                }
+            }
+            // The two replicated outputs.
+            try std.testing.expectEqual(live_before + 2, SharedHostAllocation.live.load(.acquire));
+            // Shards may be freed in any order: free one replicated output's
+            // last first; its allocation goes with its last view.
+            std.mem.reverse(*pjrt.Buffer, outputs[3]._shards.slice());
+        }
+        // PJRT may run the views' deletion callbacks on its own threads,
+        // just after the shards are freed.
+        var polls: usize = 0;
+        while (SharedHostAllocation.live.load(.acquire) != live_before) : (polls += 1) {
+            if (polls == 5000) return error.TestUnexpectedResult;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
     }
 };
 
-test "host-resident destinations are written in place, or through blocks when reads are widened or overlap" {
+test "host-resident destinations are written in place, through blocks when reads are widened or overlap, and replicas share one allocation" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var devices: testing.Devices = undefined;
