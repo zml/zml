@@ -672,8 +672,19 @@ pub const Client = opaque {
     };
 
     pub fn createUninitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
+        return self.createUninitializedBufferThrough(api, args, Api.call);
+    }
+
+    /// As `createUninitializedBuffer`, for a request the caller expects to
+    /// fail: its error is logged at debug level only.
+    pub fn createUninitializedBufferSilent(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
+        return self.createUninitializedBufferThrough(api, args, Api.callSilent);
+    }
+
+    /// `call` is `Api.call` or `Api.callSilent`.
+    fn createUninitializedBufferThrough(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs, comptime call: anytype) ApiError!*Buffer {
         var layout = args.layout.toCStruct();
-        const ret = try api.call(.PJRT_Client_CreateUninitializedBuffer, .{
+        const ret = try call(api, .PJRT_Client_CreateUninitializedBuffer, .{
             .client = self.inner(),
             .shape_dims = args.dims.ptr,
             .shape_num_dims = args.dims.len,

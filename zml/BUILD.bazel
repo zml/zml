@@ -192,6 +192,11 @@ zig_library(
             "//platforms/cuda/flashinfer_cutlass_moe",
         ],
         "//conditions:default": [],
+    }) + select({
+        "//platforms:rocm.enabled": [
+            "//platforms/rocm",
+        ],
+        "//conditions:default": [],
     }),
 )
 

@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_rocm = @import("platforms/rocm");
 const stdx = @import("stdx");
 pub const Target = @import("platforms").Platform;
 
@@ -304,6 +305,16 @@ pub const Platform = struct {
     meshes: std.StringArrayHashMapUnmanaged(*const zml.Mesh),
     replicated_mesh: *const zml.Mesh,
     io_impl: IoImpl,
+    /// Whether `releaseFreedDeviceMemory` asks the devices to give freed
+    /// memory back. `init` sets it for XLA's VMM allocator on CUDA and ROCm
+    /// (`CreateOptions.XlaGpu.Allocator.vmm`), which keeps freed memory
+    /// mapped, and counted in use, until it is reused or reclaimed. Null
+    /// otherwise: other allocators free at once, and oneAPI's VMM allocator
+    /// is not proven to follow the same rule. The flag lives in the
+    /// platform's arena, not in `Platform`: the first device that does not
+    /// answer as the VMM allocator does clears it for good, through a
+    /// `*const Platform`, without writing to the platform.
+    releases_freed_memory: ?*std.atomic.Value(bool) = null,
 
     pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
 
@@ -355,6 +366,16 @@ pub const Platform = struct {
         errdefer platform.arena.deinit();
         errdefer if (comptime Target.cuda.isEnabled()) platform.state.deinit();
         try platform.meshes.ensureTotalCapacity(arena, 8);
+        const keeps_freed_memory = switch (target) {
+            .cuda => options.cuda.allocator == .vmm,
+            .rocm => options.rocm.allocator == .vmm,
+            else => false,
+        };
+        if (keeps_freed_memory) {
+            const releases = try arena.create(std.atomic.Value(bool));
+            releases.* = .init(true);
+            platform.releases_freed_memory = releases;
+        }
 
         {
             const devices = try arena.alloc(Device, pjrt_devices.len);
@@ -465,6 +486,77 @@ pub const Platform = struct {
         }
         try group.await(io);
         if (first_error.get()) |err| return err;
+    }
+
+    /// Gives back to the devices memory that nothing uses but that stays
+    /// held: the freed buffers XLA's VMM allocator keeps, which
+    /// `Device.memoryStats` counts in `bytes_in_use`, and on ROCm what the
+    /// HIP runtime keeps.
+    ///
+    /// XLA's VMM allocator keeps a freed allocation mapped, and counted in
+    /// use, until a request of the same size reuses it, a request beyond
+    /// the device's limit reclaims it, or an executable with remapped
+    /// command buffers is destroyed. A request one byte beyond the limit
+    /// completes the deferred frees of the device's memory, once its
+    /// compute stream reached them, then fails with `ResourceExhausted`, as
+    /// expected. It leaves out the frees of collective memory, which stay
+    /// counted, and of pinned host memory, which `bytes_in_use` does not
+    /// count. Any other answer means the plugin does not follow that rule:
+    /// it is logged once, naming the device, and clears
+    /// `releases_freed_memory`, so later calls skip this part. This part is
+    /// a no-op for other allocators, which free at once, and for a device
+    /// that reports no limit.
+    ///
+    /// On ROCm, whatever the allocator, it first makes the HIP runtime give
+    /// back the device memory it keeps outside the allocator, chiefly the
+    /// scratch memory of kernels that spill registers, which `memoryStats`
+    /// never counts but the devices do
+    /// (`platforms_rocm.releaseRuntimeDeviceMemory`). That part reaches
+    /// every queue the process has on these devices, other platforms'
+    /// included, and makes running work wait: each queue holding scratch is
+    /// suspended and resumed, the call waits for its kernels using scratch,
+    /// and allocations on the device stall meanwhile. A call within a load
+    /// can overlap the load's other compiles and transfers, which then wait
+    /// too. A missing HIP runtime, or a device that does not refuse, is
+    /// logged once and ends that part for the process.
+    pub fn releaseFreedDeviceMemory(self: *const Platform) void {
+        if (comptime Target.rocm.isEnabled()) {
+            if (self.target == .rocm) _ = self.releaseRocmRuntimeMemory();
+        }
+        const releases = self.releases_freed_memory orelse return;
+        for (self.devices) |*device| {
+            if (!releases.load(.monotonic)) return;
+            const limit = device.memoryStats().bytes_limit orelse continue;
+            // A limit that large is no limit: nothing goes beyond it.
+            const beyond_limit = std.math.cast(i64, limit + 1) orelse continue;
+            const dims: []const i64 = &.{beyond_limit};
+            const answer: []const u8 = if (self.pjrt_client.createUninitializedBufferSilent(self.pjrt_api, .{
+                .dims = dims,
+                .element_type = pjrtx.bufferTypeFromDtype(.u8),
+                .layout = self.defaultMemoryLayout(dims, .u8),
+                .dst = .{ .memory = device.memory(.default).?.pjrt_memory },
+            })) |buffer| answer: {
+                buffer.deinit(self.pjrt_api);
+                break :answer "a buffer";
+            } else |err| switch (err) {
+                error.ResourceExhausted => continue,
+                else => @errorName(err),
+            };
+            if (releases.swap(false, .monotonic)) {
+                log.warn("Device {d} answered a request beyond its memory limit with {s}, not ResourceExhausted; freed device memory is no longer given back and may stay counted as in use", .{ device.id(), answer });
+            }
+            return;
+        }
+    }
+
+    /// `platforms_rocm.releaseRuntimeDeviceMemory` over every device: a
+    /// device's HIP ordinal is its local hardware id.
+    fn releaseRocmRuntimeMemory(self: *const Platform) bool {
+        var ordinals: [MAX_NUM_DEVICES]c_int = undefined;
+        for (self.devices, ordinals[0..self.devices.len]) |*device, *ordinal| {
+            ordinal.* = device.localHardwareId();
+        }
+        return platforms_rocm.releaseRuntimeDeviceMemory(ordinals[0..self.devices.len]);
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -1121,4 +1213,57 @@ test "platform device allocators can be warmed repeatedly" {
 
     try platform.warmupDeviceAllocators(std.testing.io);
     try platform.warmupDeviceAllocators(std.testing.io);
+}
+
+test "platform ROCm devices refuse a request for their whole memory, then still work" {
+    if (comptime !Target.rocm.isEnabled()) return error.SkipZigTest;
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+
+    // Every device refuses a request for its whole memory, the request ROCr
+    // answers by reclaiming its queues' scratch and freeing its caches. The
+    // release itself is not visible from here: HIP counts ROCr's caches as
+    // free, and only the driver's counters in sysfs show it.
+    try std.testing.expect(platform.releaseRocmRuntimeMemory());
+
+    // The devices still take and give back data afterwards.
+    const values = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, .init(.{ .n = values.len }, .u32), std.mem.sliceAsBytes(&values));
+    defer buffer.deinit();
+    const read: zml.Slice = try buffer.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer read.free(std.testing.allocator);
+    try std.testing.expectEqualSlices(u32, &values, read.constItems(u32));
+}
+
+test "platform gives freed device memory back" {
+    const platform = zml.testing.env();
+    // On GPU CI, CUDA and ROCm run this with XLA's VMM allocator.
+    const releases = platform.releases_freed_memory orelse return error.SkipZigTest;
+    const device = &platform.devices[0];
+    // Without a limit the drain does nothing.
+    try std.testing.expect(device.memoryStats().bytes_limit != null);
+
+    // An odd size, so that no request of the same size reuses it once freed.
+    const size = 64 * 1024 * 1024 + 4096;
+    const dims: []const i64 = &.{size};
+    const buffer = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, .{
+        .dims = dims,
+        .element_type = pjrtx.bufferTypeFromDtype(.u8),
+        .layout = platform.defaultMemoryLayout(dims, .u8),
+        .dst = .{ .memory = device.memory(.default).?.pjrt_memory },
+    });
+    {
+        // Once its allocation is ready, destroying it frees it at once,
+        // not later on another thread.
+        errdefer buffer.deinit(platform.pjrt_api);
+        const ready = buffer.readyEvent(platform.pjrt_api);
+        defer ready.deinit(platform.pjrt_api);
+        try ready.await(platform.pjrt_api, std.testing.io);
+    }
+    buffer.deinit(platform.pjrt_api);
+    const in_use_freed = device.memoryStats().bytes_in_use;
+
+    platform.releaseFreedDeviceMemory();
+    try std.testing.expect(releases.load(.monotonic));
+    try std.testing.expect(device.memoryStats().bytes_in_use + size <= in_use_freed);
 }
