@@ -180,6 +180,11 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
         return;
     }
 
+    if (FromStruct == ToStruct and !comptime Contains(FromStruct, From)) {
+        to.* = from;
+        return;
+    }
+
     if (@sizeOf(ToStruct) == 0) return;
 
     switch (type_info_to) {

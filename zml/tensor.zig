@@ -4802,14 +4802,14 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation((struct {
+                ops.manualComputation2((struct {
                     input: Tensor,
                     name: []const u8,
 
                     fn body(body_ctx: @This(), _: void) void {
                         ops.customCall("zml$print", body_ctx.input, {}, .{ .name = body_ctx.name }, .{ .has_side_effect = true });
                     }
-                }).body, .{ .input = input, .name = full_name }, {});
+                }).body, .{ .input = input, .name = full_name }, {}, .{ .mesh = ctx.platform.replicated_mesh, .in_specs = .replicated, .out_specs = .replicated });
             },
             .oneapi, .neuron, .furiosa => {},
         }
