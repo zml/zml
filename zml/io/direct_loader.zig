@@ -386,6 +386,36 @@ const Planner = struct {
     }
 };
 
+/// Reads `[file_offset, file_offset + minimum)`, and possibly more, into
+/// `buffers` in order, consuming them as it reads; bytes past `minimum` may
+/// stay unread. The io takes as many buffers per call as it can (VFS's
+/// direct read `IOV_MAX`, std's and zio's 8, a remote read all); a short
+/// read resumes where it stopped. Reading stops once `minimum` bytes are
+/// in, so the file may end only past `minimum`: the bytes after it are
+/// padding a caller added to align the read, and the read that would fetch
+/// them can start unaligned, which a file read directly refuses. Returns
+/// the bytes read.
+fn readFilePositionalAllV(
+    io: std.Io,
+    file: std.Io.File,
+    buffers: [][]u8,
+    file_offset: u64,
+    minimum: u64,
+) !u64 {
+    var index: usize = 0;
+    var completed: u64 = 0;
+    while (completed < minimum) {
+        std.debug.assert(index < buffers.len);
+        const bytes_read = try file.readPositional(io, buffers[index..], file_offset + completed);
+        if (bytes_read == 0) return error.UnexpectedEndOfFile;
+        completed += bytes_read;
+        var rest = bytes_read;
+        while (index < buffers.len and rest >= buffers[index].len) : (index += 1) rest -= buffers[index].len;
+        if (rest != 0) buffers[index] = buffers[index][rest..];
+    }
+    return completed;
+}
+
 /// A value initialized at most once by whichever task touches it first,
 /// with the initializer that task passes. Concurrent callers wait on the
 /// event; a failed initialization keeps its error code and re-materializes
@@ -553,6 +583,42 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 8), aligned_plan.jobs[1].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 5), aligned_plan.jobs[2].kind.dma_read.len);
+}
+
+// Source read tests.
+
+test "readFilePositionalAllV resumes short reads and stops at minimum" {
+    const OneByteIo = struct {
+        const file_end = 11;
+
+        /// Reads one byte per call, the low byte of its offset, from a file
+        /// that ends at `file_end`, and counts the calls in `userdata`.
+        fn fileReadPositional(userdata: ?*anyopaque, _: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            const calls: *usize = @ptrCast(@alignCast(userdata.?));
+            calls.* += 1;
+            if (offset >= file_end) return 0;
+            for (data) |buffer| {
+                if (buffer.len == 0) continue;
+                buffer[0] = @truncate(offset);
+                return 1;
+            }
+            return 0;
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileReadPositional = OneByteIo.fileReadPositional;
+    var calls: usize = 0;
+    const io: std.Io = .{ .userdata = &calls, .vtable = &vtable };
+    const file: std.Io.File = .{ .handle = 0, .flags = .{ .nonblocking = false } };
+
+    var output: [5]u8 = @splat(0xaa);
+    var buffers = [_][]u8{ output[0..1], output[1..1], output[1..3], output[3..5] };
+    try std.testing.expectEqual(@as(u64, 4), try readFilePositionalAllV(io, file, &buffers, 7, 4));
+    try std.testing.expectEqual(@as(usize, 4), calls);
+    try std.testing.expectEqualSlices(u8, &.{ 7, 8, 9, 10, 0xaa }, &output);
+
+    var past_end = [_][]u8{&output};
+    try std.testing.expectError(error.UnexpectedEndOfFile, readFilePositionalAllV(io, file, &past_end, 7, output.len));
 }
 
 // LazyOnce tests.
