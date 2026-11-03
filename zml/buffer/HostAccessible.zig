@@ -17,6 +17,7 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Buffer = @import("../buffer.zig").Buffer;
+const deviceMemory = @import("../buffer.zig").deviceMemory;
 const PjrtBufferMetadata = @import("../buffer.zig").PjrtBufferMetadata;
 const Platform = @import("../platform.zig").Platform;
 const Shape = @import("../shape.zig").Shape;
@@ -249,7 +250,7 @@ pub fn init(
         ._shards = .empty,
     };
     const metadata: PjrtBufferMetadata = .init(platform, shape_);
-    const devices = platform.physical_mesh.devices_in_canonical_order;
+    const devices = metadata.placement.mesh().?.devicesInCanonicalOrder();
     const api = platform.pjrt_api;
 
     var allocations: HostPinnedAllocations = .empty;
@@ -259,7 +260,7 @@ pub fn init(
     errdefer allocations.deinitHandles(api, buffer._shards.constSlice());
 
     for (devices, 0..) |device, shard_index| {
-        const memory = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
+        const memory = deviceMemory(platform, device, .host_pinned).pjrt_memory;
         const origin: Coordinates = .ofShard(&metadata.placement, shard_index, metadata.shape);
         const shared_region = if (can_share_allocations) allocations.findRegion(origin, metadata.placement.localShape(metadata.shape)) else null;
 

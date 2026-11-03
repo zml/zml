@@ -55,6 +55,16 @@ pub const Buffer = struct {
         pub fn devicePtr(self: *const Shard) *anyopaque {
             return self._pjrt_buffer.opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
         }
+
+        /// Copies this shard's bytes to `destination`, which must hold the
+        /// shard's byte size, and waits for the copy.
+        pub fn toHost(self: *const Shard, io: std.Io, destination: []u8) !void {
+            const maybe_event = try self._pjrt_buffer.toHostBuffer(self._platform.pjrt_api, destination);
+            if (maybe_event) |event| {
+                defer event.deinit(self._platform.pjrt_api);
+                try event.await(self._platform.pjrt_api, io);
+            }
+        }
     };
 
     pub const ShardIterator = struct {
@@ -118,6 +128,8 @@ pub const Buffer = struct {
         return @intCast(self._shards.len);
     }
 
+    /// One shard per device of the shape's mesh (the platform's replicated
+    /// mesh when it names none), in that mesh's canonical device order.
     pub fn shards(self: *const Buffer) ShardIterator {
         return .{
             ._platform = self._platform,
@@ -155,7 +167,6 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const byte_size: usize = if (packed_shape.rank() == 0)
             packed_shape.dtype().sizeOf()
         else
@@ -163,8 +174,8 @@ pub const Buffer = struct {
         stdx.debug.assert(data_.len == byte_size, "Expected data length {}, got {}", .{ byte_size, data_.len });
         const base_ptr = data_.ptr;
 
-        for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
-            const memory = platform.devices[device.id].memory(opts.memory).?;
+        for (placement.mesh().?.devicesInCanonicalOrder(), 0..) |device, device_index| {
+            const memory = deviceMemory(platform, device, opts.memory);
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device_index, base_ptr),
@@ -247,10 +258,8 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-
-        for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const memory = platform.devices[device.id].memory(opts.memory).?;
+        for (metadata.placement.mesh().?.devicesInCanonicalOrder()) |device| {
+            const memory = deviceMemory(platform, device, opts.memory);
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 // Change for each device
                 .dst = .{ .memory = memory.pjrt_memory },
@@ -294,14 +303,14 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
         const placement = placementOrPanic(self._platform, self._shape);
-        for (0..self._platform.physical_mesh.devices_in_canonical_order.len) |shard_index| {
+        for (self._shards.constSlice(), 0..) |shard, shard_index| {
             // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
             const sub_slice = placement.shardSlice(shard_index, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
 
             const size_bytes = placement.localShape(self._shape).byteSize();
             const destination = sub_slice.data()[0..size_bytes];
-            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
+            const maybe_event = try shard.toHostBuffer(self._platform.pjrt_api, destination);
 
             if (maybe_event) |event| {
                 defer event.deinit(self._platform.pjrt_api);
@@ -321,9 +330,9 @@ pub const Buffer = struct {
         var shard_slice = try Slice.alloc(allocator, placement.localShape(self._shape));
         defer shard_slice.free(allocator);
 
-        for (0..self._platform.physical_mesh.devices_in_canonical_order.len) |shard_index| {
+        for (self._shards.constSlice(), 0..) |shard, shard_index| {
             const sub_slice = placement.shardSlice(shard_index, slice);
-            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
+            const maybe_event = try shard.toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
                 defer event.deinit(self._platform.pjrt_api);
                 try event.await(self._platform.pjrt_api, io);
@@ -420,6 +429,41 @@ test "device round-trip" {
     }
 }
 
+test "a buffer on a sub-mesh has one shard per device of that mesh" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    // Four devices: the accelerator's when it has them, else a CPU platform's
+    // (none on a host without the CPU plugin, such as aarch64 Linux).
+    var devices: testing.Devices = undefined;
+    devices.init(allocator, io, 4) catch return error.SkipZigTest;
+    defer devices.deinit();
+    const platform = devices.platform;
+    // Two of the four devices, out of the platform's order.
+    const nodes = [_]Sharding.PhysicalNode{ .device(platform.devices[3]), .device(platform.devices[1]) };
+    var physical: Sharding.PhysicalMesh = try .fromTree(allocator, platform.target, .axis(.bus, .tree, &nodes));
+    defer physical.deinit(allocator);
+    const mesh: Sharding.Mesh = try .init("pair", &physical, .mesh(.{ .model = .high_bandwidth }), .parseBindings(.{ .model = .bus }));
+
+    var values: [8]u32 = undefined;
+    for (&values, 0..) |*value, i| value.* = @intCast(i);
+    const shape = Shape.init(.{ .b = 4, .d = 2 }, .u32).withPartitioning(&mesh, .{ .b = .model });
+    var buffer: Buffer = try .fromBytes(io, platform, shape, std.mem.sliceAsBytes(&values));
+    defer buffer.deinit();
+    try testing.expectShards(allocator, io, &buffer, std.mem.sliceAsBytes(&values), .default);
+
+    const read: Slice = try buffer.toSliceAlloc(allocator, io);
+    defer read.free(allocator);
+    try std.testing.expectEqualSlices(u32, &values, read.constItems(u32));
+    var into: [8]u32 = undefined;
+    try buffer.toSlice(io, .init(shape, std.mem.sliceAsBytes(&into)));
+    try std.testing.expectEqualSlices(u32, &values, &into);
+
+    const pinned: Buffer.HostAccessible = try .init(allocator, io, platform, shape, .undonatable);
+    defer pinned.deinit(allocator);
+    pinned.view(u32).copyFrom(&values);
+    try testing.expectShards(allocator, io, &pinned.buffer, std.mem.sliceAsBytes(&values), .host_pinned);
+}
+
 pub const PjrtBufferMetadata = struct {
     shape: Shape,
     ty: pjrt.BufferType,
@@ -445,10 +489,16 @@ pub const PjrtBufferMetadata = struct {
     }
 };
 
+/// The `kind` memory of `device`, a device of a buffer's mesh, which names it
+/// by its index in `platform.devices`. Outside `Buffer` for `Buffer.HostAccessible`.
+pub fn deviceMemory(platform: *const Platform, device: Sharding.Device, kind: Memory.Kind) *const Memory {
+    stdx.debug.assert(device.id < platform.devices.len, "Mesh device {d} is not one of the {d} devices of {t}", .{ device.id, platform.devices.len, platform.target });
+    return platform.devices[device.id].memory(kind) orelse stdx.debug.panic("Device {d} doesn't have {t} memory", .{ device.id, kind });
+}
+
 fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
-    var sh = shape;
-    if (sh._sharding.mesh == null) sh._sharding.mesh = platform.replicated_mesh;
-    return Sharding.Placement.init(&sh) catch |err| {
+    const placed = platform.placedShape(shape);
+    return Sharding.Placement.init(&placed) catch |err| {
         @branchHint(.cold);
         std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ shape, err });
     };

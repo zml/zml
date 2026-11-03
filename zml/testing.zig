@@ -7,6 +7,8 @@ const Platform = @import("platform.zig").Platform;
 const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
+/// The new loader's delivery kinds; zml does not export its store.
+const LoadMemory = @import("io/TensorStore.zig").Memory;
 
 const log = std.log.scoped(.@"zml/testing");
 
@@ -365,6 +367,51 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
     return error.TestExpectedEqual;
 }
 
+/// `device_count` devices for a loader test: the accelerator the tests run
+/// on (`env`, shared and never freed) when it has that many, otherwise a CPU
+/// platform with exactly that many, freed by `deinit`. `physical` lays the
+/// first `device_count` devices on one axis, so a mesh over it (`mesh`)
+/// places on exactly those, whatever the platform has. Must not move after
+/// `init`: meshes point at `physical`.
+pub const Devices = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    owned: ?*Platform,
+    physical: Sharding.PhysicalMesh,
+
+    pub fn init(self: *Devices, allocator: std.mem.Allocator, io: std.Io, device_count: usize) !void {
+        const shared = env();
+        const owned: ?*Platform = if (shared.target != .cpu and shared.devices.len >= device_count)
+            null
+        else
+            try Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = @intCast(device_count) } });
+        errdefer if (owned) |platform| platform.deinit(allocator, io);
+        const platform: *const Platform = if (owned) |p| p else shared;
+        const nodes = try allocator.alloc(Sharding.PhysicalNode, device_count);
+        defer allocator.free(nodes);
+        for (nodes, platform.devices[0..device_count]) |*node, device| node.* = .device(device);
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .owned = owned,
+            .physical = try .fromTree(allocator, platform.target, .axis(.bus, .tree, nodes)),
+        };
+    }
+
+    pub fn deinit(self: *Devices) void {
+        self.physical.deinit(self.allocator);
+        if (self.owned) |platform| platform.deinit(self.allocator, self.io);
+        self.* = undefined;
+    }
+
+    /// A mesh named `name` whose one axis, `model`, spans the devices.
+    pub fn mesh(self: *const Devices, name: []const u8) !Sharding.Mesh {
+        return .init(name, &self.physical, .mesh(.{ .model = .high_bandwidth }), .parseBindings(.{ .model = .bus }));
+    }
+};
+
 pub const TensorBytes = struct {
     name: []const u8,
     /// The safetensors dtype name, such as "U16".
@@ -428,6 +475,52 @@ pub fn writeSafetensorsFile(
 /// Distinct, nonzero bytes for test tensor number `seed`.
 pub fn pattern(bytes: []u8, seed: u8) void {
     for (bytes, 0..) |*byte, index| byte.* = (@as(u8, @truncate(index *% 29)) +% seed *% 53) | 1;
+}
+
+/// Reads every shard of `buffer` back, in its mesh's device order, and
+/// checks that it lives in `memory`'s space and holds that device's box of
+/// `global`, the whole tensor's row-major bytes (sub-byte elements packed).
+/// A buffer without a mesh is replicated on the platform's devices. On
+/// CPU/neuron/metal every memory kind is the one memory space, so only
+/// CUDA/ROCm/oneAPI tell them apart.
+pub fn expectShards(allocator: std.mem.Allocator, io: std.Io, buffer: *const zml.Buffer, global: []const u8, memory: LoadMemory) !void {
+    const platform = buffer._platform;
+    const shape = platform.placedShape(buffer.shape()).packedShape();
+    try std.testing.expectEqual(shape.byteSize(), global.len);
+    const placement: Sharding.Placement = try .init(&shape);
+    const devices = placement.mesh().?.devicesInCanonicalOrder();
+    try std.testing.expectEqual(devices.len, buffer._shards.len);
+    const shard_bytes = placement.localShape(shape).byteSize();
+    const actual = try allocator.alloc(u8, shard_bytes);
+    defer allocator.free(actual);
+    const expected = try allocator.alloc(u8, shard_bytes);
+    defer allocator.free(expected);
+    const rank = shape.rank();
+    const strides = shape.computeByteStrides();
+    var shards = buffer.shards();
+    for (devices, 0..) |device, device_index| {
+        const shard = shards.next().?;
+        try std.testing.expect(shard._pjrt_buffer.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory.space()).?.pjrt_memory);
+        try shard.toHost(io, actual);
+        // The device's box, one run of the last axis per index of the others.
+        const box = placement.slices(device_index, shape);
+        const run: usize = if (rank == 0) shape.dtype().sizeOf() else @intCast(box.get(rank - 1).size * strides.get(rank - 1));
+        var index: [zml.Shape.MAX_RANK]i64 = @splat(0);
+        var cursor: usize = 0;
+        while (cursor < expected.len) : (cursor += run) {
+            var offset: i64 = 0;
+            for (0..rank) |axis| offset += (box.get(axis).start + index[axis]) * strides.get(axis);
+            @memcpy(expected[cursor..][0..run], global[@intCast(offset)..][0..run]);
+            var axis = rank -| 1;
+            while (axis > 0) {
+                axis -= 1;
+                index[axis] += 1;
+                if (index[axis] < box.get(axis).size) break;
+                index[axis] = 0;
+            }
+        }
+        try std.testing.expectEqualSlices(u8, expected, actual);
+    }
 }
 
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
