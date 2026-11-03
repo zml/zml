@@ -1,9 +1,9 @@
 //! A tensor the loader assembles from checkpoint bytes by moving them, never
 //! by computing: a checkpoint tensor, or slices, reshapes, transposes,
-//! paddings, concatenations and stacks of checkpoint tensors. The ops are
-//! `zml.Tensor`'s shape ops, with the same names, tags and argument
-//! conventions; slices are static and contiguous, and padding is zeros
-//! only.
+//! broadcasts, paddings, concatenations and stacks of checkpoint tensors.
+//! The ops are `zml.Tensor`'s shape ops, with the same names, tags and
+//! argument conventions; slices are static and contiguous, and padding is
+//! zeros only.
 //!
 //! A source comes from its store (`View.source`) and its pieces live in
 //! the store's arena, where the ops that rewrite them allocate. Nothing is
@@ -281,6 +281,46 @@ pub fn pad(self: Source, padding_value: anytype, paddings: anytype) Source {
             }
             for (axis_piece.dims.slice()) |*d| d.step *= @intCast(options.get(d.axis).interior + 1);
             ctx.emit(res_shape, axis_piece.*);
+        }
+    }
+    return ctx.finish(res_shape);
+}
+
+/// Like `Tensor.broad`: repeats the elements along the axes `other` adds or
+/// grows from 1. The loader reads a few large repetitions once each, and
+/// copies many small ones from one read of the source per job.
+pub fn broad(self: Source, other: Shape) Source {
+    stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {f} to {f}", .{ self._shape, other });
+    if (std.mem.eql(i64, self.dims(), other.dims())) return self;
+    const r = self.rank();
+    var axes_map: [constants.MAX_RANK]u3 = undefined;
+    if (r == 0 or r == other.rank()) {
+        for (0..r) |i| axes_map[i] = @intCast(i);
+    } else {
+        for (self._shape.tags(), 0..) |t, i| axes_map[i] = other.axis(t);
+    }
+    const res_shape = other.withDtype(self.dtype());
+    // The axes the elements repeat along: new ones and those grown from 1.
+    var repeated: [constants.MAX_RANK]bool = @splat(true);
+    for (0..r) |i| {
+        if (self.dim(i) != 1) repeated[axes_map[i]] = false;
+    }
+    var ctx: Rewrite = .init(self.store);
+    defer ctx.deinit();
+    for (self._pieces) |piece| {
+        for (ctx.decompose(self._shape, piece)) |axis_piece| {
+            var moved: AxisPiece = .{ .tensor = axis_piece.tensor, .offset = axis_piece.offset };
+            for (0..r) |i| moved.origin[axes_map[i]] = axis_piece.origin[i];
+            for (axis_piece.dims.constSlice()) |d| {
+                var mapped = d;
+                mapped.axis = axes_map[d.axis];
+                moved.dims.append(mapped) catch tooManyDims();
+            }
+            for (0..other.rank()) |b| {
+                if (!repeated[b] or other.dim(b) == 1) continue;
+                moved.dims.append(.{ .count = @intCast(other.dim(b)), .axis = @intCast(b), .step = 1, .stride = 0 }) catch tooManyDims();
+            }
+            ctx.emit(res_shape, moved);
         }
     }
     return ctx.finish(res_shape);
@@ -1044,6 +1084,24 @@ test "Source pads rows as Tensor does" {
     try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
         fn build(comptime T: type, x: []const T) T {
             return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 3 } });
+        }
+    }.build);
+}
+
+test "Source broadcasts a scalar as Tensor does" {
+    try expectCase(.{.{}}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].broad(Shape.init(.{ .row = 3, .col = 2 }, .u16));
+        }
+    }.build);
+}
+
+test "Source broadcasts a column as Tensor does" {
+    // A per-tensor scale repeated over each member's rows.
+    try expectCase(.{ .{ .row = 1, .col = 1 }, .{ .row = 1, .col = 1 } }, struct {
+        fn build(comptime T: type, x: []const T) T {
+            const members = [2]T{ x[0].broad(Shape.init(.{ .row = 4, .col = 1 }, .u16)), x[1].broad(Shape.init(.{ .row = 2, .col = 1 }, .u16)) };
+            return interleave(T, &members, 2);
         }
     }.build);
 }
