@@ -55,27 +55,42 @@ pub const LoadedModel = union(ModelType) {
         }
     }
 
+    /// Loads the model's weights from the store. Free them with `zml.mem.deinitBufferized`.
     pub fn loadBuffers(
-        self: *LoadedModel,
+        self: *const LoadedModel,
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
     ) !Buffers {
-        return switch (self.*) {
-            inline else => |*m, t| @unionInit(
-                Buffers,
-                @tagName(t),
-                try m.loadBuffers(allocator, io, platform, store, progress),
-            ),
-        };
-    }
+        progress.increaseEstimatedTotalItems(store.view().count());
+        const now: std.Io.Timestamp = .now(io, .awake);
 
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            inline else => |*loaded, t| loaded.unloadBuffers(&@field(buffers, @tagName(t)), allocator),
-        }
+        var loader: zml.io.Loader = try .init(allocator, platform, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 256 * zml.MiB,
+            .parallelism = 16,
+        });
+        defer loader.deinit();
+
+        const buffers: Buffers = switch (self.*) {
+            inline else => |*m, t| b: {
+                const Model = @TypeOf(m.inner);
+                var buffers = try zml.mem.bufferize(allocator, Model, &m.inner);
+                errdefer zml.mem.deinitBufferized(allocator, &buffers);
+                try loader.load(io, Model, &m.inner, &buffers, store, .{ .progress = progress });
+                try loader.await(io);
+                break :b @unionInit(Buffers, @tagName(t), buffers);
+            },
+        };
+
+        const took = now.untilNow(io, .awake);
+        const total_bytes: u64 = loader.bytes_loaded.raw;
+        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+
+        return buffers;
     }
 
     pub fn compile(

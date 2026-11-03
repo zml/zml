@@ -47,8 +47,12 @@ pub fn main(init: std.process.Init) !void {
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
-    defer repo_model.unloadBuffers(&model_buffers, allocator);
+    var loader: zml.io.Loader = try .init(allocator, platform, .{ .dma_chunks = 32, .dma_chunk_size = 256 * zml.MiB, .parallelism = 16 });
+    defer loader.deinit();
+    var model_buffers = try zml.mem.bufferize(allocator, llama.Model, &repo_model.inner);
+    defer zml.mem.deinitBufferized(allocator, &model_buffers);
+    try loader.load(io, llama.Model, &repo_model.inner, &model_buffers, &store, .{ .progress = &progress });
+    try loader.await(io);
     progress.end();
 
     try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, &meshes.all());

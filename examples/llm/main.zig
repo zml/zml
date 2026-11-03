@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
     var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress);
-    defer model.unloadBuffers(&model_buffers, allocator);
+    defer zml.mem.deinitBufferized(allocator, &model_buffers);
 
     progress.end();
 
