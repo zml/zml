@@ -10,6 +10,7 @@ zig_library(
         "http.zig",
         "mock_server.zig",
         "parallel_read.zig",
+        "request.zig",
         "s3.zig",
     ],
     main = "vfs.zig",

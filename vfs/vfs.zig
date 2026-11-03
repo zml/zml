@@ -36,6 +36,7 @@ pub const direct_io_alignment: usize = if (direct_io.supported) direct_io.alignm
 
 test {
     _ = @import("gcs.zig");
+    _ = @import("request.zig");
 }
 
 const log = std.log.scoped(.@"zml/vfs");
