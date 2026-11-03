@@ -16,6 +16,66 @@ const host_memory = @import("host_memory.zig");
 /// of the tensor.
 const StateInitError = std.mem.Allocator.Error || pjrt.ApiError;
 
+/// One submission: its plans (one per source file, published as each file
+/// is planned), the destinations it writes and their parts, all in the
+/// batch's arena until it retires. `remaining` counts completion units: one
+/// per published job plus a publish sentinel held until the submission is
+/// sealed. A job's unit is released exactly once, by whichever of these
+/// happens: its request's last reference drops (final DMA callback or
+/// abandonment), or `Scheduler.fail` retires it unclaimed. The batch is
+/// done when `remaining` reaches zero; the awaiting task then retires it,
+/// so releasing a unit is the last permitted access to the batch.
+pub const Batch = struct {
+    /// Holds the plans, the destinations and the parts until `destroy`;
+    /// only the submitting task allocates in it.
+    arena: std.heap.ArenaAllocator,
+    io: std.Io,
+    /// Published plans in file order: appended by the submitting task under
+    /// the scheduler mutex.
+    plans: std.ArrayList(*Plan) = .empty,
+    /// Their device state is the loader's, released before `destroy`.
+    destinations: []Destination = &.{},
+    /// The destinations' parts, each destination's consecutive and in its
+    /// destination order: what the planner sorts by file offset.
+    parts: []Part = &.{},
+    remaining: std.atomic.Value(usize),
+    done: std.Io.Event = .unset,
+    /// Submission number within the loader, for log correlation.
+    sequence: usize,
+
+    /// An open batch holding its publish sentinel and nothing else. The
+    /// sentinel keeps the batch from completing before its last plan is
+    /// visible.
+    fn create(allocator: std.mem.Allocator, io: std.Io, sequence: usize) !*Batch {
+        const self = try allocator.create(Batch);
+        self.* = .{
+            .arena = .init(allocator),
+            .io = io,
+            .remaining = .init(1),
+            .sequence = sequence,
+        };
+        return self;
+    }
+
+    /// Releases `count` completion units. MEMORY-ORDER RULE: this must be the
+    /// caller's final access to the batch and to anything it owns (plans,
+    /// destinations, parts). The last unit sets `done`, and the awaiting
+    /// task frees all of it as soon as it observes the event.
+    fn releaseUnits(self: *Batch, count: usize) void {
+        if (count == 0) return;
+        const previous = self.remaining.fetchSub(count, .acq_rel);
+        std.debug.assert(previous >= count);
+        if (previous == count) self.done.set(self.io);
+    }
+
+    /// Frees the arena: the plans, the destinations and the parts.
+    fn destroy(self: *Batch) void {
+        const allocator = self.arena.child_allocator;
+        self.arena.deinit();
+        allocator.destroy(self);
+    }
+};
+
 /// One output buffer and what places it. Its parts may come from several
 /// files, so several plans can write it: their pieces all count toward the
 /// same targets (`Target.total` is the placement's bytes, whichever plan
@@ -111,12 +171,17 @@ const Plan = struct {
         len: usize,
     };
 
+    /// The submission this plan belongs to; set when it is published,
+    /// under the scheduler mutex, with its completion units.
+    batch: *Batch = undefined,
     /// The file every job of the plan reads.
     source_slot: *SourceSlot,
     jobs: []Job,
     transfers: []Transfer,
     /// The tensor bytes the jobs read.
     source_bytes: u64,
+    /// Next job to claim; owned by the scheduler mutex.
+    cursor: usize = 0,
 
     fn transfersOf(self: *const Plan, job: Job) []const Transfer {
         return self.transfers[job.transfer_start..][0..job.transfer_len];
@@ -139,6 +204,30 @@ const Planner = struct {
         /// (`backend.requestSize`).
         request_size: usize,
     };
+
+    /// Plans `parts` one file at a time and publishes each plan as soon as
+    /// it exists, so workers claim the first file while the rest is planned,
+    /// each plan in the batch's arena. Stops at the first error; the caller
+    /// seals or fails the batch.
+    /// Whole-model planning delayed the first read by 0.32 s for DeepSeek's
+    /// 46 files on one MI300X; publishing per file overlaps the rest with IO.
+    fn publishFiles(
+        scheduler: *Scheduler,
+        io: std.Io,
+        batch: *Batch,
+        parts: []Part,
+        config: Config,
+    ) !void {
+        const order = try sortedPartOrder(scheduler.allocator, parts);
+        defer scheduler.allocator.free(order);
+        var file_start: usize = 0;
+        while (file_start < order.len) {
+            const file_end = fileGroupEnd(parts, order, file_start);
+            const plan = try preparePlan(scheduler.allocator, batch.arena.allocator(), parts, order[file_start..file_end], config);
+            try scheduler.publish(io, batch, plan);
+            file_start = file_end;
+        }
+    }
 
     /// Plans one file: `order` indexes its `parts` by offset and size
     /// (`sortedPartOrder`), and `JobCut.cutRuns` cuts them. The plan goes in
@@ -404,6 +493,108 @@ const Planner = struct {
         var end = start + 1;
         while (end < order.len and std.mem.eql(u8, uri, parts[order[end]].source.file_uri)) : (end += 1) {}
         return end;
+    }
+};
+
+/// A strict FIFO of published plans. A submission holds one plan per source
+/// file, published as soon as that file is planned, so a plan reaches the
+/// queue behind every earlier plan of its own submission and of every
+/// earlier one (submissions publish and seal on one task). Within a plan,
+/// jobs are handed out in the planned order (file order); a plan leaves the
+/// queue with its last claim or through `fail`.
+/// A plan is queued only with jobs left and its completion units are added
+/// in the same critical section, so a queued plan's batch still holds at
+/// least one unit and can never be freed under the scheduler.
+const Scheduler = struct {
+    /// A claimed job: its position in the plan that owns it. The claim holds
+    /// one of the batch's completion units until the request releases it.
+    const Claim = struct {
+        plan: *Plan,
+        index: usize,
+    };
+
+    allocator: std.mem.Allocator,
+    /// Plans with unclaimed jobs in publish order.
+    queue: std.Deque(*Plan) = .empty,
+    /// Set by `fail`: `publish` refuses plans (`Canceled`) and `waitForWork`
+    /// returns false.
+    stopping: bool = false,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+
+    fn init(allocator: std.mem.Allocator) Scheduler {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *Scheduler) void {
+        // Every batch was awaited (and so claimed out or retired) first.
+        std.debug.assert(self.queue.len == 0);
+        self.queue.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    /// Publishes one plan of an open submission behind every earlier plan.
+    /// A plan without jobs never joins the queue. `Canceled` once the
+    /// scheduler failed (`fail`).
+    fn publish(self: *Scheduler, io: std.Io, batch: *Batch, plan: *Plan) !void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.stopping) return error.Canceled;
+        const job_count = plan.jobs.len;
+        try batch.plans.ensureUnusedCapacity(batch.arena.allocator(), 1);
+        if (job_count != 0) try self.queue.ensureUnusedCapacity(self.allocator, 1);
+        // Nothing below fails: the plan, its units and the queue entry
+        // appear together.
+        plan.batch = batch;
+        batch.plans.appendAssumeCapacity(plan);
+        _ = batch.remaining.fetchAdd(job_count, .acq_rel);
+        if (job_count != 0) {
+            self.queue.pushBackAssumeCapacity(plan);
+            self.condition.broadcast(io);
+        }
+    }
+
+    /// Stops claims and publishes, wakes every worker waiting for work, and
+    /// retires the unclaimed units of every queued plan so its batch still
+    /// reaches `done` through its claimed requests (an open one through its
+    /// seal and sentinel as well). Claims and this pass both move cursors
+    /// under the mutex, so they partition the jobs exactly: every claimed
+    /// job keeps its unit with its worker. Each queued plan still holds an
+    /// unclaimed unit of its batch, so only the retire of a batch's last
+    /// queued plan can complete it, and nothing touches the batch after that.
+    fn fail(self: *Scheduler, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.stopping = true;
+        self.condition.broadcast(io);
+        while (self.queue.popFront()) |plan| {
+            const unclaimed = plan.jobs.len - plan.cursor;
+            plan.cursor = plan.jobs.len;
+            plan.batch.releaseUnits(unclaimed);
+        }
+    }
+
+    /// Hands out the head plan's next job; the plan leaves the queue with
+    /// its last one. Null only when nothing is queued: a queued plan always
+    /// has a job left.
+    fn claim(self: *Scheduler, io: std.Io) ?Claim {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const plan = self.queue.front() orelse return null;
+        const index = plan.cursor;
+        std.debug.assert(index < plan.jobs.len);
+        plan.cursor += 1;
+        if (plan.cursor == plan.jobs.len) _ = self.queue.popFront();
+        return .{ .plan = plan, .index = index };
+    }
+
+    fn waitForWork(self: *Scheduler, io: std.Io) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (!self.stopping and self.queue.len == 0) {
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+        return !self.stopping;
     }
 };
 
@@ -687,6 +878,20 @@ fn initPlainParts(
     }
 }
 
+/// Claims out and frees an open batch that a test only inspected; it must
+/// be the only queued batch.
+fn discardTestBatch(scheduler: *Scheduler, batch: *Batch) void {
+    const io = std.testing.io;
+    var claimed: usize = 0;
+    while (scheduler.claim(io)) |claim| {
+        std.debug.assert(claim.plan.batch == batch);
+        claimed += 1;
+    }
+    batch.releaseUnits(1 + claimed);
+    std.debug.assert(batch.done.isSet());
+    batch.destroy();
+}
+
 test "source planner coalesces exact adjacent and overlapping tensor ranges per file" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -710,25 +915,19 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var parts: [sources.len]Part = undefined;
     initPlainParts(platform, &sources, &.{ &slots[0], &slots[0], &slots[0], &slots[0], &slots[1] }, &outputs, &destinations, &parts);
 
-    var arena: std.heap.ArenaAllocator = .init(allocator);
-    defer arena.deinit();
-    const order = try Planner.sortedPartOrder(allocator, &parts);
-    defer allocator.free(order);
-    var plans: [2]*Plan = undefined;
-    var file_start: usize = 0;
-    for (&plans) |*plan| {
-        const file_end = Planner.fileGroupEnd(&parts, order, file_start);
-        plan.* = try prepareTestPlan(arena.allocator(), &parts, order[file_start..file_end], .{
-            .block_size = 4,
-            .request_size = 8,
-        });
-        file_start = file_end;
-    }
-    try std.testing.expectEqual(order.len, file_start);
+    var scheduler: Scheduler = .init(allocator);
+    defer scheduler.deinit();
+    const batch = try Batch.create(allocator, io, 0);
+    try Planner.publishFiles(&scheduler, io, batch, &parts, .{
+        .block_size = 4,
+        .request_size = 8,
+    });
 
     // One plan per file. a:[10,18) merges adjacency and the duplicate,
     // a:[20,24) remains exact, and b:[3,15) is split at the request-size
     // boundary.
+    const plans = batch.plans.items;
+    try std.testing.expectEqual(@as(usize, 2), plans.len);
     try std.testing.expect(plans[0].source_slot == &slots[0]);
     try std.testing.expect(plans[1].source_slot == &slots[1]);
     try std.testing.expectEqual(@as(usize, 2), plans[0].jobs.len);
@@ -749,6 +948,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 1), plans[0].jobs[1].blockLen(4));
     try std.testing.expectEqual(@as(usize, 2), plans[1].jobs[0].blockLen(4));
     try std.testing.expectEqual(@as(usize, 1), plans[1].jobs[1].blockLen(4));
+    discardTestBatch(&scheduler, batch);
 
     var aligned_sources = [_]safetensors.Tensor{
         .{ .file_uri = "aligned", .name = "aligned0", .shape = .init(.{7}, .u8), .offset = 0 },
@@ -760,6 +960,8 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var aligned_destinations: [aligned_sources.len]Destination = undefined;
     var aligned_items: [aligned_sources.len]Part = undefined;
     initPlainParts(platform, &aligned_sources, &.{ &aligned_slot, &aligned_slot, &aligned_slot }, &aligned_outputs, &aligned_destinations, &aligned_items);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
     const aligned_plan = try prepareTestPlan(arena.allocator(), &aligned_items, &.{ 0, 1, 2 }, .{
         .block_size = 4,
         .request_size = 8,
@@ -769,6 +971,254 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 8), aligned_plan.jobs[1].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 5), aligned_plan.jobs[2].kind.dma_read.len);
+}
+
+// Scheduler tests.
+
+/// A plan of `job_count` unit jobs (`file_offset` = index), each with one
+/// block, and no transfers, in `arena`.
+fn testPlan(arena: std.mem.Allocator, job_count: usize) !*Plan {
+    const jobs = try arena.alloc(Plan.Job, job_count);
+    for (jobs, 0..) |*job, index| job.* = .{
+        .file_offset = index,
+        .transfer_start = 0,
+        .transfer_len = 0,
+        .kind = .{ .dma_read = .{ .len = 1, .minimum_len = 1 } },
+    };
+    const plan = try arena.create(Plan);
+    plan.* = .{
+        .source_slot = undefined,
+        .jobs = jobs,
+        .transfers = &.{},
+        .source_bytes = job_count,
+    };
+    return plan;
+}
+
+/// Publishes a plan of `job_count` unit jobs into an open batch.
+fn publishTestPlan(scheduler: *Scheduler, batch: *Batch, job_count: usize) !void {
+    try scheduler.publish(std.testing.io, batch, try testPlan(batch.arena.allocator(), job_count));
+}
+
+/// A one-file submission's sequence: publish, then drop the sentinel.
+fn publishTestBatch(scheduler: *Scheduler, job_count: usize) !*Batch {
+    const batch = try Batch.create(std.testing.allocator, std.testing.io, 0);
+    errdefer batch.destroy();
+    try publishTestPlan(scheduler, batch, job_count);
+    batch.releaseUnits(1);
+    return batch;
+}
+
+/// The jobs of the queued plans no worker claimed yet.
+fn unclaimedJobs(scheduler: *const Scheduler) usize {
+    var jobs: usize = 0;
+    for (0..scheduler.queue.len) |index| {
+        const plan = scheduler.queue.at(index);
+        jobs += plan.jobs.len - plan.cursor;
+    }
+    return jobs;
+}
+
+test "scheduler publishes a submission one file at a time and claims the files in order" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+
+    // Submitted out of file order: the sort groups "a" before "b".
+    var sources = [_]safetensors.Tensor{
+        .{ .file_uri = "b", .name = "b0", .shape = .init(.{4}, .u8), .offset = 0 },
+        .{ .file_uri = "a", .name = "a1", .shape = .init(.{4}, .u8), .offset = 4 },
+        .{ .file_uri = "a", .name = "a0", .shape = .init(.{4}, .u8), .offset = 0 },
+    };
+    var slots = [_]SourceSlot{
+        .{ .uri = "a" },
+        .{ .uri = "b" },
+    };
+    var outputs: [sources.len]Buffer = undefined;
+    var destinations: [sources.len]Destination = undefined;
+    var parts: [sources.len]Part = undefined;
+    initPlainParts(platform, &sources, &.{ &slots[1], &slots[0], &slots[0] }, &outputs, &destinations, &parts);
+
+    var scheduler: Scheduler = .init(allocator);
+    defer scheduler.deinit();
+    const batch = try Batch.create(allocator, io, 0);
+    try Planner.publishFiles(&scheduler, io, batch, &parts, .{
+        .block_size = 4,
+        .request_size = 4,
+    });
+    try std.testing.expectEqual(@as(usize, 2), batch.plans.items.len);
+    try std.testing.expectEqual(@as(usize, 2), batch.plans.items[0].jobs.len);
+    try std.testing.expectEqual(@as(usize, 1), batch.plans.items[1].jobs.len);
+    try std.testing.expectEqual(@as(usize, 3), unclaimedJobs(&scheduler));
+
+    // File a's jobs in offset order, then file b's.
+    var claim = scheduler.claim(io).?;
+    try std.testing.expect(claim.plan.source_slot == &slots[0]);
+    try std.testing.expectEqual(@as(u64, 0), claim.plan.jobs[claim.index].file_offset);
+    claim = scheduler.claim(io).?;
+    try std.testing.expect(claim.plan.source_slot == &slots[0]);
+    try std.testing.expectEqual(@as(u64, 4), claim.plan.jobs[claim.index].file_offset);
+    claim = scheduler.claim(io).?;
+    try std.testing.expect(claim.plan.source_slot == &slots[1]);
+    try std.testing.expectEqual(@as(u64, 0), claim.plan.jobs[claim.index].file_offset);
+    // Both plans left the queue with their last claim; the submission is
+    // still open until its sentinel goes.
+    try std.testing.expect(scheduler.claim(io) == null);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.len);
+    batch.releaseUnits(1);
+    try std.testing.expect(!batch.done.isSet());
+    batch.releaseUnits(3);
+    try std.testing.expect(batch.done.isSet());
+    batch.destroy();
+}
+
+test "fifo scheduler claims plan by plan in publish order, and a done batch leaves while a later plan is queued" {
+    const io = std.testing.io;
+    var scheduler: Scheduler = .init(std.testing.allocator);
+    defer scheduler.deinit();
+    // An open submission's first plan, a sealed batch, then the open
+    // submission's second plan: an open submission holds no place of its
+    // own.
+    const open = try Batch.create(std.testing.allocator, io, 0);
+    try publishTestPlan(&scheduler, open, 1);
+    const sealed = try publishTestBatch(&scheduler, 2);
+    try publishTestPlan(&scheduler, open, 1);
+    try std.testing.expectEqual(@as(usize, 4), unclaimedJobs(&scheduler));
+
+    var claim = scheduler.claim(io).?;
+    try std.testing.expect(claim.plan == open.plans.items[0] and claim.index == 0);
+    for (0..2) |index| {
+        claim = scheduler.claim(io).?;
+        try std.testing.expect(claim.plan == sealed.plans.items[0] and claim.index == index);
+    }
+    // The sealed batch left the queue with its last claim, so it completes
+    // and goes away while the open one's second plan is still queued.
+    sealed.releaseUnits(2);
+    try std.testing.expect(sealed.done.isSet());
+    sealed.destroy();
+    try std.testing.expectEqual(@as(usize, 1), scheduler.queue.len);
+
+    claim = scheduler.claim(io).?;
+    try std.testing.expect(claim.plan == open.plans.items[1] and claim.index == 0);
+    try std.testing.expect(scheduler.claim(io) == null);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.len);
+    // Claimed out, the open submission completes only once its sentinel
+    // goes.
+    open.releaseUnits(2);
+    try std.testing.expect(!open.done.isSet());
+    open.releaseUnits(1);
+    try std.testing.expect(open.done.isSet());
+    open.destroy();
+}
+
+test "fifo scheduler failure retires the unclaimed jobs of every queued plan and refuses later publishes" {
+    const io = std.testing.io;
+    var scheduler: Scheduler = .init(std.testing.allocator);
+    defer scheduler.deinit();
+    // A batch without jobs is never queued and completes at publish.
+    const empty = try publishTestBatch(&scheduler, 0);
+    try std.testing.expect(empty.done.isSet());
+    empty.destroy();
+    // An open submission of two plans, then a sealed batch.
+    const open = try Batch.create(std.testing.allocator, io, 0);
+    try publishTestPlan(&scheduler, open, 2);
+    try publishTestPlan(&scheduler, open, 3);
+    const sealed = try publishTestBatch(&scheduler, 3);
+    try std.testing.expectEqual(@as(usize, 8), unclaimedJobs(&scheduler));
+    try std.testing.expectEqual(@as(usize, 6), open.remaining.load(.acquire));
+
+    // The claim keeps its unit and the open submission its sentinel; every
+    // other job is retired.
+    try std.testing.expect(scheduler.claim(io).?.plan.batch == open);
+    scheduler.fail(io);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.queue.len);
+    try std.testing.expectEqual(@as(usize, 2), open.remaining.load(.acquire));
+    try std.testing.expect(sealed.done.isSet());
+    sealed.destroy();
+    try std.testing.expect(scheduler.claim(io) == null);
+    try std.testing.expect(!scheduler.waitForWork(io));
+    // The submission goes on: its next plan is refused, and the sentinel
+    // drop leaves only the claim to complete it.
+    try std.testing.expectError(error.Canceled, publishTestPlan(&scheduler, open, 1));
+    open.releaseUnits(1);
+    try std.testing.expect(!open.done.isSet());
+    open.releaseUnits(1);
+    try std.testing.expect(open.done.isSet());
+    open.destroy();
+}
+
+test "fifo scheduler wakes waiting workers on publish and releases them on failure" {
+    const WaitResult = enum(u8) { waiting, work, stopped };
+    const io = std.testing.io;
+    var scheduler: Scheduler = .init(std.testing.allocator);
+    defer scheduler.deinit();
+
+    var woke: std.atomic.Value(WaitResult) = .init(.waiting);
+    var group: std.Io.Group = .init;
+    const Waiter = struct {
+        fn run(scheduler_: *Scheduler, io_: std.Io, woke_: *std.atomic.Value(WaitResult)) void {
+            woke_.store(if (scheduler_.waitForWork(io_)) .work else .stopped, .release);
+        }
+    };
+    try group.concurrent(io, Waiter.run, .{ &scheduler, io, &woke });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expectEqual(WaitResult.waiting, woke.load(.acquire));
+    const batch = try publishTestBatch(&scheduler, 1);
+    try group.await(io);
+    try std.testing.expectEqual(WaitResult.work, woke.load(.acquire));
+    _ = scheduler.claim(io).?;
+    batch.releaseUnits(1);
+    batch.destroy();
+
+    woke.store(.waiting, .release);
+    try group.concurrent(io, Waiter.run, .{ &scheduler, io, &woke });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expectEqual(WaitResult.waiting, woke.load(.acquire));
+    scheduler.fail(io);
+    try group.await(io);
+    try std.testing.expectEqual(WaitResult.stopped, woke.load(.acquire));
+}
+
+test "fifo scheduler concurrent claims across two batches return each job once" {
+    const io = std.testing.io;
+    var scheduler: Scheduler = .init(std.testing.allocator);
+    defer scheduler.deinit();
+    const batches = [_]*Batch{
+        try publishTestBatch(&scheduler, 16),
+        try publishTestBatch(&scheduler, 16),
+    };
+    var seen: std.atomic.Value(u64) = .init(0);
+    var claim_count: std.atomic.Value(usize) = .init(0);
+    var duplicate: std.atomic.Value(bool) = .init(false);
+    var group: std.Io.Group = .init;
+    for (0..8) |_| try group.concurrent(io, struct {
+        fn run(
+            scheduler_: *Scheduler,
+            batches_: []const *Batch,
+            seen_: *std.atomic.Value(u64),
+            claim_count_: *std.atomic.Value(usize),
+            duplicate_: *std.atomic.Value(bool),
+        ) void {
+            while (scheduler_.claim(std.testing.io)) |claim| {
+                const base: u64 = if (claim.plan.batch == batches_[0]) 0 else 16;
+                const mask = @as(u64, 1) << @intCast(base + claim.plan.jobs[claim.index].file_offset);
+                if (seen_.fetchOr(mask, .acq_rel) & mask != 0) duplicate_.store(true, .release);
+                _ = claim_count_.fetchAdd(1, .monotonic);
+            }
+        }
+    }.run, .{ &scheduler, &batches, &seen, &claim_count, &duplicate });
+    try group.await(io);
+    try std.testing.expectEqual(std.math.maxInt(u32), @as(u32, @truncate(seen.load(.acquire))));
+    try std.testing.expectEqual(@as(usize, 32), claim_count.load(.acquire));
+    try std.testing.expect(!duplicate.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), unclaimedJobs(&scheduler));
+    for (batches) |batch| {
+        batch.releaseUnits(16);
+        try std.testing.expect(batch.done.isSet());
+        batch.destroy();
+    }
 }
 
 // DMA pump and transfer target tests.
