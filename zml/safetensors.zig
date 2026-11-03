@@ -293,6 +293,8 @@ pub const TensorRegistry = struct {
         self.arena.deinit();
     }
 
+    /// Adds `tensor`, its name and file URI copied; a name already here is
+    /// `DuplicateTensor`, logged.
     pub fn registerTensor(
         self: *TensorRegistry,
         tensor: Tensor,
@@ -304,7 +306,12 @@ pub const TensorRegistry = struct {
         tensor_copy.name = try allocator.dupe(u8, tensor.name);
         tensor_copy.file_uri = try allocator.dupe(u8, tensor.file_uri);
 
-        try self.tensors.put(allocator, tensor_copy.name, tensor_copy);
+        const entry = try self.tensors.getOrPut(allocator, tensor_copy.name);
+        if (entry.found_existing) {
+            log.warn("Tensor {s} of {s} is already registered from {s}", .{ tensor.name, tensor.file_uri, entry.value_ptr.file_uri });
+            return error.DuplicateTensor;
+        }
+        entry.value_ptr.* = tensor_copy;
     }
 
     pub fn reader(
@@ -340,7 +347,8 @@ pub const TensorRegistry = struct {
 /// Adds the tensors of the safetensors `file` to `registry`. A header that
 /// is not an object of tensors, each with a `dtype`, a `shape` and
 /// `data_offsets` spanning exactly its bytes within the file, is
-/// `InvalidSafetensorsHeader`, logged.
+/// `InvalidSafetensorsHeader`, and a name already registered
+/// `DuplicateTensor`, both logged.
 pub fn parseSafetensors(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -440,7 +448,7 @@ fn checkedByteSize(dims: []const i64, dtype: DataType) ?u64 {
     return std.math.divCeil(u64, bits, 8) catch unreachable;
 }
 
-test "parseSafetensors rejects a malformed header or data_offsets that do not span their tensor within the file" {
+test "parseSafetensors rejects a malformed header, data_offsets that do not span their tensor within the file, or a name already registered" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -485,6 +493,9 @@ test "parseSafetensors rejects a malformed header or data_offsets that do not sp
         if (case.valid) {
             try result;
             try std.testing.expectEqual(@as(u64, BYTES_HEADER + header.len), registry.tensors.get("x").?.offset);
+            // A name already registered, as one repeated across a checkpoint's
+            // shards.
+            try std.testing.expectError(error.DuplicateTensor, parseSafetensors(allocator, io, &registry, file));
         } else {
             try std.testing.expectError(error.InvalidSafetensorsHeader, result);
         }
