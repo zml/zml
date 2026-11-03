@@ -4,7 +4,7 @@
 //! part read at its offset (a strided part reads its source range once and
 //! copies each run where it lands), then the whole tensor is placed as any
 //! other. Each batch runs up to the read width of workers over its specs;
-//! each tensor allocates its host staging and frees it once placed. There
+//! one byte budget bounds the host staging, live and kept for reuse. There
 //! is no calibration and no pinned memory. The shared front end owns source
 //! lookup, programs and admission.
 const std = @import("std");
@@ -21,12 +21,21 @@ const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
 const log = @import("log.zig").load;
 
+/// The host staging budget in largest requests: this many times the
+/// largest staging request submitted (`stagingBytes`), for the buffers in
+/// use and those kept for reuse alike. Twelve rather than the read width:
+/// at a high-latency width of 32 the read width would nearly triple the
+/// host staging for nothing this path can use.
+const staging_tensors: usize = 12;
+
 pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    /// Workers per batch, so the threads grow with the batches in flight.
+    /// Workers per batch, so the threads grow with the batches in flight:
+    /// the staging budget bounds their bytes, not their number.
     width: usize,
+    staging: Staging,
     first_error: stdx.FirstError(anyerror) = .{},
 
     pub fn create(
@@ -41,6 +50,7 @@ pub const Loader = struct {
             .io = io,
             .platform = platform,
             .width = opts.read_parallelism,
+            .staging = .{ .slots = @min(opts.read_parallelism, staging_tensors) },
         };
         return self;
     }
@@ -52,8 +62,11 @@ pub const Loader = struct {
     /// runs when this fails.
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) !*Batch {
         try self.checkOpen();
+        var largest: usize = 0;
+        for (specs) |spec| largest = @max(largest, stagingBytes(spec));
         const batch = try self.allocator.create(Batch);
         batch.* = .{ .specs = specs, .progress = progress };
+        self.staging.widen(self.io, largest);
         // `concurrent`, never `async`: a busy Threaded io runs `async`
         // inline, and an inline first worker would drain the whole cursor
         // here.
@@ -80,13 +93,14 @@ pub const Loader = struct {
     }
 
     /// Fails the loader unless it already failed: workers start no other
-    /// tensor.
+    /// tensor, and one waiting for its staging returns once it gets it.
     pub fn abort(self: *Loader) void {
         self.recordError(error.Canceled, "loader aborted", .{});
     }
 
     /// Every batch was awaited, so no worker runs.
     pub fn destroy(self: *Loader) void {
+        self.staging.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -115,12 +129,15 @@ pub const Loader = struct {
         if (self.first_error.get() != null) return;
         std.debug.assert(spec.parts.len != 0);
         const tensor_bytes = spec.shape.byteSize();
-        const staging = self.allocator.alloc(u8, stagingBytes(spec)) catch |err|
+        const staging = self.staging.acquire(self.allocator, self.io, stagingBytes(spec)) catch |err|
             return self.fail(err, "allocate staging for", spec, &spec.parts[0]);
-        defer self.allocator.free(staging);
+        defer self.staging.release(self.allocator, self.io, staging);
+        // The staging may have taken a while: a failure meanwhile leaves
+        // this tensor unstarted.
+        if (self.first_error.get() != null) return;
         const tensor = staging[0..tensor_bytes];
-        // The staging's contents are undefined, so a byte no part writes
-        // would publish garbage rather than zero: the gaps are zeroed first.
+        // Staging is reused, so a byte no part writes would publish another
+        // tensor's bytes rather than zero: the gaps are zeroed first.
         var strided = false;
         for (spec.parts) |part| strided = strided or part.lattice.dims.len != 0;
         if (strided) {
@@ -185,7 +202,172 @@ pub const Batch = struct {
     workers: std.Io.Group = .init,
 };
 
-test "buffered loader assembles a composite destination" {
+/// Host staging for the buffered backend: one budget for the buffers the
+/// running tensors hold and those kept for reuse, which are handed back on
+/// completion instead of freed. Mapping, faulting and then unmapping a whole
+/// tensor's worth of pages for every tensor takes half of a serial buffered
+/// load of a 14.96 GiB checkpoint, and a fifth of a concurrent one.
+///
+/// The budget is `slots` times the largest request submitted, so no
+/// request is wider than it. A request takes the smallest kept buffer that
+/// fits, which counts in full while it is held: small tensors run far wider
+/// than the slot count on small buffers, but once only large ones are kept
+/// they take those, and run about `slots` wide.
+const Staging = struct {
+    mutex: std.Io.Mutex = .init,
+    room: std.Io.Condition = .init,
+    /// The budget in largest requests (`staging_tensors`).
+    slots: usize,
+    /// Zero until the first submission reports its largest request.
+    budget: usize = 0,
+    /// What the running tensors hold.
+    live_bytes: usize = 0,
+    /// Buffers no tensor holds, and their total length.
+    free: std.ArrayList([]u8) = .empty,
+    retained_bytes: usize = 0,
+
+    /// Raises the budget to `slots` of `largest`. Submissions only ever widen
+    /// it: a later submission of smaller tensors cannot shrink what is
+    /// already running.
+    fn widen(self: *Staging, io: std.Io, largest: usize) void {
+        const wanted = largest *| self.slots;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (wanted <= self.budget) return;
+        self.budget = wanted;
+        self.room.broadcast(io);
+    }
+
+    /// A whole allocation of at least `size` bytes, with undefined contents:
+    /// the allocation itself, not a slice of one. The caller slices it for
+    /// its own use and returns this exact slice to `release`, whatever
+    /// happens. Waits until a retained buffer fits, or `size` more bytes
+    /// fit the budget beside the live ones. `size` is at most the budget:
+    /// `widen` ran for the request's submission.
+    fn acquire(self: *Staging, allocator: std.mem.Allocator, io: std.Io, size: usize) ![]u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(size <= self.budget);
+        while (true) {
+            if (self.take(size)) |buffer| return buffer;
+            if (self.live_bytes + size <= self.budget) break;
+            self.room.waitUncancelable(io, &self.mutex);
+        }
+        // No retained buffer fits, so each is smaller than this request:
+        // free them, smallest first, until it fits beside the rest.
+        while (self.live_bytes + self.retained_bytes + size > self.budget) {
+            const dropped = self.free.swapRemove(self.smallest());
+            self.retained_bytes -= dropped.len;
+            allocator.free(dropped);
+        }
+        const fresh = try allocator.alloc(u8, size);
+        self.live_bytes += fresh.len;
+        std.debug.assert(self.live_bytes + self.retained_bytes <= self.budget);
+        return fresh;
+    }
+
+    /// `buffer` must be what `acquire` returned, not a slice of it. It is
+    /// kept: the budget already counts it.
+    fn release(self: *Staging, allocator: std.mem.Allocator, io: std.Io, buffer: []u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.live_bytes -= buffer.len;
+        self.room.broadcast(io);
+        self.free.append(allocator, buffer) catch return allocator.free(buffer);
+        self.retained_bytes += buffer.len;
+    }
+
+    /// Every tensor is done, so every buffer is back.
+    fn deinit(self: *Staging, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.live_bytes == 0);
+        for (self.free.items) |buffer| allocator.free(buffer);
+        self.free.deinit(allocator);
+    }
+
+    /// The smallest retained buffer that fits, now live, so the big ones
+    /// stay free for the big tensors. Called with `mutex` held.
+    fn take(self: *Staging, size: usize) ?[]u8 {
+        var best: ?usize = null;
+        for (self.free.items, 0..) |buffer, i| {
+            if (buffer.len < size) continue;
+            if (best == null or buffer.len < self.free.items[best.?].len) best = i;
+        }
+        const buffer = self.free.swapRemove(best orelse return null);
+        self.retained_bytes -= buffer.len;
+        self.live_bytes += buffer.len;
+        return buffer;
+    }
+
+    /// Called with `mutex` held and a buffer retained.
+    fn smallest(self: *const Staging) usize {
+        var index: usize = 0;
+        for (self.free.items, 0..) |buffer, i| {
+            if (buffer.len < self.free.items[index].len) index = i;
+        }
+        return index;
+    }
+};
+
+test "staging holds live and retained bytes within one budget" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var staging: Staging = .{ .slots = 3 };
+    defer staging.deinit(allocator);
+
+    // Three slots of the largest request is the budget, and a later,
+    // smaller submission cannot shrink it.
+    staging.widen(io, 16);
+    staging.widen(io, 4);
+    try std.testing.expectEqual(@as(usize, 48), staging.budget);
+
+    // With nothing kept, small requests run far wider than the slot count,
+    // and their buffers are kept.
+    var small: [12][]u8 = undefined;
+    for (&small) |*buffer| buffer.* = try staging.acquire(allocator, io, 4);
+    try std.testing.expectEqual(@as(usize, 48), staging.live_bytes);
+    for (small) |buffer| staging.release(allocator, io, buffer);
+    try std.testing.expectEqual(@as(usize, 48), staging.retained_bytes);
+
+    // A request no retained buffer fits frees as many as it needs room
+    // from.
+    const large = try staging.acquire(allocator, io, 16);
+    try std.testing.expectEqual(@as(usize, 32), staging.retained_bytes);
+    staging.release(allocator, io, large);
+    // The smallest buffer that fits comes back to a smaller request, so the
+    // 16 stays for one the 4s cannot serve. The first take moves the 16 to
+    // the front of the list, ahead of the second's 4.
+    var reused: [2][]u8 = undefined;
+    for (&reused) |*buffer| {
+        buffer.* = try staging.acquire(allocator, io, 3);
+        try std.testing.expectEqual(@as(usize, 4), buffer.len);
+    }
+    try std.testing.expectEqual(@as(usize, 40), staging.retained_bytes);
+    for (reused) |buffer| staging.release(allocator, io, buffer);
+    try std.testing.expectEqual(@as(usize, 48), staging.retained_bytes);
+
+    // A full budget holds the next request until a buffer comes back, then
+    // hands it that buffer.
+    var held: [3][]u8 = undefined;
+    for (&held) |*buffer| buffer.* = try staging.acquire(allocator, io, 16);
+    try std.testing.expectEqual(@as(usize, 48), staging.live_bytes + staging.retained_bytes);
+    var waiting = try io.concurrent(Staging.acquire, .{ &staging, allocator, io, 16 });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expectEqual(@as(usize, 48), staging.live_bytes);
+    staging.release(allocator, io, held[0]);
+    held[0] = try waiting.await(io);
+    try std.testing.expectEqual(@as(usize, 48), staging.live_bytes);
+    for (held) |buffer| staging.release(allocator, io, buffer);
+
+    // Once only large buffers are kept, small requests take them, each
+    // counted in full: three fill the budget.
+    var on_large: [3][]u8 = undefined;
+    for (&on_large) |*buffer| buffer.* = try staging.acquire(allocator, io, 4);
+    try std.testing.expectEqual(@as(usize, 48), staging.live_bytes);
+    for (on_large) |buffer| staging.release(allocator, io, buffer);
+    try std.testing.expectEqual(@as(usize, 48), staging.retained_bytes);
+}
+
+test "buffered loader assembles a composite destination in reused staging" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var devices: testing.Devices = undefined;
@@ -204,10 +386,13 @@ test "buffered loader assembles a composite destination" {
     testing.pattern(&b, 2);
     var full: [128]u8 = undefined;
     testing.pattern(&full, 3);
+    var big: [256]u8 = undefined;
+    testing.pattern(&big, 4);
     try testing.writeSafetensors(allocator, io, tmp.dir, "weights.safetensors", &registry, &.{
         .{ .name = "a", .dtype = "U16", .dims = &.{ 3, 8 }, .bytes = &a },
         .{ .name = "b", .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &b },
         .{ .name = "full", .dtype = "U16", .dims = &.{ 8, 8 }, .bytes = &full },
+        .{ .name = "big", .dtype = "U16", .dims = &.{ 16, 8 }, .bytes = &big },
     });
     // Rows split over the two devices: b at row 1, a's last two rows (from
     // byte 16 of a) at row 4, and a strided part, the left halves of full's
@@ -227,13 +412,26 @@ test "buffered loader assembles a composite destination" {
     @memcpy(expected[96..104], full[0..8]);
     @memcpy(expected[112..120], full[32..40]);
     const whole = [_]LoadPart{.whole(registry.tensors.getPtr("full").?)};
+    const big_shape = Shape.init(.{ .row = 16, .col = 8 }, .u16).withPartitioning(&mesh, .{ .row = .model });
+    const big_whole = [_]LoadPart{.whole(registry.tensors.getPtr("big").?)};
 
     const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2 });
     defer loader.destroy();
+    // A bigger tensor first, so the composite, its strided source range
+    // included, reuses its staging buffer and only the zeroing keeps its
+    // bytes out of the gaps.
+    var first: Buffer = undefined;
+    try loader.awaitBatch(try loader.submit(&.{.{ .shape = big_shape, .output = &first, .parts = &big_whole }}, .none));
+    defer first.deinit();
+    try testing.expectShards(allocator, io, &first, &big, .default);
     var output: Buffer = undefined;
     try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .output = &output, .parts = &parts }}, .none));
     defer output.deinit();
     try testing.expectShards(allocator, io, &output, &expected, .default);
+    // One buffer was ever allocated, within the budget of two slots of the
+    // largest request.
+    try std.testing.expectEqual(@as(usize, 512), loader.staging.budget);
+    try std.testing.expectEqual(@as(usize, 256), loader.staging.retained_bytes);
 
     // A source whose file does not exist fails the worker, and the error
     // is sticky from then on.
@@ -248,6 +446,41 @@ test "buffered loader assembles a composite destination" {
         return error.TestUnexpectedResult
     else |err|
         try std.testing.expectEqual(error.FileNotFound, err);
+}
+
+test "a worker waiting for its staging loads nothing once the loader failed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, io, 1);
+    defer devices.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    var bytes: [64]u8 = undefined;
+    testing.pattern(&bytes, 1);
+    try testing.writeSafetensors(allocator, io, tmp.dir, "weights.safetensors", &registry, &.{
+        .{ .name = "x", .dtype = "U8", .dims = &.{ 8, 8 }, .bytes = &bytes },
+    });
+    const shape = Shape.init(.{ .row = 8, .col = 8 }, .u8);
+    const parts = [_]LoadPart{.whole(registry.tensors.getPtr("x").?)};
+
+    const loader = try Loader.create(allocator, io, devices.platform, .{ .read_parallelism = 1 });
+    defer loader.destroy();
+    // The test holds the whole budget, one slot of the tensor, so the
+    // worker waits for its staging until the loader failed.
+    loader.staging.widen(io, bytes.len);
+    const held = try loader.staging.acquire(allocator, io, bytes.len);
+    var output: Buffer = .{ ._platform = devices.platform, ._shape = shape, ._shards = .empty };
+    defer output.deinit();
+    const batch = try loader.submit(&.{.{ .shape = shape, .output = &output, .parts = &parts }}, .none);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    loader.abort();
+    loader.staging.release(allocator, io, held);
+    try std.testing.expectError(error.Canceled, loader.awaitBatch(batch));
+    try std.testing.expectEqual(@as(usize, 0), output._shards.len);
 }
 
 test "an aborted loader leaves each output as it was or whole, and stays failed" {
@@ -302,7 +535,8 @@ test "buffered loader runs overlapping batches over their cursors, with or witho
     defer tmp.cleanup();
     var registry: safetensors.TensorRegistry = .init(allocator);
     defer registry.deinit();
-    // Tensors of 2 to 32 rows of 8 u16.
+    // Tensors of 2 to 32 rows of 8 u16, so the staging budget holds a
+    // varying number of them.
     const count = 24;
     var bytes: [count][512]u8 = undefined;
     var names: [count][8]u8 = undefined;
@@ -331,12 +565,15 @@ test "buffered loader runs overlapping batches over their cursors, with or witho
         const loader = try Loader.create(allocator, io, devices.platform, .{ .read_parallelism = 4 });
         defer loader.destroy();
         // Both batches are in flight before either is awaited, each with
-        // its own workers.
+        // its own workers: the staging budget bounds their bytes
+        // (`Staging.acquire` asserts it).
         const first = try loader.submit(specs[0 .. count / 2], .none);
         const second = try loader.submit(specs[count / 2 ..], .none);
         try loader.awaitBatch(first);
         try loader.awaitBatch(second);
         defer for (&outputs) |*output| output.deinit();
         for (&outputs, entries) |*output, entry| try testing.expectShards(allocator, io, output, entry.bytes, .default);
+        try std.testing.expect(loader.staging.retained_bytes <= loader.staging.budget);
+        try std.testing.expectEqual(@as(usize, 0), loader.staging.live_bytes);
     }
 }
