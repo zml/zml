@@ -31,6 +31,7 @@ test {
     _ = @import("io/Source.zig");
     _ = @import("io/TensorStore.zig");
     _ = @import("io/backend.zig");
+    _ = @import("io/buffered_loader.zig");
     _ = @import("io/log.zig");
 }
 

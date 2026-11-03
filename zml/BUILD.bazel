@@ -90,6 +90,7 @@ zig_library(
         "io/Source.zig",
         "io/TensorStore.zig",
         "io/backend.zig",
+        "io/buffered_loader.zig",
         "io/log.zig",
         "kernel.zig",
         "kernels/flash_attention/flash_attention.zig",
