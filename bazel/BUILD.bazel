@@ -3,11 +3,9 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "retain_runfiles_init",
-    srcs = select({
-        "@platforms//os:linux": ["runfiles_init.c"],
-        "//conditions:default": [],
-    }),
-    # Mach-O adds an underscore to the exported Zig symbol.
+    srcs = ["runfiles_init.c"],
+    # Retain the constructor even when its object is in a static archive.
+    # Mach-O adds an underscore to the exported C symbol.
     linkopts = select({
         "@platforms//os:macos": ["-Wl,-u,__bazel_runfiles_init"],
         "//conditions:default": ["-Wl,-u,_bazel_runfiles_init"],
