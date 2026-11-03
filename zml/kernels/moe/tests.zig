@@ -5,8 +5,8 @@ const std = @import("std");
 const zml = @import("../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const reference = @import("stablehlo/stablehlo.zig");
 const Placement = @import("moe.zig").RoutingWeightPlacement;
+const reference = @import("stablehlo/stablehlo.zig");
 
 const Case = struct {
     backend: zml.moe.Backend,
@@ -22,15 +22,22 @@ const Case = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
+    expert_mesh: *const zml.Mesh,
+
+    fn inputShape(c: Case) Shape {
+        const shape = Shape.init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
+        const spec: zml.Sharding.Partitioning.Logical = if (c.expert_mesh.resolveLogicalAxis("data") != null) .parse(.{ .t = .data }) else .replicated;
+        return shape.withPartitioning(c.expert_mesh, spec);
+    }
 
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
-        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
-        return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
+        const x: Tensor = .fromShape(c.inputShape());
+        return platform.compileFn(allocator, io, forward, .{ x, c }, .{ .meshes = &.{c.expert_mesh} });
     }
 
     pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
-        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
+        const x: Tensor = .fromShape(c.inputShape());
 
         var host = try zml.Slice.alloc(allocator, x.shape());
         defer host.free(allocator);
@@ -52,6 +59,7 @@ const Case = struct {
         var output: zml.Bufferized(Outputs) = undefined;
         runner.run(io, .{input}, .{&output}, .{ .wait = true });
         defer zml.Buffer.deinitAll(Outputs, &output);
+        try std.testing.expectEqualDeep(c.inputShape()._sharding, output.actual.shape()._sharding);
 
         // BF16 intermediate rounding and different GEMM reduction orders. Every
         // element must pass; near-zero values use the absolute bound.
@@ -269,8 +277,20 @@ fn forward(input: Tensor, c: Case) Outputs {
         .routing_weight_placement = c.placement,
     };
 
-    const actual = zml.moe.forwardMoe(input, ids, weights, prepared.gate_up, prepared.down, c.backend, options);
-    const expected = reference.reference(input, ids, weights, canonical.gate_up, canonical.down, .{
+    const data_spec: zml.Sharding.Partitioning.Logical = if (c.expert_mesh.resolveLogicalAxis("data") != null) .parse(.{ .t = .data }) else .replicated;
+    const expert_spec: zml.Sharding.Partitioning.Logical = if (c.expert_mesh.resolveLogicalAxis("experts") != null) .parse(.{ .expert = .experts }) else .replicated;
+    const actual = zml.moe.forwardMoe(input, ids, weights, prepared.gate_up, prepared.down, c.backend, c.expert_mesh, .{
+        .in_specs = .{
+            .input = data_spec,
+            .ids = data_spec,
+            .weights = data_spec,
+            .gate_up = expert_spec,
+            .down = expert_spec,
+        },
+        .out_specs = data_spec,
+    }, options);
+    // Keep the oracle input replicated so token sharding does not change its GEMM rounding.
+    const expected = reference.reference(input.replicate(), ids, weights, canonical.gate_up, canonical.down, .{
         .activation = c.activation,
         .quantize_input = c.quantize_input,
         .routing_weight_placement = c.placement,
@@ -346,7 +366,7 @@ const Matrix = struct {
     }
 
     /// Shapes vary fastest, matching the nested loops in the backend tests.
-    pub fn caseAt(self: Matrix, backend: zml.moe.Backend, index: usize) Case {
+    pub fn caseAt(self: Matrix, backend: zml.moe.Backend, expert_mesh: *const zml.Mesh, index: usize) Case {
         std.debug.assert(index < self.count());
         var remaining = index;
         const shape = self.shapes[remaining % self.shapes.len];
@@ -374,6 +394,7 @@ const Matrix = struct {
             .width = shape.width,
             .intermediate = shape.intermediate,
             .experts = shape.experts,
+            .expert_mesh = expert_mesh,
         };
     }
 };
@@ -414,7 +435,7 @@ const Pipeline = struct {
 
         var index: usize = 0;
         for (0..matrix.count()) |local_index| {
-            const c = matrix.caseAt(backend, local_index);
+            const c = matrix.caseAt(backend, self.platform.replicated_mesh, local_index);
             if (available) {
                 case_queue.putOne(io, .{ .index = index, .case = c }) catch |err| return switch (err) {
                     error.Closed => {},
@@ -591,6 +612,7 @@ test "Triton MoE prefill launch buckets fit shared memory" {
     for ([_]i64{ 8, 32, 96, 128, 256, 512, 1024, 2048, 3072, 4096 }) |tokens| {
         const case: Case = .{
             .backend = .triton,
+            .expert_mesh = platform.replicated_mesh,
             .tokens = tokens,
             .width = 256,
             .intermediate = 128,

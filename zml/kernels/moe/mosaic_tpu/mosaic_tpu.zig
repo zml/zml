@@ -12,22 +12,9 @@ const log = std.log.scoped(.@"zml/moe/mosaic_tpu");
 var gate_up_transpose: std.atomic.Value(bool) = .init(false);
 var down_transpose: std.atomic.Value(bool) = .init(false);
 
-pub const Options = struct {
-    activation: zml.moe.Activation,
-    global_num_experts: i64 = -1,
-    expert_map: ?Tensor = null,
-    w1_scale: ?Tensor = null,
-    w2_scale: ?Tensor = null,
-    w1_bias: ?Tensor = null,
-    w2_bias: ?Tensor = null,
-};
-
 fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
-    // TODO(Corentin): find where to put that
-    //if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
-    //if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
 }
 
 fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor, ids: Tensor) !void {
@@ -225,119 +212,24 @@ pub fn callGmmEp(
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: zml.moe.Options,
 ) zml.Tensor {
     validateOptions(opts);
+    const expert_map_ = routing.expertMap();
 
-    const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
-    const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
-
-    const expert_partition = gate_up.weight.shape().partition(.expert);
-
-    if (expert_partition.isSharded()) {
-        const global_num_experts = down.weight.dim(.expert);
-        const partial_output = zml.ops.manualComputation(
-            (struct {
-                input: zml.Tensor,
-                topk_ids: zml.Tensor,
-                topk_weights: zml.Tensor,
-                weights_gate_up: zml.Tensor,
-                weights_down: zml.Tensor,
-                activation: zml.moe.Activation,
-                global_num_experts: i64,
-                gate_up_scales: ?zml.Tensor,
-                bias_gate_up: ?zml.Tensor,
-                down_scales: ?zml.Tensor,
-                bias_down: ?zml.Tensor,
-
-                fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                    const local_num_experts = self.weights_gate_up.dim(.expert);
-                    const partition_id = zml.ops.partitionId().convert(.i32);
-                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                    const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                    const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                        .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                    const expert_map = local_expert_mask.select(
-                        global_expert_ids.sub(expert_start),
-                        zml.Tensor.scalar(-1, .i32),
-                    );
-                    const local_output = fusedExpertsImpl(
-                        self.input,
-                        self.weights_gate_up,
-                        self.weights_down,
-                        self.topk_weights,
-                        self.topk_ids,
-                        .{
-                            .activation = self.activation,
-                            .global_num_experts = self.global_num_experts,
-                            .expert_map = expert_map,
-                            .w1_scale = self.gate_up_scales,
-                            .w2_scale = self.down_scales,
-                            .w1_bias = self.bias_gate_up,
-                            .w2_bias = self.bias_down,
-                        },
-                    );
-                    return local_output.reshape(self.input.shape()).withTags(.{ .t, .d });
-                }
-            }).body,
-            .{
-                .input = input,
-                .topk_ids = topk_ids,
-                .topk_weights = topk_weights,
-                .weights_gate_up = gate_up.weight,
-                .weights_down = down.weight,
-                .activation = opts.activation,
-                .global_num_experts = global_num_experts,
-                .gate_up_scales = gate_up_scales,
-                .bias_gate_up = gate_up.bias,
-                .down_scales = down_scales,
-                .bias_down = down.bias,
-            },
-            input.shape(),
-        );
-        return zml.ops.allReduce(partial_output, zml.Tensor.add);
-    }
-
-    return fusedExpertsImpl(
-        input,
-        gate_up.weight,
-        down.weight,
-        topk_weights,
-        topk_ids,
-        .{
-            .activation = opts.activation,
-            .global_num_experts = gate_up.weight.dim(.expert),
-            .w1_scale = gate_up_scales,
-            .w2_scale = down_scales,
-            .w1_bias = gate_up.bias,
-            .w2_bias = down.bias,
-        },
-    );
-}
-
-pub fn fusedExpertsImpl(
-    hidden_states: Tensor,
-    w1: Tensor,
-    w2: Tensor,
-    topk_weights: Tensor,
-    topk_ids: Tensor,
-    opts: Options,
-) Tensor {
-    const tokens = hidden_states.dim(.t);
-    const hidden = hidden_states.reshape(.{ .token = tokens, .in = hidden_states.dim(.d) });
+    const tokens = input.dim(.t);
+    const hidden = input.reshape(.{ .token = tokens, .in = input.dim(.d) });
     // TODO(Corentin): Better error message
-    const gate_up = canonicalizeGateUp(w1, hidden.dim(.in)) catch |e| stdx.debug.panic("Invalid gate_up weights for fusedExpertsImpl: {}", .{e});
-    const down = canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out)) catch |e| stdx.debug.panic("Invalid down weights for fusedExpertsImpl: {}", .{e});
-    const weights = topk_weights.reshape(.{ .token = tokens, .topk = topk_weights.dim(.topk) });
-    const ids = topk_ids.reshape(.{ .token = tokens, .topk = topk_ids.dim(.topk) });
+    const gate_up_ = canonicalizeGateUp(gate_up.weight, hidden.dim(.in)) catch |e| stdx.debug.panic("Invalid gate_up weights for fusedExperts: {}", .{e});
+    const down_ = canonicalizeDown(down.weight, hidden.dim(.in), gate_up_.dim(.out)) catch |e| stdx.debug.panic("Invalid down weights for fusedExperts: {}", .{e});
+    const weights = routing.weights.reshape(.{ .token = tokens, .topk = routing.weights.dim(.topk) });
+    const ids = routing.ids.reshape(.{ .token = tokens, .topk = routing.ids.dim(.topk) });
 
-    const num_experts = if (opts.global_num_experts != -1) opts.global_num_experts else gate_up.dim(.expert);
-    if (opts.expert_map) |expert_map| {
+    const num_experts = routing.global_num_experts;
+    if (expert_map_) |expert_map| {
         if (expert_map.dtype() != .i32) stdx.debug.panic("expert_map must be of dtype i32, got {}", .{expert_map.dtype()});
         if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) stdx.debug.panic("expert_map must be a 1D tensor of length num_experts, got shape {}", .{expert_map.shape()});
     }
@@ -345,7 +237,7 @@ pub fn fusedExpertsImpl(
     const flat_ids_global = ids.transpose(.{ .topk, .token }).flatten().withTags(.{.route});
     const flat_weights = weights.transpose(.{ .topk, .token }).flatten().withTags(.{.route});
 
-    const flat_ids_local, const local_route_mask = if (opts.expert_map) |expert_map| blk: {
+    const flat_ids_local, const local_route_mask = if (expert_map_) |expert_map| blk: {
         const mapped = expert_map.gather(.{ .expert = flat_ids_global }, .{}).withTags(.{.route});
         const route_mask = mapped.cmp(.GE, Tensor.scalar(0, .i32).broad(mapped.shape()));
         const safe_ids = route_mask.select(mapped, Tensor.zeroes(mapped.shape()));
@@ -356,7 +248,7 @@ pub fn fusedExpertsImpl(
     };
 
     const sorted_route = flat_ids_local.argsort(.route, .{ .descending = false }).rename(.{ .route = .perm });
-    const hidden_sorted = if (opts.expert_map != null)
+    const hidden_sorted = if (expert_map_ != null)
         permuteSmallBatch(hidden, sorted_route, ids.dim(.topk))
     else blk: {
         // If not sharded, we can save the sort + gather by just repeating the hidden states for each expert and gathering with the sorted route
@@ -371,15 +263,15 @@ pub fn fusedExpertsImpl(
         Tensor.zeroes(sorted_weights.shape()),
     );
 
-    const group_sizes = histogramCounts(flat_ids_local, gate_up.dim(.expert));
+    const group_sizes = histogramCounts(flat_ids_local, gate_up_.dim(.expert));
     const tile_m: i64 = 128;
     const aligned_hidden = alignSortedRowsByGroup(hidden_sorted, expert_ids_sorted, group_sizes, tile_m);
 
-    var gate_up_out = callGmmEp(aligned_hidden.rows, gate_up, aligned_hidden.group_sizes, hidden.dtype(), .none)
+    var gate_up_out = callGmmEp(aligned_hidden.rows, gate_up_, aligned_hidden.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_hidden.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
 
-    if (opts.w1_bias) |bias| {
+    if (gate_up.bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         gate_up_out = gate_up_out.add(bias_per_token);
     }
@@ -387,11 +279,11 @@ pub fn fusedExpertsImpl(
     const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
-    var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
+    var down_out = callGmmEp(aligned_activated.rows, down_, aligned_activated.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
 
-    if (opts.w2_bias) |bias| {
+    if (down.bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         down_out = down_out.add(bias_per_token);
     }
@@ -400,7 +292,7 @@ pub fn fusedExpertsImpl(
 
     const restore_indices = sorted_route.argsort(.perm, .{ .descending = false }).rename(.{ .perm = .restore });
     const unsorted = weighted.gather(.{ .token = restore_indices }, .{}).rename(.{ .restore = .route });
-    const restored = unsorted.reshape(.{ .topk = ids.dim(.topk), .token = hidden.dim(.token), .out = down.dim(.out) });
+    const restored = unsorted.reshape(.{ .topk = ids.dim(.topk), .token = hidden.dim(.token), .out = down_.dim(.out) });
     const combined = restored.sum(.topk).squeeze(.topk);
-    return combined.reshape(.{ .t = tokens, .d = down.dim(.out) });
+    return combined.reshape(.{ .t = tokens, .d = down_.dim(.out) });
 }

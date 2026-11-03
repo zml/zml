@@ -8,18 +8,6 @@ const platforms = @import("platforms");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
-const manual_computation = @import("ops/manual_computation.zig");
-pub const manualComputation = manual_computation.manualComputation;
-
-const manual_computation2 = @import("ops/manual_computation2.zig");
-pub const manualComputation2 = manual_computation2.manualComputation2;
-pub const ManualPartitioning = manual_computation2.ManualPartitioning;
-
-test {
-    _ = manual_computation;
-    _ = manual_computation2;
-}
-
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("mem.zig").Bufferized;
 const Compiler = @import("Compiler.zig");
@@ -28,15 +16,113 @@ const CustomCallBuffer = @import("pjrtx.zig").CustomCallBuffer;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
+const manual_computation = @import("ops/manual_computation.zig");
+pub const manualComputation = manual_computation.manualComputation;
+const manual_computation2 = @import("ops/manual_computation2.zig");
+pub const manualComputation2 = manual_computation2.manualComputation2;
+pub const ManualPartitioning = manual_computation2.ManualPartitioning;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
+
+test {
+    _ = manual_computation;
+    _ = manual_computation2;
+}
+
 const log = std.log.scoped(.@"zml/Compiler");
 
+/// Reduces local tensor values across all processes in the computation.
+/// For each tensor index, `func_` combines the values at that index from every
+/// process. The result is identical on all processes.
+///
+/// Inside a manual computation, `inputs` describes the local tensors at each
+/// partition. For example, summing `[1, 2]` and `[3, 4]` from two partitions gives
+/// `[4, 6]` at each partition. The local tensor dimensions stay unchanged.
+///
+/// * `inputs` is a `Tensor`, a nonempty tuple of tensors, or an `[N]Tensor`.
+/// Each input must have matching shapes and dtypes across processes.
+/// * `func_` describes how to combine two scalar contributions:
+///   - For one input, it must be `fn (left: Tensor, right: Tensor) Tensor`, such
+///     as `Tensor.add`. This also applies to a one-element tuple or array.
+///   - For multiple inputs, it takes one `ReduceArgs` per input and returns a
+///     tuple or array with one scalar tensor per input, in the same order.
+///
+/// Returns the same container type as `inputs`, preserving tensor attributes.
+/// With one process, returns `inputs` unchanged.
+///
+/// The reduction uses one group containing all processes, including mesh replicas.
+/// To reduce along one logical mesh axis, use `allReduceOnAxis`.
 pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@TypeOf(inputs)) {
+    const count = Compiler.current().meshes[0].numDevices();
+    var devices: [Platform.MAX_NUM_DEVICES]i64 = undefined;
+    for (devices[0..count], 0..) |*device, i| device.* = @intCast(i);
+    return allReduceGroups(inputs, func_, devices[0..count], count);
+}
+
+/// Reduces local tensor values within process groups defined by `axis` in `mesh`.
+/// A group contains processes with the same coordinates on every other logical
+/// mesh axis. Separate replicas of the mesh belong to separate groups. Within
+/// each group, `func_` combines corresponding elements and the result is identical
+/// on all member processes.
+///
+/// Use this inside a manual computation to combine partial results along `axis`
+/// while preserving the independent computations along the other mesh axes.
+///
+/// * `inputs` and `func_` follow `allReduce`'s tensor and reducer contracts.
+/// * `mesh` is the logical mesh used by the manual computation and must be
+///   included in the compilation's meshes.
+/// * `axis` names an axis of that mesh, for example `.experts`. It can be an enum
+///   literal or a mesh axis tag. The axis must exist in `mesh`.
+///
+/// Returns the same container type with tensor attributes as
+/// `inputs`. An axis of size one returns `inputs` unchanged.
+///
+/// For a mesh with `.data = 2` and `.experts = 4`, the following sums four local
+/// expert contributions independently for each of the two data shards:
+///
+/// ```zig
+/// const output = allReduceOnAxis(local_output, Tensor.add, mesh, .experts);
+/// ```
+///
+/// Each expert shard now has the complete output for its data shard. To expose
+/// this result through `manualComputation2`, an output spec such as
+/// `.parse(.{ .t = .data })` keeps tokens split across `.data` and declares the
+/// result replicated along `.experts`.
+pub fn allReduceOnAxis(inputs: anytype, comptime func_: anytype, mesh: *const Sharding.Mesh, axis: anytype) AllReduceReturnType(@TypeOf(inputs)) {
+    const logical_axis = mesh.resolveLogicalAxis(Shape.toTag(axis)) orelse @panic("Unknown logical reduction axis");
+    const size = mesh.grid.axis_sizes[logical_axis];
+    var groups: [Platform.MAX_NUM_DEVICES]i64 = undefined;
+    var replica_indices: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
+    const replicas = mesh.numReplicas();
+    for (0..mesh.numDevices()) |device| {
+        const coords = mesh.grid.logical_coords[device];
+        var tile: usize = 0;
+        var group: usize = 0;
+        for (0..mesh.logical.axes.len) |dim| {
+            tile = tile * mesh.grid.axis_sizes[dim] + coords[dim];
+            if (dim != logical_axis) group = group * mesh.grid.axis_sizes[dim] + coords[dim];
+        }
+        group = group * replicas + replica_indices[tile];
+        replica_indices[tile] += 1;
+        groups[group * size + coords[logical_axis]] = @intCast(device);
+    }
+    return allReduceGroups(inputs, func_, groups[0..mesh.numDevices()], size);
+}
+
+/// Reduces corresponding tensor elements independently within each process group.
+/// `inputs`, `func_` and the return value follow `allReduce`'s contract.
+///
+/// `groups` identifies processes by their executable partition IDs, as returned
+/// by `partitionId()`. Each consecutive `group_size` IDs defines one group.
+///
+/// For example, `groups = &.{ 0, 2, 1, 3 }` and `group_size = 2` combine partitions
+/// 0 and 2 together, and partitions 1 and 3 together. Both members of each group
+/// receive that group's result. Groups of size one return `inputs` unchanged.
+fn allReduceGroups(inputs: anytype, comptime func_: anytype, groups: []const i64, group_size: usize) AllReduceReturnType(@TypeOf(inputs)) {
     const ctx = Compiler.current();
     const mlir_ctx = ctx.mlir_ctx;
 
@@ -80,8 +166,7 @@ pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@
         else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
 
-    const num_devices = ctx.meshes[0].numDevices();
-    if (num_devices <= 1) return inputs;
+    if (group_size <= 1) return inputs;
 
     const reducer_block = b: {
         const ArgsTypes: [input_tensors.len]type = @splat(ReduceArgs);
@@ -130,14 +215,9 @@ pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@
         break :b block;
     };
 
-    var replica_group_storage: [constants.MAX_RANK]i64 = undefined;
-    for (0..@intCast(num_devices)) |i| {
-        replica_group_storage[i] = @intCast(i);
-    }
-    const replica_group_slice = replica_group_storage[0..@intCast(num_devices)];
     const replica_groups_attr = mlir.Attribute.denseElements(
-        .rankedTensor(&.{ 1, num_devices }, .int(mlir_ctx, .i64)),
-        replica_group_slice,
+        .rankedTensor(&.{ @intCast(groups.len / group_size), @intCast(group_size) }, .int(mlir_ctx, .i64)),
+        groups,
     );
 
     const handle = ctx.nextChannelId();
@@ -205,6 +285,15 @@ fn AllReduceReturnType(comptime InputsT: type) type {
         },
         else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
+}
+
+/// The executing device's coordinate on a caller-selected logical mesh axis.
+pub fn axisIndex(mesh: *const Sharding.Mesh, axis: anytype) Tensor {
+    const logical_axis = mesh.resolveLogicalAxis(Shape.toTag(axis)) orelse @panic("Unknown logical mesh axis");
+    var coords: [Platform.MAX_NUM_DEVICES]u32 = undefined;
+    for (coords[0..mesh.numDevices()], 0..) |*coord, i| coord.* = mesh.grid.logical_coords[i][logical_axis];
+    return Tensor.constantTensor(.init(.{ .device = mesh.numDevices() }, .u32), std.mem.sliceAsBytes(coords[0..mesh.numDevices()]))
+        .gather(.{ .device = partitionId() }, .{});
 }
 
 pub fn partitionId() Tensor {
