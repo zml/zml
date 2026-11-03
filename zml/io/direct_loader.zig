@@ -155,6 +155,13 @@ pub const Loader = struct {
     /// read) and stays open until `destroy`. Keyed by the slot's own copy of
     /// the path: the registry that named it may go once the batch retired.
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
+    /// Device bytes of the outputs of the sealed batches, per
+    /// `platform.devices` index, cumulative, as `DestinationState.init`
+    /// allocates them; counted by the submitting task.
+    sealed_bytes: backend.DeviceBytes = @splat(0),
+    /// Device bytes allocated for outputs so far, per `platform.devices`
+    /// index, cumulative. Freeing an output does not decrease them.
+    allocated_bytes: [Platform.MAX_NUM_DEVICES]std.atomic.Value(u64) = @splat(.init(0)),
     /// What the debug lines time from (`logBatch`, `logSummary`).
     created_at: std.Io.Timestamp,
     /// Submissions so far; the next batch's sequence number.
@@ -310,6 +317,7 @@ pub const Loader = struct {
         // Stamped before the sentinel goes, so before the batch can complete.
         batch.sealed_at = .now(self.io, .awake);
         self.batch_count += 1;
+        self.countSealed(batch);
         self.startAllocations(batch);
         // Every plan is visible: drop the publish sentinel. A batch without
         // jobs completes right here.
@@ -443,6 +451,25 @@ pub const Loader = struct {
         self.credits.deinit(self.allocator);
         self.workspace.deinit();
         self.allocator.destroy(self);
+    }
+
+    /// Output bytes of the sealed batches not allocated yet, per
+    /// `platform.devices` index. Workers allocate as they read, possibly
+    /// before the batch is sealed, so the difference saturates.
+    pub fn unallocatedBytes(self: *const Loader) backend.DeviceBytes {
+        var unallocated = self.sealed_bytes;
+        for (&unallocated, &self.allocated_bytes) |*bytes, *allocated| bytes.* -|= allocated.load(.acquire);
+        return unallocated;
+    }
+
+    /// Counts the device bytes of the sealed `batch`: a box of each
+    /// destination outside host memory on each of its devices, as
+    /// `DestinationState.init` allocates them.
+    fn countSealed(self: *Loader, batch: *const Batch) void {
+        for (batch.destinations) |*destination| {
+            if (destination.memory.isHost()) continue;
+            for (destination.grid.devices) |device| self.sealed_bytes[device.id] += destination.grid.box_bytes;
+        }
     }
 
     fn checkOpen(self: *Loader) !void {
@@ -2825,7 +2852,10 @@ const DestinationState = struct {
     /// device of its grid in canonical order; for a host-resident one, the
     /// buffers workers write (`initHost`). Runs once per destination
     /// (`LazyOnce`), however many parts feed it, on the allocation task or
-    /// the worker that first reads or fills for it.
+    /// the worker that first reads or fills for it, which also counts the
+    /// allocation once. A host destination (`Memory.isHost`) is created in
+    /// each device's pinned host memory space and takes no device memory,
+    /// so it is not counted in `allocated_bytes`.
     fn init(direct: *Loader, destination: *const Destination) StateInitError!DestinationState {
         if (destination.memory.isHost()) return initHost(direct, destination);
         const allocator = direct.allocator;
@@ -2860,6 +2890,9 @@ const DestinationState = struct {
             };
             initialized += 1;
             pjrt_buffers.appendAssumeCapacity(pjrt_buffer);
+        }
+        for (targets) |target| {
+            _ = direct.allocated_bytes[target.device_index].fetchAdd(target.total, .monotonic);
         }
 
         destination.output.* = .fromPjrtBuffers(platform, destination.shape, pjrt_buffers.constSlice());

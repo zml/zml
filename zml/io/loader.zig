@@ -1,11 +1,11 @@
 //! Checkpoint loading. `Loader.start` takes a whole model: it starts
 //! compiling the programs that compute some of its tensors
 //! (`Source.bindProgram`) and publishes every tensor the loader fills
-//! itself. `wait` then publishes the programs' inputs in groups, runs each
-//! group's programs on the caller's task once its inputs landed, and
-//! retires everything. Backends only read sources into buffers; lookup,
-//! compilation, admission and execution stay in this shared front end. The
-//! contract is in the pub doc comments below.
+//! itself. `wait` then publishes the programs' inputs in groups the devices
+//! have room for, runs each group's programs on the caller's task once its
+//! inputs landed, and retires everything. Backends only read sources into
+//! buffers; lookup, compilation, admission and execution stay in this
+//! shared front end. The contract is in the pub doc comments below.
 //!
 //! From bindings to specs. `start` checks every tensor and program input
 //! once, before anything is published (`prepareSpec`, `checkPlacement`).
@@ -25,14 +25,30 @@
 //! do).
 //!
 //! Order and admission. The tensors the loader fills go out first, as one
-//! submission. A group holds the tensors of consecutive programs in model
-//! order, up to `program_group_bytes` of outputs, so the inputs of one
-//! layer's experts, adjacent in the checkpoint, are read together. Before
-//! publishing a group, `wait` waits for its programs to compile, then
-//! retires the oldest pending submissions until no program group is
-//! pending: one program group is in flight at a time.
+//! submission, so every program group is admitted with them counted. A
+//! group holds the tensors of consecutive programs in model order, up to
+//! `program_group_bytes` of outputs, so the inputs of one layer's experts,
+//! adjacent in the checkpoint, are read together. Before publishing a
+//! group, `wait` waits for its programs to compile, then retires the oldest
+//! pending submissions until the group fits the room every device reports
+//! (`admission`): its limit, minus what is in use, minus the bytes the
+//! direct backend published but has not allocated yet, minus a 64 MiB
+//! reserve. A device's allocator may count freed memory as in use until it
+//! is given back (`Platform.releaseFreedDeviceMemory`), so `start` gives
+//! back what was freed before the load. A group costs its inputs, its
+//! outputs and the largest of its programs' temporaries per device, since
+//! they run one after the other. Once no program group is pending, retiring
+//! frees nothing more: the room is read again after the retired groups'
+//! memory is given back, and the group goes even if it is still short,
+//! since the room is an estimate and can read low. A group that does not
+//! fit a device fails its allocation or its execution with the device's
+//! error, which `wait` returns; a smaller `Options.program_group_bytes`
+//! makes smaller groups. Where a device reports no limit (CPU) or the
+//! backend does not count its allocations (buffered), nothing is measured
+//! and one program group is in flight at a time.
 const std = @import("std");
 
+const pjrt = @import("pjrt");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
@@ -55,8 +71,10 @@ const Backend = backend.Backend;
 const buffered_loader = @import("buffered_loader.zig");
 const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
+const DeviceBytes = backend.DeviceBytes;
 const direct_loader = @import("direct_loader.zig");
 const load_log = @import("log.zig").load;
+const ShardGrid = @import("ShardGrid.zig");
 const TensorStore = @import("TensorStore.zig");
 
 const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
@@ -119,6 +137,10 @@ pub const Loader = struct {
     pending: std.Deque(PendingSubmission) = .empty,
     /// The first error; every later call returns it.
     failure: ?anyerror = null,
+    /// The direct backend when admission can measure the room: it counts
+    /// its allocations and every device reported an allocator limit at the
+    /// first `start`. Otherwise one program group is in flight at a time.
+    measured: ?*direct_loader.Loader = null,
     stats: Stats = .{},
 
     pub const Options = struct {
@@ -198,13 +220,15 @@ pub const Loader = struct {
         return Backend.init(allocator, io, platform, opts);
     }
 
-    /// Waits for `init`'s task the first time: its backend, or its error,
-    /// for the caller to fail the loader with.
+    /// Waits for `init`'s task the first time: its backend, then whether
+    /// admission can measure the devices; or its error, for the caller to
+    /// fail the loader with.
     fn awaitSetup(self: *Loader) !void {
         const setup = if (self.setup) |*task| task else return;
         const result = setup.await(self.io);
         self.setup = null;
         self.backend = try result;
+        self.measured = self.probeMemory();
     }
 
     /// Gives up on everything started: drops the queued groups, aborts the
@@ -226,6 +250,7 @@ pub const Loader = struct {
     /// the caller's. Panics on loads neither waited for nor canceled.
     pub fn deinit(self: *Loader) void {
         if (self.loadsStarted()) std.debug.panic("Loader.deinit with loads started, whose store and buffers may be freed already: add `errdefer loader.cancel();` after `start`", .{});
+        self.stats.logAdmission(self.measured != null);
         self.queued.deinit(self.allocator);
         self.pending.deinit(self.allocator);
         self.programs.deinit(self.allocator);
@@ -239,6 +264,21 @@ pub const Loader = struct {
     /// Whether loads are started and neither waited for nor canceled.
     fn loadsStarted(self: *const Loader) bool {
         return self.queued.len != 0 or self.pending.len != 0 or self.programs.items.len != 0;
+    }
+
+    /// The direct backend when every device reports an allocator limit
+    /// (`measured`). Decided once: the CPU plugin logs an unimplemented
+    /// warning on every stats call, so admission never asks a device that
+    /// answered nothing.
+    fn probeMemory(self: *const Loader) ?*direct_loader.Loader {
+        const direct = switch (self.backend.?) {
+            .direct => |direct| direct,
+            .buffered => return null,
+        };
+        for (self.platform.devices) |device| {
+            if (device.memoryStats().bytes_limit == null) return null;
+        }
+        return direct;
     }
 
     /// Starts loading every tensor of `model` into its buffer in `buffers`,
@@ -277,7 +317,8 @@ pub const Loader = struct {
     /// input; the backend completes them.
     /// Several loads may be started before one `wait`, from one store or
     /// several. The first `start` waits for `init`'s task, and fails with
-    /// its error.
+    /// its error. Each `start` then gives the device memory freed before it
+    /// back to the devices (`Platform.releaseFreedDeviceMemory`).
     pub fn start(
         self: *Loader,
         model: anytype,
@@ -300,7 +341,12 @@ pub const Loader = struct {
         progress: std.Progress.Node,
     ) !void {
         try self.awaitSetup();
-        // The load's time starts once the set-up is done.
+        // Give back what was freed before this load (compile scratch, the
+        // set-up's calibration buffers), so that admission's room does not
+        // count it and the load's peak does not include it.
+        self.platform.releaseFreedDeviceMemory();
+        // The load's time starts once the set-up is done and the freed
+        // memory given back.
         self.stats.begin(self.io);
         var prepared = try prepareModel(self.allocator, self.platform, self.backend.?, store, model, buffers);
         errdefer prepared.arena.deinit();
@@ -313,12 +359,12 @@ pub const Loader = struct {
             prepared.arena.deinit();
             return;
         }
-        try self.submit(prepared.specs, prepared.arena, &.{}, progress);
+        try self.submit(prepared.specs, prepared.arena, &.{}, @splat(0), progress);
     }
 
     /// Publishes the queued program groups, oldest first, each once its
-    /// programs compiled and no other program group is pending (`admit`),
-    /// and retires every submission in publish order, running a group's
+    /// programs compiled and the devices have room for it (`admit`), and
+    /// retires every submission in publish order, running a group's
     /// programs on this task once its inputs landed. Returns once every
     /// started load is in its buffers, with the freed device memory, its
     /// programs' inputs and temporaries among it, given back to the devices
@@ -327,7 +373,8 @@ pub const Loader = struct {
     /// what the programs computed and how long publishing waited for their
     /// compiles. A program that fails to compile or run fails it; one that
     /// does not return its tensor's shape, placed alike, is
-    /// `InvalidBinding`. Idempotent: with nothing started it returns at
+    /// `InvalidBinding`; a group that does not fit a device fails it with
+    /// the device's error. Idempotent: with nothing started it returns at
     /// once and logs nothing.
     pub fn wait(self: *Loader) !void {
         if (self.failure) |err| return err;
@@ -427,25 +474,110 @@ pub const Loader = struct {
         self.programs.clearRetainingCapacity();
     }
 
-    /// Publishes `group` once its programs compiled and no other program
-    /// group is pending: its calls and its specs' arena move to the pending
+    /// Publishes `group` once its programs compiled and the devices have
+    /// room for it: its calls and its specs' arena move to the pending
     /// submission, or are freed when this fails.
     fn publish(self: *Loader, group: Group) !void {
         errdefer group.deinit(self.allocator);
         const started: std.Io.Timestamp = .now(self.io, .awake);
         for (group.calls) |call| try call.program.await(self.io, self.platform);
         self.stats.compile_wait_ns +|= @intCast(started.untilNow(self.io, .awake).toNanoseconds());
-        try self.admit();
-        try self.submit(group.specs, group.arena, group.calls, group.progress);
+        const execution = try self.admit(group.calls);
+        try self.submit(group.specs, group.arena, group.calls, execution, group.progress);
     }
 
-    /// Retires pending submissions, oldest first, until no program group is
-    /// pending, so one program group is in flight at a time. A bulk load
-    /// published before the pending group is retired with it.
-    fn admit(self: *Loader) !void {
+    /// Retires pending submissions, oldest first, until the group of
+    /// `calls` fits the measured room or no program group is pending: a
+    /// bulk load frees nothing. Once nothing can be retired for it, the
+    /// room is read again after the freed device memory is given back
+    /// (`Platform.releaseFreedDeviceMemory`), and the group is admitted
+    /// whatever its size (`Stats.beyond_room`). Without memory measurement
+    /// one program group is in flight at a time. Returns the group's output
+    /// and temporary bytes per device, zero while unmeasured.
+    fn admit(self: *Loader, calls: []const Call) !DeviceBytes {
+        var inputs: DeviceBytes = @splat(0);
+        var execution: DeviceBytes = @splat(0);
+        var room: ?DeviceBytes = null;
+        if (self.measured) |direct| {
+            var temporaries: DeviceBytes = @splat(0);
+            for (calls) |call| {
+                const exe = &call.program.exe.?;
+                for (exe.input_shapes) |shape| addPlacementBytes(&inputs, self.platform, shape);
+                // The output's memory space is the program's to choose; it is
+                // charged to the devices like the default space.
+                addPlacementBytes(&execution, self.platform, exe.output_shapes[0]);
+                // The group's programs run one after the other, so only the
+                // largest temporaries are live at once.
+                const temp = self.compiledTempBytes(exe);
+                const output_mesh = self.platform.placedShape(exe.output_shapes[0])._sharding.mesh.?;
+                for (output_mesh.devicesInCanonicalOrder()) |device| temporaries[device.id] = @max(temporaries[device.id], temp);
+            }
+            for (&execution, temporaries) |*bytes, temp| bytes.* +|= temp;
+            room = self.readRoom(direct);
+        }
         var retired: usize = 0;
-        while (self.programGroupPending()) : (retired += 1) try self.retireOldest(true);
+        while (room == null or !self.fits(&room.?, &inputs, &execution)) : (retired += 1) {
+            if (!self.programGroupPending()) {
+                // Nothing is left to retire, but the retired groups' inputs
+                // may still count as in use: read the room again once the
+                // devices have them back. The group then goes, beyond the
+                // room if the room is still short.
+                if (room != null) {
+                    self.platform.releaseFreedDeviceMemory();
+                    room = self.readRoom(self.measured.?);
+                }
+                break;
+            }
+            try self.retireOldest(true);
+            if (self.measured) |direct| room = self.readRoom(direct);
+        }
+        const beyond_room = room != null and !self.fits(&room.?, &inputs, &execution);
         self.stats.admission_retires += retired;
+        if (beyond_room) self.stats.beyond_room += 1;
+        if (retired != 0 or beyond_room) {
+            // Unmeasured, the group's bytes are not computed: only the retires are logged.
+            if (self.measured != null) {
+                const n = self.platform.devices.len;
+                // A device that stopped reporting its limit shows no room.
+                const rooms: DeviceBytes = room orelse @splat(0);
+                const pending = self.pendingExecution();
+                // The device the fit is decided on: the short one when the
+                // group goes beyond the room.
+                const device = admission.tightest(rooms[0..n], pending[0..n], inputs[0..n], execution[0..n]);
+                load_log.debug("execute admission: retired={d} before submission {d}: measured=true, beyond_room={}, device {d} room={Bi:.2} pending_execution={Bi:.2} inputs={Bi:.2} execution={Bi:.2}", .{
+                    retired,
+                    self.stats.submissions,
+                    beyond_room,
+                    device,
+                    rooms[device],
+                    pending[device],
+                    inputs[device],
+                    execution[device],
+                });
+            } else {
+                load_log.debug("execute admission: retired={d} before submission {d}: measured=false", .{ retired, self.stats.submissions });
+            }
+        }
+        return execution;
+    }
+
+    /// Whether a group of `inputs` and `execution` fits beside the pending
+    /// program groups in `room`, on every device.
+    fn fits(self: *const Loader, room: *const DeviceBytes, inputs: *const DeviceBytes, execution: *const DeviceBytes) bool {
+        const n = self.platform.devices.len;
+        const pending = self.pendingExecution();
+        return admission.admits(room[0..n], pending[0..n], inputs[0..n], execution[0..n]);
+    }
+
+    /// Output and temporary bytes of the pending program groups, per
+    /// device: what retiring them will take before it frees anything.
+    fn pendingExecution(self: *const Loader) DeviceBytes {
+        var sum: DeviceBytes = @splat(0);
+        var it = self.pending.iterator();
+        while (it.nextPtr()) |submission| {
+            for (&sum, submission.execution) |*bytes, more| bytes.* +|= more;
+        }
+        return sum;
     }
 
     /// Whether a program group is pending: only retiring one frees room
@@ -458,14 +590,49 @@ pub const Loader = struct {
         return false;
     }
 
+    /// The room each device reports now; null when one reports no memory
+    /// limit.
+    fn readRoom(self: *Loader, direct: *const direct_loader.Loader) ?DeviceBytes {
+        const n = self.platform.devices.len;
+        const unallocated = direct.unallocatedBytes();
+        var room: DeviceBytes = undefined;
+        for (room[0..n], self.platform.devices, unallocated[0..n]) |*out, device, device_unallocated| {
+            const reported = device.memoryStats();
+            out.* = admission.room(reported.bytes_limit, reported.bytes_in_use, device_unallocated, admission.reserve_bytes) orelse return null;
+            self.stats.min_room_seen = @min(self.stats.min_room_seen orelse out.*, out.*);
+        }
+        return room;
+    }
+
+    /// Temporaries the executable takes on each of its devices, from its
+    /// compiled memory stats (per partition, i.e. per device). Zero when
+    /// the plugin cannot answer.
+    fn compiledTempBytes(self: *Loader, exe: *const Exe) u64 {
+        const api = self.platform.pjrt_api;
+        const pjrt_executable = exe.exe.executable(api) catch |err| return self.tempUnavailable(err);
+        defer pjrt_executable.deinit(api);
+        const stats = pjrt_executable.getCompiledMemoryStats(api) catch |err| return self.tempUnavailable(err);
+        return stats.temp_size_in_bytes;
+    }
+
+    fn tempUnavailable(self: *Loader, err: pjrt.ApiError) u64 {
+        if (!self.stats.temp_unavailable_logged) {
+            self.stats.temp_unavailable_logged = true;
+            load_log.debug("executable memory stats unavailable ({s}): temporaries counted as zero", .{@errorName(err)});
+        }
+        return 0;
+    }
+
     /// One submission over `specs`, which live in `arena`. Takes `arena` and
     /// `calls` once the submission is published; on failure the caller still
-    /// owns them.
+    /// owns them. `execution` is a program group's output and temporary
+    /// bytes per device (`admit`), zero for a bulk load.
     fn submit(
         self: *Loader,
         specs: []const LoadSpec,
         arena: std.heap.ArenaAllocator,
         calls: []Call,
+        execution: DeviceBytes,
         progress: std.Progress.Node,
     ) !void {
         // One spec per destination, however many parts fill it: its bytes
@@ -478,6 +645,7 @@ pub const Loader = struct {
             .submission = submission,
             .arena = arena,
             .calls = calls,
+            .execution = execution,
             .logical_bytes = logical_bytes,
         });
         self.stats.submissions += 1;
@@ -525,6 +693,15 @@ const Stats = struct {
     submissions: usize = 0,
     /// Submissions retired to admit a program group, bulk loads included.
     admission_retires: usize = 0,
+    /// The least room a device reported since `init`; null while nothing
+    /// was measured.
+    min_room_seen: ?u64 = null,
+    /// Program groups admitted beyond the measured room since `init`:
+    /// nothing was left to retire for them.
+    beyond_room: usize = 0,
+    /// Whether `tempUnavailable` logged that the plugin gives no compiled
+    /// memory stats: once per loader.
+    temp_unavailable_logged: bool = false,
 
     /// Times and counts a load from the first `start` since the last
     /// `wait`; later starts add to it.
@@ -558,6 +735,20 @@ const Stats = struct {
         self.started_at = null;
         self.compile_wait_ns = 0;
     }
+
+    /// `deinit`'s debug line. `measured`: whether admission measured the
+    /// room (`Loader.measured`), printed as `memory_supported`.
+    fn logAdmission(self: *const Stats, measured: bool) void {
+        if (self.submissions == 0) return;
+        load_log.debug("loader admission: submissions={d}, execute_admission_retires={d}, beyond_room={d}, memory_supported={}, min_room_seen={Bi:.2}, reserve={Bi:.2}", .{
+            self.submissions,
+            self.admission_retires,
+            self.beyond_room,
+            measured,
+            self.min_room_seen orelse 0,
+            admission.reserve_bytes,
+        });
+    }
 };
 
 /// One published submission: what to wait for, what to run afterwards and
@@ -570,6 +761,9 @@ const PendingSubmission = struct {
     /// Run in order once the reads are done; freed with their inputs when
     /// the submission is retired. Empty for a bulk load.
     calls: []Call,
+    /// Output and temporary bytes per device of a program group, while
+    /// admission measures (`admit`); zero otherwise and for a bulk load.
+    execution: DeviceBytes,
     logical_bytes: usize,
 };
 
@@ -680,6 +874,87 @@ const Call = struct {
         allocator.free(self.inputs);
     }
 };
+
+/// The arithmetic behind program admission: what the devices have left,
+/// and whether the next group fits beside the ones still pending.
+/// Everything is per device (index = `platform.devices` index) in bytes;
+/// nothing here touches a device, so the rules are tested without one.
+const admission = struct {
+    /// Allocator slack per device. BFC rounds every allocation up to 256 bytes;
+    /// a 64-pack, 16-source, 8-device load is about 1e5 shards, under 32 MiB of
+    /// rounding, and nothing else runs on the devices during a load.
+    const reserve_bytes: u64 = 64 << 20;
+
+    /// Bytes the loader may still take on one device: the limit (null when the
+    /// plugin reports none, as CPU does) minus what is in use, minus its own
+    /// bytes published but not allocated yet (`unallocated`), minus the
+    /// reserve.
+    fn room(limit: ?u64, in_use: u64, unallocated: u64, reserve: u64) ?u64 {
+        return (limit orelse return null) -| in_use -| unallocated -| reserve;
+    }
+
+    /// Whether one submission's `inputs` (placements, counted here until they
+    /// are published) and `execution` (output placement plus the executable's
+    /// temporaries) fit beside the pending executions on every device.
+    fn admits(rooms: []const u64, pending: []const u64, inputs: []const u64, execution: []const u64) bool {
+        for (rooms, pending, inputs, execution) |r, p, i, e| {
+            if (p +| i +| e > r) return false;
+        }
+        return true;
+    }
+
+    /// The device with the least room left once one submission's `inputs`
+    /// and `execution` sit beside the pending executions: one that `admits`
+    /// fails on when the submission does not fit. `rooms` is not empty.
+    fn tightest(rooms: []const u64, pending: []const u64, inputs: []const u64, execution: []const u64) usize {
+        var device: usize = 0;
+        var least: i128 = std.math.maxInt(i128);
+        for (rooms, pending, inputs, execution, 0..) |r, p, i, e, index| {
+            const left = @as(i128, r) - (p +| i +| e);
+            if (left < least) {
+                least = left;
+                device = index;
+            }
+        }
+        return device;
+    }
+};
+
+test "room subtracts use, unallocated bytes and the reserve, saturating" {
+    try std.testing.expectEqual(null, admission.room(null, 0, 0, 0));
+    try std.testing.expectEqual(55, admission.room(100, 30, 10, 5).?);
+    // More in use than the limit admits: no room, no underflow.
+    try std.testing.expectEqual(0, admission.room(100, 130, 0, 0).?);
+    try std.testing.expectEqual(0, admission.room(100, 90, 0, 20).?);
+}
+
+test "admits needs room on every device" {
+    try std.testing.expect(admission.admits(&.{ 40, 40 }, &.{ 20, 20 }, &.{ 10, 10 }, &.{ 5, 5 }));
+    // The second device is one byte short.
+    try std.testing.expect(!admission.admits(&.{ 40, 34 }, &.{ 20, 20 }, &.{ 10, 10 }, &.{ 5, 5 }));
+    try std.testing.expect(admission.admits(&.{}, &.{}, &.{}, &.{}));
+}
+
+test "tightest names the device short of room, not the first" {
+    // Device 0 has less room but holds the group; device 1 is one byte short.
+    try std.testing.expectEqual(1, admission.tightest(&.{ 30, 34 }, &.{ 0, 20 }, &.{ 10, 10 }, &.{ 5, 5 }));
+    // Both are short: the one short by more, though it has more room.
+    try std.testing.expectEqual(1, admission.tightest(&.{ 10, 12 }, &.{ 0, 0 }, &.{ 10, 20 }, &.{ 5, 10 }));
+    // A need that saturates at maxInt(u64) is short by the most.
+    try std.testing.expectEqual(1, admission.tightest(&.{ 10, 20 }, &.{ 0, std.math.maxInt(u64) }, &.{ 20, 1 }, &.{ 0, 0 }));
+    // Equally short: the first.
+    try std.testing.expectEqual(0, admission.tightest(&.{ 10, 10 }, &.{ 0, 0 }, &.{ 12, 12 }, &.{ 0, 0 }));
+}
+
+/// Adds the bytes `shape` occupies per device: its box on each device it
+/// is placed on, as the direct backend's `countSealed` counts them; an
+/// empty shape takes none. `shape` places on the platform's devices
+/// (`checkPlacement`).
+fn addPlacementBytes(out: *DeviceBytes, platform: *const Platform, shape: Shape) void {
+    if (shape.byteSize() == 0) return;
+    const grid: ShardGrid = .init(platform, shape);
+    for (grid.devices) |device| out[device.id] += grid.box_bytes;
+}
 
 /// A tensor a program computes, at `path` in the model, the buffer it
 /// computes into, and its program and inputs.
@@ -1058,7 +1333,7 @@ const LoaderTestFixture = struct {
     }
 };
 
-test "start publishes the bulk at once and wait runs program groups one at a time" {
+test "start publishes the bulk at once and wait runs program groups one at a time without memory measurement" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var fixture: LoaderTestFixture = undefined;
@@ -1067,6 +1342,10 @@ test "start publishes the bulk at once and wait runs program groups one at a tim
     // One program tensor per group.
     var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2, .program_group_bytes = 1 });
     defer loader.deinit();
+    // Exercise serial admission regardless of the platform's memory stats:
+    // decided once the set-up is done.
+    try loader.awaitSetup();
+    loader.measured = null;
 
     const Model = struct { value: Tensor, first: Tensor, second: Tensor };
     const model: Model = .{
@@ -1086,8 +1365,8 @@ test "start publishes the bulk at once and wait runs program groups one at a tim
     try std.testing.expectEqual(1, loader.programs.items.len);
     try loader.wait();
     try std.testing.expectEqual(0, loader.pending.len + loader.queued.len + loader.programs.items.len);
-    // Admission retired the bulk and the first group before it published
-    // the second.
+    // Serial admission retired the bulk and the first group before it
+    // published the second.
     try std.testing.expectEqual(2, loader.stats.admission_retires);
     try testing.expectShards(allocator, io, &buffers.value, &LoaderTestFixture.contents, .default);
     try testing.expectShards(allocator, io, &buffers.first, &LoaderTestFixture.contents, .default);
@@ -1163,7 +1442,7 @@ test "tensors of one program and equal args share one compile, and one group run
     try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.stats.bytes_loaded);
 }
 
-test "loader delivers host bindings into pinned host memory" {
+test "loader delivers host bindings into pinned host memory without charging the devices" {
     for ([_]Memory{ .host_pinned, .host_mapped }) |kind| try expectHostDelivery(kind);
 }
 
@@ -1197,6 +1476,16 @@ fn expectHostDelivery(kind: Memory) !void {
     // One shard per device, each in that device's pinned host memory space
     // or, `host_mapped`, a view of pinned memory in its default space.
     try testing.expectShards(allocator, io, &buffers.host, &LoaderTestFixture.second_contents, kind);
+
+    // Only the tensor in device memory counts against the devices, on both
+    // sides of the admission ledger.
+    if (loader.backend.? == .direct) {
+        const direct = loader.backend.?.direct;
+        for (direct.sealed_bytes[0..platform.devices.len], direct.allocated_bytes[0..platform.devices.len]) |sealed, *allocated| {
+            try std.testing.expectEqual(LoaderTestFixture.contents.len, sealed);
+            try std.testing.expectEqual(sealed, allocated.load(.acquire));
+        }
+    }
 }
 
 test "a program frees its donated and non-donated inputs once" {
@@ -1301,6 +1590,8 @@ test "a read failure fails the loader for every later call" {
     // The broken group first, retired when the next one is admitted.
     var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2, .program_group_bytes = 1 });
     defer loader.deinit();
+    try loader.awaitSetup();
+    loader.measured = null;
 
     const Model = struct { broken: Tensor, value: Tensor };
     const model: Model = .{
@@ -1356,6 +1647,38 @@ test "after a failed load every buffer is empty or whole, and deinitBufferized f
     }.call, .{ devices, &torn });
     try std.testing.expectEqual(0, torn);
     try std.testing.expectEqual(0, buffers.computed._shards.len);
+}
+
+test "the direct backend allocates what it was submitted once everything landed" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    var placed: DeviceBytes = @splat(0);
+    // An empty tensor takes no bytes.
+    addPlacementBytes(&placed, fixture.platform, .init(.{ 0, 4 }, .f32));
+    addPlacementBytes(&placed, fixture.platform, fixture.value.shape());
+    for (placed[0..fixture.platform.devices.len]) |bytes| try std.testing.expectEqual(LoaderTestFixture.contents.len, bytes);
+
+    var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+    const Model = struct { value: Tensor, computed: Tensor };
+    const model: Model = .{ .value = fixture.value, .computed = fixture.computed("value", fixture.value, LoaderTestFixture.Identity{}) };
+    var buffers = try mem.bufferize(allocator, &model);
+    defer mem.deinitBufferized(allocator, &buffers);
+    try loader.start(&model, &buffers, &fixture.store, .none);
+    try loader.wait();
+    if (loader.backend.? != .direct) return;
+    const direct = loader.backend.?.direct;
+    const n = fixture.platform.devices.len;
+    const unallocated = direct.unallocatedBytes();
+    // Replicated program inputs and bulk outputs occupy every device.
+    for (direct.sealed_bytes[0..n], direct.allocated_bytes[0..n], unallocated[0..n]) |sealed, *allocated, bytes| {
+        try std.testing.expectEqual(LoaderTestFixture.contents.len * 2, sealed);
+        try std.testing.expectEqual(sealed, allocated.load(.acquire));
+        try std.testing.expectEqual(0, bytes);
+    }
 }
 
 test "init checks every option and returns InvalidOptions" {
@@ -1685,6 +2008,7 @@ test "loader assembles concatenated and padded sources on every placement and me
         // Rows over the devices (b and c straddle shards on four), every
         // row split over them, and every byte on each of them.
         inline for (.{ .{ .row = .model }, .{ .col = .model }, .{} }) |partitioning| {
+            const shards: u64 = if (@typeInfo(@TypeOf(partitioning)).@"struct".field_names.len == 0) 1 else device_count;
             for ([_]Memory{ .default, .host_pinned, .host_mapped }) |memory| {
                 if (!backend.supportsMemory(platform, memory)) continue;
                 const view = store.view();
@@ -1715,6 +2039,17 @@ test "loader assembles concatenated and padded sources on every placement and me
                 try testing.expectShards(allocator, io, &buffers.plain, &fixture.plain, memory);
                 // Each destination once, padding included.
                 try std.testing.expectEqual(@as(usize, 256 + 128 + 96 + 64), loader.stats.bytes_loaded);
+                // A destination is allocated once per device, whatever its
+                // parts; host memory counts on neither side.
+                if (loader.backend.? == .direct) {
+                    const direct = loader.backend.?.direct;
+                    const n = platform.devices.len;
+                    for (direct.sealed_bytes[0..n], direct.allocated_bytes[0..n]) |sealed, *allocated| try std.testing.expectEqual(sealed, allocated.load(.acquire));
+                    for (devices.physical.devices_in_canonical_order) |device| {
+                        const expected: u64 = if (memory.isHost()) 0 else (256 + 128 + 64) / shards + 96;
+                        try std.testing.expectEqual(expected, direct.sealed_bytes[device.id]);
+                    }
+                }
             }
         }
     }

@@ -406,6 +406,10 @@ pub fn supportsMemory(platform: *const Platform, kind: Memory) bool {
     return true;
 }
 
+/// Bytes per device, by `platform.devices` index: `Platform.init` refuses
+/// more devices than it holds.
+pub const DeviceBytes = [Platform.MAX_NUM_DEVICES]u64;
+
 /// The transfer implementation selected for the platform (`loadsDirect`).
 pub const Backend = union(enum) {
     direct: *direct_loader.Loader,
