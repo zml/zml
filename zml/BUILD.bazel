@@ -91,6 +91,7 @@ zig_library(
         "io/TensorStore.zig",
         "io/backend.zig",
         "io/buffered_loader.zig",
+        "io/direct_loader.zig",
         "io/host_memory.zig",
         "io/loader.zig",
         "io/log.zig",
