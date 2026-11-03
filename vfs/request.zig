@@ -16,6 +16,13 @@ pub const Retry = struct {
     /// Longest backoff before a request's next attempt, a server-named delay
     /// included.
     max_delay: std.Io.Duration = .fromSeconds(30),
+    /// An exchange that receives nothing for this long is canceled and
+    /// retried as a timeout: a peer that stops sending without closing the
+    /// connection would otherwise hold its reader, and the load waiting for
+    /// it, forever. Body readers count what they receive
+    /// (`Attempt.progress`); an exchange that counts nothing (a HEAD, a token
+    /// exchange) must finish within it.
+    stall_timeout: std.Io.Duration = .fromSeconds(60),
 };
 
 /// One per backend instance: what each of its requests needs and its read
@@ -137,7 +144,14 @@ pub const Attempt = struct {
     /// The status the previous attempt returned, for a hook that reacts to
     /// one (an expired signed URL answering 403).
     previous_status: ?std.http.Status = null,
+    /// Bytes received so far, for a hook whose body is long: `exchange`
+    /// cancels an exchange this counter does not move for
+    /// `Retry.stall_timeout`.
+    progress: *std.atomic.Value(u64),
 };
+
+/// How often a watched exchange's progress is checked, per stall timeout.
+const stall_checks = 12;
 
 /// Identity of one request, for the logs and for the classification.
 pub const RequestSpec = struct {
@@ -174,9 +188,10 @@ pub fn Outcome(comptime T: type) type {
 
 /// The one request loop. `attemptFn` performs a single HTTP exchange (see
 /// `exchange`); this drives the classification and the retry budget around
-/// it. Every retryable failure, a throttle included, sleeps the per-request
-/// backoff, or the delay the server named up to `max_delay`, and charges one
-/// of `max_retries`. A cancel of the caller propagates.
+/// it. Every retryable failure, a throttle and a stall
+/// (`Retry.stall_timeout`) included, sleeps the per-request backoff, or the
+/// delay the server named up to `max_delay`, and charges one of
+/// `max_retries`. A cancel of the caller propagates.
 pub fn perform(
     comptime T: type,
     governor: *Governor,
@@ -188,7 +203,8 @@ pub fn perform(
     var previous_status: ?std.http.Status = null;
     while (true) {
         governor.stats.recordAttempt();
-        switch (try attemptFn(context, .{ .governor = governor, .spec = spec, .previous_status = previous_status })) {
+        var progress: std.atomic.Value(u64) = .init(0);
+        switch (try attemptFn(context, .{ .governor = governor, .spec = spec, .previous_status = previous_status, .progress = &progress })) {
             .done => |value| return value,
             .retry => |failure| {
                 governor.stats.recordFailure(failure.failure);
@@ -206,6 +222,74 @@ pub fn perform(
             },
         }
     }
+}
+
+/// Runs one exchange on its own unit of concurrency while this task watches
+/// the attempt's progress, and cancels it after `Retry.stall_timeout` without
+/// progress. The exchange returns a canceled read as `Canceled`, unlogged,
+/// so the outcome of a stalled exchange is decided here, as a timeout.
+/// Without a unit of concurrency the exchange runs unwatched.
+fn watched(
+    comptime T: type,
+    context: anytype,
+    comptime exchangeFn: fn (@TypeOf(context), Attempt) anyerror!Outcome(T),
+    attempt: Attempt,
+) anyerror!Outcome(T) {
+    const Run = struct {
+        result: anyerror!Outcome(T) = undefined,
+        done: std.Io.Event = .unset,
+
+        fn run(self: *@This(), io: std.Io, context_: @TypeOf(context), attempt_: Attempt) void {
+            self.result = exchangeFn(context_, attempt_);
+            self.done.set(io);
+        }
+    };
+    const governor = attempt.governor;
+    var run: Run = .{};
+    var future = governor.io.concurrent(Run.run, .{ &run, governor.io, context, attempt }) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => return exchangeFn(context, attempt),
+    };
+    const stall_timeout = governor.retry.stall_timeout;
+    const check: std.Io.Timeout = .{ .duration = .{
+        .raw = .fromNanoseconds(@divTrunc(stall_timeout.nanoseconds, stall_checks)),
+        .clock = .awake,
+    } };
+    var seen = attempt.progress.load(.monotonic);
+    var quiet: usize = 0;
+    while (quiet < stall_checks) {
+        run.done.waitTimeout(governor.io, check) catch |err| switch (err) {
+            error.Timeout => {
+                const now = attempt.progress.load(.monotonic);
+                quiet = if (now == seen) quiet + 1 else 0;
+                seen = now;
+                continue;
+            },
+            error.Canceled => {
+                future.cancel(governor.io);
+                // An exchange already past its last cancelation point
+                // finished: its value is the caller's, and the cancel
+                // reaches the caller at its next cancelation point.
+                if (run.result) |outcome| switch (outcome) {
+                    .done => {
+                        governor.io.recancel();
+                        return outcome;
+                    },
+                    .retry => {},
+                } else |_| {}
+                return error.Canceled;
+            },
+        };
+        future.await(governor.io);
+        return run.result;
+    }
+    future.cancel(governor.io);
+    // It may have finished while being canceled.
+    if (run.result) |outcome| switch (outcome) {
+        .done => return outcome,
+        .retry => {},
+    } else |_| {}
+    log.warn("{s}: {s} received nothing for {d:.1}s; retrying", .{ governor.name, attempt.spec.target, @as(f64, @floatFromInt(stall_timeout.nanoseconds)) / std.time.ns_per_s });
+    return .{ .retry = .{ .failure = .timeout } };
 }
 
 fn clampDelay(value: std.Io.Duration, low: std.Io.Duration, high: std.Io.Duration) std.Io.Duration {
@@ -253,8 +337,30 @@ pub const ExchangeOptions = struct {
 /// an unclassified status or any other connect or head failure fails with
 /// `error.RequestFailed`, logged at err, except that an open request
 /// (`ExchangeOptions.open`) fails an absent or denied object with
-/// `FileNotFound` or `PermissionDenied` first, unlogged.
+/// `FileNotFound` or `PermissionDenied` first, unlogged. The exchange alone
+/// is watched (`Retry.stall_timeout`); a governed request its hook runs
+/// first (a re-resolve, a token refresh) is watched by its own exchange.
 pub fn exchange(
+    comptime T: type,
+    attempt: Attempt,
+    uri: std.Uri,
+    options: ExchangeOptions,
+    context: anytype,
+    comptime consume: fn (@TypeOf(context), *std.http.Client.Response) anyerror!T,
+) anyerror!Outcome(T) {
+    const Exchange = struct {
+        uri: std.Uri,
+        options: ExchangeOptions,
+        context: @TypeOf(context),
+
+        fn run(self: @This(), current: Attempt) anyerror!Outcome(T) {
+            return roundTrip(T, current, self.uri, self.options, self.context, consume);
+        }
+    };
+    return watched(T, Exchange{ .uri = uri, .options = options, .context = context }, Exchange.run, attempt);
+}
+
+fn roundTrip(
     comptime T: type,
     attempt: Attempt,
     uri: std.Uri,
@@ -284,7 +390,7 @@ pub fn exchange(
         error.NetworkDown,
         error.NameServerFailure,
         => return retryable(T, attempt, "connect", err, .transient),
-        // The caller's cancel.
+        // A stalled exchange that `watched` canceled, or the caller's cancel.
         error.Canceled => return err,
         error.OutOfMemory => return err,
         else => return fatal(attempt, "connect", err),
@@ -329,7 +435,7 @@ pub fn exchange(
             error.NetworkDown,
             error.NameServerFailure,
             => return retryable(T, attempt, "receive headers", err, .transient),
-            // The caller's cancel.
+            // A stalled exchange that `watched` canceled, or the caller's cancel.
             error.Canceled => return err,
             error.OutOfMemory => return err,
             else => return fatal(attempt, "receive headers", err),
@@ -656,6 +762,69 @@ test "a server-named retry delay sleeps at most max_delay" {
     try std.testing.expectEqual(@as(u64, 20 * std.time.ns_per_ms), governor.stats.retry_delay_ns.load(.acquire));
 }
 
+test "an attempt that receives nothing is canceled and retried as a timeout" {
+    var governor: Governor = .init(std.testing.io, undefined, "test", .throttle, .{
+        .max_retries = 3,
+        .initial_delay = .fromMilliseconds(1),
+        .max_delay = .fromMilliseconds(1),
+        .stall_timeout = .fromMilliseconds(120),
+    });
+    const Hang = struct {
+        seen: usize = 0,
+        progressed: u64 = 0,
+        // Watched as `exchange` watches its round trip.
+        fn attempt(self: *@This(), current: Attempt) anyerror!Outcome(usize) {
+            return watched(usize, self, receive, current);
+        }
+
+        fn receive(self: *@This(), current: Attempt) anyerror!Outcome(usize) {
+            self.seen += 1;
+            // The first exchange hangs, the second one keeps receiving and
+            // takes longer than the stall timeout overall.
+            if (self.seen == 1) {
+                try std.testing.io.sleep(.fromSeconds(60), .awake);
+                return error.TestUnexpectedResult;
+            }
+            for (0..6) |_| {
+                try std.testing.io.sleep(.fromMilliseconds(40), .awake);
+                _ = current.progress.fetchAdd(1, .monotonic);
+                self.progressed += 1;
+            }
+            return .{ .done = self.seen };
+        }
+    };
+    var hang: Hang = .{};
+    try std.testing.expectEqual(@as(usize, 2), try perform(usize, &governor, test_spec, &hang, Hang.attempt));
+    try std.testing.expectEqual(@as(u64, 6), hang.progressed);
+    try std.testing.expectEqual(@as(u64, 1), governor.stats.timeouts.load(.acquire));
+}
+
+test "an attempt waiting on a request of its own is not a stall" {
+    var governor: Governor = .init(std.testing.io, undefined, "test", .throttle, .{
+        .max_retries = 3,
+        .initial_delay = .fromMilliseconds(1),
+        .max_delay = .fromMilliseconds(1),
+        .stall_timeout = .fromMilliseconds(120),
+    });
+    const Nested = struct {
+        fn attempt(self: *@This(), current: Attempt) anyerror!Outcome(usize) {
+            _ = try perform(usize, current.governor, test_spec, self, wait);
+            return .{ .done = 1 };
+        }
+
+        // A re-resolve or token refresh waiting out a hold, outside any
+        // exchange, for longer than the stall timeout.
+        fn wait(_: *@This(), _: Attempt) anyerror!Outcome(usize) {
+            try std.testing.io.sleep(.fromMilliseconds(300), .awake);
+            return .{ .done = 0 };
+        }
+    };
+    var nested: Nested = .{};
+    try std.testing.expectEqual(@as(usize, 1), try perform(usize, &governor, test_spec, &nested, Nested.attempt));
+    try std.testing.expectEqual(@as(u64, 0), governor.stats.timeouts.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), governor.stats.physical_requests.load(.acquire));
+}
+
 test "an exchange canceled while it waits for the head returns Canceled, not a retry" {
     const MockServer = @import("mock_server.zig").MockServer;
     const io = std.testing.io;
@@ -672,8 +841,10 @@ test "an exchange canceled while it waits for the head returns Canceled, not a r
     const uri: std.Uri = try .parse(try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()}));
 
     const Exchange = struct {
+        // Unwatched, so that the cancel lands in the read rather than in `watched`.
         fn run(governor_: *Governor, uri_: std.Uri, result: *anyerror!Outcome(void)) void {
-            result.* = exchange(void, .{ .governor = governor_, .spec = test_spec }, uri_, .{
+            var progress: std.atomic.Value(u64) = .init(0);
+            result.* = roundTrip(void, .{ .governor = governor_, .spec = test_spec, .progress = &progress }, uri_, .{
                 .extra_headers = &.{.{ .name = "Range", .value = "bytes=0-5" }},
             }, {}, consume);
         }

@@ -294,6 +294,38 @@ test "the shared range loop prepares the request once per attempt" {
     try std.testing.expectEqual(@as(u64, request_size), stats.physical_bytes.load(.acquire));
 }
 
+test "generic HTTP cancels a GET that receives nothing and retries it as a timeout" {
+    const io = std.testing.io;
+
+    var object: [4096]u8 = undefined;
+    for (&object, 0..) |*byte, i| byte.* = @truncate(i);
+    var output: [1000]u8 = undefined;
+
+    // The first GET waits unanswered for the second: a peer that receives
+    // the request and sends nothing.
+    var fixture: Fixture = undefined;
+    try fixture.init(&object, .{ .barrier_gets = 2 }, .{
+        .initial_delay = .fromNanoseconds(0),
+        .max_delay = .fromNanoseconds(0),
+        .stall_timeout = .fromMilliseconds(100),
+    });
+    defer fixture.deinit();
+    const server = &fixture.server;
+    const stats = &fixture.http.governor.stats;
+
+    stats.* = .{};
+    const buffers = [_][]u8{&output};
+    try std.testing.expectEqual(output.len, try fixture.file.readPositional(fixture.http.io(), &buffers, 77));
+    try std.testing.expectEqualSlices(u8, object[77..][0..output.len], &output);
+    try std.testing.expectEqual(@as(u64, 1), stats.timeouts.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), stats.retries.load(.acquire));
+
+    // The first GET answers late, to a connection the client closed: that
+    // write may fail.
+    server.stop(io) catch |err| if (err != error.WriteFailed) return err;
+    try std.testing.expectEqual(@as(usize, 2), server.get_requests.load(.acquire));
+}
+
 test "http fails open, stat and access of an absent or denied object" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
