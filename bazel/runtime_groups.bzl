@@ -30,17 +30,20 @@ def _targets(value):
 def _collect_impl(target, ctx):
     """Collect runtime groups from the target and its dependencies."""
 
-    # Build tools do not contribute to the application's runtime package.
     if ctx.configuration.is_tool_configuration():
-        return [_RuntimeGroupsInfo(entries = runfiles_groups.entries())]
+        return [_RuntimeGroupsInfo(entries = runfiles_groups.entries())] # Build tools do not contribute to the application's runtime package
 
     # Read this target runtime-group annotations, ignoring other aspect hints.
     hints = [h for h in getattr(ctx.rule.attr, "aspect_hints", []) if _RuntimeGroupInfo in h]
     if len(hints) > 1:
         fail("Only one runtime group annotation is allowed on " + str(target.label))
 
+    # Annotated producers create an entry. Unannotated nodes propagate dependency entries.
+    # Groups propagate upward from producers to consumers:
+    # LLMD (no annotation): forwards collected entries via `transitive`
+    # └── ROCm Zig library (no annotation): forwards entries via `transitive`
+    #     └── libzml_rocm (annotated): declares the rocm entry via `direct`
     if hints:
-        # The annotation owns the assembled runtime, including its dependencies.
         return [_RuntimeGroupsInfo(entries = runfiles_groups.entries(direct = [
             runfiles_groups.entry(
                 name = hints[0][_RuntimeGroupInfo].name,
@@ -148,6 +151,7 @@ def collect_runtime_groups(ctx, binary, *, application_files = []):
         content = _runfiles(ctx, remaining),
         rank = runfiles_groups.RANK_SHARED_DEPS,
     ))
+    # Return producer, shared and application entries
     return RunfilesGroupInfo(
         entries = runfiles_groups.entries(direct = own, transitive = [collected.entries]),
         executable_group = "application" if executable != None else None,

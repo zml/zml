@@ -1,13 +1,10 @@
 # Runtime groups
 
-Runtime groups let packaging rules place CUDA, ROCm, TPU, and oneAPI runtimes in
-separate image layers. Producers name the groups; consumers choose how to package
-them. Ordinary builds need no extra configuration.
+Runtime groups let packaging rules place CUDA, ROCm, TPU, and oneAPI runtimes in separate image layers. Producers name the groups. Consumers choose how to package them. Ordinary builds need no extra configuration.
 
 ## Producers
 
-Attach a hint to the target that supplies the runtime. Its complete default
-runfiles become part of the named group:
+Attach a hint to the target that supplies the runtime. Its complete default runfiles become part of the named group:
 
 ```starlark
 load("@zml//bazel:runtime_groups.bzl", "runtime_group")
@@ -24,12 +21,11 @@ cc_library(
 )
 ```
 
-Several targets can contribute to the same group. An annotation includes the
-target's transitive runfiles and supersedes annotations below it.
+Several targets can contribute to the same group: for instance both `flashinfer_cutlass_moe` and `libzml_cuda` currently are both producers to group `cuda`. An annotation includes the target transitive runfiles and supersedes annotations below it.
 
 ## Consumers
 
-Apply `runtime_groups_aspect` to your packaging rule's binary attribute:
+Apply `runtime_groups_aspect` to the `binary` attribute of the rule that consumes runtime groups:
 
 ```starlark
 load("@zml//bazel:runtime_groups.bzl", "collect_runtime_groups", "runtime_groups_aspect")
@@ -39,7 +35,7 @@ attrs = {
 }
 ```
 
-In its implementation, collect the groups and select the one to package:
+Inside the consuming packaging rule’s implementation function, collect and resolve the binary runtime groups, then select the group to package.
 
 ```starlark
 load("@rules_runfiles_group//runfiles_group:lib.bzl", "runfiles_groups")
@@ -49,15 +45,13 @@ groups = runfiles_groups.resolve(ctx, info, aspect_hints = [])
 runfiles = runfiles_groups.runfiles(ctx, groups.by_name["cuda"])
 ```
 
-Together, the groups preserve all of the binary's default runfiles:
+Together, the groups preserve all of the binary default runfiles:
 
 - Named groups contain the annotated runtimes.
 - `shared` contains remaining runtime files.
-- `application` contains the binary's executable and its aliases. This name is
-  reserved and cannot be used in producer hints.
+- `application` contains the binary's executable and its aliases. This name is reserved and cannot be used in producer hints.
 
-For wrappers such as `with_cfg` that also retain the original executable, include
-that file explicitly in `application`:
+For wrappers such as `with_cfg` that also retain the original executable, include that file explicitly in `application`:
 
 ```starlark
 info = collect_runtime_groups(
@@ -67,5 +61,4 @@ info = collect_runtime_groups(
 )
 ```
 
-Grouping does not build image layers or strip executables. The packaging rule
-chooses the layout and supplies the repository mapping manifest.
+Grouping does not build image layers or strip executables. The packaging rule chooses the layout and supplies the repository mapping manifest.
