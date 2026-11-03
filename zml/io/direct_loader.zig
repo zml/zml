@@ -89,6 +89,7 @@ pub const Loader = struct {
     /// and is never written after `create`.
     blocks: []const host_memory.Block,
     scheduler: Scheduler,
+    metrics: Metrics = .{},
     /// One permit per source read in flight (`readSlot`), `read_width` of
     /// them. The width never changes: a source that answers 429 (or 503 on
     /// the object stores) is held one layer down, where the VFS holds every
@@ -116,6 +117,8 @@ pub const Loader = struct {
     /// open until `destroy`. Keyed by the slot's own copy of the path: the
     /// registry that named it may go once the batch retired.
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
+    /// What the debug lines time from (`logBatch`, `logSummary`).
+    created_at: std.Io.Timestamp,
     /// Submissions so far; the next batch's sequence number.
     batch_count: usize = 0,
     /// The block size and the request size, for the whole load.
@@ -203,6 +206,7 @@ pub const Loader = struct {
             .credits = credits,
             .pumps = pumps,
             .dma_budget_bytes = dma_calibration.depth * block_size,
+            .created_at = .now(io, .awake),
             .plan_config = .{
                 .block_size = block_size,
                 .request_size = request_size,
@@ -251,11 +255,14 @@ pub const Loader = struct {
             // Fail the loader, seal and await what was published of this
             // batch, and return the loader's first error.
             self.recordError(err, "plan batch {d}, published_plans={d}", .{ batch.sequence, batch.plans.items.len });
+            batch.sealed_at = .now(self.io, .awake);
             self.batch_count += 1;
             batch.releaseUnits(1);
             try self.awaitBatch(batch);
             unreachable;
         };
+        // Stamped before the sentinel goes, so before the batch can complete.
+        batch.sealed_at = .now(self.io, .awake);
         self.batch_count += 1;
         // Every plan is visible: drop the publish sentinel. A batch without
         // jobs completes right here.
@@ -279,6 +286,7 @@ pub const Loader = struct {
     /// panics on.
     pub fn awaitBatch(self: *Loader, batch: *Batch) !void {
         batch.done.waitUncancelable(self.io);
+        const done_at: std.Io.Timestamp = .now(self.io, .awake);
         // Every request of this batch has completed: no worker or callback
         // touches its managers or contexts any more.
         const load_error = self.first_error.get();
@@ -295,6 +303,7 @@ pub const Loader = struct {
         // Each destination completed its progress item.
         if (load_error == null) for (batch.destinations) |*destination| std.debug.assert(destination.unread_bytes.load(.acquire) == 0);
         Dma.retireBatch(self, batch);
+        self.logBatch(batch, done_at, load_error == null);
         self.destroyBatch(batch);
         if (load_error) |err| return err;
     }
@@ -310,6 +319,7 @@ pub const Loader = struct {
     /// flight, so stopping the workers is a plain shutdown.
     pub fn destroy(self: *Loader) void {
         self.stopWorkers();
+        self.logSummary();
         var slots = self.source_slots.valueIterator();
         while (slots.next()) |slot| {
             slot.*.deinit(self.io);
@@ -421,11 +431,14 @@ pub const Loader = struct {
     /// waits for its slot. Null, with the credit given back, when nothing
     /// was left to claim.
     fn claimRequest(self: *Loader) ?*ReadRequest {
+        const credit_wait_started = awakeNs(self.io);
         const slot = self.credits.acquire(self.io);
+        const credit_wait_ns = awakeNs(self.io) -| credit_wait_started;
         const claim = self.scheduler.claim(self.io) orelse {
             self.credits.release(self.io, slot);
             return null;
         };
+        _ = self.metrics.credit_wait_ns.fetchAdd(credit_wait_ns, .monotonic);
         return ReadRequest.init(self, claim, slot);
     }
 
@@ -459,6 +472,88 @@ pub const Loader = struct {
             Dma.abortReady(self);
         }
     }
+
+    /// Counts the plans' jobs, transfers and events only when the lines
+    /// would be logged.
+    fn logBatch(self: *Loader, batch: *const Batch, done_at: std.Io.Timestamp, successful: bool) void {
+        if (!std.log.logEnabled(.debug, .@"zml/io/load")) return;
+        const sealed_at = batch.sealed_at orelse self.created_at;
+        const published_at = batch.published_at orelse sealed_at;
+        var logical_bytes: usize = 0;
+        for (batch.destinations) |*destination| logical_bytes += destination.shape.byteSize();
+        load_log.debug("batch completed: batch={d}, successful={}, logical_bytes={Bi:.2}, published=+{d:.3}s, sealed=+{d:.3}s, done=+{d:.3}s, elapsed={d:.3}s, source_width={d}, request_size={Bi:.2}", .{
+            batch.sequence,
+            successful,
+            logical_bytes,
+            secondsBetween(self.created_at, published_at),
+            secondsBetween(self.created_at, sealed_at),
+            secondsBetween(self.created_at, done_at),
+            secondsBetween(published_at, done_at),
+            self.read_width,
+            self.plan_config.request_size,
+        });
+
+        var planning_ns: u64 = 0;
+        var source_bytes: u64 = 0;
+        var jobs: usize = 0;
+        var transfers: usize = 0;
+        var dma_submissions: usize = 0;
+        for (batch.plans.items) |plan| {
+            planning_ns += plan.planning_ns;
+            source_bytes += plan.source_bytes;
+            jobs += plan.jobs.len;
+            transfers += plan.transfers.len;
+            dma_submissions += plan.events.len;
+        }
+        const average_read_size = if (jobs == 0) 0 else source_bytes / jobs;
+        const coalescing_ratio = if (jobs == 0)
+            0
+        else
+            @as(f64, @floatFromInt(batch.parts.len)) /
+                @as(f64, @floatFromInt(jobs));
+        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
+            batch.sequence,
+            batch.plans.items.len,
+            @as(f64, @floatFromInt(planning_ns)) / std.time.ns_per_s,
+            source_bytes,
+            jobs,
+            batch.parts.len,
+            transfers,
+            dma_submissions,
+            coalescing_ratio,
+            average_read_size,
+        });
+    }
+
+    fn logSummary(self: *Loader) void {
+        const reads = self.metrics.read_operations.load(.acquire);
+        load_log.debug("loader summary: batches={d}, successful={}, read_bytes={Bi:.2}, elapsed={d:.3}s, reads={d}, source_width={d}, request_size={Bi:.2}, credits_high_water={d} of {d}, pinned_mapped={Bi:.2}", .{
+            self.batch_count,
+            self.first_error.get() == null,
+            self.metrics.read_bytes.load(.acquire),
+            secondsBetween(self.created_at, .now(self.io, .awake)),
+            reads,
+            self.read_width,
+            self.plan_config.request_size,
+            self.credits.high_water,
+            self.credits.count(),
+            self.workspace.mappedBytes(),
+        });
+        load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}", .{
+            millisecondsPer(self.metrics.credit_wait_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.dma_stage_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.tensor_init_ns.load(.acquire), reads),
+        });
+        const submissions = self.metrics.dma_submissions.load(.acquire);
+        load_log.debug("loader DMA: dma_submissions={d}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
+            submissions,
+            millisecondsPer(self.metrics.dma_submit_ns.load(.acquire), submissions) * 1000,
+            millisecondsPer(self.metrics.dma_piece_ns.load(.acquire), submissions),
+            self.metrics.pump_stops_empty.load(.acquire),
+            self.metrics.pump_stops_full.load(.acquire),
+        });
+    }
 };
 
 /// One submission: its plans (one per source file, published as each file
@@ -488,6 +583,10 @@ pub const Batch = struct {
     done: std.Io.Event = .unset,
     /// Submission number within the loader, for log correlation.
     sequence: usize,
+    /// The first publish; null for a submission without plans.
+    published_at: ?std.Io.Timestamp = null,
+    /// Once every plan is published, before the publish sentinel goes.
+    sealed_at: ?std.Io.Timestamp = null,
 
     /// An open batch holding its publish sentinel and nothing else. The
     /// sentinel keeps the batch from completing before its last plan is
@@ -664,6 +763,8 @@ const Plan = struct {
     events_used: std.atomic.Value(usize) = .init(0),
     /// The tensor bytes the jobs read.
     source_bytes: u64,
+    /// How long the plan took to cut.
+    planning_ns: u64 = 0,
     /// Next job to claim; owned by the scheduler mutex.
     cursor: usize = 0,
 
@@ -707,8 +808,11 @@ const Planner = struct {
         var file_start: usize = 0;
         while (file_start < order.len) {
             const file_end = fileGroupEnd(parts, order, file_start);
+            const planning_started: std.Io.Timestamp = .now(io, .awake);
             const plan = try preparePlan(scheduler.allocator, batch.arena.allocator(), parts, order[file_start..file_end], config);
+            plan.planning_ns = @intCast(@max(planning_started.untilNow(io, .awake).nanoseconds, 0));
             try scheduler.publish(io, batch, plan);
+            if (batch.published_at == null) batch.published_at = .now(io, .awake);
             file_start = file_end;
         }
     }
@@ -1128,6 +1232,8 @@ const ReadRequest = struct {
     /// The scheduling sentinel and one reference per DMA piece queued; the
     /// last release gives the credit back and finishes the job.
     pending: std.atomic.Value(usize) = .init(1),
+    /// Awake-clock nanoseconds of the enqueue; 0 until then.
+    enqueued_ns: u64 = 0,
 
     /// The slot of a job that was never claimed: nothing pending, so the
     /// retirement checks hold.
@@ -1164,10 +1270,12 @@ const ReadRequest = struct {
             const destination = transfer.destination;
             if (destination == previous) continue;
             previous = destination;
+            const init_started = awakeNs(loader.io);
             _ = destination.ensureState(loader.allocator, loader.io, loader.platform) catch |err| {
                 loader.recordError(err, "initialize tensor {s} from {s}, shape={f}", .{ destination.name(), destination.parts[0].source.file_uri, destination.shape });
                 return err;
             };
+            _ = loader.metrics.tensor_init_ns.fetchAdd(awakeNs(loader.io) -| init_started, .monotonic);
         }
         const blocks = loader.credits.slotBlocks(self.slot)[0..job.blockLen(block_size)];
         switch (job.kind) {
@@ -1200,6 +1308,9 @@ const ReadRequest = struct {
         // that owns this request, so nothing is touched after it.
         const loader = self.loader;
         const batch = self.plan.batch;
+        if (self.enqueued_ns != 0) {
+            _ = loader.metrics.dma_stage_ns.fetchAdd(awakeNs(loader.io) -| self.enqueued_ns, .monotonic);
+        }
         loader.credits.release(loader.io, self.slot);
         batch.releaseUnits(1);
     }
@@ -1247,10 +1358,15 @@ fn readSlot(loader: *Loader, slot: *SourceSlot, iovecs: [][]u8, file_offset: u64
     loader.read_permits.waitUncancelable(io);
     defer loader.read_permits.post(io);
     if (loader.first_error.get()) |err| return err;
-    _ = readFilePositionalAllV(io, file, iovecs, file_offset, minimum_len) catch |err| {
+    const read_started = awakeNs(io);
+    const read_result = readFilePositionalAllV(io, file, iovecs, file_offset, minimum_len);
+    _ = loader.metrics.read_ns.fetchAdd(awakeNs(io) -| read_started, .monotonic);
+    const bytes_read = read_result catch |err| {
         loader.recordError(err, "read {s} at {d}, {d} bytes at least", .{ slot.uri, file_offset, minimum_len });
         return err;
     };
+    _ = loader.metrics.read_operations.fetchAdd(1, .monotonic);
+    _ = loader.metrics.read_bytes.fetchAdd(@intCast(bytes_read), .monotonic);
 }
 
 /// The bytes from offset `at` of `blocks` taken end to end, `block_size`
@@ -1340,6 +1456,8 @@ const Dma = struct {
         device_index: usize,
         /// Bytes this submission holds against the device's in-flight budget.
         len: usize,
+        /// Awake-clock nanoseconds of the submission.
+        submitted_ns: u64 = 0,
         /// Link of the device pump's `retired`; owned by that pump's mutex.
         next_retired: ?*EventContext = null,
 
@@ -1414,6 +1532,7 @@ const Dma = struct {
                 counts[tensor.targets[writer_index].device_index] += 1;
             }
         }
+        const enqueued_ns = awakeNs(loader.io);
         // Every pump is held while the request's pieces land, and every
         // queue is reserved before any changes, so the request is either
         // fully queued or not queued at all.
@@ -1431,6 +1550,7 @@ const Dma = struct {
         // Every piece holds the request, and with it the slot, until its
         // callback.
         _ = request.pending.fetchAdd(pieces, .acq_rel);
+        request.enqueued_ns = enqueued_ns;
         for (transfers) |transfer| {
             // The planner cut the transfers to the job's blocks.
             const data = blockPiece(blocks, block_size, transfer.landing, transfer.len);
@@ -1478,11 +1598,15 @@ const Dma = struct {
             var selected: ?Piece = null;
             device_pump.mutex.lockUncancelable(loader.io);
             device_pump.destroyRetired();
-            if (loader.first_error.get() == null and device_pump.hasRoom(loader.dma_budget_bytes)) {
-                if (device_pump.queue.popFront()) |piece| {
+            if (loader.first_error.get() == null) {
+                if (!device_pump.hasRoom(loader.dma_budget_bytes)) {
+                    _ = loader.metrics.pump_stops_full.fetchAdd(1, .monotonic);
+                } else if (device_pump.queue.popFront()) |piece| {
                     device_pump.active_bytes += piece.data.len;
                     device_pump.active_pieces += 1;
                     selected = piece;
+                } else {
+                    _ = loader.metrics.pump_stops_empty.fetchAdd(1, .monotonic);
                 }
             }
             if (selected == null) device_pump.pumping = false;
@@ -1504,6 +1628,7 @@ const Dma = struct {
         const api = loader.platform.pjrt_api;
         const target = piece.target;
         const is_last = target.nextIsLast(piece.data.len);
+        const submit_started = awakeNs(loader.io);
         const event = try target.manager.transferData(
             api,
             0,
@@ -1524,8 +1649,10 @@ const Dma = struct {
             .pjrt_event = event,
             .device_index = target.device_index,
             .len = piece.data.len,
+            .submitted_ns = submit_started,
         };
 
+        _ = loader.metrics.dma_submissions.fetchAdd(1, .monotonic);
         event.onReady(api, EventContext, struct {
             fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
                 const request = ctx_.request;
@@ -1533,6 +1660,7 @@ const Dma = struct {
                 const api_ = loader_.platform.pjrt_api;
                 const device_index = ctx_.device_index;
                 const len = ctx_.len;
+                _ = loader_.metrics.dma_piece_ns.fetchAdd(awakeNs(loader_.io) -| ctx_.submitted_ns, .monotonic);
                 // The shipped plugins resolve this event without an error
                 // whatever happened to the copy (the C API wrapper sets the
                 // promise with an OK status); kept for a plugin that reports.
@@ -1548,6 +1676,7 @@ const Dma = struct {
             ctx.destroyEvent();
             return err;
         };
+        _ = loader.metrics.dma_submit_ns.fetchAdd(awakeNs(loader.io) -| submit_started, .monotonic);
     }
 
     /// Ends a submitted piece: frees its room, which may pump on this thread;
@@ -1758,6 +1887,35 @@ const Credits = struct {
     }
 };
 
+/// The debug summary's counters (`Loader.logSummary`): read only by logs;
+/// nothing here decides.
+const Metrics = struct {
+    read_operations: std.atomic.Value(u64) = .init(0),
+    read_bytes: std.atomic.Value(u64) = .init(0),
+    dma_submissions: std.atomic.Value(u64) = .init(0),
+    /// Time workers spend waiting for a lifecycle credit and inside the
+    /// source read, summed over requests: waits above the read time mean the
+    /// load is DMA-completion bound.
+    credit_wait_ns: std.atomic.Value(u64) = .init(0),
+    read_ns: std.atomic.Value(u64) = .init(0),
+    /// From a request's enqueue to its last DMA callback: how long the DMA
+    /// stage holds a lifecycle credit and pinned blocks per request.
+    dma_stage_ns: std.atomic.Value(u64) = .init(0),
+    /// Inside `submitTransfer` (the PJRT call and the callback registration)
+    /// and from a submission to its ready callback, summed over submissions.
+    dma_submit_ns: std.atomic.Value(u64) = .init(0),
+    dma_piece_ns: std.atomic.Value(u64) = .init(0),
+    /// Why a device pump stopped: nothing queued, or no room under the
+    /// device's budget. A pump that mostly stops empty is starved by the
+    /// reads; one that mostly stops full is waiting on the engine.
+    pump_stops_empty: std.atomic.Value(u64) = .init(0),
+    pump_stops_full: std.atomic.Value(u64) = .init(0),
+    /// Inside `ensureState` for a claimed job's destinations: the first
+    /// worker to touch a tensor creates its PJRT buffers and transfer
+    /// managers there, and the other workers of the same tensor wait for it.
+    tensor_init_ns: std.atomic.Value(u64) = .init(0),
+};
+
 /// A value initialized at most once by whichever task touches it first,
 /// with the initializer that task passes. Concurrent callers wait on the
 /// event; a failed initialization keeps its error code and re-materializes
@@ -1807,6 +1965,20 @@ fn LazyOnce(comptime T: type) type {
             return if (self.status.load(.acquire) == .ready) &self.value else null;
         }
     };
+}
+
+fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
+    return @as(f64, @floatFromInt(from.durationTo(to).nanoseconds)) / std.time.ns_per_s;
+}
+
+/// Mean milliseconds per unit of a summed duration (zero units: the total).
+fn millisecondsPer(total_ns: u64, units: u64) f64 {
+    return @as(f64, @floatFromInt(total_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(@max(units, 1)));
+}
+
+fn awakeNs(io: std.Io) u64 {
+    const now: std.Io.Timestamp = .now(io, .awake);
+    return @intCast(@max(now.nanoseconds, 1));
 }
 
 /// Writes `contents` to a new file `name` in `dir` and returns its real
@@ -2271,6 +2443,7 @@ const TestLoader = struct {
             .credits = try .init(allocator, blocks[1..], 1),
             .pumps = &self.pumps,
             .dma_budget_bytes = 64,
+            .created_at = .now(std.testing.io, .awake),
             .plan_config = .{ .block_size = 64, .request_size = 64 },
         };
     }
