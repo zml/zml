@@ -203,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
 
             const now: std.Io.Timestamp = .now(io, .awake);
 
-            var buffers = try zml.mem.bufferize(allocator, AllTensorsModel, &model);
+            var buffers = try zml.mem.bufferize(allocator, &model);
             defer {
                 for (buffers.tensors) |*b| b.deinit();
                 allocator.free(buffers.tensors);

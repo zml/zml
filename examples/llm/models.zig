@@ -77,7 +77,7 @@ pub const LoadedModel = union(ModelType) {
         const buffers: Buffers = switch (self.*) {
             inline else => |*m, t| b: {
                 const Model = @TypeOf(m.inner);
-                var buffers = try zml.mem.bufferize(allocator, Model, &m.inner);
+                var buffers = try zml.mem.bufferize(allocator, &m.inner);
                 errdefer zml.mem.deinitBufferized(allocator, &buffers);
                 try loader.load(io, Model, &m.inner, &buffers, store, .{ .progress = progress });
                 try loader.await(io);

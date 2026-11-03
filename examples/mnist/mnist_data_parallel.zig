@@ -38,7 +38,7 @@ const Mnist = struct {
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
-        var buffers = try zml.mem.bufferize(allocator, Mnist, self);
+        var buffers = try zml.mem.bufferize(allocator, self);
         errdefer zml.Buffer.deinitAll(Mnist, &buffers);
 
         var loader: zml.io.Loader = try .init(allocator, platform, .default);

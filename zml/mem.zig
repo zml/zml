@@ -371,10 +371,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     }
 }
 
-/// Convert a model to its bufferized form by replacing Tensor fields with Buffer
-/// and allocating any required slices using the provided allocator.
-pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, model: *const ModelType) !Bufferized(ModelType) {
-    var bufferized: Bufferized(ModelType) = undefined;
+/// Convert the model `model` points to into its bufferized form by replacing
+/// Tensor fields with Buffer and allocating any required slices using the
+/// provided allocator.
+pub inline fn bufferize(allocator: std.mem.Allocator, model: anytype) !Bufferized(@TypeOf(model.*)) {
+    var bufferized: Bufferized(@TypeOf(model.*)) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
 }
@@ -420,7 +421,7 @@ test "bufferize maps a tuple's fields as Bufferized renumbers them" {
     const b: Tensor = .init(.{3}, .f16);
     var tensors = [_]Tensor{ a, b };
     const model: Model = .{ 3, a, &tensors, .{ b, a } };
-    var bufferized = try bufferize(std.testing.allocator, Model, &model);
+    var bufferized = try bufferize(std.testing.allocator, &model);
     defer deinitBufferized(std.testing.allocator, &bufferized);
     try std.testing.expect(bufferized[0].shape().eql(a.shape()));
     try std.testing.expectEqual(2, bufferized[1].len);
@@ -438,7 +439,7 @@ test "bufferize rolls back earlier slice fields on allocation failure" {
     const model: Model = .{ .first = &tensors, .second = &tensors };
     var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
 
-    if (bufferize(failing.allocator(), Model, &model)) |result| {
+    if (bufferize(failing.allocator(), &model)) |result| {
         var unexpected = result;
         deinitBufferized(failing.allocator(), &unexpected);
         return error.ExpectedOutOfMemory;
@@ -461,7 +462,7 @@ test "deinitBufferized frees recursive const slices" {
         .{ .weights = weights[1..2] },
     };
     const model: Model = .{ .layers = &layers, .fixed = undefined };
-    var bufferized = try bufferize(std.testing.allocator, Model, &model);
+    var bufferized = try bufferize(std.testing.allocator, &model);
     deinitBufferized(std.testing.allocator, &bufferized);
 }
 
@@ -480,6 +481,6 @@ test "deinitBufferized frees slices under optionals and unions" {
         .absent = null,
         .ffns = .{ .{ .dense = .{ .weights = weights[2..3] } }, .{ .experts = &experts }, .none },
     };
-    var bufferized = try bufferize(std.testing.allocator, Model, &model);
+    var bufferized = try bufferize(std.testing.allocator, &model);
     deinitBufferized(std.testing.allocator, &bufferized);
 }
