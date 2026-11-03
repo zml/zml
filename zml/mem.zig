@@ -323,6 +323,21 @@ pub fn Bufferized(comptime T: type) type {
     return meta.MapRestrict(Tensor, Buffer).map(T);
 }
 
+/// The field of `Bufferized(Model)` that holds the struct `Model`'s field
+/// `name`, or null when `Bufferized` strips it. `Bufferized` keeps the
+/// fields holding tensors, in order, and renumbers a tuple's.
+fn bufferizedField(comptime Model: type, comptime name: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(10_000);
+    const info = @typeInfo(Model).@"struct";
+    var index: usize = 0;
+    for (info.field_names, info.field_types, info.field_attrs) |field_name, Field, attrs| {
+        if (attrs.@"comptime" or !meta.Contains(Field, Tensor)) continue;
+        if (std.mem.eql(u8, field_name, name)) return @typeInfo(Bufferized(Model)).@"struct".field_names[index];
+        index += 1;
+    }
+    return null;
+}
+
 fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bufferized(@TypeOf(model))) !void {
     @setEvalBranchQuota(10_000);
     const Model = @TypeOf(model);
@@ -340,9 +355,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
 
     const type_info = @typeInfo(ModelBufferized);
     switch (type_info) {
-        .@"struct" => |struct_type_info| {
-            inline for (struct_type_info.field_names) |field_name| {
-                try bufferizeInner(allocator, @field(model, field_name), &@field(bufferized_, field_name));
+        .@"struct" => {
+            inline for (@typeInfo(Model).@"struct".field_names) |field_name| {
+                if (comptime bufferizedField(Model, field_name)) |buffer_field| {
+                    try bufferizeInner(allocator, @field(model, field_name), &@field(bufferized_, buffer_field));
+                }
             }
         },
         .@"union" => {
@@ -372,6 +389,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                 else => unreachable,
             }
         },
+        .array => |info| {
+            inline for (0..info.len) |index| {
+                try bufferizeInner(allocator, model[index], &bufferized_.*[index]);
+            }
+        },
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }
@@ -383,4 +405,19 @@ pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, 
     var bufferized: Bufferized(ModelType) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
+}
+
+test "bufferize maps a tuple's fields as Bufferized renumbers them" {
+    const Model = struct { u32, Tensor, []Tensor, [2]Tensor };
+    const a: Tensor = .init(.{2}, .f32);
+    const b: Tensor = .init(.{3}, .f16);
+    var tensors = [_]Tensor{ a, b };
+    const model: Model = .{ 3, a, &tensors, .{ b, a } };
+    const bufferized = try bufferize(std.testing.allocator, Model, &model);
+    defer std.testing.allocator.free(bufferized[1]);
+    try std.testing.expect(bufferized[0].shape().eql(a.shape()));
+    try std.testing.expectEqual(2, bufferized[1].len);
+    try std.testing.expect(bufferized[1][1].shape().eql(b.shape()));
+    try std.testing.expect(bufferized[2][0].shape().eql(b.shape()));
+    try std.testing.expect(bufferized[2][1].shape().eql(a.shape()));
 }
