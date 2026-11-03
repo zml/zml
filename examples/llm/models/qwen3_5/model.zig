@@ -657,6 +657,10 @@ pub const SelfAttn = struct {
         k = partitionCachedKv(k, kv_head_sharding);
         v = partitionCachedKv(v, kv_head_sharding);
 
+        const head_partitioning: zml.Sharding.Partitioning.Logical = switch (kv_head_sharding) {
+            .sharded => comptime .parse(.{ .h = .model }),
+            .replicated => comptime .parse(.{ .h = .replicated }),
+        };
         const attn_output = zml.attention.attention(
             q,
             k,
@@ -664,6 +668,11 @@ pub const SelfAttn = struct {
             token_index,
             zml.attention.Metadata.init(.fromBackend(.stablehlo)),
             zml.attention.Parameters.init(.fromBackend(.stablehlo)),
+            .{
+                .mesh = .model,
+                .in_specs = .{ .q = head_partitioning, .k = head_partitioning, .v = head_partitioning, .token_index = .replicated, .metadata = .replicated },
+                .out_specs = head_partitioning,
+            },
         ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());

@@ -143,3 +143,72 @@ corresponding types.
 
 7. Return the model output (`zml.Buffer`) to the host (`zml.Slice`),
    decode it (custom struct) and finally return to the user.
+
+## Manual computations and sharding
+
+Ordinary graph results leave their sharding open for the partitioner to infer. A manual
+computation declares the sharding its local kernel requires, independently of
+annotations on earlier tensors:
+
+```zig
+const result = zml.ops.manualComputation2(Kernel.body, .{
+    .q = projected_q,
+    .cache = updated_cache,
+    .lengths = lengths,
+}, output_shape, .{
+    .mesh = mesh,
+    .in_specs = .{
+        .q = .{ .hkv = .model },
+        .cache = .{ .hkv = .model },
+        .lengths = .replicated,
+    },
+    .out_specs = .{ .hkv = .model },
+});
+```
+
+The body receives local input tensors and local output shapes. Each tensor needs
+an explicit spec; omitted dimensions within a spec are replicated. Open
+specs, unknown axes, and dimensions that cannot be divided into equal shards
+are rejected. Specs follow nested tensor fields, including optional values;
+`.replicated` can explicitly replicate a whole subtree.
+
+`out_specs` describes how local results form the global result. Returned tensors
+retain this explicit sharding, including when returned directly from the
+executable. Subsequent ordinary graph operations leave their results open for
+the partitioner to infer; an unspecified executable output defaults to replication.
+
+Attention, paged attention, and MoE keep numerical options separate from
+partitioning. Their shared entry points accept a final partitioning declaration
+using the same `mesh`, `in_specs` and `out_specs` machinery:
+
+```zig
+const output = zml.attention.attention(q, k, v, position, metadata, parameters, .{
+    .mesh = .model,
+    .in_specs = .{
+        .q = .{ .h = .model },
+        .k = .{ .h = .model },
+        .v = .{ .h = .model },
+        .token_index = .replicated,
+        .metadata = .replicated,
+    },
+    .out_specs = .{ .h = .model },
+});
+```
+
+The shared operator creates a manual region around the selected implementation,
+including StableHLO. Each backend computes on its shard's local tensors.
+Models declare partitioning without implementing callbacks or dispatching local
+kernels. The declaration remains effective after casts and cache updates that
+leave frontend sharding unspecified. Every backend requires an explicit declaration.
+
+Page indices and query offsets must refer to each shard's local tensors.
+
+For MoE, `in_specs` covers `input`, `ids`, `weights`, `gate_up` and `down`.
+Projection specs describe the weight tensors; bias and quantization scales follow
+the expert partition automatically. `forwardMoe` handles local expert routing and
+reduces contributions only along the declared expert axis. Token sharding on a
+separate data axis is preserved. Models do not need to describe packed scales or
+implement these collectives.
+
+Mesh construction maps logical axes onto the physical topology; the two meshes
+can have different ranks.

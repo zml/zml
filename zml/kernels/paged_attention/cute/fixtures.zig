@@ -108,7 +108,7 @@ pub const Inputs = struct {
     }
 };
 
-pub fn forward(i: Inputs, c: cases.Case) zml.Tensor {
+pub fn forward(i: Inputs, c: cases.Case, mesh: *const zml.Mesh, head_partition: zml.Sharding.PartitionSpec) zml.Tensor {
     const parameters: zml.paged_attention.Parameters = .{
         .cute = .{
             .block_table = i.table,
@@ -122,7 +122,18 @@ pub fn forward(i: Inputs, c: cases.Case) zml.Tensor {
             },
         },
     };
-    return zml.paged_attention.pagedAttention(parameters, i.q, i.k, i.v, .{ .split = .{ .k = i.k, .v = i.v } }, i.options(c));
+    const q_spec = zml.Sharding.Partitioning.replicated(i.q.rank()).set(i.q.axis(.hkv), head_partition);
+    const kv_spec = zml.Sharding.Partitioning.replicated(i.k.rank()).set(i.k.axis(.hkv), head_partition);
+    return zml.paged_attention.pagedAttention(parameters, i.q, i.k, i.v, .{ .split = .{ .k = i.k, .v = i.v } }, i.options(c), .{
+        .mesh = mesh,
+        .in_specs = .{
+            .parameters = .replicated,
+            .q = q_spec,
+            .kv_cache = .{ .split = .{ .k = kv_spec, .v = kv_spec }, .dense = kv_spec },
+            .opts = .{ .mask = .replicated, .sink = zml.Sharding.Partitioning.replicated(i.sinks.rank()).set(0, head_partition) },
+        },
+        .out_specs = q_spec,
+    });
 }
 
 pub fn upload(io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {

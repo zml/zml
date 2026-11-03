@@ -283,6 +283,10 @@ test "tcl fused experts run on furiosa" {
                     .activation = .{ .swiglu = .{} },
                     .quantize_input = false,
                     .routing_weight_placement = .after_down,
+                }, .{
+                    .mesh = zml.Compiler.current().platform.replicated_mesh,
+                    .in_specs = .replicated,
+                    .out_specs = .replicated,
                 });
             }
         };

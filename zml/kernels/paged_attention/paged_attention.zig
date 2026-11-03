@@ -247,8 +247,13 @@ pub const KvCache = union(enum) {
     }
 };
 
-/// Every backend runs inside the same manual computation using the inputs' sharding.
-pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
+/// Computes attention over cached KV pages.
+/// `partitioning` declares `mesh`, `in_specs` and `out_specs`.
+/// Input specs cover parameters, q, kv_cache and opts
+/// (including tensor masks and sinks). `.replicated` can cover a whole subtree.
+/// Every backend runs in a manual region with local tensors.
+/// Page indices and query offsets must refer to each shard's local cache and queries.
+pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions, partitioning: anytype) zml.Tensor {
     _ = k;
     _ = v;
     const Call = struct {
@@ -262,7 +267,7 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
         }
     };
     const args: Call = .{ .parameters = parameters, .q = q, .kv_cache = kv_cache, .opts = opts };
-    return zml.ops.manualComputation(Call.forward, args, q.shape());
+    return zml.ops.manualComputation2(Call.forward, args, q.shape(), partitioning);
 }
 
 fn pagedAttentionLocal(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
@@ -465,6 +470,21 @@ test pagedAttention {
         },
     };
 
+    const AttentionCall = struct {
+        fn forward(parameters: Parameters, q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, cache: KvCache, opts: AttentionOptions, mesh: *const zml.Mesh) zml.Tensor {
+            return pagedAttention(parameters, q_, k_, v_, cache, opts, .{
+                .mesh = mesh,
+                .in_specs = .{
+                    .parameters = .replicated,
+                    .q = .{ .hkv = .model },
+                    .kv_cache = .{ .split = .{ .k = .{ .hkv = .model }, .v = .{ .hkv = .model } }, .dense = .{ .hkv = .model } },
+                    .opts = .{ .mask = .replicated, .sink = .replicated },
+                },
+                .out_specs = .{ .hkv = .model },
+            });
+        }
+    };
+
     for (test_cases) |test_case| {
         var results_per_backend: std.enums.EnumArray(Backend, ?zml.Slice) = .initFill(null);
         defer {
@@ -487,8 +507,8 @@ test pagedAttention {
             const exe = try platform.compileFn(
                 allocator,
                 io,
-                pagedAttention,
-                .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, test_case.attention_options },
+                AttentionCall.forward,
+                .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, test_case.attention_options, model_meshe },
                 .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{s}_{t}", .{ test_case.name, backend }), .meshes = meshes },
             );
             defer exe.deinit();
@@ -504,6 +524,7 @@ test pagedAttention {
 
             var output_d = try exe.eval(allocator, io, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{ .mask = .{ .standard = {} }, .sink = null } });
             defer output_d.deinit();
+            try std.testing.expectEqualDeep(tensors.q.shape()._sharding, output_d.shape()._sharding);
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }
 
@@ -537,5 +558,61 @@ test pagedAttention {
         }
 
         if (num_failed > 0) return error.TestUnexpectedResult;
+    }
+}
+
+test "pagedAttention composes data and head partitioning with local page indices" {
+    const platform = zml.testing.env();
+    if (platform.devices.len < 4) return error.SkipZigTest;
+    const logical = try zml.Sharding.LogicalMesh.init(.{ .data, .model, .pipeline }, &.{ .balanced, .balanced, .balanced }, &.{ 2, 2, -1 });
+    const mesh: zml.Mesh = try .init("paged_data_model", &platform.physical_mesh, logical, .suggest(logical, &platform.physical_mesh));
+    const Outputs = struct { actual: zml.Tensor, expected: zml.Tensor };
+    const Test = struct {
+        fn forward(m: *const zml.Mesh, backend: Backend) Outputs {
+            const q: zml.Tensor = .zeroes(.init(.{ .b = 32, .hkv = 2, .hg = 2, .hd = 32 }, .bf16));
+            const cache_shape: zml.Shape = .init(.{ .page = 2, .k_chunk = 16, .hkv = 2, .hd = 32 }, .bf16);
+            // Each data shard has a distinct page zero, with a distinct value per head.
+            const values = zml.Tensor.arange(.{ .end = 4 }, .i32).addConstant(1).reshape(.{ .page = 2, .hkv = 2 }).convert(.bf16);
+            const cache: KvCache = .{ .split = .{ .k = .zeroes(cache_shape), .v = values.broad(cache_shape) } };
+            const params: triton.paged.Parameters = .{
+                .options_ = .{ .batch_size = 1, .max_num_pages = 1, .max_seqlen_q = 16, .is_prefill = true },
+                .block_table = .zeroes(.init(.{ .b = 2, .p = 1 }, .i32)),
+                .seq_lens = zml.Tensor.scalar(16, .i32).broad(.init(.{ .b = 2 }, .i32)),
+                .query_start_len = .constantTensor(.init(.{ .b = 4 }, .i32), std.mem.sliceAsBytes(&[_]i32{ 0, 16, 0, 16 })),
+            };
+            const parameters: Parameters = switch (backend) {
+                .stablehlo => .{ .stablehlo = params },
+                .triton => .{ .triton = params },
+                else => unreachable,
+            };
+            const parameter_specs = .{ .block_table = .{ .b = .data }, .seq_lens = .{ .b = .data }, .query_start_len = .{ .b = .data } };
+            const actual = pagedAttention(parameters, q, cache.split.k, cache.split.v, cache, .{ .mask = .{ .standard = .{} } }, .{
+                .mesh = m,
+                .in_specs = .{
+                    .parameters = .{ .stablehlo = parameter_specs, .triton = parameter_specs, .cute = .replicated, .mosaic_tpu = .replicated, .metal = .replicated, .tcl = .replicated },
+                    .q = .{ .b = .data, .hkv = .model },
+                    .kv_cache = .{ .split = .{ .k = .{ .page = .data, .hkv = .model }, .v = .{ .page = .data, .hkv = .model } }, .dense = .replicated },
+                    .opts = .replicated,
+                },
+                .out_specs = .{ .b = .data, .hkv = .model },
+            });
+            const expected = values.rename(.{ .page = .shard }).broad(q.shape().setDim(.b, 16).insert(0, .{ .shard = 2 })).merge(.{ .b = .{ .shard, .b } });
+            return .{ .actual = actual, .expected = expected };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]Backend{ .stablehlo, .triton }) |backend| {
+        if (!backend.isAvailable(platform)) continue;
+        errdefer std.log.err("pagedAttention data/head partitioning failed: {t}", .{backend});
+        const exe = try platform.compileFn(allocator, io, Test.forward, .{ &mesh, backend }, .{ .meshes = &.{ platform.replicated_mesh, &mesh } });
+        defer exe.deinit();
+        var output: zml.Bufferized(Outputs) = undefined;
+        var runner = try exe.runner(allocator);
+        defer runner.deinit(allocator);
+        runner.run(io, .{}, .{&output}, .{ .wait = true });
+        defer zml.Buffer.deinitAll(Outputs, &output);
+        try std.testing.expectEqualDeep(output.actual.shape().withPartitioning(&mesh, .{ .b = .data, .hkv = .model })._sharding, output.actual.shape()._sharding);
+        try zml.testing.expectClose(io, output.expected, output.actual, .{ .absolute_tolerance = 0.01, .relative_tolerance = 0.01, .minimum_close_fraction = 1 });
     }
 }

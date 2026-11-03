@@ -641,6 +641,10 @@ pub const SelfAttn = struct {
         k = partitionCachedKv(k, kv_head_sharding);
         v = partitionCachedKv(v, kv_head_sharding);
 
+        const head_partitioning: zml.Sharding.Partitioning.Logical = switch (kv_head_sharding) {
+            .sharded => comptime .parse(.{ .h = .model }),
+            .replicated => comptime .parse(.{ .h = .replicated }),
+        };
         const attn_output = zml.attention.attention(
             q,
             k,
@@ -648,7 +652,12 @@ pub const SelfAttn = struct {
             token_index,
             zml.attention.Metadata.init(.fromBackend(.stablehlo)),
             zml.attention.Parameters.init(.fromBackend(.stablehlo)),
-        ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
+            .{
+                .mesh = .model,
+                .in_specs = .{ .q = head_partitioning, .k = head_partitioning, .v = head_partitioning, .token_index = .replicated, .metadata = .replicated },
+                .out_specs = head_partitioning,
+            },
+        ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
         const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype()).rename(.{ .dout = .d }).withPartitioning(tp, .{ .d = .replicated });
@@ -785,6 +794,17 @@ pub const Moe = struct {
                 .activation = .{ .swiglu = .{} },
                 .quantize_input = false,
                 .routing_weight_placement = .after_down,
+            },
+            .{
+                .mesh = .experts,
+                .in_specs = .{
+                    .input = .replicated,
+                    .ids = .replicated,
+                    .weights = .replicated,
+                    .gate_up = .{ .expert = .experts },
+                    .down = .{ .expert = .experts },
+                },
+                .out_specs = .replicated,
             },
         ).reshape(x.shape());
 

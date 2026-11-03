@@ -94,7 +94,10 @@ pub const Metadata = union(BackendType) {
 };
 
 /// Causal attention as used in transformers.
-/// Every backend runs on local head shards inside a manual computation.
+/// `partitioning` declares `mesh`, `in_specs` and `out_specs` for every backend.
+/// Input specs cover q, k, v, token_index and metadata. Every backend runs in a
+/// manual region with local tensors, including when the specs are `.replicated`.
+/// For attention without a manual boundary, use `zml.nn.sdpa` with a causal mask.
 ///
 /// **Shapes**:
 ///   - q, result: .{ .q, .h, .hd }
@@ -105,7 +108,7 @@ pub const Metadata = union(BackendType) {
 ///   - .q is the number of queries
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, partitioning: anytype) zml.Tensor {
     const Call = struct {
         q: zml.Tensor,
         k: zml.Tensor,
@@ -126,19 +129,11 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             };
         }
     };
-    const mesh = zml.Compiler.current().resolveMesh(.{.model});
-    const args: Call = .{
-        .q = q.withPartitioning(mesh, q.shape().withPartitioning(mesh, .{ .h = .model })._sharding.partition),
-        .k = k.withPartitioning(mesh, k.shape().withPartitioning(mesh, .{ .h = .model })._sharding.partition),
-        .v = v.withPartitioning(mesh, v.shape().withPartitioning(mesh, .{ .h = .model })._sharding.partition),
-        .token_index = token_index,
-        .metadata = metadata,
-        .parameters = parameters,
-    };
-    return zml.ops.manualComputation(Call.forward, args, q.shape().withPartitioning(mesh, .{ .h = .model }));
+    const args: Call = .{ .q = q, .k = k, .v = v, .token_index = token_index, .metadata = metadata, .parameters = parameters };
+    return zml.ops.manualComputation2(Call.forward, args, q.shape(), partitioning);
 }
 
-test "attention runs every backend inside the shared manual region" {
+test "attention honors replicated and sharded caller specs across backends" {
     const mlir = @import("mlir");
     const platform = zml.testing.env();
     const mesh = zml.testing.tpMesh();
@@ -167,10 +162,16 @@ test "attention runs every backend inside the shared manual region" {
 
         // Trace CuTe on any platform; no device kernel is compiled or executed.
         for ([_]Backend{ .stablehlo, .{ .flash_attention = .cute } }) |backend| {
-            const output = attention(q, k, v, .scalar(0, .u32), .init(.fromBackend(backend)), .init(.fromBackend(backend)));
-            try std.testing.expect(output.shape().eql(q_shape));
-            try std.testing.expectEqualDeep(q_shape.withPartitioning(mesh, .{ .h = .model })._sharding, output.shape()._sharding);
-            try std.testing.expectEqualStrings("sdy.manual_computation", compiler.currentScope().value(output).owner().name());
+            inline for (.{ .{ .h = .replicated }, .{ .h = .model } }) |spec| {
+                const output = attention(q, k, v, .scalar(0, .u32), .init(.fromBackend(backend)), .init(.fromBackend(backend)), .{
+                    .mesh = mesh,
+                    .in_specs = .{ .q = spec, .k = spec, .v = spec, .token_index = .replicated, .metadata = .replicated },
+                    .out_specs = spec,
+                });
+                try std.testing.expect(output.shape().eql(q_shape));
+                try std.testing.expectEqualDeep(q_shape.withPartitioning(mesh, spec)._sharding, output.shape()._sharding);
+                try std.testing.expectEqualStrings("sdy.manual_computation", compiler.currentScope().value(output).owner().name());
+            }
         }
     }
 }

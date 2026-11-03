@@ -115,7 +115,8 @@ pub const Metadata = union(Backend) {
     }
 };
 
-/// Causal attention as used in transformers.
+/// Causal attention on local tensors inside a manual computation.
+/// Use `zml.attention.attention` to declare sharding on global tensors.
 ///
 /// **Shapes**:
 ///   - q, result: .{ .q, .h, .hd }
@@ -127,7 +128,7 @@ pub const Metadata = union(Backend) {
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-    stdx.debug.assert(zml.Compiler.current().manual_computation_depth > 0, "Attention kernels require a manualComputation boundary", .{});
+    zml.stdx.debug.assert(zml.Compiler.current().manual_computation_depth > 0, "Attention kernels require an explicit manualComputation boundary", .{});
     return switch (parameters) {
         .cute => cute.attention(q, k, v, token_index),
         .nki => nki.attention(q, k, v, token_index, parameters.nki),
@@ -229,9 +230,19 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     defer token_index.deinit();
 
     const meshes = platform.meshes.values();
+    const mesh = platform.meshes.get("model").?;
+    const AttentionCall = struct {
+        fn forward(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, position: zml.Tensor, metadata: zml.attention.Metadata, parameters: zml.attention.Parameters, mesh_: *const zml.Mesh) zml.Tensor {
+            return zml.attention.attention(q_, k_, v_, position, metadata, parameters, .{
+                .mesh = mesh_,
+                .in_specs = .{ .q = .{ .h = .model }, .k = .{ .h = .model }, .v = .{ .h = .model }, .token_index = .replicated, .metadata = .replicated },
+                .out_specs = .{ .h = .model },
+            });
+        }
+    };
     const reference_metadata: zml.attention.Metadata = .{ .stablehlo = {} };
     const reference_parameters: zml.attention.Parameters = .{ .stablehlo = {} };
-    const reference_exe = try platform.compileFn(allocator, io, zml.attention.attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters }, .{
+    const reference_exe = try platform.compileFn(allocator, io, AttentionCall.forward, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters, mesh }, .{
         .program_name = "attention_stablehlo",
         .meshes = meshes,
     });
@@ -240,6 +251,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     var reference_d = try reference_exe.eval(allocator, io, .{ q, k, v, token_index, reference_metadata });
     defer reference_d.deinit();
     try reference_d.await(io);
+    try std.testing.expectEqualDeep(q_shape.withPartitioning(mesh, .{ .h = .model })._sharding, reference_d.shape()._sharding);
     const reference_h: zml.Slice = try reference_d.toSliceAlloc(allocator, io);
     defer reference_h.free(allocator);
 
@@ -251,8 +263,8 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
         const exe = try platform.compileFn(
             allocator,
             io,
-            zml.attention.attention,
-            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters },
+            AttentionCall.forward,
+            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters, mesh },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
                 .meshes = meshes,
@@ -266,6 +278,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
         var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, metadata_d });
         defer output_d.deinit();
         try output_d.await(io);
+        try std.testing.expectEqualDeep(reference_d.shape()._sharding, output_d.shape()._sharding);
         const output_h = try output_d.toSliceAlloc(allocator, io);
         defer output_h.free(allocator);
 

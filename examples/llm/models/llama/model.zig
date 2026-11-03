@@ -587,6 +587,11 @@ const SelfAttn = struct {
             token_index,
             attention_metadata,
             attention_parameters,
+            .{
+                .mesh = .model,
+                .in_specs = .{ .q = .{ .h = .model }, .k = .{ .h = .model }, .v = .{ .h = .model }, .token_index = .replicated, .metadata = .replicated },
+                .out_specs = .{ .h = .model },
+            },
         );
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
