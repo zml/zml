@@ -1,8 +1,8 @@
 //! A tensor the loader assembles from checkpoint bytes by moving them, never
-//! by computing: a checkpoint tensor, or slices, reshapes, concatenations
-//! and stacks of checkpoint tensors. The ops are `zml.Tensor`'s shape ops,
-//! with the same names, tags and argument conventions; slices are static
-//! and contiguous.
+//! by computing: a checkpoint tensor, or slices, reshapes, transposes,
+//! concatenations and stacks of checkpoint tensors. The ops are
+//! `zml.Tensor`'s shape ops, with the same names, tags and argument
+//! conventions; slices are static and contiguous.
 //!
 //! A source comes from its store (`View.source`) and its pieces live in
 //! the store's arena, where the ops that rewrite them allocate. Nothing is
@@ -214,6 +214,44 @@ pub fn chunkExact(self: Source, axis_: anytype, comptime n_chunks: comptime_int)
         chunk.* = self.slice(a, .{ .start = start, .end = start + size });
     }
     return chunks;
+}
+
+/// Like `Tensor.transpose`: no axes reverses them.
+pub fn transpose(self: Source, axes_: anytype) Source {
+    const given = self._shape.axes(axes_);
+    const r = self.rank();
+    var permutation: [constants.MAX_RANK]u3 = undefined;
+    if (given.len == 0) {
+        for (0..r) |i| permutation[i] = @intCast(r - 1 - i);
+    } else {
+        stdx.debug.assert(given.len == r, "transpose expects {d} axes for {f}, got {d}", .{ r, self._shape, given.len });
+        @memcpy(permutation[0..r], given.constSlice());
+    }
+    var as_i64: [constants.MAX_RANK]i64 = undefined;
+    for (permutation[0..r], as_i64[0..r]) |p, *q| q.* = p;
+    const res_shape = self._shape.transpose(as_i64[0..r]);
+    // Axes of one element move nothing: when the others keep their order,
+    // the row-major order is unchanged, so are the pieces.
+    var previous: ?u3 = null;
+    const moves = for (permutation[0..r]) |p| {
+        if (self.dim(p) == 1) continue;
+        if (previous) |q| if (p < q) break true;
+        previous = p;
+    } else false;
+    if (!moves) return self.reshaped(res_shape);
+    var inverse: [constants.MAX_RANK]u3 = undefined;
+    for (permutation[0..r], 0..) |p, i| inverse[p] = @intCast(i);
+    var ctx: Rewrite = .init(self.store);
+    defer ctx.deinit();
+    for (self._pieces) |piece| {
+        for (ctx.decompose(self._shape, piece)) |axis_piece| {
+            var moved = axis_piece;
+            for (0..r) |i| moved.origin[i] = axis_piece.origin[permutation[i]];
+            for (moved.dims.slice()) |*d| d.axis = inverse[d.axis];
+            ctx.emit(res_shape, moved);
+        }
+    }
+    return ctx.finish(res_shape);
 }
 
 /// Like `Tensor.concatenate`; the sources must share every dimension but
@@ -898,6 +936,23 @@ test "Source interleaves expert vectors as Tensor does" {
     }.build);
 }
 
+test "Source transposes as Tensor does" {
+    try expectCase(.{.{ .row = 3, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].transpose(.{ .col, .row });
+        }
+    }.build);
+}
+
+test "Source interleaves rows of three as Tensor does" {
+    // lfm2's in_proj: rows [B; C; x] become b0 c0 x0 b1 c1 x1.
+    try expectCase(.{.{ .row = 6, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].splitAxis(.row, .{ .m = 3, .c = 2 }).transpose(.{ .c, .m, .col }).merge(.{ .row = .{ .c, .m } });
+        }
+    }.build);
+}
+
 test "Source slices rows as Tensor does" {
     try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
         fn build(comptime T: type, x: []const T) T {
@@ -1002,6 +1057,15 @@ test "a source binds as its pieces, which the loader lowers to byte parts" {
         .{ .source = entries[1], .lattice = .{ .src_offset = 0, .dst_offset = 12, .width = 6, .dims = &.{.{ .count = 2, .src_stride = 6, .dst_stride = 24 }} } },
         .{ .source = entries[2], .lattice = .{ .src_offset = 0, .dst_offset = 18, .width = 6, .dims = &.{.{ .count = 2, .src_stride = 6, .dst_stride = 24 }} } },
     }, try fused.lower(arena.allocator()));
+
+    // A transpose is one part of single elements.
+    const transposed = q.transpose(.{}).withPartitioning(.replicated, .{});
+    try std.testing.expectEqualDeep(&[_]backend.LoadPart{
+        .{ .source = entries[0], .lattice = .{ .src_offset = 0, .dst_offset = 0, .width = 2, .dims = &.{
+            .{ .count = 3, .src_stride = 2, .dst_stride = 8 },
+            .{ .count = 4, .src_stride = 6, .dst_stride = 2 },
+        } } },
+    }, try transposed.lower(arena.allocator()));
 }
 
 test "assembling fails on a byte two pieces write" {
@@ -1021,17 +1085,17 @@ test "a source is placed last, by as or withPartitioning, and binds in its place
     try checkpoint.init(allocator, &.{.{ .name = "w", .shape = .init(.{ 4, 6 }, .u16) }});
     defer checkpoint.deinit();
     const mesh: Sharding.Mesh = .initTest(.tp, .{.model});
-    const w = checkpoint.store.view().source("w", .{ .row, .col });
+    const transposed = checkpoint.store.view().source("w", .{ .row, .col }).transpose(.{});
 
     // `as` takes a shape built elsewhere, here of another rank: its
     // dimensions, tags and sharding, for the same elements.
     const placed = Shape.init(.{ .flat = 24 }, .u16).withPartitioning(&mesh, .{ .flat = .model });
-    const placed_source = w.as(placed);
+    const placed_source = transposed.as(placed);
     const flat = placed_source.bind();
     try std.testing.expect(flat.shape().eqlWithTagsAndPartitioning(placed));
     try std.testing.expect(checkpoint.store.bindingOf(flat.id).?.load.source.shape.eqlWithTagsAndPartitioning(placed));
-    const replicated = w.withPartitioning(.replicated, .{}).bind();
-    try std.testing.expect(replicated.shape().eqlWithTags(w.shape()));
+    const replicated = transposed.withPartitioning(.replicated, .{}).bind();
+    try std.testing.expect(replicated.shape().eqlWithTags(transposed.shape()));
     try std.testing.expectEqual(null, replicated.shape()._sharding.mesh);
     // `unplaced` keeps the placed dimensions and tags, without the sharding.
     const dropped = placed_source.unplaced();
