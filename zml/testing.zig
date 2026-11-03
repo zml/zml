@@ -365,6 +365,55 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
     return error.TestExpectedEqual;
 }
 
+pub const TensorBytes = struct {
+    name: []const u8,
+    /// The safetensors dtype name, such as "U16".
+    dtype: []const u8,
+    dims: []const i64,
+    bytes: []const u8,
+};
+
+/// Writes `tensors` as the safetensors file `sub_path` of `dir`, in order.
+pub fn writeSafetensorsFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    tensors: []const TensorBytes,
+) !void {
+    var header: std.Io.Writer.Allocating = .init(allocator);
+    defer header.deinit();
+    const writer = &header.writer;
+    try writer.writeByte('{');
+    var offset: usize = 0;
+    for (tensors, 0..) |tensor, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ tensor.name, tensor.dtype });
+        for (tensor.dims, 0..) |dim, axis| try writer.print("{s}{d}", .{ if (axis != 0) "," else "", dim });
+        try writer.print("],\"data_offsets\":[{d},{d}]}}", .{ offset, offset + tensor.bytes.len });
+        offset += tensor.bytes.len;
+    }
+    try writer.writeByte('}');
+
+    const file = try dir.createFile(io, sub_path, .{});
+    defer file.close(io);
+    var header_len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &header_len, header.written().len, .little);
+    try file.writePositionalAll(io, &header_len, 0);
+    var position: u64 = header_len.len;
+    try file.writePositionalAll(io, header.written(), position);
+    position += header.written().len;
+    for (tensors) |tensor| {
+        try file.writePositionalAll(io, tensor.bytes, position);
+        position += tensor.bytes.len;
+    }
+}
+
+/// Distinct, nonzero bytes for test tensor number `seed`.
+pub fn pattern(bytes: []u8, seed: u8) void {
+    for (bytes, 0..) |*byte, index| byte.* = (@as(u8, @truncate(index *% 29)) +% seed *% 53) | 1;
+}
+
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
     var count: usize = 0;
     var it = store.store.registry.iterator();
