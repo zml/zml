@@ -427,6 +427,46 @@ pub const Platform = struct {
         } else error.Unavailable;
     }
 
+    /// Forces lazy device allocators to materialize their backing pools.
+    ///
+    /// In particular, a preallocated GPU BFC allocator does not reserve its
+    /// fixed arena until its first non-empty allocation. The temporary buffer
+    /// is released immediately; caching allocators retain their initialized
+    /// pools for subsequent allocations. Calling this more than once is safe.
+    /// Devices are warmed concurrently: a serial pass over eight GPUs costs
+    /// measurable milliseconds ahead of a load. A device whose task `io`
+    /// cannot spawn is warmed in place.
+    pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) !void {
+        const Worker = struct {
+            platform: *const Platform,
+            device_index: usize,
+            first_error: *stdx.FirstError(pjrt.ApiError),
+
+            fn run(worker: @This()) void {
+                const dims: []const i64 = &.{1};
+                const memory = worker.platform.devices[worker.device_index].memory(.default).?;
+                const buffer = worker.platform.pjrt_client.createUninitializedBuffer(worker.platform.pjrt_api, .{
+                    .dims = dims,
+                    .element_type = pjrtx.bufferTypeFromDtype(.u8),
+                    .layout = worker.platform.defaultMemoryLayout(dims, .u8),
+                    .dst = .{ .memory = memory.pjrt_memory },
+                }) catch |err| {
+                    _ = worker.first_error.set(err);
+                    return;
+                };
+                buffer.deinit(worker.platform.pjrt_api);
+            }
+        };
+        var first_error: stdx.FirstError(pjrt.ApiError) = .{};
+        var group: std.Io.Group = .init;
+        for (self.devices, 0..) |_, device_index| {
+            const worker: Worker = .{ .platform = self, .device_index = device_index, .first_error = &first_error };
+            group.concurrent(io, Worker.run, .{worker}) catch worker.run();
+        }
+        try group.await(io);
+        if (first_error.get()) |err| return err;
+    }
+
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const tee = "├─ ";
         const line = "│  ";
@@ -1074,4 +1114,11 @@ test "platform defaultMemoryLayout is boring" {
             },
         });
     }
+}
+
+test "platform device allocators can be warmed repeatedly" {
+    const platform = zml.testing.env();
+
+    try platform.warmupDeviceAllocators(std.testing.io);
+    try platform.warmupDeviceAllocators(std.testing.io);
 }

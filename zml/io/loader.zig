@@ -35,7 +35,8 @@ const TensorStore = @import("TensorStore.zig");
 
 const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
 
-/// Loads models from their checkpoint sources.
+/// Loads models from their checkpoint sources. A value: `init` returns at
+/// once.
 ///
 /// What it borrows. The platform outlives the loader and every buffer it
 /// loads. `io` outlives the loader: the backend's tasks run on it and open
@@ -69,7 +70,12 @@ pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    backend: Backend,
+    /// `init`'s task, which warms the device allocators and creates the
+    /// backend, until the first `start` awaits it.
+    setup: ?std.Io.Future(anyerror!Backend),
+    /// What `setup` created; null before the first `start`, and after a
+    /// failed set-up.
+    backend: ?Backend = null,
     /// Submissions published and not yet retired, oldest first.
     pending: std.Deque(PendingSubmission) = .empty,
     /// The first error; every later call returns it.
@@ -86,21 +92,43 @@ pub const Loader = struct {
     /// Concurrent source reads at most (`Options.read_parallelism`).
     pub const max_read_parallelism: usize = 128;
 
-    /// Checks `opts` and creates the backend. A read width out of range is
-    /// `InvalidOptions`, logged.
+    /// Checks `opts` and returns at once. Warming the device allocators and
+    /// creating the backend run on a task of the loader's own, or here when
+    /// `io` has no concurrency; the first `start` waits for that task and
+    /// returns its error. A read width out of range is `InvalidOptions`,
+    /// logged.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
         opts: Options,
-    ) !Loader {
+    ) error{InvalidOptions}!Loader {
         const backend_opts = try backendOptions(opts);
+        const setup_args = .{ allocator, io, platform, backend_opts };
         return .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
-            .backend = try .init(allocator, io, platform, backend_opts),
+            .setup = io.concurrent(setUp, setup_args) catch io.async(setUp, setup_args),
         };
+    }
+
+    /// `init`'s task: the device allocators warmed, then the backend.
+    fn setUp(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: backend.Options) anyerror!Backend {
+        platform.warmupDeviceAllocators(io) catch |err| {
+            load_log.failure(err, "warm the device allocators", .{});
+            return err;
+        };
+        return Backend.init(allocator, io, platform, opts);
+    }
+
+    /// Waits for `init`'s task the first time: its backend, or its error,
+    /// for the caller to fail the loader with.
+    fn awaitSetup(self: *Loader) !void {
+        const setup = if (self.setup) |*task| task else return;
+        const result = setup.await(self.io);
+        self.setup = null;
+        self.backend = try result;
     }
 
     /// Gives up on everything started: aborts the backend (queued reads are
@@ -115,13 +143,17 @@ pub const Loader = struct {
         if (self.loadsStarted()) self.fail(error.Canceled);
     }
 
-    /// Destroys the backend: its workers and its host staging. The buffers
-    /// it loaded stay the caller's. Panics on loads neither waited for nor
-    /// canceled.
+    /// Cancels `init`'s task when no `start` awaited it, destroying what it
+    /// built, and destroys the backend: its workers and its host staging.
+    /// The buffers it loaded stay the caller's. Panics on loads neither
+    /// waited for nor canceled.
     pub fn deinit(self: *Loader) void {
         if (self.loadsStarted()) std.debug.panic("Loader.deinit with loads started, whose store and buffers may be freed already: add `errdefer loader.cancel();` after `start`", .{});
         self.pending.deinit(self.allocator);
-        self.backend.destroy();
+        if (self.setup) |*setup| {
+            if (setup.cancel(self.io)) |backend_| backend_.destroy() else |_| {}
+        }
+        if (self.backend) |backend_| backend_.destroy();
         self.* = undefined;
     }
 
@@ -159,7 +191,8 @@ pub const Loader = struct {
     /// `progress` before then. `start` adds one item to `progress` for each
     /// tensor, a composite one once; the backend completes them.
     /// Several loads may be started before one `wait`, from one store or
-    /// several.
+    /// several. The first `start` waits for `init`'s task, and fails with
+    /// its error.
     pub fn start(
         self: *Loader,
         model: anytype,
@@ -181,6 +214,8 @@ pub const Loader = struct {
         store: *const TensorStore,
         progress: std.Progress.Node,
     ) !void {
+        try self.awaitSetup();
+        // The load's time starts once the set-up is done.
         self.stats.begin(self.io);
         var prepared = try prepareModel(self.allocator, self.platform, store, model, buffers);
         errdefer prepared.arena.deinit();
@@ -214,7 +249,7 @@ pub const Loader = struct {
     fn fail(self: *Loader, err: anyerror) void {
         if (self.failure == null) self.failure = err;
         // Nothing still pending can succeed.
-        if (self.pending.len != 0) self.backend.abort();
+        if (self.pending.len != 0) self.backend.?.abort();
         while (self.pending.len != 0) self.retireOldest() catch {};
     }
 
@@ -232,7 +267,7 @@ pub const Loader = struct {
         var logical_bytes: usize = 0;
         for (specs) |spec| logical_bytes += spec.shape.byteSize();
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
-        const submission = try self.backend.submit(specs, progress);
+        const submission = try self.backend.?.submit(specs, progress);
         self.pending.pushBackAssumeCapacity(.{
             .submission = submission,
             .arena = arena,
@@ -246,7 +281,7 @@ pub const Loader = struct {
     fn retireOldest(self: *Loader) !void {
         const oldest = self.pending.popFront().?;
         defer oldest.arena.deinit();
-        try self.backend.await(oldest.submission);
+        try self.backend.?.await(oldest.submission);
         self.stats.bytes_loaded += oldest.logical_bytes;
     }
 };
@@ -673,6 +708,63 @@ test "init checks every option and returns InvalidOptions" {
             return error.TestUnexpectedResult;
         } else |err| try std.testing.expectEqual(error.InvalidOptions, err);
     }
+    // Nothing started, so `deinit` cancels the set-up or destroys what it
+    // built.
+    var loader = try Loader.init(allocator, io, platform, .{});
+    loader.deinit();
+}
+
+test "a failed set-up fails the first start, and deinit frees the rest" {
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(std.testing.allocator, io);
+    defer fixture.deinit();
+    // `init` allocates nothing; the set-up's first allocation, inside the
+    // backend, fails.
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var loader = try Loader.init(failing.allocator(), io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+    var output: Buffer = undefined;
+    try std.testing.expectError(error.OutOfMemory, loader.start(&fixture.value, &output, &fixture.store, .none));
+    try LoaderTestFixture.expectFailed(&loader, error.OutOfMemory);
+    try std.testing.expect(loader.backend == null);
+    try std.testing.expectError(error.OutOfMemory, loader.wait());
+}
+
+test "without concurrency init sets up in place" {
+    const allocator = std.testing.allocator;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, std.testing.io);
+    defer fixture.deinit();
+    // The testing io, but `io.concurrent` refuses and `io.async` runs the
+    // function in place.
+    var vtable = std.testing.io.vtable.*;
+    vtable.concurrent = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) std.Io.ConcurrentError!*std.Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    }.concurrent;
+    vtable.async = struct {
+        fn async(_: ?*anyopaque, result: []u8, _: std.mem.Alignment, context: []const u8, _: std.mem.Alignment, start: *const fn (*const anyopaque, *anyopaque) void) ?*std.Io.AnyFuture {
+            start(context.ptr, result.ptr);
+            return null;
+        }
+    }.async;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+
+    var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+    try std.testing.expect(loader.setup.?.any_future == null);
+    // Nothing started: neither has anything to do.
+    loader.cancel();
+    try loader.wait();
+    try std.testing.expectEqual(null, loader.failure);
+
+    var output: Buffer = undefined;
+    try loader.start(&fixture.value, &output, &fixture.store, .none);
+    try loader.wait();
+    defer output.deinit();
+    try testing.expectShards(allocator, io, &output, &LoaderTestFixture.contents, .default);
 }
 
 test "a rejected binding fails the loader" {

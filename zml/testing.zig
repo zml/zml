@@ -491,7 +491,8 @@ pub fn storeOf(allocator: std.mem.Allocator, registry: *const zml.safetensors.Te
 
 /// Loads `model` from `store` with the new loader, one of its own, and
 /// returns its buffers, which the caller frees with `mem.deinitBufferized`.
-/// A recipe for tests: a model's code keeps one loader for all its loads.
+/// A recipe for tests: production code creates its loader before building
+/// the model, so the loader's set-up runs meanwhile.
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,
