@@ -35,6 +35,10 @@
 //!   (`Loader.Options.dma_block_size`); unset, calibration picks one.
 //! - `ZML_DIRECT_IO=off|on|auto`: direct I/O for local checkpoint files
 //!   (`Loader.Options.direct_io`, `VFS.DirectIo`); `auto` when unset.
+//! - `ZML_LOAD_MEMORY=default|host_pinned|host_mapped`: where every tensor
+//!   is delivered (`TensorStore.Memory`, `View.setMemory`); `default`, device
+//!   memory, when unset. The loader refuses a kind the platform cannot take
+//!   (`InvalidBinding`).
 //! - `ZML_GPU_MEMORY_FRACTION=f`: a preallocated BFC pool of that fraction
 //!   of each device's memory on CUDA, ROCm and oneAPI, instead of the
 //!   platform's allocator defaults, for a run that observes the loader's
@@ -75,6 +79,10 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArgument;
     };
     const dma_block_mib = try envNumber(u32, init.environ_map, "ZML_DMA_BENCH_BLOCK_MIB");
+    const memory = std.meta.stringToEnum(zml.io.next.TensorStore.Memory, init.environ_map.get("ZML_LOAD_MEMORY") orelse "default") orelse {
+        log.err("ZML_LOAD_MEMORY must be default, host_pinned or host_mapped", .{});
+        return error.InvalidArgument;
+    };
 
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
@@ -125,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
             view.createTensor(key, null, .tp, columns)
         else
             view.createTensor(key, null, .tp, rows);
+        if (memory != .default) view.setMemory(tensor.*, memory);
     }
 
     var progress = std.Progress.start(io, .{ .root_name = "load_check", .disable_printing = true });

@@ -59,6 +59,17 @@
 //! worker time; as programs it copied 1 to 3 GiB and loaded 0.1 to 1.1 s
 //! faster, for 4 to 6 GiB more device memory at the peak.
 //!
+//! Host memory. A destination in a host memory space (`Memory.isHost`)
+//! takes no DMA: the worker that reads its bytes writes them in place into
+//! its PJRT host buffers, which an allocation task creates ahead of the
+//! reads (`Loader.startAllocations`). A host job reads straight into its
+//! destinations when its read is exact and addresses each byte once, in
+//! order; a widened read, or parts that overlap, goes through its slot's
+//! blocks and is copied from there. Bytes no part covers are zeroed in
+//! place. Each device of a replicated destination holds a copy of its own,
+//! which the worker writes from the first one. Host and DMA parts never
+//! share a job, and no strided part goes to host memory.
+//!
 //! Locks. Where several pumps are held, they are taken in device order. A
 //! pump's mutex may be held while a released request gives its credit back
 //! (`Credits`), never the reverse, and no other lock is taken under the
@@ -89,8 +100,8 @@ const load_log = @import("log.zig").load;
 const testing = @import("../testing.zig");
 
 /// Creating a tensor's device state: host memory or PJRT, since the front
-/// end checked its placement. `LazyOnce` replays it to every later reader
-/// of the tensor.
+/// end checked its placement and memory kind. `LazyOnce` replays it to every
+/// later reader of the tensor.
 const StateInitError = std.mem.Allocator.Error || pjrt.ApiError;
 
 /// Bounds per-device event overhead for tiny tensors. This is not a measured
@@ -268,11 +279,12 @@ pub const Loader = struct {
     /// batch: work on the first file starts while the rest is planned. The
     /// batch owns its destinations and parts until `awaitBatch` retires it.
     /// The specs keep the `LoadSpec` contract and `stridedRead`'s limit,
-    /// which the front end checked, and this backend's: device memory. A
-    /// planning failure fails the loader (a partial submission can never
-    /// complete): the batch is awaited here and the caller sees only the
-    /// first error. A failed loader refuses every submit with its first
-    /// error.
+    /// which the front end checked. A planning failure fails the loader (a
+    /// partial submission can never complete): the batch is awaited here
+    /// and the caller sees only the first error. A failed loader refuses
+    /// every submit with its first error. The batch's host-resident
+    /// destinations are then created ahead of their reads
+    /// (`startAllocations`).
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) !*Batch {
         try self.checkOpen();
         const batch = batch: {
@@ -294,6 +306,7 @@ pub const Loader = struct {
         // Stamped before the sentinel goes, so before the batch can complete.
         batch.sealed_at = .now(self.io, .awake);
         self.batch_count += 1;
+        self.startAllocations(batch);
         // Every plan is visible: drop the publish sentinel. A batch without
         // jobs completes right here.
         batch.releaseUnits(1);
@@ -304,6 +317,56 @@ pub const Loader = struct {
     /// (`Planner.stridedRead`).
     pub fn stridedRead(self: *const Loader, part: LoadPart) backend.Backend.StridedRead {
         return Planner.stridedRead(self.plan_config, self.reads, part);
+    }
+
+    /// Creates the batch's host-resident destinations ahead of their reads,
+    /// in claim order, on a task of its own. A first-time pinned allocation
+    /// runs at about 14-15 GiB/s on four B70 (oneAPI), serialized whatever
+    /// the number of callers (one to sixteen threads measured alike; the
+    /// time is the xe driver's VM_BIND), so on the workers' read path it
+    /// stalled them for 10-12 ms per tensor; ahead of them it overlaps the
+    /// reads. A worker that still finds its destination missing creates it
+    /// itself (`LazyOnce`). The task holds one completion unit, so the batch
+    /// outlives it; without a task the workers create everything.
+    fn startAllocations(self: *Loader, batch: *Batch) void {
+        var host_destinations: usize = 0;
+        for (batch.destinations) |*destination| host_destinations += @intFromBool(destination.memory.isHost());
+        if (host_destinations == 0) return;
+        _ = batch.remaining.fetchAdd(1, .acq_rel);
+        self.worker_group.concurrent(self.io, allocateMain, .{ self, batch, host_destinations }) catch |err| {
+            load_log.debug("batch {d}: no allocation task, workers create its {d} host destinations: {s}", .{ batch.sequence, host_destinations, @errorName(err) });
+            batch.releaseUnits(1);
+        };
+    }
+
+    /// Walks the host jobs in claim order (the plans in publish order, each
+    /// plan's jobs in order) and their transfers as `run` does, skipping a
+    /// destination already created. `ensured` also counts one a worker was
+    /// still creating, which the task waited for.
+    fn allocateMain(self: *Loader, batch: *Batch, host_destinations: usize) void {
+        var ensured: usize = 0;
+        var previous: ?*Destination = null;
+        walk: for (batch.plans.items) |plan| for (plan.jobs) |job| {
+            switch (job.kind) {
+                .host_direct, .host_bounce, .host_fill => {},
+                .dma_read, .dma_land, .dma_fill => continue,
+            }
+            for (plan.transfersOf(job)) |transfer| {
+                const destination = transfer.destination;
+                if (destination == previous or destination.state.readyValue() != null) continue;
+                previous = destination;
+                if (self.first_error.get() != null) break :walk;
+                const started = awakeNs(self.io);
+                _ = destination.ensureState(self) catch |err| {
+                    self.recordError(err, "initialize tensor {s} from {s} ahead of its reads, shape={f}", .{ destination.name(), destination.parts[0].source.file_uri, destination.shape });
+                    break :walk;
+                };
+                _ = self.metrics.ahead_init_ns.fetchAdd(awakeNs(self.io) -| started, .monotonic);
+                ensured += 1;
+            }
+        };
+        load_log.debug("batch allocations: batch={d}, host_destinations={d}, ensured={d}, done=+{d:.3}s", .{ batch.sequence, host_destinations, ensured, secondsBetween(self.created_at, .now(self.io, .awake)) });
+        batch.releaseUnits(1);
     }
 
     /// Waits for the batch's last completion unit, retires it and returns
@@ -319,7 +382,8 @@ pub const Loader = struct {
     /// completed without an error submitted every byte of every target (the
     /// pump flagged the submission that completed its bytes); one that did
     /// not would leave a buffer PJRT then errors, a bookkeeping bug this
-    /// panics on.
+    /// panics on. A host-resident destination has no target: its workers
+    /// write it in place, which only the debug check of its progress covers.
     pub fn awaitBatch(self: *Loader, batch: *Batch) !void {
         batch.done.waitUncancelable(self.io);
         const done_at: std.Io.Timestamp = .now(self.io, .awake);
@@ -384,7 +448,8 @@ pub const Loader = struct {
     /// Creates the batch's destinations, one per spec, and their parts in
     /// its arena, their sources and dimensions staying the specs' until the
     /// batch is awaited (`backend.LoadSpec`). A destination's device state
-    /// is created lazily by the first worker that reads or fills for it.
+    /// is created lazily by the first worker that reads or fills for it,
+    /// or by the allocation task.
     fn createDestinations(
         self: *Loader,
         batch: *Batch,
@@ -398,7 +463,6 @@ pub const Loader = struct {
         const parts = try arena.alloc(Part, part_count);
         var next_part: usize = 0;
         for (specs, destinations) |spec, *destination| {
-            std.debug.assert(spec.memory == .default); // submit
             const grid: ShardGrid = .init(self.platform, spec.shape);
             const destination_parts = parts[next_part..][0..spec.parts.len];
             next_part += spec.parts.len;
@@ -416,9 +480,11 @@ pub const Loader = struct {
                 const strided = self.stridedRead(part);
                 std.debug.assert(strided.read <= strided.limit); // backend.Backend.stridedRead
             }
+            std.debug.assert(!gathered or !spec.memory.isHost()); // backend.LoadSpec.memory
             destination.* = .{
                 .shape = spec.shape,
                 .grid = grid,
+                .memory = spec.memory,
                 .output = spec.output,
                 .parts = destination_parts,
                 .gathered = gathered,
@@ -550,7 +616,8 @@ pub const Loader = struct {
                 if (job.kind == .dma_land and plan.transfersOf(job)[0].destination.gathered) gather_jobs += 1;
             }
         }
-        const fill_jobs = kinds.get(.dma_fill);
+        const fill_jobs = kinds.get(.dma_fill) + kinds.get(.host_fill);
+        const host_jobs = kinds.get(.host_direct) + kinds.get(.host_bounce) + kinds.get(.host_fill);
         const source_jobs = jobs - fill_jobs;
         const average_read_size = if (source_jobs == 0) 0 else source_bytes / source_jobs;
         const coalescing_ratio = if (source_jobs == 0)
@@ -558,13 +625,14 @@ pub const Loader = struct {
         else
             @as(f64, @floatFromInt(batch.parts.len)) /
                 @as(f64, @floatFromInt(source_jobs));
-        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, fill_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, staged_jobs={d}, gather_jobs={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
+        load_log.debug("batch planning: batch={d}, plans={d}, planning_elapsed={d:.3}s, planned_source_bytes={Bi:.2}, planned_source_jobs={d}, fill_jobs={d}, host_jobs={d}, source_items={d}, planned_transfers={d}, planned_dma_submissions={d}, staged_jobs={d}, gather_jobs={d}, coalescing_ratio={d:.2}, average_read_size={Bi:.2}", .{
             batch.sequence,
             batch.plans.items.len,
             @as(f64, @floatFromInt(planning_ns)) / std.time.ns_per_s,
             source_bytes,
             source_jobs,
             fill_jobs,
+            host_jobs,
             batch.parts.len,
             transfers,
             dma_submissions,
@@ -589,11 +657,12 @@ pub const Loader = struct {
             self.credits.count(),
             self.workspace.mappedBytes(),
         });
-        load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}", .{
+        load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, ahead_init_ms={d:.3}", .{
             millisecondsPer(self.metrics.credit_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.dma_stage_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.tensor_init_ns.load(.acquire), reads),
+            millisecondsPer(self.metrics.ahead_init_ns.load(.acquire), 1),
         });
         const submissions = self.metrics.dma_submissions.load(.acquire);
         load_log.debug("loader DMA: dma_submissions={d}, dma_submit_us_per_piece={d:.2}, dma_piece_latency_ms={d:.3}, pump_stops_empty={d}, pump_stops_full={d}", .{
@@ -609,10 +678,12 @@ pub const Loader = struct {
 /// One submission: its plans (one per source file, published as each file
 /// is planned), the destinations it writes and their parts, and every
 /// request and event context created while loading it, all in the batch's
-/// arena until it retires. `remaining` counts completion units: one
-/// per published job plus a publish sentinel held until the submission is
-/// sealed. A job's unit is released exactly once, by whichever of these
-/// happens: its request's last reference drops (final DMA callback or
+/// arena until it retires. `remaining` counts completion units: one per
+/// published job plus a publish sentinel held until the submission is
+/// sealed, and one for the allocation task while it runs
+/// (`Loader.startAllocations`), taken before the sentinel is dropped. A
+/// job's unit is released exactly once, by whichever of these happens: its
+/// request's last reference drops (final DMA callback, a host job's end, or
 /// abandonment), or `Scheduler.fail` retires it unclaimed. The batch is
 /// done when `remaining` reaches zero; the awaiting task then retires it,
 /// so releasing a unit is the last permitted access to the batch.
@@ -679,13 +750,17 @@ pub const Batch = struct {
 /// come from several files, so several plans can write it: their pieces,
 /// and the zero fill, all count toward the same targets (`Target.total` is
 /// the placement's bytes, whichever plan submits them), and its device
-/// state is created once, by the first worker that reads or fills for it.
+/// state is created once, by the first worker that reads or fills for it
+/// or, for a host-resident one, normally by the allocation task ahead of
+/// them.
 const Destination = struct {
     /// The caller's shape, which the output buffer keeps.
     shape: Shape,
     /// Where `shape`, packed and placed (`Platform.placedShape`), lands on
     /// its devices: what PJRT allocates and the planner cuts.
     grid: ShardGrid,
+    /// Where its bytes go (`TensorStore.Memory`).
+    memory: Memory = .default,
     output: *Buffer,
     /// What fills it, in ascending, disjoint destination order
     /// (`backend.LoadSpec`): a slice of the batch's parts. Bytes no part
@@ -705,15 +780,16 @@ const Destination = struct {
     state: LazyOnce(DestinationState) = .{},
 
     /// How its parts are planned, a class at a time in this order
-    /// (`Planner.sortedPartOrder`): DMA jobs, or gathered whole.
-    const Delivery = enum { dma, gathered };
+    /// (`Planner.sortedPartOrder`): DMA jobs, host jobs, or gathered whole.
+    const Delivery = enum { dma, host, gathered };
 
     fn delivery(self: *const Destination) Delivery {
-        return if (self.gathered) .gathered else .dma;
+        if (self.gathered) return .gathered;
+        return if (self.memory.isHost()) .host else .dma;
     }
 
-    fn ensureState(self: *Destination, allocator: std.mem.Allocator, io: std.Io, platform: *const Platform) StateInitError!*DestinationState {
-        return self.state.ensure(io, DestinationState.init, .{ allocator, platform, self });
+    fn ensureState(self: *Destination, direct: *Loader) StateInitError!*DestinationState {
+        return self.state.ensure(direct.io, DestinationState.init, .{ direct, self });
     }
 
     fn deinit(self: *Destination, allocator: std.mem.Allocator, api: *const pjrt.Api) void {
@@ -771,10 +847,10 @@ const SourceSlot = struct {
 };
 
 /// One file's jobs in claim order with their transfer records and every
-/// context the jobs can need, allocated by the planner: one request per job
-/// and one event per planned DMA submission, handed out in submission
-/// order. Contexts hold the plan's address, which the batch's arena keeps
-/// until it retires.
+/// context the jobs can need, allocated by the planner: one request per
+/// job and one event per planned DMA submission, handed out in
+/// submission order; a host job needs only its request. Contexts hold the
+/// plan's address, which the batch's arena keeps until it retires.
 const Plan = struct {
     /// A claimable job: its slice of the plan's transfers and what its
     /// worker does for them. Its request slot is its index.
@@ -782,13 +858,18 @@ const Plan = struct {
         /// Where the job reads first: its read's start, a landing job's
         /// first extent's; zero for a job that reads nothing.
         /// `Planner.preparePlan` sorts the other jobs by it and appends
-        /// the fill job after them.
+        /// the fill jobs after them.
         file_offset: u64,
         transfer_start: usize,
         transfer_len: usize,
         kind: Kind,
 
-        /// How the job's bytes reach their destinations.
+        /// How the job's bytes reach their destinations. A destination
+        /// in a host memory space (`Memory.isHost`) is written
+        /// by the worker that reads it: going through pinned blocks and
+        /// a host-to-host PJRT transfer copied every byte twice and held
+        /// the DMA pumps, which on four B70 made Llama-3.1-8B take 2.0 s
+        /// into pinned_host against 0.67 s into device memory.
         const Kind = union(enum) {
             /// Read into pinned blocks in file order, where its transfers
             /// address it, then copied to the devices by DMA.
@@ -801,6 +882,19 @@ const Plan = struct {
             /// Reads nothing: every transfer goes from the loader's zero
             /// block (`Planner.JobCut.appendFillTransfers`).
             dma_fill,
+            /// Read straight into host-resident destinations: the read's
+            /// iovecs are the destination ranges, so the read is the only
+            /// copy. Needs a read without alignment padding whose
+            /// transfers address each of its bytes once, in order
+            /// (`Planner.JobCut.coversReadInOrder`).
+            host_direct: Read,
+            /// Read into the request's slot of blocks, then copied into
+            /// host-resident destinations by the worker: reads widened
+            /// for direct I/O, whose buffers must be aligned, and
+            /// overlapping parts.
+            host_bounce: Read,
+            /// Writes zeros in place, reading nothing.
+            host_fill,
         };
 
         /// `len` bytes from the job's `file_offset`, of which the first
@@ -824,12 +918,12 @@ const Plan = struct {
         };
 
         /// The blocks of its credit's slot the job reads into or lands
-        /// in; none for a fill job.
+        /// in; none for a direct host job or a fill job.
         fn blockLen(self: Job, block_size: usize) usize {
             return switch (self.kind) {
-                .dma_read => |read| Planner.blockCount(read.len, block_size),
+                .dma_read, .host_bounce => |read| Planner.blockCount(read.len, block_size),
                 .dma_land => |land| Planner.blockCount(land.len, block_size),
-                .dma_fill => 0,
+                .dma_fill, .host_direct, .host_fill => 0,
             };
         }
     };
@@ -868,10 +962,12 @@ const Plan = struct {
         item_len: usize,
     };
 
-    /// `len` bytes at `landing` of the job's blocks taken end to end, for
-    /// every device of `writer_mask` at `destination_offset` of its shard.
-    /// Every transfer stays inside one block. A fill one lands at 0 and
-    /// reads the zero block.
+    /// `len` bytes at `landing` of the job's blocks taken end to end,
+    /// for every device of `writer_mask` at `destination_offset` of its
+    /// shard. Every transfer stays inside one block, which the worker or
+    /// `Dma.enqueue` finds from `landing` (`blockPiece`); a direct host
+    /// job reads at the same landings without blocks. A fill one lands
+    /// at 0: a DMA one reads the zero block, a host one writes zeros.
     const Transfer = struct {
         destination: *Destination,
         landing: usize,
@@ -1014,11 +1110,11 @@ const Planner = struct {
 
     /// Plans one file: `order` indexes its `parts` by delivery class, then
     /// offset and size (`sortedPartOrder`). `JobCut.cutRuns` cuts the DMA
-    /// parts at the file's alignment (`Reads.alignmentOf`),
+    /// and the host parts at the file's alignment (`Reads.alignmentOf`),
     /// `JobCut.appendGatherJobs` each gathered destination with the file of
     /// its first part; the jobs merge in file order, then
-    /// `JobCut.appendFillJob` appends the zero fill. The plan goes in
-    /// `arena` (`JobCut.finish`), the cut in `allocator`.
+    /// `JobCut.appendFillJob` appends each class's zero fill. The plan goes
+    /// in `arena` (`JobCut.finish`), the cut in `allocator`.
     fn preparePlan(
         allocator: std.mem.Allocator,
         arena: std.mem.Allocator,
@@ -1030,6 +1126,7 @@ const Planner = struct {
         const source_slot = parts[order[0]].source_slot;
         for (order) |part_index| std.debug.assert(std.mem.eql(u8, parts[part_index].source.file_uri, parts[order[0]].source.file_uri));
         const dma_end = deliveryEnd(parts, order, 0, .dma);
+        const host_end = deliveryEnd(parts, order, dma_end, .host);
         const alignment = try reads.alignmentOf(source_slot);
         var cut: JobCut = .{
             .allocator = allocator,
@@ -1045,8 +1142,9 @@ const Planner = struct {
             .gather_len = maximumJobLen(config.request_size, reads.alignment),
         };
         defer cut.deinit();
-        try cut.cutRuns(order[0..dma_end]);
-        for (order[dma_end..]) |part_index| {
+        try cut.cutRuns(order[0..dma_end], false);
+        try cut.cutRuns(order[dma_end..host_end], true);
+        for (order[host_end..]) |part_index| {
             const part = &parts[part_index];
             std.debug.assert(part.destination.gathered);
             if (part == &part.destination.parts[0]) try cut.appendGatherJobs(part.destination);
@@ -1065,8 +1163,9 @@ const Planner = struct {
 
         // The zero fill of each destination goes out once, with the plan
         // of its first part; it depends on no read, so one job after this
-        // file's reads carries all of it.
-        try cut.appendFillJob(order[0..dma_end]);
+        // file's reads carries all of it, one per delivery class.
+        try cut.appendFillJob(order[0..dma_end], false);
+        try cut.appendFillJob(order[dma_end..host_end], true);
         return cut.finish(arena);
     }
 
@@ -1114,11 +1213,16 @@ const Planner = struct {
 
         /// The plan of the jobs cut, copied into `arena` with every context
         /// its jobs can need, allocated before publication makes it visible
-        /// to workers: a request per job and an event per writer of a
-        /// transfer.
+        /// to workers: a request per job and an event per writer of a DMA
+        /// job's transfer.
         fn finish(self: *JobCut, arena: std.mem.Allocator) !*Plan {
             const jobs = self.jobs.items;
             const transfers = self.transfers.items;
+            var dma_submissions: usize = 0;
+            for (jobs) |job| switch (job.kind) {
+                .dma_read, .dma_land, .dma_fill => dma_submissions += submissionCount(transfers[job.transfer_start..][0..job.transfer_len]),
+                .host_direct, .host_bounce, .host_fill => {},
+            };
             const requests = try arena.alloc(ReadRequest, jobs.len);
             @memset(requests, ReadRequest.idle);
             const plan = try arena.create(Plan);
@@ -1130,7 +1234,7 @@ const Planner = struct {
                 .items = try arena.dupe(Plan.Item, self.items.items),
                 .landings = try arena.dupe(u64, self.landings.items),
                 .requests = requests,
-                .events = try arena.alloc(Dma.EventContext, submissionCount(transfers)),
+                .events = try arena.alloc(Dma.EventContext, dma_submissions),
                 .source_bytes = self.source_bytes,
             };
             return plan;
@@ -1149,16 +1253,18 @@ const Planner = struct {
             self.jobs.deinit(allocator);
         }
 
-        /// Cuts the runs of `order` (the DMA parts' indices in file order)
-        /// into jobs: each run of touching or overlapping ranges into the
-        /// minimum number of jobs, cut at part-safe boundaries where that
-        /// number allows. No job depends on another, since every DMA piece
-        /// is submitted as soon as its block is read. With an alignment
-        /// (`Reads.alignmentOf`), a job's read widens to aligned bounds
-        /// around its range (`maximumJobLen` leaves room for it), and the
-        /// transfers address the widened read. Each job's segments are
-        /// placed in its blocks by `placeDma`.
-        fn cutRuns(self: *JobCut, order: []const usize) !void {
+        /// Cuts the runs of `order` (part indices of one delivery class in
+        /// file order) into jobs: each run of touching or overlapping
+        /// ranges into the minimum number of jobs, cut at part-safe
+        /// boundaries where that number allows. No job depends on another,
+        /// since every DMA piece is submitted as soon as its block is read.
+        /// With an alignment (`Reads.alignmentOf`), a job's read widens to
+        /// aligned bounds around its range (`maximumJobLen` leaves room for
+        /// it), and the transfers address the widened read. A DMA job's
+        /// segments are placed in its blocks by `placeDma`. A host job is
+        /// `host_direct` only when its read is exact and its transfers
+        /// cover it in order (`coversReadInOrder`), otherwise `host_bounce`.
+        fn cutRuns(self: *JobCut, order: []const usize, host: bool) !void {
             const allocator = self.allocator;
             const parts = self.parts;
             const alignment = self.alignment;
@@ -1255,7 +1361,13 @@ const Planner = struct {
                     }
                     std.debug.assert(self.segments.items.len != 0);
                     const read: Plan.Job.Read = .{ .len = read_len, .minimum_len = @intCast(job_end - read_start) };
-                    const kind = try self.placeDma(read, read_start, job_start, job_len);
+                    const kind: Plan.Job.Kind = if (host) host: {
+                        for (self.segments.items) |segment| try self.appendRunTransfers(transfer_start, segment, read_start);
+                        break :host if (alignment == 0 and coversReadInOrder(self.transfers.items[transfer_start..], read_len))
+                            .{ .host_direct = read }
+                        else
+                            .{ .host_bounce = read };
+                    } else try self.placeDma(read, read_start, job_start, job_len);
                     try self.jobs.append(allocator, .{
                         .file_offset = read_start,
                         .transfer_start = transfer_start,
@@ -1607,10 +1719,11 @@ const Planner = struct {
         }
 
         /// The zero fill of the destinations whose first part is among
-        /// `order`, the file's DMA parts, as one job that reads one block,
-        /// the zero block. A gathered destination's jobs write its zeros
+        /// `order`, the file's parts of one delivery class, as one job. A DMA
+        /// fill job reads one block, the zero block; a host one writes zeros
+        /// in place. A gathered destination's jobs write its zeros
         /// themselves.
-        fn appendFillJob(self: *JobCut, order: []const usize) !void {
+        fn appendFillJob(self: *JobCut, order: []const usize, host: bool) !void {
             const fill_start = self.transfers.items.len;
             for (order) |part_index| {
                 const part = &self.parts[part_index];
@@ -1624,14 +1737,14 @@ const Planner = struct {
                 .file_offset = 0,
                 .transfer_start = fill_start,
                 .transfer_len = fill_transfers.len,
-                .kind = .dma_fill,
+                .kind = if (host) .host_fill else .dma_fill,
             });
         }
 
         /// Appends the zero-fill transfers of `destination`: every logical
         /// range no part covers (the gaps between its parts and the tail),
         /// placed by its grid like read bytes, each piece at most one block
-        /// at landing 0, where the job reads the zero block. Pieces count
+        /// at landing 0, where a DMA job reads the zero block. Pieces count
         /// toward their targets' totals, so the fill completes each
         /// device's placement bytes alongside the parts.
         fn appendFillTransfers(self: *JobCut, transfer_start: usize, destination: *Destination) !void {
@@ -1679,6 +1792,20 @@ const Planner = struct {
                     remaining -= take;
                 }
             }
+        }
+
+        /// Whether a host job's transfers address its read from byte zero
+        /// to `read_len` in order, each source byte once: then the read
+        /// can scatter straight into the destinations. Overlapping or
+        /// duplicate parts address some source bytes twice and go through
+        /// blocks instead.
+        fn coversReadInOrder(transfers: []const Plan.Transfer, read_len: usize) bool {
+            var next: usize = 0;
+            for (transfers) |transfer| {
+                if (transfer.landing != next) return false;
+                next += transfer.len;
+            }
+            return next == read_len;
         }
     };
     fn blockCount(len: usize, block_size: usize) usize {
@@ -1937,21 +2064,24 @@ const ReadRequest = struct {
 
     fn run(self: *ReadRequest, scratch: *Scratch) !void {
         const loader = self.loader;
+        const io = loader.io;
         const block_size = loader.plan_config.block_size;
         const job = self.plan.jobs[self.index];
         const transfers = self.plan.transfersOf(job);
-        // The first worker to touch a destination creates its state.
+        // The first worker to touch a destination creates its state; a
+        // host-resident one's is normally created ahead by the allocation
+        // task.
         var previous: ?*Destination = null;
         for (transfers) |transfer| {
             const destination = transfer.destination;
             if (destination == previous) continue;
             previous = destination;
-            const init_started = awakeNs(loader.io);
-            _ = destination.ensureState(loader.allocator, loader.io, loader.platform) catch |err| {
+            const init_started = awakeNs(io);
+            _ = destination.ensureState(loader) catch |err| {
                 loader.recordError(err, "initialize tensor {s} from {s}, shape={f}", .{ destination.name(), destination.parts[0].source.file_uri, destination.shape });
                 return err;
             };
-            _ = loader.metrics.tensor_init_ns.fetchAdd(awakeNs(loader.io) -| init_started, .monotonic);
+            _ = loader.metrics.tensor_init_ns.fetchAdd(awakeNs(io) -| init_started, .monotonic);
         }
         const blocks = loader.credits.slotBlocks(self.slot)[0..job.blockLen(block_size)];
         switch (job.kind) {
@@ -1959,9 +2089,50 @@ const ReadRequest = struct {
             .dma_land => |land| try landJob(loader, self.plan, land, blocks, scratch),
             // Reads nothing: its transfers read the zero block.
             .dma_fill => return Dma.enqueue(self, loader.blocks[0..1]),
+            // A host job's worker writes its destinations itself, so the job
+            // ends with the worker's scheduling reference; its slot's blocks,
+            // if it reads through them, are done when this returns.
+            .host_direct => |read| {
+                var scatter: Scatter = .{
+                    .loader = loader,
+                    .slot = self.plan.source_slot,
+                    .iovecs = scratch.scatterIovecs(),
+                    .file_offset = job.file_offset,
+                };
+                for (transfers) |transfer| {
+                    const tensor = transfer.destination.state.readyValue().?;
+                    // The planner checked that the transfers cover the read
+                    // in order, each source byte once.
+                    try scatter.add(tensor.hostLanding(transfer, @ctz(transfer.writer_mask)));
+                }
+                try scatter.flush();
+                std.debug.assert(scatter.file_offset == job.file_offset + read.len);
+                for (transfers) |transfer| transfer.destination.state.readyValue().?.copyToReplicas(transfer);
+            },
+            .host_bounce => |read| {
+                try self.readBlocks(scratch, blocks, read);
+                for (transfers) |transfer| {
+                    const tensor = transfer.destination.state.readyValue().?;
+                    // The last block holds stale bytes past the read, which
+                    // no bounds check would stop a copy from taking.
+                    std.debug.assert(transfer.landing + transfer.len <= read.len);
+                    const piece = blockPiece(blocks, block_size, transfer.landing, transfer.len);
+                    std.debug.assert(piece.len == transfer.len);
+                    var writers = transfer.writer_mask;
+                    while (writers != 0) : (writers &= writers - 1) @memcpy(tensor.hostLanding(transfer, @ctz(writers)), piece);
+                }
+            },
+            .host_fill => {
+                for (transfers) |transfer| {
+                    const tensor = transfer.destination.state.readyValue().?;
+                    var writers = transfer.writer_mask;
+                    while (writers != 0) : (writers &= writers - 1) @memset(tensor.hostLanding(transfer, @ctz(writers)), 0);
+                }
+                return;
+            },
         }
         for (transfers) |transfer| transfer.destination.recordRead(transfer.len);
-        try Dma.enqueue(self, blocks);
+        if (job.kind == .dma_read or job.kind == .dma_land) try Dma.enqueue(self, blocks);
     }
 
     /// Reads the job's `read` into `blocks`, its slot's, in file order.
@@ -2175,9 +2346,9 @@ const max_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 
 /// A read scattered over memory ranges as they come, in file order and
 /// back to back from `file_offset` of `slot`'s file: a range that continues
 /// the previous one in memory merges with it, and one call reads at most
-/// `iovecs.len` ranges. Fed the runs of a walk landing in `blocks`
-/// (`place`), or memory ranges directly (`add`). Every byte read must
-/// exist: a scattered read has no alignment padding.
+/// `iovecs.len` ranges. Fed destination ranges directly (`add`), or the runs
+/// of a walk landing in `blocks` (`place`). Every byte read must exist: a
+/// scattered read has no alignment padding.
 const Scatter = struct {
     loader: *Loader,
     slot: *SourceSlot,
@@ -2640,15 +2811,24 @@ const DestinationState = struct {
         }
     };
 
-    /// The destination's transfer targets, one per device in canonical
-    /// order.
-    targets: []Target,
+    /// A DMA destination's transfer targets, one per device in canonical
+    /// order; empty for a host-resident one.
+    targets: []Target = &.{},
+    /// A host-resident destination's shards in host memory, which workers
+    /// write in place, one per device in canonical order; empty for a DMA
+    /// one.
+    host: [][*]u8 = &.{},
 
-    /// Creates the destination's device buffers and transfer managers, one
-    /// per device of its grid in canonical order, and writes the output
-    /// shell. Runs once per destination (`LazyOnce`), however many parts
-    /// feed it, on the worker that first reads or fills for it.
-    fn init(allocator: std.mem.Allocator, platform: *const Platform, destination: *const Destination) StateInitError!DestinationState {
+    /// Creates the destination's buffers and writes the output shell: for a
+    /// DMA destination, the device buffers and transfer managers, one per
+    /// device of its grid in canonical order; for a host-resident one, the
+    /// buffers workers write (`initHost`). Runs once per destination
+    /// (`LazyOnce`), however many parts feed it, on the allocation task or
+    /// the worker that first reads or fills for it.
+    fn init(direct: *Loader, destination: *const Destination) StateInitError!DestinationState {
+        if (destination.memory.isHost()) return initHost(direct, destination);
+        const allocator = direct.allocator;
+        const platform = direct.platform;
         const grid = &destination.grid;
         const targets = try allocator.alloc(Target, grid.devices.len);
         errdefer allocator.free(targets);
@@ -2685,20 +2865,91 @@ const DestinationState = struct {
         return .{ .targets = targets };
     }
 
+    /// Creates a host-resident destination's buffers, one per device of its
+    /// grid in canonical order, each in that device's pinned host memory
+    /// space, and reads their host pointers for the workers. The buffers are
+    /// complete before any worker writes them, so they report ready from the
+    /// start; the front end hands them out only once the batch is done.
+    fn initHost(direct: *Loader, destination: *const Destination) StateInitError!DestinationState {
+        const allocator = direct.allocator;
+        const platform = direct.platform;
+        const api = platform.pjrt_api;
+        const grid = &destination.grid;
+        const shards = try allocator.alloc([*]u8, grid.devices.len);
+        errdefer allocator.free(shards);
+        const dims = grid.local.dims();
+        const element_type = pjrtx.bufferTypeFromDtype(grid.local.dtype());
+        const layout = platform.defaultMemoryLayout(dims, grid.local.dtype());
+
+        var pjrt_buffers: Buffer.Shards = .empty;
+        errdefer for (pjrt_buffers.constSlice()) |buffer| buffer.deinit(api);
+        for (grid.devices, shards) |device, *shard| {
+            // The front end only submits host kinds when every device has
+            // a pinned host space (`backend.supportsMemory`).
+            const host = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
+            const buffer = try createHostBuffer(direct.io, platform, dims, element_type, layout, host);
+            pjrt_buffers.appendAssumeCapacity(buffer);
+            shard.* = @ptrCast(try buffer.opaqueDeviceMemoryDataPointer(api));
+        }
+
+        destination.output.* = .fromPjrtBuffers(platform, destination.shape, pjrt_buffers.constSlice());
+        return .{ .host = shards };
+    }
+
     fn deinit(self: *DestinationState, allocator: std.mem.Allocator, api: *const pjrt.Api) void {
         for (self.targets) |target| target.manager.deinit(api);
         allocator.free(self.targets);
+        allocator.free(self.host);
+    }
+
+    /// Where a host transfer's bytes go on `writer`, one of its writers (a
+    /// canonical device index of `writer_mask`).
+    fn hostLanding(self: *const DestinationState, transfer: Plan.Transfer, writer: usize) []u8 {
+        std.debug.assert(writer < self.host.len and transfer.writer_mask >> @as(u6, @intCast(writer)) & 1 != 0);
+        return self.host[writer][transfer.destination_offset..][0..transfer.len];
+    }
+
+    /// Copies a host transfer's bytes from its first writer's shard, where a
+    /// direct read put them, to its other writers'.
+    fn copyToReplicas(self: *const DestinationState, transfer: Plan.Transfer) void {
+        const first = self.hostLanding(transfer, @ctz(transfer.writer_mask));
+        var others = transfer.writer_mask & (transfer.writer_mask - 1);
+        while (others != 0) : (others &= others - 1) @memcpy(self.hostLanding(transfer, @ctz(others)), first);
     }
 };
+
+/// An uninitialized buffer in a host memory space, once its allocation
+/// completed: its host pointer is valid only then.
+fn createHostBuffer(
+    io: std.Io,
+    platform: *const Platform,
+    dims: []const i64,
+    element_type: pjrt.BufferType,
+    layout: pjrt.MemoryLayout,
+    memory: *const pjrt.Memory,
+) StateInitError!*pjrt.Buffer {
+    const api = platform.pjrt_api;
+    const buffer = try platform.pjrt_client.createUninitializedBuffer(api, .{
+        .dims = dims,
+        .element_type = element_type,
+        .layout = layout,
+        .dst = .{ .memory = memory },
+    });
+    errdefer buffer.deinit(api);
+    const ready = buffer.readyEvent(api);
+    defer ready.deinit(api);
+    try ready.await(api, io);
+    return buffer;
+}
 
 /// The lifecycle credits: one per request the pre-grown pinned set holds,
 /// each a fixed slot of `blocks_per_slot` blocks. A worker takes a credit
 /// before claiming a job, and the request gives it back with its last
-/// reference, after its last DMA callback. Only the holder reads into and
-/// transfers from its slot's blocks, so the credits are the one bound on
-/// pinned memory in use. A block whose pieces are done stays with its
-/// request until the request ends; nobody else could use it anyway, since
-/// every credit owns a whole slot.
+/// reference: after its last DMA callback, or at the end of a host job. Only
+/// the holder reads into, lands in and transfers from its slot's blocks, so
+/// the credits are the one bound on pinned memory in use. A block whose
+/// pieces are done stays with its request until the request ends; nobody
+/// else could use it anyway, since every credit owns a whole slot.
 const Credits = struct {
     /// Every slot's blocks, slot `s` at `blocks[s * blocks_per_slot ..]`;
     /// a tail shorter than a slot is left unused.
@@ -2790,8 +3041,12 @@ const Metrics = struct {
     pump_stops_full: std.atomic.Value(u64) = .init(0),
     /// Inside `ensureState` for a claimed job's destinations: the first
     /// worker to touch a tensor creates its PJRT buffers and transfer
-    /// managers there, and the other workers of the same tensor wait for it.
+    /// managers there, and the other workers of the same tensor wait for it;
+    /// a host job waits there for the allocation task.
     tensor_init_ns: std.atomic.Value(u64) = .init(0),
+    /// The allocation task's time creating host-resident destinations ahead
+    /// of their reads, summed over batches.
+    ahead_init_ns: std.atomic.Value(u64) = .init(0),
 };
 
 /// A value initialized at most once by whichever task touches it first,
@@ -3090,6 +3345,64 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(u64, 20), widened_plan.source_bytes);
 }
 
+test "host-resident and DMA parts never share a job, and overlapping host parts read through blocks" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 2 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    // x, y and z end to end in one file. x lands in two host destinations,
+    // y in device memory between them, z in a third host destination.
+    const shape = Shape.init(.{ 8, 8 }, .u8);
+    var sources = [_]safetensors.Tensor{
+        .{ .file_uri = "file", .name = "x", .shape = shape, .offset = 0 },
+        .{ .file_uri = "file", .name = "y", .shape = shape, .offset = 64 },
+        .{ .file_uri = "file", .name = "z", .shape = shape, .offset = 128 },
+    };
+    var slot: SourceSlot = .{ .uri = "file" };
+    var outputs: [4]Buffer = undefined;
+    var destinations: [4]Destination = undefined;
+    var parts = [_]Part{
+        .{ .source = &sources[0], .source_slot = &slot, .destination = &destinations[0], .lattice = .{ .width = 64 } },
+        .{ .source = &sources[1], .source_slot = &slot, .destination = &destinations[1], .lattice = .{ .width = 64 } },
+        .{ .source = &sources[0], .source_slot = &slot, .destination = &destinations[2], .lattice = .{ .width = 64 } },
+        .{ .source = &sources[2], .source_slot = &slot, .destination = &destinations[3], .lattice = .{ .width = 64 } },
+    };
+    const memories = [_]Memory{ .host_pinned, .default, .host_pinned, .host_pinned };
+    for (&destinations, &outputs, &parts, memories) |*destination, *output, *part, memory| {
+        destination.* = .{ .shape = shape, .grid = .init(platform, shape), .memory = memory, .output = output, .parts = @as(*[1]Part, part), .unread_bytes = .init(64) };
+    }
+
+    const order = try Planner.sortedPartOrder(allocator, &parts);
+    defer allocator.free(order);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const plan = try prepareTestPlan(arena.allocator(), &parts, order, .{
+        .block_size = 64,
+        .request_size = 1024,
+    }, 0);
+    // x's run reads its bytes once for two destinations, so through
+    // blocks; y goes out by DMA; z is read in place. File order.
+    const expected = [_]struct { offset: u64, kind: std.meta.Tag(Plan.Job.Kind) }{
+        .{ .offset = 0, .kind = .host_bounce },
+        .{ .offset = 64, .kind = .dma_read },
+        .{ .offset = 128, .kind = .host_direct },
+    };
+    try std.testing.expectEqual(expected.len, plan.jobs.len);
+    var dma_writers: usize = 0;
+    for (plan.jobs, expected) |job, want| {
+        try std.testing.expectEqual(want.offset, job.file_offset);
+        try std.testing.expectEqual(want.kind, std.meta.activeTag(job.kind));
+        for (plan.transfers[job.transfer_start..][0..job.transfer_len]) |transfer| {
+            try std.testing.expectEqual(job.kind != .dma_read, transfer.destination.memory.isHost());
+            if (job.kind == .dma_read) dma_writers += @popCount(transfer.writer_mask);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), plan.jobs[0].transfer_len);
+    try std.testing.expectEqual(@as(usize, 1), plan.jobs[0].blockLen(64));
+    try std.testing.expectEqual(dma_writers, plan.events.len);
+}
+
 /// Plans a composite destination fed by three parts from two files, with a
 /// gap and a tail of zero fill, beside a plain one, then replays the plans on
 /// host memory: every device's placement bytes are written exactly once,
@@ -3098,6 +3411,7 @@ const CompositeTest = struct {
     const Options = struct {
         block_size: usize,
         request_size: usize,
+        memory: Memory = .default,
         alignment: usize = 0,
         /// By default nothing is staged.
         staging_gain: usize = std.math.maxInt(usize),
@@ -3105,9 +3419,10 @@ const CompositeTest = struct {
         cross_part_piece: bool,
     };
 
-    /// A DMA job is staged where it saves `staging_gain` submissions; the
-    /// replay reads each job's blocks from the two files as its worker
-    /// would (`jobBlocks`).
+    /// With a host memory kind the destinations take host jobs: direct
+    /// without `alignment`, through its slot's blocks with it. A DMA job is
+    /// staged where it saves `staging_gain` submissions; the replay reads
+    /// its blocks from the two files as its worker would (`jobBlocks`).
     fn run(platform: *const Platform, shape: Shape, options: Options) !void {
         const allocator = std.testing.allocator;
         const io = std.testing.io;
@@ -3149,9 +3464,10 @@ const CompositeTest = struct {
         };
         const plain_shape = shape.setDim(0, 4);
         destinations = .{
-            .{ .shape = shape, .grid = .init(platform, shape), .output = &outputs[0], .parts = parts[0..3], .unread_bytes = .init(144) },
-            .{ .shape = plain_shape, .grid = .init(platform, plain_shape), .output = &outputs[1], .parts = parts[3..4], .unread_bytes = .init(64) },
+            .{ .shape = shape, .grid = .init(platform, shape), .memory = options.memory, .output = &outputs[0], .parts = parts[0..3], .unread_bytes = .init(144) },
+            .{ .shape = plain_shape, .grid = .init(platform, plain_shape), .memory = options.memory, .output = &outputs[1], .parts = parts[3..4], .unread_bytes = .init(64) },
         };
+        const host = destinations[0].memory.isHost();
 
         const order = try Planner.sortedPartOrder(allocator, &parts);
         defer allocator.free(order);
@@ -3171,17 +3487,26 @@ const CompositeTest = struct {
         }
         try std.testing.expectEqual(@as(usize, 2), plan_count);
         // The fill goes out once, with the plan of the destination's first
-        // part, as its last job; one event per writer of every transfer.
-        try std.testing.expectEqual(.dma_fill, std.meta.activeTag(plans[0].jobs[plans[0].jobs.len - 1].kind));
+        // part, as its last job.
+        const fill_kind: std.meta.Tag(Plan.Job.Kind) = if (host) .host_fill else .dma_fill;
+        try std.testing.expectEqual(fill_kind, std.meta.activeTag(plans[0].jobs[plans[0].jobs.len - 1].kind));
+        // Host jobs take no DMA event; DMA jobs one event per writer.
         for (plans[0..plan_count], [_]usize{ 1, 0 }) |plan, fill_jobs| {
             var writers: usize = 0;
             var fills: usize = 0;
             for (plan.jobs) |job| {
-                if (job.kind == .dma_fill) fills += 1;
+                const kind = std.meta.activeTag(job.kind);
+                if (kind == fill_kind) fills += 1;
+                if (host) {
+                    const read_kind: std.meta.Tag(Plan.Job.Kind) = if (options.alignment == 0) .host_direct else .host_bounce;
+                    try std.testing.expect(kind == .host_fill or kind == read_kind);
+                } else {
+                    try std.testing.expect(kind == .dma_read or kind == .dma_land or kind == .dma_fill);
+                }
                 for (plan.transfers[job.transfer_start..][0..job.transfer_len]) |transfer| writers += @popCount(transfer.writer_mask);
             }
             try std.testing.expectEqual(fill_jobs, fills);
-            try std.testing.expectEqual(writers, plan.events.len);
+            try std.testing.expectEqual(if (host) 0 else writers, plan.events.len);
         }
 
         const zeros = try allocator.alloc(u8, 256);
@@ -3196,17 +3521,27 @@ const CompositeTest = struct {
         }
         var cross_part_piece = false;
         for (plans[0..plan_count]) |plan| {
+            const file_bytes: []const u8 = if (plan.source_slot == &slots[0]) &first_bytes else &second_bytes;
             for (plan.jobs) |job| {
-                const fill = job.kind == .dma_fill;
-                const blocks = if (fill) &.{} else try jobBlocks(allocator, loader, plan, job);
+                const fill = job.kind == .dma_fill or job.kind == .host_fill;
+                const blocks = if (host or fill) &.{} else try jobBlocks(allocator, loader, plan, job);
                 defer allocator.free(blocks);
                 for (plan.transfers[job.transfer_start..][0..job.transfer_len]) |transfer| {
                     // Every transfer stays inside one block (`Plan.Transfer`).
                     try std.testing.expect(transfer.landing % block_size + transfer.len <= block_size);
-                    try std.testing.expect(transfer.landing < (if (fill) 1 else job.blockLen(block_size)) * block_size);
+                    switch (job.kind) {
+                        .host_direct, .host_bounce => |read| try std.testing.expect(transfer.landing + transfer.len <= read.len),
+                        else => try std.testing.expect(transfer.landing < (if (fill) 1 else job.blockLen(block_size)) * block_size),
+                    }
                     const bytes = if (fill) fill: {
                         try std.testing.expectEqual(@as(usize, 0), transfer.landing);
                         break :fill zeros[0..transfer.len];
+                    } else if (host) read: {
+                        // A host job's landings address its read, which
+                        // starts at the job's file offset.
+                        const file_offset = job.file_offset + transfer.landing;
+                        if (plan.source_slot == &slots[0] and file_offset <= 51 and file_offset + transfer.len > 52) cross_part_piece = true;
+                        break :read file_bytes[file_offset..][0..transfer.len];
                     } else read: {
                         // a's last byte and b's first one in the same piece,
                         // where a read's blocks hold the file in order.
@@ -3244,7 +3579,7 @@ const CompositeTest = struct {
                 return bytes;
             },
             .dma_land => |land| land,
-            .dma_fill => unreachable,
+            .dma_fill, .host_direct, .host_bounce, .host_fill => unreachable,
         };
         // A bounce buffer as large as any of the job's reads.
         var longest: usize = land.len;
@@ -3366,6 +3701,12 @@ test "composite destinations place each part and zero-fill the rest of every dev
             for ([_]usize{ 0, 8 }) |alignment| {
                 try CompositeTest.run(platform, placed, .{ .block_size = 64, .request_size = 128, .alignment = alignment, .staging_gain = 1, .cross_part_piece = scenario[2] });
                 try CompositeTest.run(platform, placed, .{ .block_size = 16, .request_size = 48, .alignment = alignment, .staging_gain = 1, .cross_part_piece = false });
+            }
+            // Host jobs, read in place or through blocks when the reads are
+            // widened, are cut by blocks the same way.
+            for ([_]usize{ 0, 8 }) |alignment| {
+                try CompositeTest.run(platform, placed, .{ .block_size = 64, .request_size = 128, .memory = .host_pinned, .alignment = alignment, .cross_part_piece = scenario[2] });
+                try CompositeTest.run(platform, placed, .{ .block_size = 16, .request_size = 32, .memory = .host_pinned, .alignment = alignment, .cross_part_piece = false });
             }
         }
     }
@@ -3994,9 +4335,9 @@ test "loader failures clean up before publication, after publication and during 
     };
     const parts = [_]LoadPart{ .whole(&sources[0]), .whole(&sources[1]) };
 
-    // Device memory, the one kind this backend loads, goes through blocks
-    // and DMA.
-    for ([_]Memory{.default}) |memory| {
+    // Device memory goes through blocks and DMA; host memory is written in
+    // place by the workers. Both clean up the same way.
+    for ([_]Memory{ .default, .host_pinned }) |memory| {
         // Planning allocates from the scheduler's allocator, whose
         // allocations fail in turn: the first file's planning fails before
         // any plan is published, then the later file's after the first
@@ -4461,5 +4802,90 @@ test "a strided part of a remote file is checked against its exact source range"
         const local_part: LoadPart = .{ .source = &local, .lattice = .{ .width = 1, .dims = &dims } };
         const widened = loader.stridedRead(local_part);
         try std.testing.expect(widened.read > widened.limit);
+    }
+}
+
+/// A host-resident load on four devices: rows sharded; columns sharded, two
+/// bytes per device per row, so one job has 8,192 transfers and scatters in
+/// several reads; replicated; one source twice, replicated and row-sharded,
+/// which overlaps; and a device-memory tensor in the same file.
+const HostResidentTest = struct {
+    /// Each run writes its own file from `seed`: a buffer that lands on
+    /// memory an earlier run freed must not find the expected bytes there.
+    fn run(devices: *const testing.Devices, seed: u8, alignment: usize) !void {
+        const allocator = std.testing.allocator;
+        const io = std.testing.io;
+        const platform = devices.platform;
+        const mesh = try devices.mesh("tp");
+
+        var rows: [64 * 16]u8 = undefined;
+        var dev: [16 * 16]u8 = undefined;
+        var cols: [2048 * 8]u8 = undefined;
+        var rep: [96 * 4]u8 = undefined;
+        var twice: [32 * 4]u8 = undefined;
+        testing.pattern(&rows, seed);
+        testing.pattern(&dev, seed +% 1);
+        testing.pattern(&cols, seed +% 2);
+        testing.pattern(&rep, seed +% 3);
+        testing.pattern(&twice, seed +% 4);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var registry: safetensors.TensorRegistry = .init(allocator);
+        defer registry.deinit();
+        // The device tensor separates the host runs: an overlap sends its
+        // whole job through blocks, so the twice-bound source must not share
+        // a job with the others.
+        try testing.writeSafetensors(allocator, io, tmp.dir, "host.safetensors", &registry, &.{
+            .{ .name = "rows", .dtype = "U16", .dims = &.{ 64, 8 }, .bytes = &rows },
+            .{ .name = "cols", .dtype = "U8", .dims = &.{ 2048, 8 }, .bytes = &cols },
+            .{ .name = "rep", .dtype = "U8", .dims = &.{ 96, 4 }, .bytes = &rep },
+            .{ .name = "dev", .dtype = "U16", .dims = &.{ 16, 8 }, .bytes = &dev },
+            .{ .name = "twice", .dtype = "U8", .dims = &.{ 32, 4 }, .bytes = &twice },
+        });
+
+        const names = [_][]const u8{ "rows", "dev", "cols", "rep", "twice", "twice" };
+        const shapes = [_]Shape{
+            Shape.init(.{ .row = 64, .col = 8 }, .u16).withPartitioning(&mesh, .{ .row = .model }),
+            Shape.init(.{ .row = 16, .col = 8 }, .u16).withPartitioning(&mesh, .{ .row = .model }),
+            Shape.init(.{ .row = 2048, .col = 8 }, .u8).withPartitioning(&mesh, .{ .col = .model }),
+            Shape.init(.{ .row = 96, .col = 4 }, .u8).withPartitioning(&mesh, .{}),
+            Shape.init(.{ .row = 32, .col = 4 }, .u8).withPartitioning(&mesh, .{}),
+            Shape.init(.{ .row = 32, .col = 4 }, .u8).withPartitioning(&mesh, .{ .row = .model }),
+        };
+        const memories = [_]Memory{ .host_pinned, .default, .host_pinned, .host_pinned, .host_pinned, .host_pinned };
+        const globals = [_][]const u8{ &rows, &dev, &cols, &rep, &twice, &twice };
+        var parts: [names.len]LoadPart = undefined;
+        var specs: [names.len]LoadSpec = undefined;
+        var outputs: [names.len]Buffer = undefined;
+        for (&parts, &specs, &outputs, names, shapes, memories) |*part, *spec, *output, name, shape, memory| {
+            part.* = .whole(registry.tensors.getPtr(name).?);
+            spec.* = .{ .shape = shape, .memory = memory, .output = output, .parts = part[0..1] };
+        }
+
+        const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2, .direct_io = .off });
+        defer loader.destroy();
+        loader.reads.alignment = alignment;
+        const batch = try loader.submit(&specs, .none);
+        try loader.awaitBatch(batch);
+        defer for (&outputs) |*output| output.deinit();
+        // Host shards in each device's pinned host memory.
+        for (&outputs, globals, memories) |*output, global, memory| try testing.expectShards(allocator, io, output, global, memory);
+        // Every credit, with its blocks, came back once the workers stopped
+        // (`stopWorkers`).
+        loader.stopWorkers();
+        try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+    }
+};
+
+test "host-resident destinations are written in place, or through blocks when reads are widened or overlap" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, io, 4);
+    defer devices.deinit();
+    if (!backend.supportsMemory(devices.platform, .host_pinned)) return error.SkipZigTest;
+    // In place, then through blocks for every host job.
+    for ([_]usize{ 0, 64 }, [_]u8{ 1, 5 }) |alignment, seed| {
+        try HostResidentTest.run(&devices, seed, alignment);
     }
 }

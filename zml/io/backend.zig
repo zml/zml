@@ -393,12 +393,22 @@ pub fn loadsDirect(platform: *const Platform) bool {
     };
 }
 
-/// Whether the loader can deliver into `kind` on `platform`: device memory,
-/// on every platform. The host kinds need a backend that writes host
-/// memory in place.
+/// Whether the loader can deliver into `kind` on `platform`. `host_pinned`
+/// needs the direct pipeline and a pinned host memory space on every
+/// device. CPU loads through the direct backend, so it accepts it (its
+/// plugin resolves every kind to its one memory space). `host_mapped`
+/// needs views of host memory in device memory, which no backend makes.
 pub fn supportsMemory(platform: *const Platform, kind: Memory) bool {
-    _ = platform;
-    return kind == .default;
+    switch (kind) {
+        .default => return true,
+        .host_pinned => {},
+        .host_mapped => return false,
+    }
+    if (!loadsDirect(platform)) return false;
+    for (platform.devices) |*device| {
+        if (device.memory(.host_pinned) == null) return false;
+    }
+    return true;
 }
 
 /// The transfer implementation selected for the platform (`loadsDirect`).
