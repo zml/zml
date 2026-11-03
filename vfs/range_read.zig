@@ -43,9 +43,9 @@ pub fn static(uri: *const std.Uri, _: request.Attempt, _: std.http.Header) anyer
 /// the governed loop, where `size` is what `data` holds of the `file_size`
 /// bytes past `offset`; nothing is sent when it is 0. `prepare` is called
 /// once per attempt: S3's SigV4 signature covers the `Range` header and a
-/// timestamp, a bearer token may have expired, and a signed download URL
-/// may need re-resolving after a 403.
-/// The caller holds its read slot through every retry and sleep;
+/// timestamp, a bearer token may have expired during a hold, and a signed
+/// download URL may need re-resolving after a 403.
+/// The caller holds its read slot through every retry, hold and sleep;
 /// backend-local parallel readers would multiply the caller's width and
 /// defeat its memory bounds.
 pub fn performRangeRead(

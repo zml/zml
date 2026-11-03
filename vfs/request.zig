@@ -1,8 +1,11 @@
-//! One governed HTTP request loop for every backend: send, classify, and
-//! retry a retryable failure after a per-request full-jitter backoff, or
-//! after the delay the server names. A backend's open, stat and read
-//! failures map to one error contract (`OpenError`,
-//! `Governor.readFailure`), each failure logged once.
+//! One governed HTTP request loop for every backend: wait out the backend's
+//! hold, send, classify. A throttle (429 everywhere, 503 on the object
+//! stores) arms a backend-wide hold instead of charging the request's retry
+//! budget, so every reader of that backend backs off together and the traffic
+//! actually falls; every other retryable failure keeps the per-request
+//! backoff. The hold is a deadline, not a permit: nothing is narrowed
+//! permanently, recovery is the deadline passing, and a reader's width stays
+//! the ceiling it chose, because this loop runs inside its reads.
 
 const std = @import("std");
 
@@ -10,12 +13,19 @@ const log = @import("base.zig").scopedLog(.@"zml/vfs/request");
 
 /// The retry knobs of one remote backend: its `Options.retry`.
 pub const Retry = struct {
-    /// Retries per request.
+    /// Retries per request for failures that are not rate limiting.
     max_retries: usize = 5,
     initial_delay: std.Io.Duration = .fromMilliseconds(500),
-    /// Longest backoff before a request's next attempt, a server-named delay
-    /// included.
+    /// Longest backoff before a request's next attempt after a failure that
+    /// is not a throttle, a server-named delay included. A throttle waits
+    /// out the backend's hold instead (`max_hold`).
     max_delay: std.Io.Duration = .fromSeconds(30),
+    /// Longest hold one throttle may arm over every request of the backend,
+    /// a server-named delay included.
+    max_hold: std.Io.Duration = .fromSeconds(120),
+    /// A throttling episode with no clean window longer than this fails the
+    /// backend's requests.
+    throttle_budget: std.Io.Duration = .fromSeconds(300),
     /// An exchange that receives nothing for this long is canceled and
     /// retried as a timeout: a peer that stops sending without closing the
     /// connection would otherwise hold its reader, and the load waiting for
@@ -25,8 +35,39 @@ pub const Retry = struct {
     stall_timeout: std.Io.Duration = .fromSeconds(60),
 };
 
-/// One per backend instance: what each of its requests needs and its read
-/// statistics.
+/// What a hold covers. One governor holds one scope, its backend instance;
+/// the authority is carried so that a per-authority map is a local change in
+/// `Governor.holdFor`.
+pub const Key = []const u8;
+
+/// The rate-limit scope of a request: its URI authority. Only the host is
+/// taken, since `Governor.holdFor` ignores the key; a per-authority scope
+/// would want the port beside it.
+pub fn authorityOf(uri: std.Uri) Key {
+    const host = uri.host orelse return "";
+    return switch (host) {
+        .raw => |raw| raw,
+        .percent_encoded => |encoded| encoded,
+    };
+}
+
+/// One scope's rate-limit state, owned by the governor's mutex.
+const Hold = struct {
+    /// When requests may go again; null when nothing is held.
+    until: ?std.Io.Timestamp = null,
+    /// The length of the current hold: a clean window that long ends the
+    /// episode.
+    length: std.Io.Duration = .fromNanoseconds(0),
+    /// Holds armed since the episode began; the backoff base.
+    consecutive: usize = 0,
+    episode_started: ?std.Io.Timestamp = null,
+    /// The episode outlived `throttle_budget`; requests fail until a clean
+    /// window clears it.
+    exhausted: bool = false,
+};
+
+/// One per backend instance: what each of its requests needs, its
+/// rate-limit state and its read statistics.
 pub const Governor = struct {
     pub const Stats = struct {
         physical_requests: std.atomic.Value(u64) = .init(0),
@@ -37,6 +78,10 @@ pub const Governor = struct {
         server_failures: std.atomic.Value(u64) = .init(0),
         throttles: std.atomic.Value(u64) = .init(0),
         retry_delay_ns: std.atomic.Value(u64) = .init(0),
+        /// Backend-wide holds armed by rate limiting, and the time requests
+        /// spent waiting them out.
+        holds: std.atomic.Value(u64) = .init(0),
+        hold_wait_ns: std.atomic.Value(u64) = .init(0),
 
         fn recordAttempt(self: *Stats) void {
             _ = self.physical_requests.fetchAdd(1, .monotonic);
@@ -63,6 +108,16 @@ pub const Governor = struct {
             const delay_ns: u64 = @intCast(@max(delay.nanoseconds, 0));
             _ = self.retry_delay_ns.fetchAdd(delay_ns, .monotonic);
         }
+
+        /// One rate-limit hold armed over every request of this backend.
+        fn recordHold(self: *Stats) void {
+            _ = self.holds.fetchAdd(1, .monotonic);
+        }
+
+        /// Time one request spent waiting a hold out.
+        fn recordHoldWait(self: *Stats, waited: std.Io.Duration) void {
+            _ = self.hold_wait_ns.fetchAdd(@intCast(@max(waited.nanoseconds, 0)), .monotonic);
+        }
     };
 
     io: std.Io,
@@ -74,22 +129,25 @@ pub const Governor = struct {
     unavailable: ReadFailure,
     retry: Retry,
     stats: Stats = .{},
+    mutex: std.Io.Mutex = .init,
+    hold: Hold = .{},
 
     pub fn init(io: std.Io, client: *std.http.Client, name: []const u8, unavailable: ReadFailure, retry: Retry) Governor {
         std.debug.assert(retry.initial_delay.nanoseconds >= 0);
         std.debug.assert(retry.max_delay.nanoseconds >= retry.initial_delay.nanoseconds);
+        std.debug.assert(retry.max_hold.nanoseconds >= retry.initial_delay.nanoseconds);
         return .{ .io = io, .client = client, .name = name, .unavailable = unavailable, .retry = retry };
     }
 
     /// Logs the read totals at debug, once, from the backend's `deinit`;
-    /// nothing when the backend sent no request. Retries and failures are
-    /// logged at warn as they happen.
+    /// nothing when the backend sent no request. Holds, retries and failures
+    /// are logged at warn as they happen.
     pub fn logTotals(self: *const Governor) void {
         const stats = &self.stats;
         const requests = stats.physical_requests.load(.acquire);
         if (requests == 0) return;
         // Under the VFS's scope, `zml/vfs`.
-        std.log.scoped(.@"zml/vfs").debug("{s} read totals: requests={d}, bytes={Bi:.2}, retries={d}, transient_retries={d}, timeouts={d}, server_failures={d}, throttles={d}, retry_delay_ms={d:.3}", .{
+        std.log.scoped(.@"zml/vfs").debug("{s} read totals: requests={d}, bytes={Bi:.2}, retries={d}, transient_retries={d}, timeouts={d}, server_failures={d}, throttles={d}, holds={d}, hold_wait_ms={d:.3}, retry_delay_ms={d:.3}", .{
             self.name,
             requests,
             stats.physical_bytes.load(.acquire),
@@ -98,6 +156,8 @@ pub const Governor = struct {
             stats.timeouts.load(.acquire),
             stats.server_failures.load(.acquire),
             stats.throttles.load(.acquire),
+            stats.holds.load(.acquire),
+            @as(f64, @floatFromInt(stats.hold_wait_ns.load(.acquire))) / std.time.ns_per_ms,
             @as(f64, @floatFromInt(stats.retry_delay_ns.load(.acquire))) / std.time.ns_per_ms,
         });
     }
@@ -133,6 +193,15 @@ pub const Governor = struct {
             },
         };
     }
+
+    /// The scope `key` belongs to. One generic `HTTP` instance serves every
+    /// host of its scheme and one `S3` spans buckets, so per-instance
+    /// over-reaches there; a per-authority scope replaces this body with a
+    /// map without touching the loop.
+    fn holdFor(self: *Governor, key: Key) *Hold {
+        _ = key;
+        return &self.hold;
+    }
 };
 
 /// One attempt as a backend's request hook sees it.
@@ -142,7 +211,7 @@ pub const Attempt = struct {
     governor: *Governor,
     spec: RequestSpec,
     /// The status the previous attempt returned, for a hook that reacts to
-    /// one (an expired signed URL answering 403).
+    /// one (an expired signed URL answering 403 after a long hold).
     previous_status: ?std.http.Status = null,
     /// Bytes received so far, for a hook whose body is long: `exchange`
     /// cancels an exchange this counter does not move for
@@ -157,10 +226,12 @@ const stall_checks = 12;
 pub const RequestSpec = struct {
     /// Object identity for log lines.
     target: []const u8,
+    /// The rate-limit scope: the request URI's authority.
+    key: Key = "",
     /// Statuses this request retries although they are not retryable in
     /// general, because its hook can do something about them: a signed
-    /// download URL that expired answers 401 or 403, and the hook
-    /// re-resolves it. Charged to the retry budget.
+    /// download URL that expired during a hold answers 401 or 403, and the
+    /// hook re-resolves it. Charged to the retry budget.
     retry_once: []const std.http.Status = &.{},
 };
 
@@ -187,11 +258,11 @@ pub fn Outcome(comptime T: type) type {
 }
 
 /// The one request loop. `attemptFn` performs a single HTTP exchange (see
-/// `exchange`); this drives the classification and the retry budget around
-/// it. Every retryable failure, a throttle and a stall
-/// (`Retry.stall_timeout`) included, sleeps the per-request backoff, or the
-/// delay the server named up to `max_delay`, and charges one of
-/// `max_retries`. A cancel of the caller propagates.
+/// `exchange`); this drives the hold, the classification and the two budgets
+/// around it. A throttle re-runs the attempt without charging a retry, after
+/// the hold it armed; any other retryable failure, a stall
+/// (`Retry.stall_timeout`) included, sleeps the per-request backoff and charges
+/// one of `max_retries`. A cancel of the caller propagates.
 pub fn perform(
     comptime T: type,
     governor: *Governor,
@@ -202,6 +273,7 @@ pub fn perform(
     var charged: usize = 0;
     var previous_status: ?std.http.Status = null;
     while (true) {
+        try admit(governor, spec);
         governor.stats.recordAttempt();
         var progress: std.atomic.Value(u64) = .init(0);
         switch (try attemptFn(context, .{ .governor = governor, .spec = spec, .previous_status = previous_status, .progress = &progress })) {
@@ -209,6 +281,12 @@ pub fn perform(
             .retry => |failure| {
                 governor.stats.recordFailure(failure.failure);
                 previous_status = failure.status;
+                if (failure.failure == .throttle) {
+                    // Not charged to the retry budget: the hold is what
+                    // reduces the traffic, and the episode budget bounds it.
+                    try reportThrottle(governor, spec, failure.delay);
+                    continue;
+                }
                 if (charged >= governor.retry.max_retries) return error.RetriesExhausted;
                 charged += 1;
                 governor.stats.recordRetry();
@@ -290,6 +368,94 @@ fn watched(
     } else |_| {}
     log.warn("{s}: {s} received nothing for {d:.1}s; retrying", .{ governor.name, attempt.spec.target, @as(f64, @floatFromInt(stall_timeout.nanoseconds)) / std.time.ns_per_s });
     return .{ .retry = .{ .failure = .timeout } };
+}
+
+/// Waits out the scope's hold. Returns at once when nothing is held; fails
+/// with `error.RateLimited` when the episode outlived its budget. Waiters
+/// wake at the deadline plus their own jitter, so the readers of one backend
+/// do not all fire in the same instant, and re-check, since the hold may have
+/// been extended while they slept.
+fn admit(governor: *Governor, spec: RequestSpec) error{ Canceled, RateLimited }!void {
+    while (true) {
+        const deadline = deadline: {
+            governor.mutex.lockUncancelable(governor.io);
+            defer governor.mutex.unlock(governor.io);
+            const hold = governor.holdFor(spec.key);
+            const now: std.Io.Timestamp = .now(governor.io, .awake);
+            refresh(hold, now);
+            if (hold.exhausted) return error.RateLimited;
+            const until = hold.until orelse return;
+            if (until.nanoseconds <= now.nanoseconds) return;
+            break :deadline until;
+        };
+        const jitter = fullJitterDelay(governor.io, governor.retry.initial_delay, governor.retry.initial_delay, 0);
+        const started: std.Io.Timestamp = .now(governor.io, .awake);
+        try std.Io.Clock.Timestamp.wait(deadline.addDuration(jitter).withClock(.awake), governor.io);
+        governor.stats.recordHoldWait(started.durationTo(.now(governor.io, .awake)));
+    }
+}
+
+/// Arms or extends the scope's hold after a throttle. `named` is the delay
+/// the server asked for, if any; it is honoured up to `max_hold` and never
+/// below `initial_delay`, because `Retry-After: 0` and Hugging Face's
+/// `RateLimit; t=0` parse to zero, and a throttle charges no retry: a zero
+/// hold would be a hot loop.
+fn reportThrottle(governor: *Governor, spec: RequestSpec, named: ?std.Io.Duration) error{RateLimited}!void {
+    const retry = governor.retry;
+    governor.mutex.lockUncancelable(governor.io);
+    defer governor.mutex.unlock(governor.io);
+    const hold = governor.holdFor(spec.key);
+    const now: std.Io.Timestamp = .now(governor.io, .awake);
+    refresh(hold, now);
+
+    if (hold.episode_started) |started| {
+        if (started.durationTo(now).nanoseconds > retry.throttle_budget.nanoseconds) {
+            hold.exhausted = true;
+            // The caller reports the failure; this is the one line that
+            // says why its request never ran.
+            log.warn("{s}: rate limited for longer than the throttle budget while reading {s}; giving up", .{ governor.name, spec.target });
+            return error.RateLimited;
+        }
+    } else {
+        hold.episode_started = now;
+    }
+
+    const holding = if (hold.until) |until| now.nanoseconds < until.nanoseconds else false;
+    if (!holding) {
+        hold.consecutive += 1;
+        const backoff = fullJitterDelay(governor.io, retry.initial_delay, retry.max_delay, hold.consecutive - 1);
+        var delay = backoff;
+        if (named) |value| {
+            if (value.nanoseconds > delay.nanoseconds) delay = value;
+        }
+        hold.length = clampDelay(delay, retry.initial_delay, retry.max_hold);
+        hold.until = now.addDuration(hold.length);
+        log.warn("{s}: {s} is rate limiting; holding its requests for {d:.3}s", .{
+            governor.name,
+            spec.target,
+            @as(f64, @floatFromInt(hold.length.toNanoseconds())) / std.time.ns_per_s,
+        });
+        governor.stats.recordHold();
+        return;
+    }
+    // A request already in flight when the hold armed got its own answer,
+    // with a later reset: extend, never shorten.
+    const asked = named orelse return;
+    const capped = clampDelay(asked, retry.initial_delay, retry.max_hold);
+    const extended = now.addDuration(capped);
+    if (extended.nanoseconds > hold.until.?.nanoseconds) {
+        hold.until = extended;
+        hold.length = capped;
+    }
+}
+
+/// A clean window as long as the hold itself, with no new throttle, ends the
+/// episode: nothing else needs counting, since a throttle inside the window
+/// would have re-armed `until`.
+fn refresh(hold: *Hold, now: std.Io.Timestamp) void {
+    const until = hold.until orelse return;
+    if (now.nanoseconds < until.addDuration(hold.length).nanoseconds) return;
+    hold.* = .{};
 }
 
 fn clampDelay(value: std.Io.Duration, low: std.Io.Duration, high: std.Io.Duration) std.Io.Duration {
@@ -518,8 +684,9 @@ pub const HeadChain = struct {
 
     /// Follows `start_url` through at most `max_hops` redirects, absolute
     /// or relative, to the URL that answers a 2xx. Each hop is one governed
-    /// HEAD, retried as a GET would be. `authorize` names the credentials
-    /// each URL is sent. An absent or denied object fails the walk
+    /// HEAD, so a server that rate limits it holds the backend as a
+    /// throttled GET would. `authorize` names the credentials each URL is
+    /// sent. An absent or denied object fails the walk
     /// (`ExchangeOptions.open`).
     pub fn resolve(
         self: *HeadChain,
@@ -565,7 +732,7 @@ pub const HeadChain = struct {
             const uri: std.Uri = try .parse(url);
             const scratch = (current + 1) % self.urls.len;
             var hop: Hop = .{ .context = context, .url = url, .uri = uri, .location = &self.urls[scratch] };
-            const location_len = switch (try perform(Hop.Result, governor, .{ .target = target }, &hop, Hop.attempt)) {
+            const location_len = switch (try perform(Hop.Result, governor, .{ .target = target, .key = authorityOf(uri) }, &hop, Hop.attempt)) {
                 .end => |size| return .{ .url = url, .size = size },
                 .redirect => |len| len,
             };
@@ -653,17 +820,151 @@ fn fullJitterDelay(
 
 const test_spec: RequestSpec = .{ .target = "object" };
 
-fn testGovernor(initial_ms: i64, max_delay_ms: i64) Governor {
+fn testGovernor(initial_ms: i64, max_delay_ms: i64, max_hold_ms: i64, budget_ms: i64) Governor {
     // No attempt in these tests reaches the network: no client.
     return .init(std.testing.io, undefined, "test", .throttle, .{
         .max_retries = 3,
         .initial_delay = .fromMilliseconds(initial_ms),
         .max_delay = .fromMilliseconds(max_delay_ms),
+        .max_hold = .fromMilliseconds(max_hold_ms),
+        .throttle_budget = .fromMilliseconds(budget_ms),
     });
 }
 
-test "a timeout and a server failure each charge one retry" {
-    var governor = testGovernor(0, 0);
+test "a throttle arms a hold of at least the initial delay, even when the server names zero" {
+    var governor = testGovernor(20, 20, 1000, 300_000);
+
+    // `Retry-After: 0` and Hugging Face's `RateLimit; t=0` parse to zero.
+    try reportThrottle(&governor, test_spec, .fromSeconds(0));
+    const hold = governor.hold;
+    try std.testing.expect(hold.until != null);
+    try std.testing.expectEqual(@as(i96, 20 * std.time.ns_per_ms), hold.length.nanoseconds);
+    try std.testing.expectEqual(@as(usize, 1), hold.consecutive);
+    try std.testing.expect(hold.episode_started != null);
+    try std.testing.expectEqual(@as(u64, 1), governor.stats.holds.load(.acquire));
+}
+
+test "a longer named delay extends a running hold and a shorter one does not" {
+    var governor = testGovernor(10, 10, 1000, 300_000);
+
+    try reportThrottle(&governor, test_spec, null);
+    const armed = governor.hold.until.?;
+
+    // A request that was already in flight got its own answer, with a later
+    // reset: the hold extends.
+    try reportThrottle(&governor, test_spec, .fromMilliseconds(500));
+    const extended = governor.hold.until.?;
+    try std.testing.expect(extended.nanoseconds > armed.nanoseconds);
+
+    // A shorter one never shortens it, and neither arms a second hold.
+    try reportThrottle(&governor, test_spec, .fromMilliseconds(1));
+    try std.testing.expectEqual(extended.nanoseconds, governor.hold.until.?.nanoseconds);
+    try std.testing.expectEqual(@as(usize, 1), governor.hold.consecutive);
+    try std.testing.expectEqual(@as(u64, 1), governor.stats.holds.load(.acquire));
+}
+
+test "a named delay is capped by max_hold" {
+    var governor = testGovernor(10, 10, 50, 300_000);
+
+    try reportThrottle(&governor, test_spec, .fromSeconds(3600));
+    try std.testing.expectEqual(@as(i96, 50 * std.time.ns_per_ms), governor.hold.length.nanoseconds);
+}
+
+test "a second throttle inside the clean window doubles the backoff base" {
+    var governor = testGovernor(10, 1000, 10_000, 300_000);
+
+    try reportThrottle(&governor, test_spec, null);
+    try std.testing.expectEqual(@as(i96, 10 * std.time.ns_per_ms), governor.hold.length.nanoseconds);
+
+    // The hold has passed but the clean window has not: rewind it by hand
+    // rather than sleeping through a race.
+    const now: std.Io.Timestamp = .now(std.testing.io, .awake);
+    governor.hold.until = now.subDuration(.fromMilliseconds(1));
+    try reportThrottle(&governor, test_spec, null);
+    try std.testing.expectEqual(@as(usize, 2), governor.hold.consecutive);
+    // Full jitter over twice the base, floored at the initial delay.
+    try std.testing.expect(governor.hold.length.nanoseconds >= 10 * std.time.ns_per_ms);
+    try std.testing.expect(governor.hold.length.nanoseconds <= 20 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u64, 2), governor.stats.holds.load(.acquire));
+}
+
+test "a clean window as long as the hold ends the episode" {
+    var governor = testGovernor(10, 1000, 10_000, 300_000);
+
+    try reportThrottle(&governor, test_spec, null);
+    const length = governor.hold.length;
+    const now: std.Io.Timestamp = .now(std.testing.io, .awake);
+    governor.hold.until = now.subDuration(length).subDuration(.fromMilliseconds(1));
+
+    try reportThrottle(&governor, test_spec, null);
+    try std.testing.expectEqual(@as(usize, 1), governor.hold.consecutive);
+    try std.testing.expectEqual(@as(i96, 10 * std.time.ns_per_ms), governor.hold.length.nanoseconds);
+}
+
+test "an episode longer than the throttle budget fails requests until a clean window" {
+    var governor = testGovernor(10, 10, 10_000, 50);
+
+    try reportThrottle(&governor, test_spec, .fromSeconds(30));
+    const now: std.Io.Timestamp = .now(std.testing.io, .awake);
+    governor.hold.episode_started = now.subDuration(.fromMilliseconds(51));
+
+    try std.testing.expectError(error.RateLimited, reportThrottle(&governor, test_spec, null));
+    try std.testing.expect(governor.hold.exhausted);
+    // Every other request of this backend fails at once, without waiting the
+    // hold out.
+    try std.testing.expectError(error.RateLimited, admit(&governor, test_spec));
+
+    // The next clean window clears the episode.
+    governor.hold.until = now.subDuration(governor.hold.length).subDuration(.fromMilliseconds(1));
+    try admit(&governor, test_spec);
+    try std.testing.expect(governor.hold.until == null);
+    try std.testing.expect(!governor.hold.exhausted);
+}
+
+test "admit returns at once when nothing is held" {
+    var governor = testGovernor(10, 10, 1000, 300_000);
+
+    const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+    try admit(&governor, test_spec);
+    try std.testing.expect(started.durationTo(.now(std.testing.io, .awake)).nanoseconds < 5 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u64, 0), governor.stats.hold_wait_ns.load(.acquire));
+}
+
+test "admit waits a hold out and counts the wait" {
+    var governor = testGovernor(1, 1, 1000, 300_000);
+
+    try reportThrottle(&governor, test_spec, .fromMilliseconds(15));
+    const started: std.Io.Timestamp = .now(std.testing.io, .awake);
+    try admit(&governor, test_spec);
+    try std.testing.expect(started.durationTo(.now(std.testing.io, .awake)).nanoseconds >= 10 * std.time.ns_per_ms);
+    try std.testing.expect(governor.stats.hold_wait_ns.load(.acquire) > 0);
+}
+
+test "a waiter blocked on a hold is cancelable" {
+    const io = std.testing.io;
+    var governor = testGovernor(1, 1, 100_000, 300_000);
+    try reportThrottle(&governor, test_spec, .fromSeconds(60));
+
+    var result: std.atomic.Value(u16) = .init(0);
+    var started: std.Io.Event = .unset;
+    var group: std.Io.Group = .init;
+    try group.concurrent(io, struct {
+        fn run(governor_: *Governor, started_: *std.Io.Event, result_: *std.atomic.Value(u16)) void {
+            started_.set(governor_.io);
+            admit(governor_, test_spec) catch |err| {
+                result_.store(@intFromError(err), .release);
+                return;
+            };
+        }
+    }.run, .{ &governor, &started, &result });
+    try started.wait(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    group.cancel(io);
+    try std.testing.expectEqual(@intFromError(error.Canceled), result.load(.acquire));
+}
+
+test "only rate limiting holds: a timeout and a server failure keep the per-request budget" {
+    var governor = testGovernor(0, 0, 1000, 300_000);
 
     const Attempts = struct {
         seen: usize = 0,
@@ -678,12 +979,35 @@ test "a timeout and a server failure each charge one retry" {
     };
     var attempts: Attempts = .{};
     try std.testing.expectEqual(@as(usize, 3), try perform(usize, &governor, test_spec, &attempts, Attempts.run));
+    try std.testing.expect(governor.hold.until == null);
+    try std.testing.expectEqual(@as(u64, 0), governor.stats.holds.load(.acquire));
     try std.testing.expectEqual(@as(u64, 2), governor.stats.retries.load(.acquire));
     try std.testing.expectEqual(@as(u64, 3), governor.stats.physical_requests.load(.acquire));
 }
 
-test "the retry budget bounds retryable failures" {
-    var governor = testGovernor(0, 0);
+test "a throttle retries without charging the retry budget" {
+    var governor = testGovernor(0, 0, 1000, 300_000);
+
+    const Attempts = struct {
+        seen: usize = 0,
+        fn run(self: *@This(), current: Attempt) anyerror!Outcome(usize) {
+            self.seen += 1;
+            // The retry budget is three; ten throttles do not exhaust it.
+            if (self.seen <= 10) return .{ .retry = .{ .failure = .throttle, .status = .too_many_requests } };
+            try std.testing.expectEqual(@as(?std.http.Status, .too_many_requests), current.previous_status);
+            return .{ .done = self.seen };
+        }
+    };
+    var attempts: Attempts = .{};
+    try std.testing.expectEqual(@as(usize, 11), try perform(usize, &governor, test_spec, &attempts, Attempts.run));
+    try std.testing.expectEqual(@as(u64, 0), governor.stats.retries.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 10), governor.stats.throttles.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 11), governor.stats.physical_requests.load(.acquire));
+    try std.testing.expect(governor.stats.holds.load(.acquire) >= 1);
+}
+
+test "the retry budget still bounds failures that are not rate limiting" {
+    var governor = testGovernor(0, 0, 1000, 300_000);
 
     const Attempts = struct {
         seen: usize = 0,
@@ -716,7 +1040,7 @@ test "absent and denied statuses map to one error each" {
         try std.testing.expect(openStatus(status) == null);
     }
 
-    const governor = testGovernor(10, 10);
+    const governor = testGovernor(10, 10, 1000, 300_000);
     try std.testing.expect(governor.openFailure("object", error.FileNotFound) == error.FileNotFound);
     try std.testing.expect(governor.openFailure("object", error.PermissionDenied) == error.PermissionDenied);
     try std.testing.expect(governor.openFailure("object", error.Canceled) == error.Canceled);
@@ -726,7 +1050,7 @@ test "absent and denied statuses map to one error each" {
 }
 
 test "a failed read is Canceled or Unexpected" {
-    const governor = testGovernor(10, 10);
+    const governor = testGovernor(10, 10, 1000, 300_000);
     try std.testing.expect(governor.readFailure("object", 0, error.Canceled) == error.Canceled);
     try std.testing.expect(governor.readFailure("object", 0, error.RequestFailed) == error.Unexpected);
     try std.testing.expect(governor.readFailure("object", 0, error.InvalidContentRange) == error.Unexpected);
@@ -747,7 +1071,7 @@ test "server retry delay comes from Retry-After seconds or a RateLimit reset" {
 }
 
 test "a server-named retry delay sleeps at most max_delay" {
-    var governor = testGovernor(1, 20);
+    var governor = testGovernor(1, 20, 20, 1000);
     const Failing = struct {
         seen: usize = 0,
         fn attempt(self: *@This(), _: Attempt) anyerror!Outcome(usize) {
@@ -767,6 +1091,8 @@ test "an attempt that receives nothing is canceled and retried as a timeout" {
         .max_retries = 3,
         .initial_delay = .fromMilliseconds(1),
         .max_delay = .fromMilliseconds(1),
+        .max_hold = .fromMilliseconds(1),
+        .throttle_budget = .fromSeconds(1),
         .stall_timeout = .fromMilliseconds(120),
     });
     const Hang = struct {
@@ -804,6 +1130,8 @@ test "an attempt waiting on a request of its own is not a stall" {
         .max_retries = 3,
         .initial_delay = .fromMilliseconds(1),
         .max_delay = .fromMilliseconds(1),
+        .max_hold = .fromMilliseconds(1),
+        .throttle_budget = .fromSeconds(1),
         .stall_timeout = .fromMilliseconds(120),
     });
     const Nested = struct {
@@ -859,4 +1187,9 @@ test "an exchange canceled while it waits for the head returns Canceled, not a r
     try std.testing.expectError(error.Canceled, result);
 
     try server.stop(io);
+}
+
+test "the request authority is the rate-limit scope" {
+    const uri: std.Uri = try .parse("https://huggingface.co/api/models/x");
+    try std.testing.expectEqualStrings("huggingface.co", authorityOf(uri));
 }

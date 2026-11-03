@@ -353,7 +353,7 @@ pub const HTTP = struct {
         const url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), handle.uri });
         const uri: std.Uri = try .parse(url);
         return range_read.performRangeRead(&self.governor, .{
-            .request = .{ .target = url },
+            .request = .{ .target = url, .key = request.authorityOf(uri) },
             // The object `fetchSize` found at the end of the chain.
             .redirects = .follow,
         }, &uri, range_read.static, data, offset, handle.size);

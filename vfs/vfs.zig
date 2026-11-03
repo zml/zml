@@ -16,12 +16,14 @@
 //! allocate. Any other failure of a request is logged at err with the
 //! backend and the path, and surfaces as `Unexpected`. A positional read
 //! that still fails after its retries is logged at err and surfaces as
-//! `Unexpected`; a streaming read as `InputOutput`. A remote path is
-//! read-only: creating or deleting a file or a directory there, or opening
-//! a file for writing, is logged at err and fails with `ReadOnlyFileSystem`.
-//! A local file fails as the inner io does (a denied one is `AccessDenied`
-//! there); it may be read past the page cache (`useDirectIo`). A backend on
-//! `request.zig` logs its read totals at debug from its `deinit`.
+//! `Unexpected`; a streaming read as `InputOutput`. A throttled backend
+//! holds its requests rather than failing them, until its throttle budget
+//! runs out (`request.Retry`). A remote path is read-only: creating or
+//! deleting a file or a directory there, or opening a file for writing, is
+//! logged at err and fails with `ReadOnlyFileSystem`. A local file fails as
+//! the inner io does (a denied one is `AccessDenied` there); it may be read
+//! past the page cache (`useDirectIo`). A backend on `request.zig` logs its
+//! read totals at debug from its `deinit`.
 const std = @import("std");
 
 const stdx = @import("stdx");
