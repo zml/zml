@@ -11,8 +11,13 @@ const stdx = @import("stdx");
 const manual_computation = @import("ops/manual_computation.zig");
 pub const manualComputation = manual_computation.manualComputation;
 
+const manual_computation2 = @import("ops/manual_computation2.zig");
+pub const manualComputation2 = manual_computation2.manualComputation2;
+pub const ManualPartitioning = manual_computation2.ManualPartitioning;
+
 test {
     _ = manual_computation;
+    _ = manual_computation2;
 }
 
 const Buffer = @import("buffer.zig").Buffer;

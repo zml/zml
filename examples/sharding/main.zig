@@ -30,15 +30,19 @@ const DemoModel = struct {
     }
 
     pub fn forward(self: DemoModel, input: zml.Tensor) zml.Tensor {
-        const x = input.convert(.f32);
+        const compiler = zml.Compiler.current();
 
+        const x = input.convert(.f32);
         var y = x.dot(self.w, .feature);
         y = y.add(self.b.broad(y.shape()));
         y = y.withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
         y.print("dense_out");
 
-        const gate = y.scale(0.01).sigmoid().withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
-        return zml.ops.manualComputation(
+        const gate = y.scale(0.01).sigmoid();
+
+        const spec: zml.Sharding.Partitioning.Logical = .parse(.{ .batch = .data, .hidden = .model });
+
+        return zml.ops.manualComputation2(
             (struct {
                 y: zml.Tensor,
                 gate: zml.Tensor,
@@ -50,6 +54,11 @@ const DemoModel = struct {
             }).body,
             .{ .y = y, .gate = gate },
             y.shape(),
+            compiler.mesh(.dp_mp),
+            .{
+                .in_specs = .{ .y = spec, .gate = spec },
+                .out_specs = spec,
+            },
         );
     }
 };
@@ -60,8 +69,8 @@ fn usage() void {
         \\
         \\Simple sharding demo:
         \\  - explicit partitioning on data/model axes
-        \\  - shard-local tensor print
-        \\  - manualComputation with multiple inputs and one output
+        \\  - tensor print
+        \\  - manualComputation2 with multiple inputs and one output
         \\
         \\Mesh modes:
         \\  - auto: physical_mesh=auto, inferred cpu device_count=2
