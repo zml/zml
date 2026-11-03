@@ -1,3 +1,48 @@
+//! Direct loading follows a batch from per-file planning through FIFO claims,
+//! source reads and DMA completion. Runtime ownership and synchronization
+//! live here.
+//!
+//! Sizing, fixed by `Loader.create`. The DMA block is the options' one
+//! (`backend.Options.dmaBlockSizes`); each device's DMA budget is
+//! `dma_depth` blocks. A source request is the checkpoint's minimum read
+//! (`VFS.readHints`) rounded up to whole blocks, one block at least
+//! (`backend.requestSize`). The source width is `read_parallelism`,
+//! clipped to what the mapped ceiling fits. The workspace then maps, once
+//! and before the first read, `width + 1` requests, the DMA reserve and the
+//! zero block, and cuts them into blocks (`Workspace.carve`): nothing maps
+//! during a load. `width + 1` workers share `width` read permits, so a full
+//! width of reads is in flight while one worker queues what it read. The
+//! lifecycle credits are the whole pinned set in requests, so transfers
+//! that still hold blocks keep the DMA stage fed and never want a block the
+//! reads did not leave free.
+//!
+//! Planning and claims. `submit` sorts a submission's parts by file and
+//! offset, plans one file at a time and publishes each plan at once, so the
+//! workers read the first file while the next is planned. A plan merges
+//! touching or overlapping ranges into reads, never across a gap or a file,
+//! and cuts them into jobs of at most a request; jobs keep that file order,
+//! and the `Scheduler` hands them out in submission order. A worker takes a
+//! credit, claims a job, reads it into its slot's pinned blocks and queues
+//! its preplanned transfer pieces on per-device pumps. A block may feed
+//! several outputs or devices; the request keeps its credit until every
+//! piece it queued completed or was abandoned. The last-transfer flag goes
+//! on the piece that completes a destination's bytes, so reads and DMA
+//! complete in any order. A batch owns its plans and callback contexts
+//! until every job completes; a failure retires the unclaimed jobs and
+//! drains what is in flight before the batch goes.
+//!
+//! Destinations. A part's source bytes map to its destination's logical
+//! offsets, which the destination's `ShardGrid` places on the devices by
+//! arithmetic. Pieces of one destination merge across parts when block,
+//! writers and both offsets are contiguous, and its parts may come from
+//! different files and plans.
+//!
+//! Locks. Where several pumps are held, they are taken in device order. A
+//! pump's mutex may be held while a released request gives its credit back
+//! (`Credits`), never the reverse, and no other lock is taken under the
+//! scheduler's mutex. A DMA callback, on a plugin thread, holds one pump at
+//! a time.
+
 const std = @import("std");
 
 const pjrt = @import("pjrt");
