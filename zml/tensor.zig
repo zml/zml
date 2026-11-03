@@ -2181,14 +2181,15 @@ pub const Tensor = struct {
 
         pub fn absolute(s: Slice, d: i64) Slice {
             const start = if (s.start < 0) d + s.start else s.start;
+            // `len` is checked before `end`, whose default would otherwise take the rest of the axis.
             const end = if (s.singleton)
                 start + 1
+            else if (s.len != to_the_end)
+                start + s.len
             else if (s.end == to_the_end)
                 d
             else if (s.end < 0)
                 d + s.end
-            else if (s.len != to_the_end)
-                start + s.len
             else
                 s.end;
             const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
@@ -2339,6 +2340,7 @@ pub const Tensor = struct {
             .{ 0, Tensor.Slice{ .end = 1 }, [5]f32{ 0, 1, 2, 3, 4 } },
             .{ 1, Tensor.Slice{ .start = 1, .step = 2 }, [4]f32{ 1, 3, 6, 8 } },
             .{ -1, Tensor.Slice{ .start = -2 }, [4]f32{ 3, 4, 8, 9 } },
+            .{ 1, Tensor.Slice{ .start = 1, .len = 2 }, [4]f32{ 1, 2, 6, 7 } },
         }) |testcase| {
             const ax, const slice_, const expectation = testcase;
             var exe = try zml.module.compile(
