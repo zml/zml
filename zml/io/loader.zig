@@ -561,6 +561,29 @@ test "start publishes the model at once and wait retires it" {
     try std.testing.expectEqual(null, loader.stats.started_at);
 }
 
+test "one loader takes loads from different stores before one wait" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    var other_store = try testing.storeOf(allocator, &fixture.store.registry, .{ .meshes = &.{fixture.platform.replicated_mesh} });
+    defer other_store.deinit();
+    const other = other_store.view().createReplicatedTensor("second", null);
+
+    var first: Buffer = undefined;
+    var second: Buffer = undefined;
+    var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+    try loader.start(&fixture.value, &first, &fixture.store, .none);
+    try loader.start(&other, &second, &other_store, .none);
+    try loader.wait();
+    defer first.deinit();
+    defer second.deinit();
+    try testing.expectShards(allocator, io, &first, &LoaderTestFixture.contents, .default);
+    try testing.expectShards(allocator, io, &second, &LoaderTestFixture.second_contents, .default);
+}
+
 test "cancel gives up on everything started" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

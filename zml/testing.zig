@@ -7,8 +7,10 @@ const Platform = @import("platform.zig").Platform;
 const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
-/// The new loader's delivery kinds; zml does not export its store.
-const LoadMemory = @import("io/TensorStore.zig").Memory;
+/// The new loader and its store, which zml does not export.
+const Loader = @import("io/loader.zig").Loader;
+const LoaderStore = @import("io/TensorStore.zig");
+const LoadMemory = LoaderStore.Memory;
 
 const log = std.log.scoped(.@"zml/testing");
 
@@ -477,6 +479,35 @@ pub fn pattern(bytes: []u8, seed: u8) void {
     for (bytes, 0..) |*byte, index| byte.* = (@as(u8, @truncate(index *% 29)) +% seed *% 53) | 1;
 }
 
+/// A store of the new loader over a copy of `registry`, for a test that
+/// builds several stores over one checkpoint: a store takes its registry's
+/// entries.
+pub fn storeOf(allocator: std.mem.Allocator, registry: *const zml.safetensors.TensorRegistry, opts: LoaderStore.Options) !LoaderStore {
+    var copy: zml.safetensors.TensorRegistry = .init(allocator);
+    defer copy.deinit();
+    for (registry.tensors.values()) |tensor| try copy.registerTensor(tensor);
+    return .init(allocator, &copy, opts);
+}
+
+/// Loads `model` from `store` with the new loader, one of its own, and
+/// returns its buffers, which the caller frees with `mem.deinitBufferized`.
+/// A recipe for tests: a model's code keeps one loader for all its loads.
+pub fn load(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    model: anytype,
+    store: *const LoaderStore,
+) !zml.Bufferized(@TypeOf(model.*)) {
+    var buffers = try zml.mem.bufferize(allocator, model);
+    errdefer zml.mem.deinitBufferized(allocator, &buffers);
+    var loader = try Loader.init(allocator, io, platform, .{});
+    defer loader.deinit();
+    try loader.start(model, &buffers, store, .none);
+    try loader.wait();
+    return buffers;
+}
+
 /// Reads every shard of `buffer` back, in its mesh's device order, and
 /// checks that it lives in `memory`'s space and holds that device's box of
 /// `global`, the whole tensor's row-major bytes (sub-byte elements packed).
@@ -668,4 +699,28 @@ fn center(slice: anytype, i: usize) @TypeOf(slice) {
 
 pub inline fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {
     return std.testing.expectEqual(expected, actual);
+}
+
+test load {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: zml.safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    var bytes: [8]u8 = undefined;
+    pattern(&bytes, 1);
+    try writeSafetensors(allocator, io, tmp.dir, "weights.safetensors", &registry, &.{
+        .{ .name = "weight", .dtype = "U8", .dims = &.{8}, .bytes = &bytes },
+    });
+    var store = try storeOf(allocator, &registry, .{});
+    defer store.deinit();
+    // The store took a copy: the registry still holds its entries.
+    try std.testing.expectEqual(1, registry.tensors.count());
+
+    const Model = struct { weight: zml.Tensor };
+    const model: Model = .{ .weight = store.view().createReplicatedTensor("weight", null) };
+    var buffers = try load(allocator, io, env(), &model, &store);
+    defer zml.mem.deinitBufferized(allocator, &buffers);
+    try expectShards(allocator, io, &buffers.weight, &bytes, .default);
 }
