@@ -1,9 +1,9 @@
 //! A `std.Io` over local files and remote objects. A bare path or a
 //! `file://` URI is served by the inner io; a URI such as
 //! `hf://org/model/model.safetensors` or `s3://bucket/key` by the backend
-//! registered for its scheme (`registerBackend`). Readers take `io()` and
-//! need not know which they read; one that must (to size its reads) asks
-//! `fromIo`.
+//! registered for its scheme (`registerBackend`, or the four of `Remotes`).
+//! Readers take `io()` and need not know which they read; one that must (to
+//! size its reads) asks `fromIo`.
 //!
 //! The VFS, and every backend registered on it, must outlive each file
 //! opened through it.
@@ -85,6 +85,61 @@ pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) std.mem
 
     try self.backends.put(self.allocator, scheme, backend);
 }
+
+/// The remote schemes on one HTTP client: `https`, `hf`, `s3` and `gs`, each
+/// configured from the environment through its backend's `auto` (plain
+/// `HTTP.init` for `https`), the client honoring the proxy variables.
+/// Initialized in place, since the backends point at the client; it must not
+/// move afterwards. Close every file opened through these schemes before
+/// `deinit`; the VFS must not reach them after it.
+pub const Remotes = struct {
+    /// The proxies' allocations, which must outlive the client.
+    arena: std.heap.ArenaAllocator,
+    client: std.http.Client,
+    https: HTTP,
+    hf: HF,
+    s3: S3,
+    gs: GCS,
+
+    /// Builds the client on the VFS's base io and registers the four
+    /// schemes, replacing any backend registered under them. `environ` is
+    /// read here only: tokens, credentials and proxies are copied. On error
+    /// nothing is registered.
+    pub fn init(self: *Remotes, allocator: std.mem.Allocator, vfs: *VFS, environ: *std.process.Environ.Map) !void {
+        const base_io = vfs.base.inner;
+        self.arena = .init(allocator);
+        errdefer self.arena.deinit();
+        self.client = .{ .allocator = allocator, .io = base_io };
+        errdefer self.client.deinit();
+        try self.client.initDefaultProxies(self.arena.allocator(), environ);
+        self.https = try .init(allocator, base_io, &self.client, .https);
+        errdefer self.https.deinit();
+        self.hf = try .auto(allocator, base_io, &self.client, environ);
+        errdefer self.hf.deinit();
+        self.s3 = try .auto(allocator, base_io, &self.client, environ);
+        errdefer self.s3.deinit();
+        self.gs = try .auto(allocator, base_io, &self.client, environ);
+        errdefer self.gs.deinit();
+
+        vfs.mutex.lockUncancelable(base_io);
+        defer vfs.mutex.unlock(base_io);
+        // Room first: once a scheme is registered, nothing can fail.
+        try vfs.backends.ensureUnusedCapacity(vfs.allocator, 4);
+        vfs.backends.putAssumeCapacity("https", self.https.backend());
+        vfs.backends.putAssumeCapacity("hf", self.hf.backend());
+        vfs.backends.putAssumeCapacity("s3", self.s3.backend());
+        vfs.backends.putAssumeCapacity("gs", self.gs.backend());
+    }
+
+    pub fn deinit(self: *Remotes) void {
+        self.gs.deinit();
+        self.s3.deinit();
+        self.hf.deinit();
+        self.https.deinit();
+        self.client.deinit();
+        self.arena.deinit();
+    }
+};
 
 /// The `std.Io` of this VFS. It points into the VFS, which must not move
 /// once this was called.
@@ -499,6 +554,36 @@ test "VFS gives the read hints of local and registered paths" {
     try std.testing.expect(!filesystem.isLocal("missing://bucket/object"));
     try std.testing.expectEqual(@as(?*VFS, &filesystem), VFS.fromIo(filesystem.io()));
     try std.testing.expectEqual(@as(?*VFS, null), VFS.fromIo(std.testing.io));
+}
+
+test "Remotes registers every remote scheme with its read hints" {
+    var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
+    defer filesystem.deinit();
+    // No credentials and no proxies: nothing is read from the user's home.
+    var environ: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environ.deinit();
+    var remotes: Remotes = undefined;
+    try remotes.init(std.testing.allocator, &filesystem, &environ);
+    defer remotes.deinit();
+
+    const Case = struct { path: []const u8, local: bool = false, hints: ReadHints };
+    const remote: ReadHints = .{ .read_chunk_size = 16 * 1024 * 1024, .high_latency = true };
+    const cases = [_]Case{
+        .{ .path = "file:///tmp/model", .local = true, .hints = .local },
+        .{ .path = "/var/models/model", .local = true, .hints = .local },
+        .{ .path = "https://example.com/model", .hints = remote },
+        .{ .path = "s3://bucket/model", .hints = remote },
+        .{ .path = "gs://bucket/model", .hints = remote },
+        .{ .path = "hf://owner/model", .hints = .{ .read_chunk_size = 32 * 1024 * 1024, .high_latency = true } },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.hints, try filesystem.readHints(case.path));
+        try std.testing.expectEqual(case.local, filesystem.isLocal(case.path));
+        if (case.local) continue;
+        // A remote real path carries its scheme once, resolved without a request.
+        var real_path: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(case.path, real_path[0..try std.Io.Dir.cwd().realPathFile(filesystem.io(), case.path, &real_path)]);
+    }
 }
 
 test "VFS serves bare paths and file:// URIs from the inner Io" {
