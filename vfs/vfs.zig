@@ -1,8 +1,9 @@
-//! A `std.Io` over local files and remote objects. A bare path is served by
-//! the inner io; a URI such as `hf://org/model/model.safetensors` or
-//! `s3://bucket/key` by the backend registered for its scheme
-//! (`registerBackend`). Readers take `io()` and need not know which they
-//! read; one that must (to size its reads) asks `fromIo`.
+//! A `std.Io` over local files and remote objects. A bare path or a
+//! `file://` URI is served by the inner io; a URI such as
+//! `hf://org/model/model.safetensors` or `s3://bucket/key` by the backend
+//! registered for its scheme (`registerBackend`). Readers take `io()` and
+//! need not know which they read; one that must (to size its reads) asks
+//! `fromIo`.
 //!
 //! The VFS, and every backend registered on it, must outlive each file
 //! opened through it.
@@ -10,7 +11,6 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-pub const File = @import("file.zig").File;
 pub const GCS = @import("gcs.zig").GCS;
 pub const HF = @import("hf.zig").HF;
 pub const HTTP = @import("http.zig").HTTP;
@@ -29,6 +29,9 @@ const log = std.log.scoped(.@"zml/vfs");
 /// Indices 0-2 are the standard streams, so `std.Io.File.stdout()` and
 /// friends resolve to their own descriptor; the cwd placeholder follows.
 const CWD_HANDLE: u32 = 3;
+/// Local files are the VFS's own: a bare path or a `file://` URI resolves
+/// to the inner `Io`, never to a registered backend.
+const local_scheme = "file";
 
 const VFS = @This();
 const Handle = struct {
@@ -76,6 +79,7 @@ pub fn deinit(self: *VFS) void {
 /// Serves `scheme` with `backend`, replacing any backend registered under
 /// it. `scheme` is kept, not copied: it must outlive the VFS.
 pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) std.mem.Allocator.Error!void {
+    std.debug.assert(!std.mem.eql(u8, scheme, local_scheme)); // file is the VFS's own (local_scheme)
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
 
@@ -123,9 +127,9 @@ const io_vtable: std.Io.VTable = VFSBase.vtable(.{
 });
 
 /// The read hints of the backend serving `path`, for a reader sizing its
-/// requests. A path resolves as it does for `openFile`: a bare path is local
-/// (`ReadHints.local`), and a scheme no backend serves is
-/// `VFSNotRegistered`.
+/// requests. A path resolves as it does for `openFile`: a bare path or a
+/// `file://` URI is local (`ReadHints.local`), and a scheme no backend
+/// serves is `VFSNotRegistered`.
 pub fn readHints(self: *VFS, path: []const u8) !ReadHints {
     const backend_idx, _, _ = try self.lookupDir(.cwd(), path);
     const index = backend_idx orelse return .local;
@@ -190,6 +194,7 @@ fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usiz
     if (sub_path) |sp| {
         if (std.mem.indexOf(u8, sp, "://") != null) {
             const uri = std.Uri.parse(sp) catch return error.VFSNotRegistered;
+            if (std.mem.eql(u8, uri.scheme, local_scheme)) return .{ null, std.Io.Dir.cwd(), self.base.inner };
             const backend_idx: usize = for (self.backends.entries.items(.key), 0..) |s, idx| {
                 if (std.mem.eql(u8, uri.scheme, s)) break idx;
             } else return error.VFSNotRegistered;
@@ -486,7 +491,7 @@ test "VFS gives the read hints of local and registered paths" {
     try std.testing.expectEqual(hints, try filesystem.readHints("test://bucket/object"));
     try std.testing.expect(!filesystem.isLocal("test://bucket/object"));
 
-    for ([_][]const u8{ "/tmp/model.safetensors", "models/model.safetensors" }) |path| {
+    for ([_][]const u8{ "/tmp/model.safetensors", "models/model.safetensors", "file:///tmp/model.safetensors" }) |path| {
         try std.testing.expectEqual(ReadHints{ .read_chunk_size = 8 * 1024 * 1024, .high_latency = false }, try filesystem.readHints(path));
         try std.testing.expect(filesystem.isLocal(path));
     }
@@ -494,6 +499,35 @@ test "VFS gives the read hints of local and registered paths" {
     try std.testing.expect(!filesystem.isLocal("missing://bucket/object"));
     try std.testing.expectEqual(@as(?*VFS, &filesystem), VFS.fromIo(filesystem.io()));
     try std.testing.expectEqual(@as(?*VFS, null), VFS.fromIo(std.testing.io));
+}
+
+test "VFS serves bare paths and file:// URIs from the inner Io" {
+    const testing_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const created = try tmp.dir.createFile(testing_io, "bare.bin", .{ .read = true });
+    try created.writePositionalAll(testing_io, "bare path bytes", 0);
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buffer[0..try created.realPath(testing_io, &path_buffer)];
+    created.close(testing_io);
+
+    var filesystem = try VFS.init(std.testing.allocator, testing_io);
+    defer filesystem.deinit();
+    const vfs_io = filesystem.io();
+
+    var uri_buffer: [std.fs.max_path_bytes + 8]u8 = undefined;
+    const uri = try std.fmt.bufPrint(&uri_buffer, "file://{s}", .{path});
+    for ([_][]const u8{ path, uri }) |open_path| {
+        var real_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(path, real_buffer[0..try std.Io.Dir.cwd().realPathFile(vfs_io, open_path, &real_buffer)]);
+        const opened = try std.Io.Dir.openFile(.cwd(), vfs_io, open_path, .{ .mode = .read_only });
+        defer opened.close(vfs_io);
+        const handle, _ = filesystem.getFileHandle(opened);
+        try std.testing.expectEqual(@as(?usize, null), handle.backend_idx);
+        var contents: [15]u8 = undefined;
+        try std.testing.expectEqual(contents.len, try opened.readPositionalAll(vfs_io, &contents, 0));
+        try std.testing.expectEqualStrings("bare path bytes", &contents);
+    }
 }
 
 test "standard streams resolve to their own descriptors" {
@@ -529,11 +563,9 @@ test "copy a local file through the VFS" {
     const destination_uri = try std.fmt.allocPrint(allocator, "file://{s}/destination", .{path_buffer[0..path_len]});
     defer allocator.free(destination_uri);
 
-    var file_backend: File = .init(allocator, process_io, .{});
-    defer file_backend.deinit();
+    // `file://` is the VFS's own scheme: no backend to register.
     var vfs: VFS = try .init(allocator, process_io);
     defer vfs.deinit();
-    try vfs.registerBackend("file", .{ .io = file_backend.io(), .read_hints = .local });
 
     const vfs_io = vfs.io();
     {

@@ -29,9 +29,6 @@ pub fn main(init: std.process.Init) !void {
     try http_client.initDefaultProxies(allocator, init.environ_map);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
-    defer vfs_file.deinit();
-
     var vfs_https: zml.io.VFS.HTTP = try .init(allocator, init.io, &http_client, .https);
     defer vfs_https.deinit();
 
@@ -47,7 +44,6 @@ pub fn main(init: std.process.Init) !void {
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.registerBackend("file", .{ .io = vfs_file.io(), .read_hints = .local });
     try vfs.registerBackend("https", vfs_https.backend());
     try vfs.registerBackend("hf", hf_vfs.backend());
     try vfs.registerBackend("s3", s3_vfs.backend());
