@@ -176,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     args.set(.{ mnist_buffers, input_buffer });
 
     try profiler.start();
-    exe.call(io, args, &results, .{});
+    try exe.call(io, args, &results, .{});
     if (try profiler.stop()) |report| {
         log.info("Wrote profiler files to {s} and {s}", .{ report.protobuf_path, report.perfetto_path });
     }

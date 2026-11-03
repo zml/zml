@@ -242,7 +242,7 @@ pub fn main(init: std.process.Init) !void {
     defer exe_results.deinit(allocator);
     exe_args.set(.{ w_buf, b_buf, input_buf });
 
-    exe.call(io, exe_args, &exe_results, .{});
+    try exe.call(io, exe_args, &exe_results, .{});
     var out = exe_results.get(zml.Buffer);
     defer out.deinit();
 

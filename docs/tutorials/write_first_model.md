@@ -227,7 +227,7 @@ defer results.deinit(allocator);
 args.set(.{ layer_buffers, input_buffer });
 
 // call our executable 
-executable.call(io, args, &results, .{});
+try executable.call(io, args, &results, .{});
 
 // Retrieve the resulting buffer
 var result = results.get(zml.Buffer);
@@ -394,7 +394,7 @@ pub fn main(init: std.process.Init) !void {
     args.set(.{ layer_buffers, input_buffer });
 
     // call our executable
-    executable.call(io, args, &results, .{});
+    try executable.call(io, args, &results, .{});
 
     // Retrieve the resulting buffer
     var result = results.get(zml.Buffer);
