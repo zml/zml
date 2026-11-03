@@ -160,7 +160,6 @@ bazel build //my_project:torch2zml
 ./bazel-bin/my_project/torch2zml /path/to/my/model.safetensors.index.json ./my_project/Llama-3.2-1B-Instruct.activations.safetensors
 
 info: Found 564 activations in /Users/corendos/dev/zml/python/temp/Llama-3.2-1B-Instruct.activations.safetensors
-debug(zml/safetensors): Added new metadata key=format with value=pt
 info: Found 146 activations in /Users/corendos/models/Llama-3.2-1B-Instruct/model.safetensors
 ```
 

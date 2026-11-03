@@ -4,10 +4,7 @@ const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 const Dims = Shape.DimsArray;
 
-const StringBuilder = std.ArrayListUnmanaged(u8);
-
 pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
-pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
 const log = std.log.scoped(.@"zml/safetensors");
 
@@ -41,7 +38,7 @@ pub fn fetchRegistry(
             );
             defer safetensors_index.deinit();
 
-            var registry: TensorRegistry = try .initWithMetadata(allocator, safetensors_index.metadata);
+            var registry: TensorRegistry = .init(allocator);
 
             try parseSafetensorsIndexFiles(
                 allocator,
@@ -253,31 +250,12 @@ pub const TensorRegistry = struct {
     arena: std.heap.ArenaAllocator,
 
     tensors: Tensors,
-    metadata: Metadatas,
-
-    mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator) TensorRegistry {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
-            .metadata = .{},
         };
-    }
-
-    pub fn initWithMetadata(
-        allocator: std.mem.Allocator,
-        metadata: Metadatas,
-    ) !TensorRegistry {
-        var self: TensorRegistry = .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .tensors = .{},
-            .metadata = .empty,
-        };
-
-        try self.mergeMetadata(metadata);
-
-        return self;
     }
 
     pub fn fromRepo(
@@ -310,34 +288,7 @@ pub const TensorRegistry = struct {
     pub fn deinit(self: *TensorRegistry) void {
         const allocator = self.arena.allocator();
         self.tensors.deinit(allocator);
-        self.metadata.deinit(allocator);
         self.arena.deinit();
-    }
-
-    pub fn mergeMetadata(
-        self: *TensorRegistry,
-        other: Metadatas,
-    ) !void {
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
-
-        const allocator = self.arena.allocator();
-
-        var it = other.iterator();
-        while (it.next()) |entry| {
-            const key = try allocator.dupe(u8, entry.key_ptr.*);
-            const value = try entry.value_ptr.*.clone(allocator);
-
-            const gop = try self.metadata.getOrPut(allocator, key);
-            if (gop.found_existing) {
-                gop.value_ptr.*.deinit(allocator);
-                gop.value_ptr.* = value;
-                log.debug("Overwrote existing metadata key={s} with value={f}", .{ key, value });
-            } else {
-                gop.value_ptr.* = value;
-                log.debug("Added new metadata key={s} with value={f}", .{ key, value });
-            }
-        }
     }
 
     pub fn registerTensor(
@@ -345,9 +296,6 @@ pub const TensorRegistry = struct {
         tensor: Tensor,
     ) !void {
         const allocator = self.arena.allocator();
-
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
 
         var tensor_copy = tensor;
 
@@ -423,17 +371,8 @@ pub fn parseSafetensors(
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
 
-        if (std.mem.eql(u8, key, "__metadata__")) {
-            // Parse metadata into a local arena to avoid concurrent allocations
-            // against registry.arena (which is not thread-safe).
-            var local_arena = std.heap.ArenaAllocator.init(allocator);
-            defer local_arena.deinit();
-
-            const metas = try parseMetadata(local_arena.allocator(), value);
-            try registry.mergeMetadata(metas);
-
-            continue;
-        }
+        // Free-form strings, which nothing reads.
+        if (std.mem.eql(u8, key, "__metadata__")) continue;
 
         const shape_field = value.object.get("shape").?.array;
 
@@ -468,13 +407,11 @@ const SafetensorsIndex = struct {
     arena: std.heap.ArenaAllocator,
 
     map: Map,
-    metadata: Metadatas,
 
     pub fn init(allocator: std.mem.Allocator) SafetensorsIndex {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .map = .empty,
-            .metadata = .empty,
         };
     }
 
@@ -485,7 +422,6 @@ const SafetensorsIndex = struct {
     pub fn deinit(self: *SafetensorsIndex) void {
         const allocator = self.arena.allocator();
         self.map.deinit(allocator);
-        self.metadata.deinit(allocator);
         self.arena.deinit();
     }
 };
@@ -526,10 +462,6 @@ fn parseSafetensorsIndex(
         }
     } else {
         log.warn("No weight_map attribute found in index", .{});
-    }
-
-    if (index.object.get("metadata")) |metadata_val| {
-        safetensors_index.metadata = try parseMetadata(arena_allocator, metadata_val);
     }
 
     return safetensors_index;
@@ -612,143 +544,6 @@ pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionE
     return ModelPathResolutionError.FileNotFound;
 }
 
-const Metadata = union(enum) {
-    null: void,
-    int: i64,
-    float: f64,
-    bool: bool,
-    string: []const u8,
-
-    array_bool: []const bool,
-    array_int: []const i64,
-    array_float: []const f64,
-    array_string: []const []const u8,
-
-    pub const ItemType = enum {
-        int,
-        float,
-        bool,
-        string,
-
-        pub fn toZigType(comptime kind: ItemType) type {
-            return switch (kind) {
-                .int => i64,
-                .float => f64,
-                .bool => bool,
-                .string => []const u8,
-            };
-        }
-    };
-
-    pub fn wrap(x: anytype) Metadata {
-        return switch (@TypeOf(x)) {
-            inline u8, i8, u16, i16, u32, i32, u64, i64 => .{ .int = @intCast(x) },
-            inline f16, f32, f64 => .{ .float = @floatCast(x) },
-            bool => .{ .bool = x },
-            []const u8 => .{ .string = x },
-            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(x))),
-        };
-    }
-
-    pub fn copySlice(allocator: std.mem.Allocator, any_slice: anytype) !Metadata {
-        return switch (@TypeOf(any_slice[0])) {
-            inline u8, i8, u16, i16, u32, i32, u64, i64 => {
-                const res = try allocator.alloc(i64, any_slice.len);
-                for (res, any_slice) |*r, val| r.* = @intCast(val);
-                return .{ .array_int = res };
-            },
-            inline f16, f32, f64 => {
-                const res = try allocator.alloc(f64, any_slice.len);
-                for (res, any_slice) |*r, val| r.* = @floatCast(val);
-                return .{ .array_float = res };
-            },
-            bool => .{ .array_bool = try allocator.dupe(bool, any_slice) },
-            []const u8 => .{ .array_string = try allocator.dupe([]const u8, @alignCast(any_slice)) },
-            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(any_slice))),
-        };
-    }
-
-    pub fn format(
-        self: Metadata,
-        writer: *std.Io.Writer,
-    ) !void {
-        switch (self) {
-            .null => _ = try writer.write("null"),
-            .string => |s| try writer.print("{s}", .{s}),
-            .bool => |b| try writer.print("{}", .{b}),
-            .int => |i| try writer.print("{d}", .{i}),
-            .float => |f| try writer.print("{d}", .{f}),
-            .array_bool => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_int => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{d}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_float => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{d}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_string => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("\"{s}\"", .{v});
-                }
-                try writer.writeByte(']');
-            },
-        }
-    }
-
-    pub fn deinit(self: Metadata, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .string => |s| allocator.free(s),
-            .array_bool => |s| allocator.free(s),
-            .array_int => |s| allocator.free(s),
-            .array_float => |s| allocator.free(s),
-            .array_string => |s| {
-                for (s) |str| allocator.free(str);
-                allocator.free(s);
-            },
-            else => {},
-        }
-    }
-
-    pub fn clone(self: Metadata, allocator: std.mem.Allocator) !Metadata {
-        return switch (self) {
-            .null => .null,
-            .int => |v| .{ .int = v },
-            .float => |v| .{ .float = v },
-            .bool => |v| .{ .bool = v },
-            .string => |s| .{ .string = try allocator.dupe(u8, s) },
-            .array_bool => |s| .{ .array_bool = try allocator.dupe(bool, s) },
-            .array_int => |s| .{ .array_int = try allocator.dupe(i64, s) },
-            .array_float => |s| .{ .array_float = try allocator.dupe(f64, s) },
-            .array_string => |s| blk: {
-                const new_slice = try allocator.alloc([]const u8, s.len);
-                errdefer allocator.free(new_slice);
-                for (s, 0..) |str, i| {
-                    new_slice[i] = try allocator.dupe(u8, str);
-                }
-                break :blk .{ .array_string = new_slice };
-            },
-        };
-    }
-};
-
 fn stringToDtype(safetensor_type: []const u8) !DataType {
     const map = std.StaticStringMap(DataType).initComptime(.{
         .{ "F64", .f64 },
@@ -773,97 +568,4 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
         log.err("Unsupported safetensor data type: {s}", .{safetensor_type});
         return error.UnsupportedDataType;
     };
-}
-
-fn parseMetadata(allocator: std.mem.Allocator, val: std.json.Value) !Metadatas {
-    var metadatas: Metadatas = .{};
-    var prefix_buf: [1024]u8 = undefined;
-    var prefix = StringBuilder.initBuffer(&prefix_buf);
-
-    try populateMetadata(allocator, &prefix, val, &metadatas);
-
-    return metadatas;
-}
-
-fn populateMetadata(allocator: std.mem.Allocator, prefix: *StringBuilder, val: std.json.Value, metadatas: *Metadatas) !void {
-    const key = prefix.items;
-    return switch (val) {
-        .null => try metadatas.put(allocator, try allocator.dupe(u8, key), .null),
-        .bool => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .bool = v }),
-        .integer => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .int = v }),
-        .float => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .float = v }),
-        .number_string, .string => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
-        .array => |v| {
-            if (v.items.len == 0) return;
-            if (validSlice(v)) |item_type| {
-                const data: Metadata = switch (item_type) {
-                    .bool => blk: {
-                        const values = try allocator.alloc(bool, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.bool;
-                        break :blk .{ .array_bool = values };
-                    },
-                    .integer => blk: {
-                        const values = try allocator.alloc(i64, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.integer;
-                        break :blk .{ .array_int = values };
-                    },
-                    .float => blk: {
-                        const values = try allocator.alloc(f64, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.float;
-                        break :blk .{ .array_float = values };
-                    },
-                    inline .string, .number_string => |tag| blk: {
-                        const values = try allocator.alloc([]const u8, v.items.len);
-                        for (v.items, 0..) |item, i| {
-                            values[i] = try allocator.dupe(u8, @field(item, @tagName(tag)));
-                        }
-                        break :blk .{ .array_string = values };
-                    },
-                    .null, .array, .object => unreachable,
-                };
-                try metadatas.put(allocator, try allocator.dupe(u8, key), data);
-            } else {
-                for (v.items, 0..) |item, i| {
-                    const old_len = prefix.items.len;
-                    if (prefix.items.len > 0) {
-                        prefix.appendAssumeCapacity('.');
-                    }
-                    prefix.items.len += std.fmt.printInt(prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-                    try populateMetadata(allocator, prefix, item, metadatas);
-                    prefix.items.len = old_len;
-                }
-            }
-        },
-        .object => |v| {
-            var obj_iter = v.iterator();
-            while (obj_iter.next()) |entry| {
-                const old_len = prefix.items.len;
-                if (prefix.items.len > 0) {
-                    prefix.appendAssumeCapacity('.');
-                }
-                prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
-                try populateMetadata(allocator, prefix, entry.value_ptr.*, metadatas);
-                prefix.items.len = old_len;
-            }
-        },
-    };
-}
-
-/// We can only create a Zig slice out of json array, if all values
-/// in the array have the same type.
-fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
-    if (v.items.len == 0) return null;
-
-    const item_type: std.meta.Tag(std.json.Value) = v.items[0];
-    switch (item_type) {
-        .null, .array, .object => return null,
-        else => {},
-    }
-
-    for (v.items[1..]) |item| {
-        if (item != item_type)
-            return null;
-    }
-
-    return item_type;
 }
