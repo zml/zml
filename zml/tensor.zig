@@ -92,6 +92,14 @@ pub const Tensor = struct {
         return res;
     }
 
+    /// Internal: creates a constructor result and honors `sh`'s partitioning when
+    /// it specifies a mesh.
+    pub fn _resultPropagateSharding(sh: Shape, val: *const mlir.Value) Tensor {
+        const result = _result(sh, val);
+        const mesh = sh._sharding.mesh orelse return result;
+        return result.withPartitioning(mesh, sh._sharding.partition);
+    }
+
     /// Wraps an MLIR tensor value, deriving dimensions and dtype from its type.
     /// Dimension tags are unknown and sharding is open for partitioner inference.
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
@@ -844,7 +852,7 @@ pub const Tensor = struct {
                 mlirx.Type.rankedTensor(mlirCtx(), sh),
                 currentLoc(),
             ).appendTo(currentBlock());
-            return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
+            return .{ self.update(op.result(0)), _resultPropagateSharding(sh, op.result(1)) };
         }
 
         fn update(self: Rng, new_state: *const mlir.Value) Rng {
@@ -890,7 +898,8 @@ pub const Tensor = struct {
             floats = floats.mul(scalar(opts.max - opts.min, dt)).addConstant(opts.min);
 
             // Convert back to integer if needed.
-            return .{ rng, floats.convert(shape_.dtype()) };
+            const result = floats.convert(shape_.dtype());
+            return .{ rng, _resultPropagateSharding(shape_, result.value()) };
         }
 
         test uniform {
@@ -969,7 +978,7 @@ pub const Tensor = struct {
             const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
             const res_tensor_shape = Tensor.constantTensor(Shape.init(.{sh.rank()}, .i64), std.mem.sliceAsBytes(sh.dims()));
             const op = stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, currentLoc()).appendTo(currentBlock());
-            return _result(sh, op.result(0));
+            return _resultPropagateSharding(sh, op.result(0));
         }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a Gumbel distribution, and a new Rng state.
@@ -988,7 +997,7 @@ pub const Tensor = struct {
                 .{ .min = std.math.floatEps(f32), .max = 1 },
             );
             const result = u.log().scale(-1).log().scale(-1).convert(shape_.dtype());
-            return .{ rand, result };
+            return .{ rand, _resultPropagateSharding(shape_, result.value()) };
         }
 
         test gumbel {
@@ -2709,7 +2718,7 @@ pub const Tensor = struct {
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
             currentLoc(),
         ).appendTo(currentBlock());
-        return _result(res_shape, op.result(0));
+        return _resultPropagateSharding(res_shape, op.result(0));
     }
 
     pub const LinspaceArgs = struct {
@@ -2784,7 +2793,8 @@ pub const Tensor = struct {
     }
 
     pub fn zeroes(sh: Shape) Tensor {
-        return Tensor.constant(sh.dtype().zero()).broad(sh);
+        const result = Tensor.constant(sh.dtype().zero()).broad(sh);
+        return _resultPropagateSharding(sh, result.value());
     }
 
     pub fn uninitialized(sh: Shape) Tensor {
@@ -2799,7 +2809,7 @@ pub const Tensor = struct {
             .appendTo(currentBlock());
         const tensor = stablehlo.unpin(ctx.mlir_ctx, buffer.result(0), ctx.location)
             .appendTo(currentBlock());
-        return _result(sh, tensor.result(0));
+        return _resultPropagateSharding(sh, tensor.result(0));
     }
 
     /// Embeds a buffer with concrete values into an Mlir program.
@@ -2807,7 +2817,7 @@ pub const Tensor = struct {
         const elem_type = mlirx.Type.fromDType(mlirCtx(), sh.dtype());
         //const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
         const constant_op = stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, currentLoc()).appendTo(currentBlock());
-        return _result(sh, constant_op.result(0));
+        return _resultPropagateSharding(sh, constant_op.result(0));
     }
 
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
