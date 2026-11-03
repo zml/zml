@@ -386,6 +386,57 @@ const Planner = struct {
     }
 };
 
+/// A value initialized at most once by whichever task touches it first,
+/// with the initializer that task passes. Concurrent callers wait on the
+/// event; a failed initialization keeps its error code and re-materializes
+/// the same error for every later caller.
+fn LazyOnce(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const Status = enum(u8) {
+            uninitialized,
+            initializing,
+            ready,
+            failed,
+        };
+
+        value: T = undefined,
+        status: std.atomic.Value(Status) = .init(.uninitialized),
+        error_code: std.atomic.Value(u16) = .init(0),
+        initialized: std.Io.Event = .unset,
+
+        /// The error set of `initFn`, which returns `T`.
+        fn InitError(comptime initFn: anytype) type {
+            return @typeInfo(@typeInfo(@TypeOf(initFn)).@"fn".return_type.?).error_union.error_set;
+        }
+
+        fn ensure(self: *Self, io: std.Io, comptime initFn: anytype, args: std.meta.ArgsTuple(@TypeOf(initFn))) InitError(initFn)!*T {
+            while (true) switch (self.status.load(.acquire)) {
+                .uninitialized => {
+                    if (self.status.cmpxchgStrong(.uninitialized, .initializing, .acq_rel, .acquire) != null) continue;
+                    self.value = @call(.auto, initFn, args) catch |err| {
+                        self.error_code.store(@intFromError(err), .release);
+                        self.status.store(.failed, .release);
+                        self.initialized.set(io);
+                        return err;
+                    };
+                    self.status.store(.ready, .release);
+                    self.initialized.set(io);
+                    return &self.value;
+                },
+                .initializing => self.initialized.waitUncancelable(io),
+                .ready => return &self.value,
+                .failed => return @errorCast(@errorFromInt(self.error_code.load(.acquire))),
+            };
+        }
+
+        /// The value when initialization has completed successfully.
+        fn readyValue(self: *Self) ?*T {
+            return if (self.status.load(.acquire) == .ready) &self.value else null;
+        }
+    };
+}
+
 // Planner tests.
 
 /// `Planner.preparePlan`, kept in `arena`; the testing allocator checks the
@@ -502,4 +553,20 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 7), aligned_plan.jobs[0].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 8), aligned_plan.jobs[1].kind.dma_read.len);
     try std.testing.expectEqual(@as(usize, 5), aligned_plan.jobs[2].kind.dma_read.len);
+}
+
+// LazyOnce tests.
+
+test "lazy initialization preserves its finite error across repeated callers" {
+    const Context = struct {
+        fn init(calls: *usize) error{FileNotFound}!u32 {
+            calls.* += 1;
+            return error.FileNotFound;
+        }
+    };
+    var once: LazyOnce(u32) = .{};
+    var calls: usize = 0;
+    try std.testing.expectError(error.FileNotFound, once.ensure(std.testing.io, Context.init, .{&calls}));
+    try std.testing.expectError(error.FileNotFound, once.ensure(std.testing.io, Context.init, .{&calls}));
+    try std.testing.expectEqual(1, calls);
 }
