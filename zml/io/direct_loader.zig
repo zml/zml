@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const pjrt = @import("pjrt");
+const stdx = @import("stdx");
 
 const Buffer = @import("../buffer.zig").Buffer;
 const pjrtx = @import("../pjrtx.zig");
@@ -8,8 +9,13 @@ const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const backend = @import("backend.zig");
+const BackendOptions = backend.Options;
+const LoadPart = backend.LoadPart;
+const LoadSpec = backend.LoadSpec;
 const ShardGrid = @import("ShardGrid.zig");
 const host_memory = @import("host_memory.zig");
+const load_log = @import("log.zig").load;
+const testing = @import("../testing.zig");
 
 /// Creating a tensor's device state: host memory or PJRT, since the front
 /// end checked its placement. `LazyOnce` replays it to every later reader
@@ -23,6 +29,327 @@ const max_dma_pieces_per_device: usize = 64;
 
 /// Each device's in-flight DMA budget, in blocks (`Dma.DevicePump.hasRoom`).
 const dma_depth: usize = 8;
+
+/// The direct DMA backend. Submissions and awaits come from one task at a
+/// time; the workers and the pumps run concurrently with them.
+pub const Loader = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    /// The pinned arenas, grown once at creation and cut into `blocks`.
+    workspace: host_memory.Workspace,
+    /// The workspace's blocks (`carve`): the credits' slots (`Credits`).
+    blocks: []const host_memory.Block,
+    scheduler: Scheduler,
+    /// One permit per source read in flight (`readSlot`), `read_width` of
+    /// them. The width never changes: a source that answers 429 (or 503 on
+    /// the object stores) is held one layer down, where the VFS holds every
+    /// request of that backend (`vfs/request.zig`), so the traffic falls
+    /// while the memory bounds stay.
+    read_permits: std.Io.Semaphore,
+    read_width: usize,
+    /// Lifecycle credits (`Credits`).
+    credits: Credits,
+    /// The sticky first error (`recordError`).
+    first_error: stdx.FirstError(anyerror) = .{},
+    /// One per device (`Dma.DevicePump`). Where several are locked at once
+    /// (`Dma.enqueue`, `Dma.retireBatch`) they are taken in device
+    /// order; a pump, a completion and `Dma.abortReady` hold one at a time.
+    pumps: []Dma.DevicePump,
+    /// Per-device in-flight budget: `dma_depth` blocks, in bytes.
+    dma_budget_bytes: usize,
+    worker_group: std.Io.Group = .init,
+    /// One per source path. Its file opens at its first read and stays
+    /// open until `destroy`. Keyed by the slot's own copy of the path: the
+    /// registry that named it may go once the batch retired.
+    source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
+    /// Submissions so far; the next batch's sequence number.
+    batch_count: usize = 0,
+    /// The block size and the request size, for the whole load.
+    plan_config: Planner.Config,
+
+    pub fn create(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        opts: BackendOptions,
+    ) !*Loader {
+        // A destination's shards and a transfer's writers (a u64 mask) are
+        // per device; Platform refuses devices past its maximum.
+        comptime std.debug.assert(Platform.MAX_NUM_DEVICES <= ShardGrid.max_boxes);
+        const self = try allocator.create(Loader);
+        errdefer allocator.destroy(self);
+
+        var workspace: host_memory.Workspace = try .init(allocator, io, platform);
+        errdefer workspace.deinit();
+        // Every read is exact: no alignment.
+        const block_size = opts.dmaBlockSizes()[0];
+        const request_size = backend.requestSize(opts.read_hints.read_chunk_size, block_size, 0).?;
+        const blocks_per_request = request_size / block_size;
+        const width = opts.read_parallelism;
+        // The workspace logs what it fails to map.
+        const blocks = try workspace.carve(block_size, 0, (width + 1) * blocks_per_request);
+        var credits: Credits = try .init(allocator, blocks, blocks_per_request);
+        errdefer credits.deinit(allocator);
+        const workers = width + 1;
+        std.debug.assert(credits.count() >= workers);
+        const pumps = try allocator.alloc(Dma.DevicePump, platform.devices.len);
+        errdefer allocator.free(pumps);
+        @memset(pumps, .{});
+
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .workspace = workspace,
+            .blocks = blocks,
+            .scheduler = .init(allocator),
+            .read_permits = .{ .permits = width },
+            .read_width = width,
+            .credits = credits,
+            .pumps = pumps,
+            .dma_budget_bytes = dma_depth * block_size,
+            .plan_config = .{
+                .block_size = block_size,
+                .request_size = request_size,
+            },
+        };
+        std.debug.assert(self.dma_budget_bytes > 0);
+        errdefer self.scheduler.deinit();
+
+        errdefer self.stopWorkers();
+        for (0..workers) |_| self.worker_group.concurrent(io, workerMain, .{self}) catch |err| {
+            load_log.err("start {d} source workers: {s}", .{ workers, @errorName(err) });
+            return err;
+        };
+        return self;
+    }
+
+    /// Plans `specs` one source file at a time, publishes each file's plan
+    /// as soon as it exists behind every earlier submission, then seals the
+    /// batch: work on the first file starts while the rest is planned. The
+    /// batch owns its destinations and parts until `awaitBatch` retires it.
+    /// The specs keep the `LoadSpec` contract, which the front end checked,
+    /// and this backend's: device memory, and contiguous parts covering
+    /// every byte of their destination. A planning failure fails the
+    /// loader (a partial submission can never complete): the batch is
+    /// awaited here and the caller sees only the first error.
+    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) !*Batch {
+        const batch = batch: {
+            const batch = try Batch.create(self.allocator, self.io, self.batch_count);
+            errdefer batch.destroy();
+            try self.createDestinations(batch, specs, progress);
+            break :batch batch;
+        };
+        Planner.publishFiles(&self.scheduler, self.io, batch, batch.parts, self.plan_config) catch |err| {
+            // Fail the loader, seal and await what was published of this
+            // batch, and return the loader's first error.
+            self.recordError(err, "plan batch {d}, published_plans={d}", .{ batch.sequence, batch.plans.items.len });
+            self.batch_count += 1;
+            batch.releaseUnits(1);
+            try self.awaitBatch(batch);
+            unreachable;
+        };
+        self.batch_count += 1;
+        // Every plan is visible: drop the publish sentinel. A batch without
+        // jobs completes right here.
+        batch.releaseUnits(1);
+        return batch;
+    }
+
+    /// Waits for the batch's last completion unit, retires it and returns
+    /// the loader's sticky error if the loader failed. Destroying the batch
+    /// destroys its transfer managers, and PJRT's manager destructor errors
+    /// every buffer whose last transfer never went out, so a buffer the
+    /// failure left open reports that error, never success. A transfer
+    /// that fails asynchronously errors its buffer's definition event too
+    /// (the done event carries no error). A program reading such a buffer
+    /// fails its execution; a bulk buffer shows the error at its first use.
+    /// Either way an output of a failed submission holds buffers whose
+    /// contents are unspecified, or was never written. A batch that
+    /// completed without an error submitted every byte of every target (the
+    /// pump flagged the submission that completed its bytes); one that did
+    /// not would leave a buffer PJRT then errors, a bookkeeping bug this
+    /// panics on.
+    pub fn awaitBatch(self: *Loader, batch: *Batch) !void {
+        batch.done.waitUncancelable(self.io);
+        // Every request of this batch has completed: no worker or callback
+        // touches its managers or contexts any more.
+        const load_error = self.first_error.get();
+        if (load_error == null) for (batch.destinations) |*destination| {
+            const submitted = submitted: {
+                const state = destination.state.readyValue() orelse break :submitted false;
+                for (state.targets) |target| {
+                    if (!target.fullySubmitted()) break :submitted false;
+                }
+                break :submitted true;
+            };
+            if (!submitted) std.debug.panic("loader: batch {d} completed without submitting every byte of tensor {s} {f}", .{ batch.sequence, destination.name(), destination.shape });
+        };
+        // Each destination completed its progress item.
+        if (load_error == null) for (batch.destinations) |*destination| std.debug.assert(destination.unread_bytes.load(.acquire) == 0);
+        Dma.retireBatch(self, batch);
+        self.destroyBatch(batch);
+        if (load_error) |err| return err;
+    }
+
+    /// Fails the loader unless it already failed (`recordError`): unclaimed
+    /// jobs retire, queued pieces drain, and requests in flight finish
+    /// their read.
+    pub fn abort(self: *Loader) void {
+        self.recordError(error.Canceled, "loader aborted", .{});
+    }
+
+    /// The caller awaited every batch before this; nothing is queued or in
+    /// flight, so stopping the workers is a plain shutdown.
+    pub fn destroy(self: *Loader) void {
+        self.stopWorkers();
+        var slots = self.source_slots.valueIterator();
+        while (slots.next()) |slot| {
+            slot.*.deinit(self.io);
+            self.allocator.free(slot.*.uri);
+            self.allocator.destroy(slot.*);
+        }
+        self.source_slots.deinit(self.allocator);
+        std.debug.assert(self.credits.inUse(self.io) == 0);
+        for (self.pumps) |*device_pump| {
+            std.debug.assert(device_pump.active_pieces == 0);
+            std.debug.assert(device_pump.queue.len == 0);
+            std.debug.assert(device_pump.retired == null);
+            device_pump.queue.deinit(self.allocator);
+        }
+        self.allocator.free(self.pumps);
+        self.scheduler.deinit();
+        self.credits.deinit(self.allocator);
+        self.workspace.deinit();
+        self.allocator.destroy(self);
+    }
+
+    /// Creates the batch's destinations, one per spec, and their parts in
+    /// its arena, their sources and dimensions staying the specs' until the
+    /// batch is awaited (`backend.LoadSpec`). A destination's device state
+    /// is created lazily by the first worker that reads for it.
+    fn createDestinations(
+        self: *Loader,
+        batch: *Batch,
+        specs: []const LoadSpec,
+        progress: std.Progress.Node,
+    ) !void {
+        const arena = batch.arena.allocator();
+        var part_count: usize = 0;
+        for (specs) |spec| part_count += spec.parts.len;
+        const destinations = try arena.alloc(Destination, specs.len);
+        const parts = try arena.alloc(Part, part_count);
+        var next_part: usize = 0;
+        for (specs, destinations) |spec, *destination| {
+            std.debug.assert(spec.memory == .default); // submit
+            const grid: ShardGrid = .init(self.platform, spec.shape);
+            const destination_parts = parts[next_part..][0..spec.parts.len];
+            next_part += spec.parts.len;
+            var covered_bytes: u64 = 0;
+            for (spec.parts, destination_parts) |part, *slot| {
+                std.debug.assert(part.lattice.dims.len == 0); // submit
+                slot.* = .{
+                    .source = part.source,
+                    .source_slot = try self.sourceSlot(part.source.file_uri),
+                    .destination = destination,
+                    .lattice = part.lattice,
+                };
+                covered_bytes += part.lattice.width;
+            }
+            // The parts are disjoint (`backend.LoadSpec`): they cover the
+            // destination when their widths add up to it.
+            std.debug.assert(covered_bytes == grid.total); // submit
+            destination.* = .{
+                .shape = spec.shape,
+                .grid = grid,
+                .output = spec.output,
+                .parts = destination_parts,
+                .unread_bytes = .init(covered_bytes),
+                .progress = progress,
+            };
+        }
+        batch.destinations = destinations;
+        batch.parts = parts;
+    }
+
+    /// Releases the destinations' device state, then the batch's arena.
+    fn destroyBatch(self: *Loader, batch: *Batch) void {
+        for (batch.destinations) |*destination| destination.deinit(self.allocator, self.platform.pjrt_api);
+        batch.destroy();
+    }
+
+    fn sourceSlot(self: *Loader, uri: []const u8) !*SourceSlot {
+        if (self.source_slots.get(uri)) |slot| return slot;
+        const owned = try self.allocator.dupe(u8, uri);
+        errdefer self.allocator.free(owned);
+        const slot = try self.allocator.create(SourceSlot);
+        errdefer self.allocator.destroy(slot);
+        slot.* = .{ .uri = owned };
+        try self.source_slots.putNoClobber(self.allocator, owned, slot);
+        return slot;
+    }
+
+    fn workerMain(self: *Loader) void {
+        var scratch = ReadRequest.Scratch.init(self.allocator, self.credits.blocks_per_slot) catch |err| {
+            self.recordError(err, "allocate source worker scratch: blocks={d}", .{self.credits.blocks_per_slot});
+            return;
+        };
+        defer scratch.deinit();
+        while (self.scheduler.waitForWork(self.io)) {
+            const request = self.claimRequest() orelse continue;
+            // The scheduling sentinel keeps the batch, and with it the
+            // request's plan, alive through `run` and error reporting.
+            defer request.release();
+            request.run(&scratch) catch |err| {
+                self.recordError(err, "source request: file={s}, job={t}", .{ request.plan.source_slot.uri, request.plan.jobs[request.index].kind });
+            };
+        }
+    }
+
+    /// Takes a credit, then the next job (`Credits`): a claimed job never
+    /// waits for its slot. Null, with the credit given back, when nothing
+    /// was left to claim.
+    fn claimRequest(self: *Loader) ?*ReadRequest {
+        const slot = self.credits.acquire(self.io);
+        const claim = self.scheduler.claim(self.io) orelse {
+            self.credits.release(self.io, slot);
+            return null;
+        };
+        return ReadRequest.init(self, claim, slot);
+    }
+
+    /// Stops the workers: every batch was awaited, so nothing is queued and
+    /// no request holds a credit or permit, and `Scheduler.fail` only wakes
+    /// the workers waiting for work. A worker may still hold the credit it
+    /// took for a claim that finds nothing (`claimRequest`); it gives it
+    /// back before it sees `stopping`, so every credit is free once this
+    /// returns. Awaiting a group that never spawned returns at once, so
+    /// this also cleans up a failed `create`.
+    fn stopWorkers(self: *Loader) void {
+        std.debug.assert(self.scheduler.queue.len == 0);
+        self.scheduler.fail(self.io);
+        self.worker_group.await(self.io) catch {};
+    }
+
+    /// Keeps `err` as the sticky error unless one is kept already and logs
+    /// it, then fails the load without waiting: unclaimed jobs retire
+    /// (`Scheduler.fail`) and queued pieces are released
+    /// (`Dma.abortReady`). Any thread may call it, a DMA callback included;
+    /// requests in flight stop at their next read (`readSlot`) or enqueue
+    /// and release their units.
+    /// Failing other batches than the caller's is safe from any thread:
+    /// `Scheduler.fail` and `Dma.abortReady` reach only live batches (their
+    /// docs), and `destroy` waits for the worker group before it frees what
+    /// the workers use.
+    fn recordError(self: *Loader, err: anyerror, comptime fmt: []const u8, args: anytype) void {
+        if (self.first_error.set(err)) {
+            load_log.failure(err, fmt, args);
+            self.scheduler.fail(self.io);
+            Dma.abortReady(self);
+        }
+    }
+};
 
 /// One submission: its plans (one per source file, published as each file
 /// is planned), the destinations it writes and their parts, and every
@@ -89,11 +416,11 @@ pub const Batch = struct {
     }
 };
 
-/// One output buffer and what places it. Its parts may come from several
-/// files, so several plans can write it: their pieces all count toward the
-/// same targets (`Target.total` is the placement's bytes, whichever plan
-/// submits them), and its device state is created once, by the first
-/// worker that reads for it.
+/// One output buffer and what places it. Owned by the batch. Its parts may
+/// come from several files, so several plans can write it: their pieces all
+/// count toward the same targets (`Target.total` is the placement's bytes,
+/// whichever plan submits them), and its device state is created once, by
+/// the first worker that reads for it.
 const Destination = struct {
     /// The caller's shape, which the output buffer keeps.
     shape: Shape,
@@ -104,6 +431,10 @@ const Destination = struct {
     /// What fills it, in ascending, disjoint destination order
     /// (`backend.LoadSpec`).
     parts: []Part,
+    /// Bytes not read yet, the parts' widths at first. The read that
+    /// brings it to zero completes the destination's item on `progress`.
+    unread_bytes: std.atomic.Value(u64),
+    progress: std.Progress.Node = .none,
     state: LazyOnce(DestinationState) = .{},
 
     fn ensureState(self: *Destination, allocator: std.mem.Allocator, io: std.Io, platform: *const Platform) StateInitError!*DestinationState {
@@ -112,6 +443,17 @@ const Destination = struct {
 
     fn deinit(self: *Destination, allocator: std.mem.Allocator, api: *const pjrt.Api) void {
         if (self.state.readyValue()) |state| state.deinit(allocator, api);
+    }
+
+    /// The first source's name, for logs.
+    fn name(self: *const Destination) []const u8 {
+        return self.parts[0].source.name;
+    }
+
+    /// Counts `bytes` as read (`unread_bytes`); the last read completes the
+    /// destination's one progress item.
+    fn recordRead(self: *Destination, bytes: u64) void {
+        if (self.unread_bytes.fetchSub(bytes, .acq_rel) == bytes) self.progress.completeOne();
     }
 };
 
@@ -133,9 +475,20 @@ const Part = struct {
     }
 };
 
-/// One source file: every job of a plan reads the file of its slot.
+/// One source file: every job of a plan reads the file of its slot, which
+/// the first read opens.
 const SourceSlot = struct {
     uri: []const u8,
+    file: LazyOnce(std.Io.File) = .{},
+
+    fn ensure(self: *SourceSlot, io: std.Io) std.Io.File.OpenError!std.Io.File {
+        const file = try self.file.ensure(io, std.Io.Dir.openFile, .{ .cwd(), io, self.uri, .{ .mode = .read_only } });
+        return file.*;
+    }
+
+    fn deinit(self: *SourceSlot, io: std.Io) void {
+        if (self.file.readyValue()) |file| file.close(io);
+    }
 };
 
 /// One file's jobs in claim order with their transfer records and every
@@ -772,6 +1125,24 @@ fn readFilePositionalAllV(
     return completed;
 }
 
+/// Every worker read goes through here, under a read permit: a failure is
+/// recorded with the file. Once the loader failed, returns its first error.
+/// Consumes `iovecs` (`readFilePositionalAllV`).
+fn readSlot(loader: *Loader, slot: *SourceSlot, iovecs: [][]u8, file_offset: u64, minimum_len: usize) !void {
+    const io = loader.io;
+    const file = slot.ensure(io) catch |err| {
+        loader.recordError(err, "open {s}", .{slot.uri});
+        return err;
+    };
+    loader.read_permits.waitUncancelable(io);
+    defer loader.read_permits.post(io);
+    if (loader.first_error.get()) |err| return err;
+    _ = readFilePositionalAllV(io, file, iovecs, file_offset, minimum_len) catch |err| {
+        loader.recordError(err, "read {s} at {d}, {d} bytes at least", .{ slot.uri, file_offset, minimum_len });
+        return err;
+    };
+}
+
 /// The bytes from offset `at` of `blocks` taken end to end, `block_size`
 /// bytes each, up to `len` of them or the end of that block.
 fn blockPiece(blocks: []const host_memory.Block, block_size: usize, at: usize, len: usize) []u8 {
@@ -1328,6 +1699,15 @@ fn LazyOnce(comptime T: type) type {
     };
 }
 
+/// Writes `contents` to a new file `name` in `dir` and returns its real
+/// path, in `path_buffer`.
+fn writeTestFile(dir: std.Io.Dir, io: std.Io, name: []const u8, contents: []const u8, path_buffer: []u8) ![]const u8 {
+    const file = try dir.createFile(io, name, .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, contents, 0);
+    return path_buffer[0..try file.realPath(io, path_buffer)];
+}
+
 // Planner tests.
 
 /// `Planner.preparePlan`, kept in `arena`; the testing allocator checks the
@@ -1336,8 +1716,8 @@ fn prepareTestPlan(arena: std.mem.Allocator, parts: []Part, order: []const usize
     return Planner.preparePlan(std.testing.allocator, arena, parts, order, config);
 }
 
-/// One plain destination per source, as whole-tensor specs make them: for
-/// planner tests.
+/// One plain destination per source, as `createDestinations` builds them
+/// for whole-tensor specs, without device state: for planner tests.
 fn initPlainParts(
     platform: *const Platform,
     sources: []safetensors.Tensor,
@@ -1358,6 +1738,7 @@ fn initPlainParts(
             .grid = .init(platform, source.shape),
             .output = output,
             .parts = @as(*[1]Part, part),
+            .unread_bytes = .init(source.byteSize()),
         };
     }
 }
@@ -1830,6 +2211,65 @@ test "a callback failing while a piece is queued drains it and completes the bat
     batch.destroy();
 }
 
+test "batch completes when every claimed request completes" {
+    const io = std.testing.io;
+    var fixture: TestLoader = undefined;
+    try fixture.init(3);
+    defer fixture.deinit();
+    const loader = &fixture.loader;
+
+    const batch = try publishTestBatch(&loader.scheduler, 3);
+    try std.testing.expectEqual(@as(usize, 3), batch.remaining.load(.acquire));
+    var requests: [3]*ReadRequest = undefined;
+    for (&requests) |*request| request.* = loader.claimRequest().?;
+    try std.testing.expect(loader.scheduler.claim(io) == null);
+    try std.testing.expectEqual(@as(usize, 3), loader.credits.inUse(io));
+
+    for (requests, 0..) |request, index| {
+        try std.testing.expect(!batch.done.isSet());
+        try std.testing.expectEqual(requests.len - index, batch.remaining.load(.acquire));
+        request.release();
+    }
+    try std.testing.expect(batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 0), batch.remaining.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+    // Each claim took its job's slot of the plan's request array.
+    for (requests, batch.plans.items[0].requests) |request, *slot| {
+        try std.testing.expect(request == slot);
+    }
+
+    Dma.retireBatch(loader, batch);
+    batch.destroy();
+}
+
+test "a worker waiting for a credit when the loader fails gets one back and stops" {
+    const io = std.testing.io;
+    var fixture: TestLoader = undefined;
+    try fixture.init(1);
+    defer fixture.deinit();
+    const loader = &fixture.loader;
+
+    // A request in flight holds the only credit; a worker that saw the
+    // second job waits on the credits.
+    const batch = try publishTestBatch(&loader.scheduler, 2);
+    const request = loader.claimRequest().?;
+    try loader.worker_group.concurrent(io, Loader.workerMain, .{loader});
+    while (loader.credits.condition.state.load(.monotonic).waiters == 0) io.sleep(.fromMilliseconds(1), .awake) catch {};
+
+    // The failure retires the second job and closes nothing: the request
+    // gives its credit back as it ends, the worker claims nothing with it,
+    // and `destroy`'s shutdown stops it.
+    loader.recordError(error.InputOutput, "injected source failure", .{});
+    try std.testing.expect(!batch.done.isSet());
+    request.release();
+    loader.stopWorkers();
+    try std.testing.expect(batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+    try std.testing.expectEqual(@as(usize, 0), batch.plans.items[0].requests[1].pending.load(.acquire));
+    Dma.retireBatch(loader, batch);
+    batch.destroy();
+}
+
 test "retired events are destroyed by the next pump or by a batch's retirement" {
     // Without PJRT, contexts with a null event stand in for destroyed ones;
     // the list mechanics are the subject.
@@ -1878,6 +2318,52 @@ test "retired events are destroyed by the next pump or by a batch's retirement" 
     try std.testing.expect(plan.events[0].next_retired == null);
     try std.testing.expect(other.next_retired == null);
     batch.destroy();
+}
+
+test "overlapping batches complete under concurrent claims and retirement" {
+    const io = std.testing.io;
+    const worker_count = 4;
+    var fixture: TestLoader = undefined;
+    try fixture.init(worker_count);
+    defer fixture.deinit();
+    const loader = &fixture.loader;
+
+    const Worker = struct {
+        fn run(loader_: *Loader) void {
+            while (loader_.scheduler.waitForWork(loader_.io)) if (loader_.claimRequest()) |request| request.release();
+        }
+    };
+    var group: std.Io.Group = .init;
+    defer {
+        loader.scheduler.fail(io);
+        group.await(io) catch {};
+    }
+    for (0..worker_count) |_| try group.concurrent(io, Worker.run, .{loader});
+
+    // Three batches in flight at a time, awaited newest first: a batch is
+    // retired while later ones are still being claimed.
+    for (0..70) |round| {
+        var batches: [3]*Batch = undefined;
+        var job_counts: [3]usize = undefined;
+        for (&batches, &job_counts, 0..) |*batch, *job_count, offset| {
+            job_count.* = (round * 3 + offset) % 7;
+            batch.* = try publishTestBatch(&loader.scheduler, job_count.*);
+        }
+        var index = batches.len;
+        while (index > 0) {
+            index -= 1;
+            const batch = batches[index];
+            batch.done.waitUncancelable(io);
+            Dma.retireBatch(loader, batch);
+            batch.destroy();
+        }
+        try std.testing.expectEqual(@as(usize, 0), unclaimedJobs(&loader.scheduler));
+    }
+    // Every request released its credit before its batch completed; the
+    // workers only hold one while a claim is in progress.
+    loader.scheduler.fail(io);
+    try group.await(io);
+    try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
 }
 
 // Source read tests.
@@ -1930,4 +2416,261 @@ test "lazy initialization preserves its finite error across repeated callers" {
     try std.testing.expectError(error.FileNotFound, once.ensure(std.testing.io, Context.init, .{&calls}));
     try std.testing.expectError(error.FileNotFound, once.ensure(std.testing.io, Context.init, .{&calls}));
     try std.testing.expectEqual(1, calls);
+}
+
+// Whole-loader tests.
+
+test "loader releases the pinned set when its workers cannot start" {
+    const allocator = std.testing.allocator;
+    const platform = Platform.init(allocator, std.testing.io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, std.testing.io);
+    // The testing io, but no worker starts: `create` fails after the carve,
+    // the credits and the pumps, and unwinds every one.
+    var vtable = std.testing.io.vtable.*;
+    vtable.groupConcurrent = std.Io.failingGroupConcurrent;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const result: anyerror!void = if (Loader.create(allocator, io, platform, .{ .read_parallelism = 2, .direct_io = .off })) |loader| unexpected: {
+        loader.destroy();
+        break :unexpected {};
+    } else |err| err;
+    try std.testing.expectError(error.ConcurrencyUnavailable, result);
+}
+
+test "exactly the width of reads are in flight, and a read failing mid-load leaves nothing held" {
+    const allocator = std.testing.allocator;
+    const platform = Platform.init(allocator, std.testing.io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, std.testing.io);
+    // Every source read holds for a moment and is counted; the one numbered
+    // `fail_at` fails.
+    const Reads = struct {
+        var in_flight: std.atomic.Value(usize) = .init(0);
+        var peak: std.atomic.Value(usize) = .init(0);
+        var started: std.atomic.Value(usize) = .init(0);
+        var fail_at: usize = std.math.maxInt(usize);
+
+        fn readPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            _ = peak.fetchMax(in_flight.fetchAdd(1, .acq_rel) + 1, .acq_rel);
+            defer _ = in_flight.fetchSub(1, .acq_rel);
+            std.testing.io.sleep(.fromMilliseconds(5), .awake) catch {};
+            if (started.fetchAdd(1, .acq_rel) == fail_at) return error.InputOutput;
+            return std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileReadPositional = Reads.readPositional;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+
+    // Sixteen tensors with gaps between them: a read, and a job, each.
+    const tensors = 16;
+    var contents: [tensors * 8]u8 = undefined;
+    for (&contents, 0..) |*byte, index| byte.* = @truncate(index);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [1024]u8 = undefined;
+    const path = try writeTestFile(tmp.dir, std.testing.io, "weights.bin", &contents, &path_buffer);
+    var sources: [tensors]safetensors.Tensor = undefined;
+    var parts: [tensors]LoadPart = undefined;
+    var specs: [tensors]LoadSpec = undefined;
+    var outputs: [tensors]Buffer = undefined;
+    for (&sources, &parts, &specs, &outputs, 0..) |*source, *part, *spec, *output, index| {
+        source.* = .{ .file_uri = path, .name = "t", .shape = .init(.{4}, .u8), .offset = index * 8 };
+        part.* = .whole(source);
+        spec.* = .{ .shape = source.shape, .output = output, .parts = part[0..1] };
+    }
+
+    for ([_]?usize{ null, 5 }) |fail_at| {
+        for (&outputs) |*output| output.* = .{ ._platform = platform, ._shape = sources[0].shape, ._shards = .empty };
+        defer for (&outputs) |*output| output.deinit();
+        // `destroy` returns: no worker waits for a credit or a permit.
+        const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2, .direct_io = .off });
+        defer loader.destroy();
+        try std.testing.expectEqual(@as(usize, 2), loader.read_width);
+        Reads.in_flight = .init(0);
+        Reads.peak = .init(0);
+        Reads.started = .init(0);
+        Reads.fail_at = fail_at orelse std.math.maxInt(usize);
+        const batch = try loader.submit(&specs, .none);
+        if (fail_at == null) {
+            try loader.awaitBatch(batch);
+            // Three workers, two permits.
+            try std.testing.expectEqual(@as(usize, tensors), Reads.started.load(.acquire));
+            try std.testing.expectEqual(loader.read_width, Reads.peak.load(.acquire));
+            try testing.expectShards(allocator, std.testing.io, &outputs[tensors - 1], contents[(tensors - 1) * 8 ..][0..4], .default);
+        } else {
+            try std.testing.expectError(error.InputOutput, loader.awaitBatch(batch));
+            // The reads stopped at the failure.
+            try std.testing.expect(Reads.started.load(.acquire) < tensors);
+        }
+        try std.testing.expectEqual(@as(usize, 0), loader.scheduler.queue.len);
+        // A worker the batch woke may still hold the credit it took for a
+        // claim that finds nothing: every credit is free once the workers
+        // stopped (`stopWorkers`).
+        loader.stopWorkers();
+        try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+        try std.testing.expectEqual(loader.read_width, loader.read_permits.permits);
+    }
+}
+
+test "a default-memory output a failed load left unfinished reports an error on every device" {
+    const allocator = std.testing.allocator;
+    // On the accelerator when it has two devices: each plugin's transfer
+    // manager errors the buffers it leaves unfinished.
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, std.testing.io, 2);
+    defer devices.deinit();
+    const platform = devices.platform;
+    // The read reaching the last request fails.
+    const Reads = struct {
+        var fail_from: u64 = std.math.maxInt(u64);
+
+        fn readPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+            if (offset >= fail_from) return error.InputOutput;
+            return std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileReadPositional = Reads.readPositional;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2, .direct_io = .off });
+    defer loader.destroy();
+
+    // A replicated tensor of three requests, a job each: no device's last
+    // piece goes out.
+    const request_size = loader.plan_config.request_size;
+    const contents = try allocator.alloc(u8, 3 * request_size);
+    defer allocator.free(contents);
+    testing.pattern(contents, 1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [1024]u8 = undefined;
+    const path = try writeTestFile(tmp.dir, std.testing.io, "weights.bin", contents, &path_buffer);
+    var source: safetensors.Tensor = .{ .file_uri = path, .name = "t", .shape = .init(.{contents.len}, .u8), .offset = 0 };
+    var part: LoadPart = .whole(&source);
+    var output: Buffer = .{ ._platform = platform, ._shape = source.shape, ._shards = .empty };
+    defer output.deinit();
+    const spec: LoadSpec = .{ .shape = source.shape, .output = &output, .parts = (&part)[0..1] };
+
+    Reads.fail_from = 2 * request_size;
+    defer Reads.fail_from = std.math.maxInt(u64);
+    const batch = try loader.submit((&spec)[0..1], .none);
+    try std.testing.expectError(error.InputOutput, loader.awaitBatch(batch));
+    // The failing job created the buffers before its read. Each one is
+    // ready, with an error, once the batch is retired: a success would
+    // hand out a buffer missing its last request, a pending one would hang
+    // its first user.
+    const placed = platform.placedShape(source.shape);
+    try std.testing.expectEqual(placed._sharding.mesh.?.devicesInCanonicalOrder().len, output._shards.len);
+    for (output._shards.constSlice()) |shard| {
+        const event = shard.readyEvent(platform.pjrt_api);
+        defer event.deinit(platform.pjrt_api);
+        try std.testing.expect(event.isReady(platform.pjrt_api));
+        const err = event.getEventError(platform.pjrt_api) orelse return error.TestUnexpectedResult;
+        err.deinit(platform.pjrt_api);
+    }
+}
+
+test "whole tensors load on four devices, sharded by rows or columns, replicated, or joined from two files" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, io, 4);
+    defer devices.deinit();
+    const mesh = try devices.mesh("tp");
+
+    // Rows of 32 bytes, 16 per device; rows cut into four pieces of 8
+    // bytes, one per device; a table on every device; and a tensor whose
+    // rows continue in a second file.
+    var rows: [64 * 32]u8 = undefined;
+    var cols: [1024 * 32]u8 = undefined;
+    var table: [3000 * 4]u8 = undefined;
+    var tail: [64 * 32]u8 = undefined;
+    testing.pattern(&rows, 1);
+    testing.pattern(&cols, 2);
+    testing.pattern(&table, 3);
+    testing.pattern(&tail, 4);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try testing.writeSafetensors(allocator, io, tmp.dir, "first.safetensors", &registry, &.{
+        .{ .name = "rows", .dtype = "U16", .dims = &.{ 64, 16 }, .bytes = &rows },
+        .{ .name = "cols", .dtype = "U16", .dims = &.{ 1024, 16 }, .bytes = &cols },
+        .{ .name = "table", .dtype = "U8", .dims = &.{ 3000, 4 }, .bytes = &table },
+    });
+    try testing.writeSafetensors(allocator, io, tmp.dir, "second.safetensors", &registry, &.{
+        .{ .name = "tail", .dtype = "U16", .dims = &.{ 64, 16 }, .bytes = &tail },
+    });
+    var joined: [rows.len + tail.len]u8 = undefined;
+    @memcpy(joined[0..rows.len], &rows);
+    @memcpy(joined[rows.len..], &tail);
+    const parts = [_]LoadPart{
+        .whole(registry.tensors.getPtr("rows").?),
+        .whole(registry.tensors.getPtr("cols").?),
+        .whole(registry.tensors.getPtr("table").?),
+        // rows again, then tail after it: the first file's run overlaps.
+        .whole(registry.tensors.getPtr("rows").?),
+        .{ .source = registry.tensors.getPtr("tail").?, .lattice = .{ .dst_offset = rows.len, .width = tail.len } },
+    };
+    var outputs: [4]Buffer = undefined;
+    const specs = [_]LoadSpec{
+        .{ .shape = Shape.init(.{ .row = 64, .col = 16 }, .u16).withPartitioning(&mesh, .{ .row = .model }), .output = &outputs[0], .parts = parts[0..1] },
+        .{ .shape = Shape.init(.{ .row = 1024, .col = 16 }, .u16).withPartitioning(&mesh, .{ .col = .model }), .output = &outputs[1], .parts = parts[1..2] },
+        .{ .shape = Shape.init(.{ .row = 3000, .col = 4 }, .u8).withPartitioning(&mesh, .{}), .output = &outputs[2], .parts = parts[2..3] },
+        .{ .shape = Shape.init(.{ .row = 128, .col = 16 }, .u16).withPartitioning(&mesh, .{ .row = .model }), .output = &outputs[3], .parts = parts[3..5] },
+    };
+    const globals = [_][]const u8{ &rows, &cols, &table, &joined };
+
+    // Blocks of 4 KiB and requests of two: the first file's run is cut into
+    // jobs, and the jobs' transfers at block ends.
+    const loader = try Loader.create(allocator, io, devices.platform, .{
+        .read_parallelism = 2,
+        .read_hints = .{ .read_chunk_size = 8192 },
+        .dma_block_size = 4096,
+        .direct_io = .off,
+    });
+    defer loader.destroy();
+    const batch = try loader.submit(&specs, .none);
+    var jobs: usize = 0;
+    for (batch.plans.items) |plan| jobs += plan.jobs.len;
+    try loader.awaitBatch(batch);
+    defer for (&outputs) |*output| output.deinit();
+    for (&outputs, globals) |*output, global| try testing.expectShards(allocator, io, output, global, .default);
+    // 46,816 bytes in the first file, 2,048 in the second.
+    try std.testing.expectEqual(@as(usize, 6 + 1), jobs);
+    // Every credit is free once the workers stopped (`stopWorkers`).
+    loader.stopWorkers();
+    try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
+}
+
+test "source slots keep their own copy of each path" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const contents = [_]u8{ 1, 2, 3, 4 };
+    var path_buffer: [1024]u8 = undefined;
+    const path = try writeTestFile(tmp.dir, io, "weights.bin", &contents, &path_buffer);
+    const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2, .direct_io = .off });
+    defer loader.destroy();
+    // Each submission names the file through a string of its own, freed
+    // right after the submit: workers open the file through its slot.
+    for (0..2) |_| {
+        const uri = try allocator.dupe(u8, path);
+        var source: safetensors.Tensor = .{ .file_uri = uri, .name = "x", .shape = .init(.{4}, .u8), .offset = 0 };
+        var output: Buffer = .{ ._platform = platform, ._shape = source.shape, ._shards = .empty };
+        defer output.deinit();
+        const parts = [_]LoadPart{.whole(&source)};
+        const submitted = loader.submit(&.{.{ .shape = source.shape, .output = &output, .parts = &parts }}, .none);
+        allocator.free(uri);
+        try loader.awaitBatch(try submitted);
+        try testing.expectShards(allocator, io, &output, &contents, .default);
+    }
+    // The testing allocator overwrites freed bytes: a slot keyed by the
+    // first string would miss the second lookup.
+    try std.testing.expectEqual(@as(usize, 1), loader.source_slots.count());
 }
