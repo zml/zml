@@ -109,17 +109,6 @@ pub const Buffer = struct {
         }.deinit, {}, buffers);
     }
 
-    /// Given an arbitrary struct `deinit` all `zml.Buffer` containing.
-    /// If the struct contains slices of `zml.Buffer` the memory of the slices will NOT be freed,
-    /// This only impacts device memory.
-    pub fn freeDeviceMemoryButKeepHostMetadataMemory(T: type, buffers: *mem.Bufferized(T)) void {
-        meta.visit(struct {
-            fn deinit(_: void, x: *Buffer) void {
-                x.deinit();
-            }
-        }.deinit, {}, buffers);
-    }
-
     /// This Buffer shape.
     pub fn shape(self: Buffer) Shape {
         return self._shape;

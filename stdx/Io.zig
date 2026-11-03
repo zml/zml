@@ -22,64 +22,6 @@ pub const Dir = struct {
     }
 };
 
-pub const LimitedGroup = struct {
-    limit: usize,
-    in_flight: std.atomic.Value(usize) = .init(0),
-    group: std.Io.Group = .init,
-    cond: std.Io.Condition = .init,
-    mutex: std.Io.Mutex = .init,
-
-    fn Wrapper(comptime function: anytype) type {
-        return struct {
-            fn wrapper(self: *LimitedGroup, io: std.Io, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.Cancelable!void {
-                while (true) {
-                    var in_flight = self.in_flight.load(.acquire);
-                    while (in_flight < self.limit) {
-                        if (self.in_flight.cmpxchgWeak(in_flight, in_flight + 1, .release, .acquire)) |actual| {
-                            in_flight = actual;
-                            continue;
-                        }
-
-                        defer {
-                            self.mutex.lockUncancelable(io);
-                            defer self.mutex.unlock(io);
-                            _ = self.in_flight.fetchSub(1, .release);
-                            self.cond.signal(io);
-                        }
-                        return @call(.auto, function, args);
-                    }
-
-                    try self.mutex.lock(io);
-                    defer self.mutex.unlock(io);
-                    while (self.in_flight.load(.acquire) >= self.limit) {
-                        try self.cond.wait(io, &self.mutex);
-                    }
-                }
-            }
-        };
-    }
-
-    pub fn init(limit: usize) LimitedGroup {
-        return .{ .limit = limit };
-    }
-
-    pub fn async(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) void {
-        self.group.async(io, Wrapper(function).wrapper, .{ self, io, args });
-    }
-
-    pub fn concurrent(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.ConcurrentError!void {
-        try self.group.concurrent(io, Wrapper(function).wrapper, .{ self, io, args });
-    }
-
-    pub fn await(self: *LimitedGroup, io: std.Io) std.Io.Cancelable!void {
-        try self.group.await(io);
-    }
-
-    pub fn cancel(self: *LimitedGroup, io: std.Io) void {
-        self.group.cancel(io);
-    }
-};
-
 pub const Duration = struct {
     pub fn div(self: std.Io.Duration, rhs: u64) std.Io.Duration {
         return .fromNanoseconds(@divTrunc(self.nanoseconds, @as(i96, @intCast(rhs))));
