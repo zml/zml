@@ -1,8 +1,9 @@
 //! A tensor the loader assembles from checkpoint bytes by moving them, never
 //! by computing: a checkpoint tensor, or slices, reshapes, transposes,
-//! concatenations and stacks of checkpoint tensors. The ops are
+//! paddings, concatenations and stacks of checkpoint tensors. The ops are
 //! `zml.Tensor`'s shape ops, with the same names, tags and argument
-//! conventions; slices are static and contiguous.
+//! conventions; slices are static and contiguous, and padding is zeros
+//! only.
 //!
 //! A source comes from its store (`View.source`) and its pieces live in
 //! the store's arena, where the ops that rewrite them allocate. Nothing is
@@ -56,6 +57,9 @@ const Dim = struct {
     /// Bits of the checkpoint tensor between two steps; zero repeats them.
     stride: u64,
 };
+
+/// `pad`'s per-axis options, as for `Tensor.pad`.
+pub const Pad = Tensor.Pad;
 
 /// The checkpoint tensor `subkey` of `view`, with `tags` (null keeps the
 /// checkpoint's); null when the checkpoint has no such tensor.
@@ -249,6 +253,34 @@ pub fn transpose(self: Source, axes_: anytype) Source {
             for (0..r) |i| moved.origin[i] = axis_piece.origin[permutation[i]];
             for (moved.dims.slice()) |*d| d.axis = inverse[d.axis];
             ctx.emit(res_shape, moved);
+        }
+    }
+    return ctx.finish(res_shape);
+}
+
+/// Like `Tensor.pad`, with zero as the only padding value.
+pub fn pad(self: Source, padding_value: anytype, paddings: anytype) Source {
+    stdx.debug.assert(isZero(padding_value), "Source.pad pads with zeros, got {any}", .{padding_value});
+    const options = self._shape.parseAxesOptions(Tensor.Pad, paddings, .{});
+    var res_shape = self._shape;
+    var moves = false;
+    for (options.constSlice(), 0..) |p, a| {
+        stdx.debug.assert(p.low >= 0 and p.high >= 0 and p.interior >= 0, "Source.pad cannot crop, got {any} on axis {d}", .{ p, a });
+        const d = self.dim(a);
+        res_shape._dims.set(a, p.low + d + @max(d - 1, 0) * p.interior + p.high);
+        if (p.low != 0 or p.interior != 0 or (a != 0 and p.high != 0)) moves = true;
+    }
+    // Rows appended after the last one move no element.
+    if (!moves) return .{ .store = self.store, ._shape = res_shape, ._pieces = self._pieces };
+    var ctx: Rewrite = .init(self.store);
+    defer ctx.deinit();
+    for (self._pieces) |piece| {
+        for (ctx.decompose(self._shape, piece)) |*axis_piece| {
+            for (options.constSlice(), 0..) |p, a| {
+                axis_piece.origin[a] = @as(u64, @intCast(p.low)) + axis_piece.origin[a] * @as(u64, @intCast(p.interior + 1));
+            }
+            for (axis_piece.dims.slice()) |*d| d.step *= @intCast(options.get(d.axis).interior + 1);
+            ctx.emit(res_shape, axis_piece.*);
         }
     }
     return ctx.finish(res_shape);
@@ -723,6 +755,13 @@ fn elementStrides(shape_: Shape) [constants.MAX_RANK]u64 {
     return strides;
 }
 
+fn isZero(value: anytype) bool {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .comptime_int, .int, .comptime_float, .float => value == 0,
+        else => false,
+    };
+}
+
 fn oom() noreturn {
     @panic("OOM");
 }
@@ -989,6 +1028,22 @@ test "Source takes a single row as Tensor does" {
     try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
         fn build(comptime T: type, x: []const T) T {
             return x[0].slice(.row, .single(2));
+        }
+    }.build);
+}
+
+test "Source pads as Tensor does" {
+    try expectCase(.{.{ .row = 4, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 4 }, .col = Tensor.Pad{ .low = 1, .interior = 1 } });
+        }
+    }.build);
+}
+
+test "Source pads rows as Tensor does" {
+    try expectCase(.{.{ .row = 5, .col = 4 }}, struct {
+        fn build(comptime T: type, x: []const T) T {
+            return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 3 } });
         }
     }.build);
 }
