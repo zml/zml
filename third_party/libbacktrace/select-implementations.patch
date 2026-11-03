@@ -1,0 +1,24 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -31,17 +31,14 @@
+         "config.h",
+         "backtrace.c",
+         "simple.c",
+-        "nounwind.c",
+-        "elf.c",
+-        "macho.c",
+-        "pecoff.c",
+-        "unknown.c",
+-        "read.c",
+         "mmapio.c",
+         "mmap.c",
+         "filenames.h",
+         "backtrace-supported.h",
+-    ],
++    ] + select({
++        "@bazel_tools//src/conditions:darwin": ["macho.c"],
++        "//conditions:default": ["elf.c"],
++    }),
+     hdrs = [
+         "backtrace.h",
+     ],

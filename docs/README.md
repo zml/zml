@@ -20,6 +20,7 @@ Ready to write some code? Try starting with [your first model in ZML](./tutorial
 - [Cross Compile and Deploy Models on a Server](./howtos/deploy_on_server.md)
 - [Dockerize Models](./howtos/dockerize_models.md)
 - [Profile ZML Programs](./howtos/profiling.md)
+- [Build Incrementally with Zig](./howtos/incremental_builds.md)
 
 ## Learn more...
 

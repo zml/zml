@@ -1,0 +1,316 @@
+diff --git a/zig/private/common/cdeps.bzl b/zig/private/common/cdeps.bzl
+index e784b62..e057a37 100644
+--- a/zig/private/common/cdeps.bzl
++++ b/zig/private/common/cdeps.bzl
+@@ -74,5 +74,13 @@ def zig_cdeps_linker_inputs(*, linking_context, solib_parents, os, inputs, args,
+     for link in linking_context.linker_inputs.to_list():
+-        args.add_all(link.user_link_flags)
++        args.add_all(link.user_link_flags, map_each = zig_cdeps_link_flag)
+         inputs.extend(link.additional_inputs)
+         for lib in link.libraries:
++            # Bazel's alwayslink .lo files are archives, but Zig treats .lo as
++            # relocatable ELF. Passing their members also preserves alwayslink.
++            if lib.alwayslink:
++                objects = lib.pic_objects or lib.objects
++                if objects:
++                    inputs.extend(objects)
++                    all_libraries.extend([(obj, False) for obj in objects])
++                    continue
+             file = None
+@@ -122,12 +130,6 @@ def zig_cdeps_linker_inputs(*, linking_context, solib_parents, os, inputs, args,
+ def _lib_flags(arg):
+-    (file, dynamic) = arg
+-    if dynamic:
+-        ext_skip = len(file.extension) + 1
+-        if file.basename.startswith("lib"):
+-            libname = file.basename[3:-ext_skip]
+-        else:
+-            libname = file.basename[:-ext_skip]
+-        return ["-L" + file.dirname, "-l" + libname]
+-    else:
+-        return file.path
++    (file, _) = arg
++
++    # Preserve version suffixes and Bazel's library names verbatim.
++    return file.path
+ 
+@@ -147 +149,13 @@ def _make_to_rpath(solib_parents, os):
+     return to_rpath
++
++def zig_cdeps_link_flag(flag):
++    """Translate compiler-driver linker flags used by C dependencies."""
++    if flag.startswith("-Wl,-u,"):
++        return ["--force_undefined", flag[len("-Wl,-u,"):]]
++    if flag.startswith("-Wl,-z,"):
++        return ["-z", flag[len("-Wl,-z,"):]]
++    if flag.startswith("-Wl,-rpath,"):
++        return ["-rpath", flag[len("-Wl,-rpath,"):]]
++    if flag == "-pthread":
++        return "-lpthread"
++    return flag
+diff --git a/zig/private/common/zig_build.bzl b/zig/private/common/zig_build.bzl
+index c5750ed..a03358f 100644
+--- a/zig/private/common/zig_build.bzl
++++ b/zig/private/common/zig_build.bzl
+@@ -12,7 +12,7 @@ load(
+     "bazel_builtin_module",
+     BAZEL_BUILTIN_ATTRS = "ATTRS",
+ )
+-load("//zig/private/common:cdeps.bzl", "zig_cdeps_linker_inputs")
++load("//zig/private/common:cdeps.bzl", "zig_cdeps_link_flag", "zig_cdeps_linker_inputs")
+ load("//zig/private/common:csrcs.bzl", "zig_csrcs")
+ load("//zig/private/common:data.bzl", "zig_collect_data", "zig_create_runfiles")
+ load("//zig/private/common:escape_label.bzl", "escape_label")
+@@ -55,6 +55,10 @@ load(
+ )
+ 
+ ATTRS = {
++    "_incremental_worker": attr.label(
++        default = "//zig/settings:incremental_worker",
++        cfg = "exec",
++    ),
+     "main": attr.label(
+         allow_single_file = ZIG_SOURCE_EXTENSIONS,
+         doc = """\
+@@ -240,6 +244,54 @@ def _shared_lib_extension(os):
+         "macos": ".dylib",
+     }.get(os, ".so")
+ 
++def _zig_args(ctx):
++    args = ctx.actions.args()
++    incremental = ctx.attr._incremental_worker[DefaultInfo].files_to_run.executable != None and ctx.genfiles_dir.path.find("-exec") == -1
++    args.use_param_file("@%s", use_always = incremental)
++    if incremental:
++        args.set_param_file_format("multiline")
++    return args
++
++def _run_zig(ctx, *, executable, arguments, outputs, mnemonic, **kwargs):
++    worker = ctx.attr._incremental_worker[DefaultInfo].files_to_run
++
++    # Host tools must remain independent of the incremental adapter.
++    if worker.executable == None or ctx.genfiles_dir.path.find("-exec") != -1:
++        ctx.actions.run(executable = executable, arguments = arguments, outputs = outputs, mnemonic = mnemonic, **kwargs)
++        return
++
++    if not semver.gte(zig_exec_group_toolchain(ctx).zig_version, "0.17.0"):
++        fail("incremental_worker requires Zig 0.17 or newer")
++
++    command = _zig_args(ctx)
++    request_args = [command]
++    for arg in arguments:
++        if type(arg) == "string":
++            command.add(arg)
++        else:
++            request_args.append(arg)
++
++    requirements = dict(kwargs.pop("execution_requirements", {}))
++    requirements.update({
++        "supports-workers": "1",
++        "requires-worker-protocol": "json",
++        "no-remote": "1",
++        "no-sandbox": "1",
++    })
++    ctx.actions.run(
++        executable = worker,
++        # Each output owns a compiler session; source edits do not change its key.
++        arguments = [
++            "--zig=" + (executable.path if type(executable) == "File" else executable),
++            "--action=" + outputs[0].path,
++        ] + request_args,
++        tools = [executable] if type(executable) == "File" else [],
++        outputs = outputs,
++        mnemonic = "ZigIncremental",
++        execution_requirements = requirements,
++        **kwargs
++    )
++
+ def _executable_extension(os):
+     return ".exe" if os == "windows" else ""
+ 
+@@ -306,11 +358,9 @@ def zig_build_impl(ctx, *, kind):
+         transitive_runfiles = transitive_runfiles,
+     )
+ 
+-    args = ctx.actions.args()
+-    args.use_param_file("@%s")
++    args = _zig_args(ctx)
+ 
+-    global_args = ctx.actions.args()
+-    global_args.use_param_file("@%s")
++    global_args = _zig_args(ctx)
+ 
+     if use_cc_common_link:
+         global_args.add_all([
+@@ -476,5 +526,9 @@ def zig_build_impl(ctx, *, kind):
+             global_args = global_args,
+             cc_infos = [root_module.cc_info],
+             translatectoolchaininfo = translatectoolchaininfo,
++            # Self-hosted DWARF emits references to extern functions used only
++            # for their types. Omit debug info for translated C declarations;
++            # keep debug info for the application's Zig modules.
++            zigopts = ["-fstrip"] if ctx.attr._incremental_worker[DefaultInfo].files_to_run.executable != None and ctx.genfiles_dir.path.find("-exec") == -1 else [],
+         )
+         transitive_inputs.append(c_module.transitive_inputs)
+@@ -492,6 +546,16 @@ def zig_build_impl(ctx, *, kind):
+                 data = direct_data,
+             )
+ 
++            # CcInfo excludes the C++ runtime normally injected by cc_common.link.
++            # Use the same runtime as the toolchain that compiled these objects.
++            if kind != "zig_static_library":
++                args.add("-lc")
++                runtime_toolchain, runtime_features = find_cc_toolchain(ctx, mandatory = False)
++                if runtime_toolchain:
++                    runtime = runtime_toolchain.static_runtime_lib(feature_configuration = runtime_features)
++                    args.add_all(runtime)
++                    transitive_inputs.append(runtime)
++
+             transitive_inputs.append(depset(cdeps_inputs))
+ 
+     if use_test_obj:
+@@ -535,7 +599,7 @@ def zig_build_impl(ctx, *, kind):
+     )
+ 
+     if not use_cc_common_link and kind != "zig_static_library":
+-        args.add_all(linkopts)
++        args.add_all(linkopts + ctx.fragments.cpp.linkopts, map_each = zig_cdeps_link_flag)
+ 
+     auxiliary_outputs = []
+     if ctx.attr.emit_asm:
+@@ -559,7 +623,8 @@ def zig_build_impl(ctx, *, kind):
+         if use_cc_common_link:
+             static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
+             args.add(static_lib, format = "-femit-bin=%s")
+-            ctx.actions.run(
++            _run_zig(
++                ctx,
+                 outputs = [static_lib] + auxiliary_outputs,
+                 inputs = inputs,
+                 executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -596,7 +661,8 @@ def zig_build_impl(ctx, *, kind):
+             )
+         else:
+             args.add(bin_output, format = "-femit-bin=%s")
+-            ctx.actions.run(
++            _run_zig(
++                ctx,
+                 outputs = [bin_output] + auxiliary_outputs,
+                 inputs = inputs,
+                 executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -610,9 +676,10 @@ def zig_build_impl(ctx, *, kind):
+             test_artifact = None
+             if use_test_obj:
+                 test_obj = ctx.actions.declare_file(ctx.label.name + _object_extension(zigtargetinfo.triple.os))
+-                test_args = ctx.actions.args()
++                test_args = _zig_args(ctx)
+                 test_args.add(test_obj, format = "-femit-bin=%s")
+-                ctx.actions.run(
++                _run_zig(
++                    ctx,
+                     outputs = [test_obj] + auxiliary_outputs,
+                     inputs = inputs,
+                     executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -624,14 +691,15 @@ def zig_build_impl(ctx, *, kind):
+                 test_artifact = test_obj
+             else:
+                 bc = ctx.actions.declare_file(ctx.label.name + ".bc")
+-                test_args = ctx.actions.args()
++                test_args = _zig_args(ctx)
+                 test_args.add("-fno-emit-bin")
+ 
+                 # TODO[CK] Remove once we drop support for Zig 0.15 and use test-obj.
+                 if ctx.attr.emit_llvm_bc:
+                     output_groups["llvm_bc"] = depset([bc])
+                 test_args.add(bc, format = "-femit-llvm-bc=%s")
+-                ctx.actions.run(
++                _run_zig(
++                    ctx,
+                     outputs = [bc] + auxiliary_outputs,
+                     inputs = inputs,
+                     executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -643,14 +711,15 @@ def zig_build_impl(ctx, *, kind):
+                 test_artifact = bc
+ 
+             static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
+-            lib_args = ctx.actions.args()
++            lib_args = _zig_args(ctx)
+             lib_args.add_all([
+                 "-fPIC",
+                 "-fcompiler-rt",
+             ])
+             lib_args.add(static_lib, format = "-femit-bin=%s")
+             lib_args.add(test_artifact)
+-            ctx.actions.run(
++            _run_zig(
++                ctx,
+                 outputs = [static_lib],
+                 inputs = [test_artifact, zigtoolchaininfo.validation] + ([zigtoolchaininfo.zig_lib.file] if zigtoolchaininfo.zig_lib.file else []),
+                 executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -687,7 +756,8 @@ def zig_build_impl(ctx, *, kind):
+             )
+         else:
+             args.add(bin_output, format = "-femit-bin=%s")
+-            ctx.actions.run(
++            _run_zig(
++                ctx,
+                 outputs = [bin_output] + auxiliary_outputs,
+                 inputs = inputs,
+                 executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -701,7 +771,8 @@ def zig_build_impl(ctx, *, kind):
+             args.add(bin_output, format = "-femit-bin=%s")
+         else:
+             args.add("-fno-emit-bin")
+-        ctx.actions.run(
++        _run_zig(
++            ctx,
+             outputs = ([bin_output] if ctx.attr.emit_bin else []) + auxiliary_outputs,
+             inputs = inputs,
+             executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -725,7 +796,8 @@ def zig_build_impl(ctx, *, kind):
+         if use_cc_common_link:
+             static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
+             args.add(static_lib, format = "-femit-bin=%s")
+-            ctx.actions.run(
++            _run_zig(
++                ctx,
+                 outputs = [static_lib] + auxiliary_outputs,
+                 inputs = inputs,
+                 executable = zig_toolchain_executable(zigtoolchaininfo),
+@@ -777,7 +849,8 @@ def zig_build_impl(ctx, *, kind):
+             # Here we explicitly set the SONAME to match the output filename.
+             args.add(bin_output_name, format = "-fsoname=%s")
+ 
+-            ctx.actions.run(
++            _run_zig(
++                ctx,
+                 outputs = [bin_output] + auxiliary_outputs,
+                 inputs = inputs,
+                 executable = zig_toolchain_executable(zigtoolchaininfo),
+diff --git a/zig/settings/BUILD.bazel b/zig/settings/BUILD.bazel
+index 417a898..1628776 100644
+--- a/zig/settings/BUILD.bazel
++++ b/zig/settings/BUILD.bazel
+@@ -99,3 +99,13 @@ filegroup(
+     srcs = [":BUILD.bazel"],
+     visibility = ["//zig:__pkg__"],
+ )
++
++# An executable adapter implementing Bazel's JSON persistent worker protocol.
++# An empty filegroup keeps ordinary builds on the direct compiler path.
++label_flag(
++    name = "incremental_worker",
++    build_setting_default = ":no_incremental_worker",
++    visibility = ["//visibility:public"],
++)
++
++filegroup(name = "no_incremental_worker")
+diff --git a/zig/private/common/translate_c.bzl b/zig/private/common/translate_c.bzl
+--- a/zig/private/common/translate_c.bzl
++++ b/zig/private/common/translate_c.bzl
+@@ -301 +301 @@
+-def zig_translate_c(*, ctx, name, zigtoolchaininfo, global_args, cc_infos, output_prefix = "", canonical_name = None, translatectoolchaininfo = None):
++def zig_translate_c(*, ctx, name, zigtoolchaininfo, global_args, cc_infos, output_prefix = "", canonical_name = None, translatectoolchaininfo = None, zigopts = []):
+@@ -315,0 +316 @@
++      zigopts: List of string, per-module options for the generated Zig declarations.
+@@ -349,0 +351 @@
++        zigopts = zigopts,
