@@ -475,30 +475,29 @@ pub fn pattern(bytes: []u8, seed: u8) void {
     for (bytes, 0..) |*byte, index| byte.* = (@as(u8, @truncate(index *% 29)) +% seed *% 53) | 1;
 }
 
-/// A store of the new loader over a copy of `registry`, for a test that
-/// builds several stores over one checkpoint: a store takes its registry's
-/// entries.
-pub fn storeOf(allocator: std.mem.Allocator, registry: *const zml.safetensors.TensorRegistry, opts: zml.io.next.TensorStore.Options) !zml.io.next.TensorStore {
+/// A store over a copy of `registry`, for a test that builds several stores
+/// over one checkpoint: a store takes its registry's entries.
+pub fn storeOf(allocator: std.mem.Allocator, registry: *const zml.safetensors.TensorRegistry, opts: zml.io.TensorStore.Options) !zml.io.TensorStore {
     var copy: zml.safetensors.TensorRegistry = .init(allocator);
     defer copy.deinit();
     for (registry.tensors.values()) |tensor| try copy.registerTensor(tensor);
     return .init(allocator, &copy, opts);
 }
 
-/// Loads `model` from `store` with the new loader, one of its own, and
-/// returns its buffers, which the caller frees with `mem.deinitBufferized`.
-/// A recipe for tests: production code creates its loader before building
-/// the model, so the loader's set-up runs meanwhile.
+/// Loads `model` from `store` with a loader of its own and returns its
+/// buffers, which the caller frees with `mem.deinitBufferized`. A recipe
+/// for tests: production code creates its loader before building the
+/// model, so the loader's set-up runs meanwhile.
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
     model: anytype,
-    store: *const zml.io.next.TensorStore,
+    store: *const zml.io.TensorStore,
 ) !zml.Bufferized(@TypeOf(model.*)) {
     var buffers = try zml.mem.bufferize(allocator, model);
     errdefer zml.mem.deinitBufferized(allocator, &buffers);
-    var loader = try zml.io.next.Loader.init(allocator, io, platform, .{});
+    var loader = try zml.io.Loader.init(allocator, io, platform, .{});
     defer loader.deinit();
     try loader.start(model, &buffers, store, .none);
     try loader.wait();
@@ -511,7 +510,7 @@ pub fn load(
 /// A buffer without a mesh is replicated on the platform's devices. On
 /// CPU/neuron/metal every memory kind is the one memory space, so only
 /// CUDA/ROCm/oneAPI tell them apart.
-pub fn expectShards(allocator: std.mem.Allocator, io: std.Io, buffer: *const zml.Buffer, global: []const u8, memory: zml.io.next.TensorStore.Memory) !void {
+pub fn expectShards(allocator: std.mem.Allocator, io: std.Io, buffer: *const zml.Buffer, global: []const u8, memory: zml.io.TensorStore.Memory) !void {
     const platform = buffer._platform;
     const shape = platform.placedShape(buffer.shape()).packedShape();
     try std.testing.expectEqual(shape.byteSize(), global.len);
@@ -549,18 +548,6 @@ pub fn expectShards(allocator: std.mem.Allocator, io: std.Io, buffer: *const zml
         }
         try std.testing.expectEqualSlices(u8, expected, actual);
     }
-}
-
-fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
-    var count: usize = 0;
-    var it = store.store.registry.iterator();
-    while (it.next()) |entry| {
-        if (std.mem.startsWith(u8, entry.key_ptr.*, prefix)) {
-            count += 1;
-        }
-    }
-
-    return count;
 }
 
 /// Test a layer implementation against reference activations stored in a TensorStore.
@@ -601,12 +588,12 @@ pub fn testLayer(
 
     const input_name = try std.fmt.allocPrint(arena.allocator(), "{s}.in", .{name});
     const input_count = zml.meta.count(zml.Tensor, &args);
-    const expected_input_count = countWithPrefix(activation_store, input_name);
+    const store_input = activation_store.withPrefix(input_name);
+    const expected_input_count = store_input.count();
     if (input_count != expected_input_count) {
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ expected_input_count, input_count });
     }
 
-    const store_input = activation_store.withPrefix(input_name);
     var ctx = LocalContext{ .activation_store = store_input };
     try zml.meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *zml.Tensor) !void {
@@ -624,7 +611,7 @@ pub fn testLayer(
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
     const output_count = exe.output_shapes.len;
     const store_output = activation_store.withPrefix(output_name);
-    const expected_output_count = countWithPrefix(store_output, output_name);
+    const expected_output_count = store_output.count();
     if (output_count != expected_output_count) {
         log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ expected_output_count, output_count });
     }
@@ -635,12 +622,8 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
-    defer zml.meta.visit(struct {
-        fn cb(_: void, b: *zml.Buffer) void {
-            b.deinit();
-        }
-    }.cb, {}, &args_buffers);
+    var args_buffers = try load(allocator, io, platform, &args, activation_store.store);
+    defer zml.mem.deinitBufferized(allocator, &args_buffers);
 
     exe_args.set(.{ layer_weights, args_buffers });
 
@@ -685,6 +668,39 @@ pub fn testLayer(
     } else {
         log.info("✅ all good for {s} ! (absolute tolerance: {e} - relative tolerance: {e} - minimum_close_fraction: {d:0>3})", .{ name, opts.absolute_tolerance, opts.relative_tolerance, opts.minimum_close_fraction });
     }
+}
+
+test testLayer {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = env();
+
+    const Scale = struct {
+        weight: zml.Tensor,
+
+        pub fn forward(self: @This(), x: zml.Tensor) zml.Tensor {
+            return x.mul(self.weight);
+        }
+    };
+    const weight = [_]f32{ 2, -1, 0.5, 3 };
+    const input = [_]f32{ 1, 2, 3, 4 };
+    const output = [_]f32{ 2, -2, 1.5, 12 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: zml.safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try writeSafetensors(allocator, io, tmp.dir, "layer.safetensors", &registry, &.{
+        .{ .name = "scale.weight", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&weight) },
+        .{ .name = "x.in.0", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&input) },
+        .{ .name = "x.out.0", .dtype = "F32", .dims = &.{4}, .bytes = std.mem.sliceAsBytes(&output) },
+    });
+    var store: zml.io.TensorStore = .init(allocator, &registry, .{});
+    defer store.deinit();
+
+    const layer: Scale = .{ .weight = store.view().withPrefix("scale").createReplicatedTensor("weight", null) };
+    var layer_weights = try load(allocator, io, platform, &layer, &store);
+    defer zml.mem.deinitBufferized(allocator, &layer_weights);
+    try testLayer(allocator, io, platform, layer, .forward, store.view(), "x", layer_weights, &.{}, .{});
 }
 
 fn center(slice: anytype, i: usize) @TypeOf(slice) {
