@@ -4,6 +4,7 @@ zig_library(
     name = "vfs",
     srcs = [
         "base.zig",
+        "direct_io.zig",
         "gcs.zig",
         "hf.zig",
         "http.zig",
