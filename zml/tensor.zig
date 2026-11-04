@@ -1528,7 +1528,7 @@ pub const Tensor = struct {
     pub fn dotAxes(lhs: Tensor, rhs: Tensor, tags: anytype) DotAxes {
         const T = @TypeOf(tags);
         if (comptime T == Shape.Tag or T == @EnumLiteral()) {
-            return lhs.dotAxes(rhs, .{tags});
+            return lhs.dotAxes(rhs, @as([]const Shape.Tag, &.{Shape.toTag(tags)}));
         }
 
         const lhs_contracting_axes, _ = lhs.shape().parseAxes(tags);
@@ -2983,7 +2983,7 @@ pub const Tensor = struct {
         var res_shape = self._shape;
         const ones: [constants.MAX_RANK]i64 = @splat(1);
         res_shape._dims.insertSlice(ax, ones[0..tags_.len]) catch unreachable;
-        res_shape._tags.insertSlice(ax, tags_.constSlice()) catch unreachable;
+        res_shape._tags.insertSlice(ax, tags_) catch unreachable;
 
         return self.reshape(res_shape);
     }

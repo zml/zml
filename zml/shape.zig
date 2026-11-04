@@ -117,14 +117,31 @@ pub const Shape = struct {
         stdx.debug.compileError("Wrong type, got {}. Expected .{{.a, .b}}", .{T});
     }
 
-    pub fn parseTags(v: anytype) TagsArray {
+    pub fn parseTags(v: anytype) []const Shape.Tag {
         const T = @TypeOf(v);
-        stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
-        var tags_: TagsArray = .empty;
-        inline for (v) |field| {
-            tags_.appendAssumeCapacity(toTag(field));
+        if (T == []const Shape.Tag) return v;
+        comptime validateTags(T);
+        return comptime frozen: {
+            var tagz: [v.len]Shape.Tag = undefined;
+            for (v, 0..) |field, i| tagz[i] = @tagName(field).ptr;
+            // Force the creation of a comptime constant, so that we can return a pointer to it.
+            const frozen_tags = tagz;
+            break :frozen &frozen_tags;
+        };
+    }
+
+    fn validateTags(T: type) void {
+        const message = "Expected an enum-literal tuple such as .{ .b, .d }, got " ++ @typeName(T);
+        switch (@typeInfo(T)) {
+            .@"struct" => |info| {
+                if (!info.is_tuple) @compileError(message);
+                for (info.field_types) |Field| {
+                    if (Field != @EnumLiteral()) @compileError(message);
+                }
+                if (info.field_types.len > Shape.MAX_RANK) @compileError("Too many shape tags (maximum 8)");
+            },
+            else => @compileError(message),
         }
-        return tags_;
     }
 
     /// Create a shape from a struct literal, eg:
@@ -813,8 +830,7 @@ pub const Shape = struct {
         if (T == Shape) {
             return self.assertTags(tagz.tags());
         } else if (T != []const Shape.Tag) {
-            const parsed_tags: []const Shape.Tag = comptime parseTags(tagz).constSlice();
-            return self.assertTags(parsed_tags);
+            return self.assertTags(comptime parseTags(tagz));
         }
 
         stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {f}, got {}", .{ self, stdx.fmt.stringsZ(tagz) });

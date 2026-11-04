@@ -1478,8 +1478,8 @@ pub const LogicalMesh = struct {
     /// * dimensions: dimension for each axis, -1 infers the size from underlying topology
     pub fn init(names: anytype, intents: []const LogicalAxisIntent, dimensions: []const i32) !LogicalMesh {
         if (@TypeOf(names) != []const Shape.Tag) {
-            const parsed_names = comptime Shape.parseTags(names);
-            return .init(@as([]const Shape.Tag, parsed_names.slice()), intents, dimensions);
+            const parsed_names: []const Shape.Tag = comptime Shape.parseTags(names);
+            return .init(parsed_names, intents, dimensions);
         }
 
         if (names.len == 0 or names.len > MAX_MESH_RANK or names.len != intents.len or names.len != dimensions.len) @panic("invalid logical mesh");
@@ -1645,7 +1645,7 @@ pub const Mesh = struct {
         return .{
             .name = @tagName(name_),
             .logical = .{
-                .axes = .init(axes_tags.slice()),
+                .axes = .init(axes_tags),
                 .intents = .{ .buffer = @splat(.high_bandwidth), .len = axes_tags.len },
                 .dimensions = @splat(-1),
             },
@@ -1783,8 +1783,8 @@ pub const Mesh = struct {
         const dimensions = try allocator.alloc(*const shardy.DimensionShardingAttr, shape.rank());
         var used: [MAX_MESH_RANK]bool = @splat(false);
         const has_open_dimension = shape.containsPartitionSpec(.open);
-        for (0.., dimensions) |ax, *d| {
-            d.* = switch (shape.partition(ax)) {
+        for (0.., dimensions) |i, *d| {
+            d.* = switch (shape.partition(i)) {
                 .out_of_bound => @panic("undefined"),
                 .replicated => .replicated(ctx),
                 .open => .open(ctx, &.{}),
@@ -1802,7 +1802,7 @@ pub const Mesh = struct {
             tile_count *= data.grid.axis_sizes[i];
             // Open dimensions can acquire unused logical axes during inference.
             // Only reserve those axes for replication when every dimension is closed.
-            if (!has_open_dimension and !used[i]) replicated_axes.appendAssumeCapacity(.named(ctx, std.mem.span(axis)));
+            if (!has_open_dimension and !used[i]) replicated_axes.appendAssumeCapacity(.named(ctx, std.mem.span(ax)));
         }
         if (tile_count < data.grid.device_count) {
             replicated_axes.appendAssumeCapacity(.named(ctx, data.sdyReplicaAxis()));
