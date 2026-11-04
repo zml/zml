@@ -4,6 +4,7 @@ const HTTP = @import("http.zig").HTTP;
 const MockServer = @import("mock_server.zig").MockServer;
 const range_read = @import("range_read.zig");
 const vfs_request = @import("request.zig");
+const S3 = @import("s3.zig").S3;
 
 /// A retry configuration that never sleeps, for the tests that count
 /// attempts rather than time.
@@ -397,7 +398,7 @@ test "a throttled HEAD at open waits the hold out and succeeds" {
     try std.testing.expectEqual(@as(u64, 0), stats.retries.load(.acquire));
 }
 
-test "a 503 retries a plain HTTP server without holding it" {
+test "a 503 holds an object store and only retries a plain HTTP server" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const read_size = 512;
@@ -406,30 +407,53 @@ test "a 503 retries a plain HTTP server without holding it" {
     @memset(&object, 0x7e);
     var output: [read_size]u8 = undefined;
 
-    // The first two GETs are answered 503.
+    // Each backend's first two GETs are answered 503.
     var server = try MockServer.init(io, &object, .{
         .throttle = .{ .first_gets = 2, .status = .service_unavailable },
+        .objects = &.{
+            .{ .path = "/bucket/object", .bytes = &object },
+        },
     });
     defer server.deinit(io);
     try server.start(io);
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
+    var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1", .retry = instantRetries(5) });
+    defer s3.deinit();
     var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http, .retry = instantRetries(5) });
     defer http.deinit();
-    const http_io = http.io();
 
     var path_buffer: [128]u8 = undefined;
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, try server.path(&path_buffer), .{});
-    defer file.close(http_io);
-    try std.testing.expectEqual(read_size, try file.readPositional(http_io, &.{&output}, 0));
+    const backends = [_]struct { std.Io, *const vfs_request.Governor, []const u8, bool }{
+        .{ s3.io(), &s3.governor, "bucket/object", true },
+        .{ http.io(), &http.governor, try server.path(&path_buffer), false },
+    };
+    for (backends) |backend| {
+        const backend_io, const governor, const path, const object_store = backend;
+        const file = try std.Io.Dir.openFile(.cwd(), backend_io, path, .{});
+        defer file.close(backend_io);
+        server.get_requests.store(0, .release);
+        try std.testing.expectEqual(read_size, try file.readPositional(backend_io, &.{&output}, 0));
 
-    // A 503 is a server failure there: no hold, one charged retry per
-    // attempt.
-    const stats = &http.governor.stats;
-    try std.testing.expectEqual(@as(u64, 0), stats.holds.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 2), stats.server_failures.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 2), stats.retries.load(.acquire));
+        const stats = &governor.stats;
+        if (object_store) {
+            // A 503 is `SlowDown`. One reader, two throttles in a row: each
+            // arms its own hold once the previous one has passed, and
+            // neither is charged a retry.
+            try std.testing.expectEqual(@as(u64, 2), stats.holds.load(.acquire));
+            try std.testing.expectEqual(@as(u64, 2), stats.throttles.load(.acquire));
+            try std.testing.expectEqual(@as(u64, 0), stats.retries.load(.acquire));
+        } else {
+            // A 503 is a server failure: no hold, one charged retry per
+            // attempt.
+            try std.testing.expectEqual(@as(u64, 0), stats.holds.load(.acquire));
+            try std.testing.expectEqual(@as(u64, 2), stats.server_failures.load(.acquire));
+            try std.testing.expectEqual(@as(u64, 2), stats.retries.load(.acquire));
+        }
+    }
 
     try server.stop(io);
 }
@@ -544,7 +568,7 @@ test "generic HTTP cancels a GET that receives nothing and retries it as a timeo
     try std.testing.expectEqual(@as(usize, 2), server.get_requests.load(.acquire));
 }
 
-test "http fails open, stat and access of an absent or denied object" {
+test "http and s3 fail open, stat and access of an absent or denied object alike" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -555,72 +579,114 @@ test "http fails open, stat and access of an absent or denied object" {
         .{ .name = "unauthorized", .status = .unauthorized, .expected = error.PermissionDenied },
         .{ .name = "forbidden", .status = .forbidden, .expected = error.PermissionDenied },
     };
+    // The target each backend sends for an object: HTTP its path, S3
+    // `/<bucket>/<key>`.
+    const targets = [_][]const u8{ "/", "/bucket/" };
     const refusals = comptime refusals: {
-        var list: [cases.len]MockServer.Refusal = undefined;
-        for (cases, 0..) |case, i| list[i] = .{ .path = "/" ++ case.name, .status = case.status };
+        var list: [cases.len * targets.len]MockServer.Refusal = undefined;
+        for (cases, 0..) |case, i| {
+            for (targets, 0..) |target, j| {
+                list[i * targets.len + j] = .{ .path = target ++ case.name, .status = case.status };
+            }
+        }
         break :refusals list;
     };
 
     var object: [32]u8 = undefined;
     @memset(&object, 0x6b);
-    var server = try MockServer.init(io, &object, .{ .refusals = &refusals });
+    var server = try MockServer.init(io, &object, .{
+        .objects = &.{
+            .{ .path = "/bucket/object", .bytes = &object },
+        },
+        .refusals = &refusals,
+    });
     defer server.deinit(io);
     try server.start(io);
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
     var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http });
     defer http.deinit();
-    const http_io = http.io();
+    var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" });
+    defer s3.deinit();
 
-    var path_buffer: [128]u8 = undefined;
-    const present = try server.path(&path_buffer);
-    try std.Io.Dir.access(.cwd(), http_io, present, .{});
-    try std.testing.expectEqual(@as(u64, object.len), (try std.Io.Dir.statFile(.cwd(), http_io, present, .{})).size);
-    for (cases) |case| {
-        const path = try std.fmt.bufPrint(&path_buffer, "127.0.0.1:{d}/{s}", .{ server.port(), case.name });
-        try std.testing.expectError(case.expected, std.Io.Dir.openFile(.cwd(), http_io, path, .{}));
-        try std.testing.expectError(case.expected, std.Io.Dir.statFile(.cwd(), http_io, path, .{}));
-        try std.testing.expectError(case.expected, std.Io.Dir.access(.cwd(), http_io, path, .{}));
+    var authority_buffer: [64]u8 = undefined;
+    const backends = [_]struct { std.Io, []const u8 }{
+        .{ http.io(), try std.fmt.bufPrint(&authority_buffer, "{s}/", .{endpoint["http://".len..]}) },
+        .{ s3.io(), "bucket/" },
+    };
+    for (backends) |backend| {
+        const backend_io, const prefix = backend;
+        var path_buffer: [128]u8 = undefined;
+        const present = try std.fmt.bufPrint(&path_buffer, "{s}object", .{prefix});
+        try std.Io.Dir.access(.cwd(), backend_io, present, .{});
+        try std.testing.expectEqual(@as(u64, object.len), (try std.Io.Dir.statFile(.cwd(), backend_io, present, .{})).size);
+        for (cases) |case| {
+            const path = try std.fmt.bufPrint(&path_buffer, "{s}{s}", .{ prefix, case.name });
+            try std.testing.expectError(case.expected, std.Io.Dir.openFile(.cwd(), backend_io, path, .{}));
+            try std.testing.expectError(case.expected, std.Io.Dir.statFile(.cwd(), backend_io, path, .{}));
+            try std.testing.expectError(case.expected, std.Io.Dir.access(.cwd(), backend_io, path, .{}));
+        }
     }
 
     try server.stop(io);
 }
 
-test "http fails a refused streaming read with InputOutput and seeks back no further than 0" {
+test "http and s3 fail a refused streaming read with InputOutput and seek back no further than 0" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
     var object: [64]u8 = undefined;
     for (&object, 0..) |*byte, index| byte.* = @truncate(index *% 5 +% 1);
-    // The first GET is answered 500, with no retry left.
-    var server = try MockServer.init(io, &object, .{ .fail_first_gets = 1 });
+    // Each backend's first GET is answered 500, and none has a retry left.
+    var server = try MockServer.init(io, &object, .{
+        .fail_first_gets = 2,
+        .objects = &.{
+            .{ .path = "/bucket/object", .bytes = &object },
+        },
+    });
     defer server.deinit(io);
     try server.start(io);
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
     var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http, .retry = instantRetries(0) });
     defer http.deinit();
-    const http_io = http.io();
+    var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1", .retry = instantRetries(0) });
+    defer s3.deinit();
 
     var path_buffer: [128]u8 = undefined;
-    const file = try std.Io.Dir.openFile(.cwd(), http_io, try server.path(&path_buffer), .{});
-    defer file.close(http_io);
+    const backend_ios = [_]std.Io{ http.io(), s3.io() };
+    const paths = [_][]const u8{ try server.path(&path_buffer), "bucket/object" };
+    var files: [backend_ios.len]std.Io.File = undefined;
+    var opened: usize = 0;
+    defer for (files[0..opened], backend_ios[0..opened]) |file, backend_io| file.close(backend_io);
+    for (&files, backend_ios, paths) |*file, backend_io, path| {
+        file.* = try std.Io.Dir.openFile(.cwd(), backend_io, path, .{});
+        opened += 1;
+    }
 
     var head: [8]u8 = undefined;
     const head_slices = [_][]u8{&head};
-    try std.testing.expectError(error.InputOutput, file.readStreaming(http_io, &head_slices));
-    // Forward, then back by more than the position: at 0.
-    try http_io.vtable.fileSeekBy(http_io.userdata, file, 5);
-    try http_io.vtable.fileSeekBy(http_io.userdata, file, -9);
-    try std.testing.expectEqual(head.len, try file.readStreaming(http_io, &head_slices));
-    try std.testing.expectEqualSlices(u8, object[0..head.len], &head);
-    // `minInt(i64)`, whose negation overflows, stops at 0 too.
-    try http_io.vtable.fileSeekBy(http_io.userdata, file, std.math.minInt(i64));
-    try std.testing.expectEqual(head.len, try file.readStreaming(http_io, &head_slices));
-    try std.testing.expectEqualSlices(u8, object[0..head.len], &head);
+    for (files, backend_ios) |file, backend_io| {
+        try std.testing.expectError(error.InputOutput, file.readStreaming(backend_io, &head_slices));
+    }
+    for (files, backend_ios) |file, backend_io| {
+        // Forward, then back by more than the position: at 0.
+        try backend_io.vtable.fileSeekBy(backend_io.userdata, file, 5);
+        try backend_io.vtable.fileSeekBy(backend_io.userdata, file, -9);
+        try std.testing.expectEqual(head.len, try file.readStreaming(backend_io, &head_slices));
+        try std.testing.expectEqualSlices(u8, object[0..head.len], &head);
+        // `minInt(i64)`, whose negation overflows, stops at 0 too.
+        try backend_io.vtable.fileSeekBy(backend_io.userdata, file, std.math.minInt(i64));
+        try std.testing.expectEqual(head.len, try file.readStreaming(backend_io, &head_slices));
+        try std.testing.expectEqualSlices(u8, object[0..head.len], &head);
+    }
 
     try server.stop(io);
-    try std.testing.expectEqual(@as(usize, 3), server.get_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 6), server.get_requests.load(.acquire));
 }

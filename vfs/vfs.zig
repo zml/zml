@@ -1035,45 +1035,46 @@ test "creates and deletes on a local path go to the inner Io, from a path or an 
 }
 
 test "creates and deletes on a remote path fail and write nothing anywhere" {
+    const allocator = std.testing.allocator;
     const testing_io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing_io, .{ .sub_path = "existing", .data = "bytes" });
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const root = path_buffer[0..try tmp.dir.realPath(testing_io, &path_buffer)];
+    var object: [16]u8 = @splat(0x2a);
+    var server = try MockServer.init(testing_io, &object, .{});
+    defer server.deinit(testing_io);
+    try server.start(testing_io);
 
-    // The inner `Io` itself serves `s3`, rooted at the test's directory: a
-    // write that got past the VFS would land there.
-    var vfs: VFS = try .init(std.testing.allocator, testing_io);
+    var client: std.http.Client = .{ .allocator = allocator, .io = testing_io };
+    defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
+    var s3 = try S3.init(allocator, testing_io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" });
+    defer s3.deinit();
+    var vfs: VFS = try .init(allocator, testing_io);
     defer vfs.deinit();
-    try vfs.registerBackend("s3", .{ .io = testing_io });
+    try vfs.registerBackend("s3", s3.backend());
     const vfs_io = vfs.io();
     const cwd = std.Io.Dir.cwd();
 
-    var uri_buffer: [std.fs.max_path_bytes + 16]u8 = undefined;
-    const uri = struct {
-        fn at(buffer: []u8, root_: []const u8, name: []const u8) ![]const u8 {
-            return std.fmt.bufPrint(buffer, "s3://{s}/{s}", .{ root_, name });
-        }
-    }.at;
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createFile(vfs_io, try uri(&uri_buffer, root, "key"), .{}));
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.openFile(vfs_io, try uri(&uri_buffer, root, "existing"), .{ .mode = .read_write }));
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createFileAtomic(vfs_io, try uri(&uri_buffer, root, "key"), .{}));
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDir(vfs_io, try uri(&uri_buffer, root, "dir"), .default_dir));
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPath(vfs_io, try uri(&uri_buffer, root, "a/b")));
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPathOpen(vfs_io, try uri(&uri_buffer, root, "a/b"), .{}));
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.deleteFile(vfs_io, try uri(&uri_buffer, root, "existing")));
-    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.deleteDir(vfs_io, try uri(&uri_buffer, root, "dir")));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createFile(vfs_io, "s3://bucket/key", .{}));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.openFile(vfs_io, "s3://bucket/key", .{ .mode = .read_write }));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createFileAtomic(vfs_io, "s3://bucket/key", .{}));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDir(vfs_io, "s3://bucket/dir", .default_dir));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPath(vfs_io, "s3://bucket/a/b"));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPathOpen(vfs_io, "s3://bucket/a/b", .{}));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.deleteFile(vfs_io, "s3://bucket/key"));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.deleteDir(vfs_io, "s3://bucket/dir"));
     // A directory opened on the remote is no way around it.
-    const bucket = try cwd.openDir(vfs_io, try std.fmt.bufPrint(&uri_buffer, "s3://{s}", .{root}), .{});
+    const bucket = try cwd.openDir(vfs_io, "s3://bucket", .{});
     defer bucket.close(vfs_io);
     try std.testing.expectError(error.ReadOnlyFileSystem, bucket.createFile(vfs_io, "key", .{}));
-    try std.testing.expectError(error.ReadOnlyFileSystem, bucket.deleteFile(vfs_io, "existing"));
+    try std.testing.expectError(error.ReadOnlyFileSystem, bucket.deleteFile(vfs_io, "key"));
 
-    for ([_][]const u8{ "key", "dir", "a" }) |name| {
-        try std.testing.expectError(error.FileNotFound, tmp.dir.access(testing_io, name, .{}));
+    // Nothing on local disk, where the base layer would have written, and
+    // no request to the server.
+    for ([_][]const u8{ "s3:", "bucket" }) |name| {
+        try std.testing.expectError(error.FileNotFound, cwd.access(testing_io, name, .{}));
     }
-    try tmp.dir.access(testing_io, "existing", .{});
+    try server.stop(testing_io);
+    try std.testing.expectEqual(0, server.head_requests.load(.acquire) + server.get_requests.load(.acquire));
 }
 
 test "a name with a colon and no \"://\" is local" {
