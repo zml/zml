@@ -5,7 +5,8 @@
 //! have room for, runs each group's programs on the caller's task once its
 //! inputs landed, and retires everything. Backends only read sources into
 //! buffers; lookup, compilation, admission and execution stay in this
-//! shared front end. The contract is in the pub doc comments below.
+//! shared front end. The contract is in the pub doc comments below;
+//! docs/learn/loader.md is the user guide.
 //!
 //! From bindings to specs. `start` checks every tensor and program input
 //! once, before anything is published (`prepareSpec`, `checkPlacement`).

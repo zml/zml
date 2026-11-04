@@ -209,6 +209,8 @@ pub fn main(init: std.process.Init) !void {
 ```
 
 The first `start` waits for whatever calibration is left.
+[Loading checkpoints](./docs/learn/loader.md) gives the full recipe, with
+remote checkpoints, placement, lifetimes and errors.
 
 For a full walkthrough, see:
 

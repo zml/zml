@@ -1,5 +1,5 @@
-//! Checkpoint loading and virtual filesystem integration. Each file's
-//! header holds its internals:
+//! Checkpoint loading and virtual filesystem integration. The user guide is
+//! docs/learn/loader.md; each file's header holds its internals:
 //!
 //! - io/loader.zig: options and their checks, the set-up task, starts,
 //!   program compiles and groups, admission, and the one check of every
@@ -26,10 +26,6 @@ pub const Loader = @import("io/loader.zig").Loader;
 pub const TensorStore = @import("io/TensorStore.zig");
 
 pub const dma_calibration = @import("io/dma_calibration.zig");
-
-/// This module under a second name, for code written against it:
-/// `zml.io.next.Loader` is `zml.io.Loader`.
-pub const next = @This();
 
 test {
     std.testing.refAllDecls(@This());

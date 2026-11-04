@@ -27,7 +27,7 @@ test {
 /// Buffer is a multi-dimension array, whose memory is allocated on an accelerator.
 ///
 /// * contains a handle that the ZML runtime can use to convert into a physical address, but there is no guarantee this address is visible from the CPU.
-/// * filled from a checkpoint by `zml.io.Loader`.
+/// * filled from a checkpoint by `zml.io.Loader` (docs/learn/loader.md).
 /// * created from host data by `fromSlice` or `fromBytes`.
 pub const Buffer = struct {
     _platform: *const Platform,
