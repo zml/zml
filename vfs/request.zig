@@ -494,6 +494,9 @@ pub const ExchangeOptions = struct {
     /// request with its `OpenError` before `consume`, unlogged.
     open: bool = false,
     redirects: Redirects = .forbid,
+    /// A refusal that fails the request is logged with up to 1 KiB of its
+    /// body, where an OAuth endpoint says why, instead of with its head.
+    log_refusal_body: bool = false,
 };
 
 /// One HTTP exchange of `attempt`'s request: send, receive the head,
@@ -623,7 +626,21 @@ fn roundTrip(
             return .{ .retry = .{ .failure = .transient, .status = res.head.status } };
         }
         const failure = classifyStatus(res.head.status, attempt.governor.unavailable) orelse {
-            log.err("{s}: {s} failed: {s}", .{ attempt.governor.name, spec.target, res.head.bytes });
+            if (!options.log_refusal_body) {
+                log.err("{s}: {s} failed: {s}", .{ attempt.governor.name, spec.target, res.head.bytes });
+                return error.RequestFailed;
+            }
+            // Reading the body invalidates the head's strings.
+            const status = res.head.status;
+            var body_buffer: [1024]u8 = undefined;
+            var body: std.Io.Writer = .fixed(&body_buffer);
+            // A longer body is cut, one that fails is logged as it arrived.
+            _ = res.reader(&.{}).streamRemaining(&body) catch {
+                if (canceled(&req)) return error.Canceled;
+            };
+            // One line: an OAuth endpoint spreads its JSON over several.
+            std.mem.replaceScalar(u8, body.buffered(), '\n', ' ');
+            log.err("{s}: {s} answered {d}: {s}", .{ attempt.governor.name, spec.target, @backingInt(status), body.buffered() });
             return error.RequestFailed;
         };
         log.warn("{s}: {s} failed: {s}", .{ attempt.governor.name, spec.target, res.head.bytes });

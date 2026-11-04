@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const GCS = @import("gcs.zig").GCS;
 const HTTP = @import("http.zig").HTTP;
 const MockServer = @import("mock_server.zig").MockServer;
 const range_read = @import("range_read.zig");
@@ -412,6 +413,7 @@ test "a 503 holds an object store and only retries a plain HTTP server" {
         .throttle = .{ .first_gets = 2, .status = .service_unavailable },
         .objects = &.{
             .{ .path = "/bucket/object", .bytes = &object },
+            .{ .path = "/bucket/object?alt=media", .bytes = &object },
         },
     });
     defer server.deinit(io);
@@ -423,12 +425,15 @@ test "a 503 holds an object store and only retries a plain HTTP server" {
     const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
     var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1", .retry = instantRetries(5) });
     defer s3.deinit();
+    var gcs = try GCS.init(allocator, io, &client, .{ .endpoint_url = endpoint, .retry = instantRetries(5) });
+    defer gcs.deinit();
     var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http, .retry = instantRetries(5) });
     defer http.deinit();
 
     var path_buffer: [128]u8 = undefined;
     const backends = [_]struct { std.Io, *const vfs_request.Governor, []const u8, bool }{
         .{ s3.io(), &s3.governor, "bucket/object", true },
+        .{ gcs.io(), &gcs.governor, "bucket/object", true },
         .{ http.io(), &http.governor, try server.path(&path_buffer), false },
     };
     for (backends) |backend| {
@@ -440,8 +445,8 @@ test "a 503 holds an object store and only retries a plain HTTP server" {
 
         const stats = &governor.stats;
         if (object_store) {
-            // A 503 is `SlowDown`. One reader, two throttles in a row: each
-            // arms its own hold once the previous one has passed, and
+            // A 503 is rate limiting. One reader, two throttles in a row:
+            // each arms its own hold once the previous one has passed, and
             // neither is charged a retry.
             try std.testing.expectEqual(@as(u64, 2), stats.holds.load(.acquire));
             try std.testing.expectEqual(@as(u64, 2), stats.throttles.load(.acquire));
@@ -568,7 +573,7 @@ test "generic HTTP cancels a GET that receives nothing and retries it as a timeo
     try std.testing.expectEqual(@as(usize, 2), server.get_requests.load(.acquire));
 }
 
-test "http and s3 fail open, stat and access of an absent or denied object alike" {
+test "http, s3 and gs fail open, stat and access of an absent or denied object alike" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -580,13 +585,13 @@ test "http and s3 fail open, stat and access of an absent or denied object alike
         .{ .name = "forbidden", .status = .forbidden, .expected = error.PermissionDenied },
     };
     // The target each backend sends for an object: HTTP its path, S3
-    // `/<bucket>/<key>`.
-    const targets = [_][]const u8{ "/", "/bucket/" };
+    // `/<bucket>/<key>`, GCS the same with `?alt=media`.
+    const targets = [_]struct { []const u8, []const u8 }{ .{ "/", "" }, .{ "/bucket/", "" }, .{ "/bucket/", "?alt=media" } };
     const refusals = comptime refusals: {
         var list: [cases.len * targets.len]MockServer.Refusal = undefined;
         for (cases, 0..) |case, i| {
             for (targets, 0..) |target, j| {
-                list[i * targets.len + j] = .{ .path = target ++ case.name, .status = case.status };
+                list[i * targets.len + j] = .{ .path = target[0] ++ case.name ++ target[1], .status = case.status };
             }
         }
         break :refusals list;
@@ -597,6 +602,7 @@ test "http and s3 fail open, stat and access of an absent or denied object alike
     var server = try MockServer.init(io, &object, .{
         .objects = &.{
             .{ .path = "/bucket/object", .bytes = &object },
+            .{ .path = "/bucket/object?alt=media", .bytes = &object },
         },
         .refusals = &refusals,
     });
@@ -611,11 +617,14 @@ test "http and s3 fail open, stat and access of an absent or denied object alike
     defer http.deinit();
     var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" });
     defer s3.deinit();
+    var gcs = try GCS.init(allocator, io, &client, .{ .endpoint_url = endpoint });
+    defer gcs.deinit();
 
     var authority_buffer: [64]u8 = undefined;
     const backends = [_]struct { std.Io, []const u8 }{
         .{ http.io(), try std.fmt.bufPrint(&authority_buffer, "{s}/", .{endpoint["http://".len..]}) },
         .{ s3.io(), "bucket/" },
+        .{ gcs.io(), "bucket/" },
     };
     for (backends) |backend| {
         const backend_io, const prefix = backend;
@@ -634,7 +643,7 @@ test "http and s3 fail open, stat and access of an absent or denied object alike
     try server.stop(io);
 }
 
-test "http and s3 fail a refused streaming read with InputOutput and seek back no further than 0" {
+test "http, s3 and gs fail a refused streaming read with InputOutput and seek back no further than 0" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -642,9 +651,10 @@ test "http and s3 fail a refused streaming read with InputOutput and seek back n
     for (&object, 0..) |*byte, index| byte.* = @truncate(index *% 5 +% 1);
     // Each backend's first GET is answered 500, and none has a retry left.
     var server = try MockServer.init(io, &object, .{
-        .fail_first_gets = 2,
+        .fail_first_gets = 3,
         .objects = &.{
             .{ .path = "/bucket/object", .bytes = &object },
+            .{ .path = "/bucket/object?alt=media", .bytes = &object },
         },
     });
     defer server.deinit(io);
@@ -658,10 +668,12 @@ test "http and s3 fail a refused streaming read with InputOutput and seek back n
     defer http.deinit();
     var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1", .retry = instantRetries(0) });
     defer s3.deinit();
+    var gcs = try GCS.init(allocator, io, &client, .{ .endpoint_url = endpoint, .retry = instantRetries(0) });
+    defer gcs.deinit();
 
     var path_buffer: [128]u8 = undefined;
-    const backend_ios = [_]std.Io{ http.io(), s3.io() };
-    const paths = [_][]const u8{ try server.path(&path_buffer), "bucket/object" };
+    const backend_ios = [_]std.Io{ http.io(), s3.io(), gcs.io() };
+    const paths = [_][]const u8{ try server.path(&path_buffer), "bucket/object", "bucket/object" };
     var files: [backend_ios.len]std.Io.File = undefined;
     var opened: usize = 0;
     defer for (files[0..opened], backend_ios[0..opened]) |file, backend_io| file.close(backend_io);
@@ -688,5 +700,5 @@ test "http and s3 fail a refused streaming read with InputOutput and seek back n
     }
 
     try server.stop(io);
-    try std.testing.expectEqual(@as(usize, 6), server.get_requests.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 9), server.get_requests.load(.acquire));
 }
