@@ -113,7 +113,7 @@ noinline fn manualComputationInternal(
 
     const mesh = switch (chooseCommonMesh(input_tensors, compiler.platform.replicated_mesh)) {
         .mesh => |m| m,
-        .incompatible => |incomp| std.debug.panic("manualComputation expects all inputs and outputs to use the same mesh, got input {}: {} and input {}: {}", .{ incomp[0], input_tensors[incomp[0]], incomp[1], input_tensors[incomp[1]] }),
+        .incompatible => |incomp| std.debug.panic("manualComputation expects all inputs and outputs to use the same mesh, got input {d}: {f} and input {d}: {f}", .{ incomp[0], input_tensors[incomp[0]], incomp[1], input_tensors[incomp[1]] }),
     };
     const manual_axes = collectManualAxes(mesh, input_tensors);
     log.debug("manualComputation({s}) will use mesh {s}, manual axes: {f}", .{ functor_name, mesh.name, stdx.fmt.stringsZ(manual_axes.constSlice()) });
