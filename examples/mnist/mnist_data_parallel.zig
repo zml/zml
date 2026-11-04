@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
             .{
                 .program_name = "mnist",
                 .meshes = &.{dp_mp},
-                .xla_dump_to = "/tmp/zml/mnist",
+                .xla_dump_to = "/tmp/zml/mnist_dp",
             },
         );
     };
