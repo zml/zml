@@ -897,14 +897,17 @@ pub fn fusedExpertsMxfp4(
 
     const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
 
+    // Note: we directly forward input sharding to manualComputation
+    // TODO: improve sharding in attention and moe APIs
+    // https://github.com/zml/zml/issues/914
     const context: Context = .{
         .input = input,
         .ids = ids,
         .weights = weights,
-        .w1 = gate_up.weight.bitCast(.u8),
-        .s1 = gq.scales,
-        .w2 = down.weight.bitCast(.u8),
-        .s2 = dq.scales,
+        .gate_up = gate_up.weight,
+        .gate_up_scales = gq.scales,
+        .down = down.weight,
+        .down_scales = dq.scales,
         .global_experts = gate_up.weight.dim(.expert),
         .topk = ids.dim(.topk),
         .limit = options.activation.swiglu.limit.?,
@@ -952,46 +955,71 @@ pub const Config = struct {
     }
 };
 
-pub fn validateInputs(
+fn validateInputs(
     c: Config,
     input: zml.Tensor,
     ids: zml.Tensor,
-    weights: zml.Tensor,
-    w1: zml.Tensor,
-    s1: zml.Tensor,
-    w2: zml.Tensor,
-    s2: zml.Tensor,
-) !void {
-    if (s1.rank() != 3 or s2.rank() != 3) return error.InvalidInputShape;
-    if (s1.dim(2) < @divTrunc(c.hidden, 32) or
-        s2.dim(2) < @divTrunc(c.intermediate, 32)) return error.InvalidInputShape;
+    expert_weights: zml.Tensor,
+    gate_up: zml.Tensor,
+    gate_up_scales: zml.Tensor,
+    down: zml.Tensor,
+    down_scales: zml.Tensor,
+) void {
+    stdx.debug.assert(gate_up_scales.rank() == 3 and down_scales.rank() == 3, "Invalid MXFP4 tensor layout, expected gate_up_scales and down_scales to be rank 3, got {f} and {f}", .{ gate_up_scales, down_scales });
+
     const shapes = .{
-        .x = zml.Shape.init(.{ c.tokens, c.hidden }, .bf16),
+        .input = zml.Shape.init(.{ c.tokens, c.hidden }, .bf16),
         .ids = zml.Shape.init(.{ c.tokens, c.topk }, .i32),
-        .scales = zml.Shape.init(.{ c.tokens, c.topk }, .f32),
-        .w1 = zml.Shape.init(.{ c.experts, 2 * c.intermediate, @divTrunc(c.hidden, 2) }, .u8),
-        .s1 = zml.Shape.init(.{ c.experts, 2 * c.intermediate, s1.dim(2) }, .f8e8m0),
-        .w2 = zml.Shape.init(.{ c.experts, c.hidden, @divTrunc(c.intermediate, 2) }, .u8),
-        .s2 = zml.Shape.init(.{ c.experts, c.hidden, s2.dim(2) }, .f8e8m0),
+        .expert_weights = zml.Shape.init(.{ c.tokens, c.topk }, .f32),
+        .gate_up = zml.Shape.init(.{ c.experts, 2 * c.intermediate, @divExact(c.hidden, 2) }, .i8),
+        .gate_up_scales = zml.Shape.init(.{ c.experts, 2 * c.intermediate, gate_up_scales.dim(2) }, .f8e8m0),
+        .down = zml.Shape.init(.{ c.experts, c.hidden, @divExact(c.intermediate, 2) }, .i8),
+        .down_scales = zml.Shape.init(.{ c.experts, c.hidden, down_scales.dim(2) }, .f8e8m0),
     };
 
-    if (!input.shape().eql(shapes.x)) return error.InvalidInputShape;
-    if (!ids.shape().eql(shapes.ids)) return error.InvalidInputShape;
-    if (!weights.shape().eql(shapes.scales)) return error.InvalidInputShape;
-    if (!w1.shape().eql(shapes.w1)) return error.InvalidInputShape;
-    if (!s1.shape().eql(shapes.s1)) return error.InvalidInputShape;
-    if (!w2.shape().eql(shapes.w2)) return error.InvalidInputShape;
-    if (!s2.shape().eql(shapes.s2)) return error.InvalidInputShape;
+    stdx.debug.assert(input.shape().eql(shapes.input) and
+        ids.shape().eql(shapes.ids) and
+        expert_weights.shape().eql(shapes.expert_weights) and
+        // Note: we accept both i8 and u8 for gate_up and down
+        // TODO: we should instead use f4e2m1
+        (gate_up.shape().eql(shapes.gate_up) or gate_up.shape().eql(shapes.gate_up.withDtype(.u8))) and
+        gate_up_scales.shape().eql(shapes.gate_up_scales) and
+        (down.shape().eql(shapes.down) or down.shape().eql(shapes.down.withDtype(.u8))) and
+        down_scales.shape().eql(shapes.down_scales),
+        \\Invalid MXFP4 tensor layout:
+        \\ - expected input={f}, got {f}
+        \\ - expected ids={f}, got {f}
+        \\ - expected expert_weights={f}, got {f}
+        \\ - expected gate_up={f}, got {f}
+        \\ - expected gate_up_scales={f}, got {f}
+        \\ - expected down={f}, got {f}
+        \\ - expected down_scales={f}, got {f}
+    , .{
+        shapes.input, input, //
+        shapes.ids, ids, //
+        shapes.expert_weights, expert_weights, //
+        shapes.gate_up, gate_up, //
+        shapes.gate_up_scales, gate_up_scales, //
+        shapes.down, down, //
+        shapes.down_scales, down_scales, //
+    });
+
+    stdx.debug.assert(
+        gate_up_scales.dim(2) >= @divTrunc(c.hidden, 32) and
+            down_scales.dim(2) >= @divTrunc(c.intermediate, 32),
+        "Invalid MXFP4 tensor layout, not enough scales, expected a ratio of at most 32 for config {}, got {f} and {f}",
+        .{ c, gate_up_scales, down_scales },
+    );
 }
 
 const Context = struct {
     input: zml.Tensor,
     ids: zml.Tensor,
     weights: zml.Tensor,
-    w1: zml.Tensor,
-    s1: zml.Tensor,
-    w2: zml.Tensor,
-    s2: zml.Tensor,
+    gate_up: zml.Tensor,
+    gate_up_scales: zml.Tensor,
+    down: zml.Tensor,
+    down_scales: zml.Tensor,
     global_experts: i64,
     topk: i64,
     limit: f32,
@@ -999,9 +1027,9 @@ const Context = struct {
     expert_parallel: bool,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {
-        const experts = self.w1.dim(.expert);
-        const hidden = self.w2.dim(1);
-        const intermediate = self.w2.dim(2) * 2;
+        const experts = self.gate_up.dim(.expert);
+        const hidden = self.down.dim(1);
+        const intermediate = self.down.dim(2) * 2;
         var ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
         const tokens = ids.dim(.token);
         if (self.expert_parallel) {
@@ -1023,7 +1051,7 @@ const Context = struct {
         };
 
         cfg.validate() catch @panic("Invalid MXFP4 MoE configuration");
-        validateInputs(cfg, x, ids, scales, self.w1, self.s1, self.w2, self.s2) catch @panic("Invalid MXFP4 tensor layout");
+        validateInputs(cfg, x, ids, scales, self.gate_up, self.gate_up_scales, self.down, self.down_scales);
 
         const bn = 16;
         const bk = 512;
@@ -1087,7 +1115,7 @@ const Context = struct {
         // Each narrow tile produces 64 activations: two complete scale groups.
         const up_columns: i64 = if (cfg.tokens <= 8) 64 else 128;
         const m = kernels.GateUp.Kernel.call(
-            .{ .q = q.q, .s = q.s, .w = self.w1, .ws = self.s1.bitCast(.u8), .ids = ids, .rw = scales, .map = map, .sched = sched },
+            .{ .q = q.q, .s = q.s, .w = self.gate_up.bitCast(.u8), .ws = self.gate_up_scales.bitCast(.u8), .ids = ids, .rw = scales, .map = map, .sched = sched },
             .{ .mid = .init(.{ tile_count * bn, cfg.intermediate }, .f8e4m3fn), .ms = .init(.{ tile_count * bn, @divTrunc(cfg.intermediate, 32) }, .u8) },
             .{
                 .cfg = .{
@@ -1098,7 +1126,7 @@ const Context = struct {
                     .topk = cfg.topk,
                     .expert_offset = cfg.expert_offset,
                     .swiglu_limit = cfg.swiglu_limit,
-                    .scale_stride = self.s1.dim(2),
+                    .scale_stride = self.gate_up_scales.dim(2),
                     .routing_weight_placement = cfg.routing_weight_placement,
                     .bn = bn,
                     .bk = bk,
@@ -1111,7 +1139,7 @@ const Context = struct {
         );
 
         const d = kernels.Down.Kernel.call(
-            .{ .mid = m.mid, .ms = m.ms, .w = self.w2, .ws = self.s2.bitCast(.u8), .ids = ids, .sched = sched },
+            .{ .mid = m.mid, .ms = m.ms, .w = self.down.bitCast(.u8), .ws = self.down_scales.bitCast(.u8), .ids = ids, .sched = sched },
             .{ .d = .init(.{ tile_count * bn, cfg.hidden }, .bf16) },
             .{
                 .cfg = .{
@@ -1122,7 +1150,7 @@ const Context = struct {
                     .topk = cfg.topk,
                     .expert_offset = cfg.expert_offset,
                     .swiglu_limit = cfg.swiglu_limit,
-                    .scale_stride = self.s2.dim(2),
+                    .scale_stride = self.down_scales.dim(2),
                     .routing_weight_placement = cfg.routing_weight_placement,
                     .bn = bn,
                     .bk = bk,
