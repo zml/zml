@@ -1,4 +1,4 @@
-//! Quantization metadata and scheme classification.
+//! Quantization representations, metadata, and tensor conversion.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -15,10 +15,10 @@ pub const nvfp4_block_size = 16;
 pub const mx_block_size = 32;
 
 pub const Quantization = struct {
-    scheme: Scheme, // decided when the checkpoint is read
+    scheme: Quantization.Scheme, // decided when the checkpoint is read
     scales: Tensor,
-    global_scale: ?GlobalScale = null,
-    input_scale: ?GlobalScale = null,
+    global_scale: ?Quantization.GlobalScale = null,
+    input_scale: ?Quantization.GlobalScale = null,
     /// HACK: `scales` is stored in the 128x4 blocked layout of Blackwell's block-scaled mma.
     // Something cleaner will need to be done to differentiate different kinds of swizzling
     swizzled_scales: bool = false,
@@ -30,7 +30,7 @@ pub const Quantization = struct {
 
         pub const Operation = enum { multiply, divide };
 
-        pub fn asMultiplier(self: GlobalScale) Tensor {
+        pub fn asMultiplier(self: Quantization.GlobalScale) Tensor {
             const s = self.value.convert(.f32);
             const flat = if (s.shape().count() == 1) s.asScalar() else s; // essentially normalization
 
@@ -62,7 +62,7 @@ pub const Quantization = struct {
         /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
         fp8_per_tensor,
 
-        pub fn accepts(self: Scheme, weight: Shape, scale: Shape) bool {
+        pub fn accepts(self: Quantization.Scheme, weight: Shape, scale: Shape) bool {
             if (weight.rank() != 2) return false;
 
             const n = weight.dim(0);
@@ -93,19 +93,178 @@ pub const Quantization = struct {
             };
         }
 
-        pub fn classify(weight: Shape, scale: Shape) ?Scheme {
-            for (std.enums.values(Scheme)) |scheme| {
+        pub fn classify(weight: Shape, scale: Shape) ?Quantization.Scheme {
+            for (std.enums.values(Quantization.Scheme)) |scheme| {
                 if (scheme.accepts(weight, scale)) return scheme;
             }
 
             return null;
         }
 
-        pub fn isMx(self: Scheme) bool {
+        pub fn isMx(self: Quantization.Scheme) bool {
             return self == .mxfp8 or self == .mxfp4;
         }
     };
 };
+
+/// Logical quantized values and the scales needed to reconstruct them.
+pub const QuantizedTensor = struct {
+    values: Tensor,
+    scales: Scales,
+
+    pub const ValidationError = error{
+        InvalidValueDtype,
+        InvalidScaleDtype,
+        InvalidGroupSize,
+        InvalidScaleShape,
+        UnsupportedScaleLayout,
+    };
+
+    /// Validate logical values and a plain scale grid in the values' axis order.
+    /// A single scale may broadcast over all values. Otherwise, axis scaling
+    /// reduces at most one dimension and tile scaling at most two.
+    pub fn validate(self: QuantizedTensor) ValidationError!void {
+        const values = self.values.shape();
+        const scales = self.scales;
+        if (scales.swizzled) return error.UnsupportedScaleLayout;
+        if (!values.dtype().isFloat()) return error.InvalidValueDtype;
+        if (!scales.values.dtype().isFloat()) return error.InvalidScaleDtype;
+        switch (scales.scaling) {
+            .axis => |size| if (size == 0) return error.InvalidGroupSize,
+            .tile => |size| if (size == 0) return error.InvalidGroupSize,
+            .tensor => {},
+        }
+        if (scales.values.count() == 1) return;
+        if (scales.values.rank() != values.rank()) return error.InvalidScaleShape;
+        var reduced_axes: usize = 0;
+        var grouped_axes: usize = 0;
+        for (0..values.rank()) |axis| {
+            const block: i64 = switch (scales.scaling) {
+                .tensor => values.dim(axis),
+                .axis => |size| size orelse values.dim(axis),
+                .tile => |size| size,
+            };
+            if (block <= 0) return error.InvalidGroupSize;
+            const groups = std.math.divCeil(i64, values.dim(axis), block) catch return error.InvalidScaleShape;
+            if (scales.values.dim(axis) == groups) grouped_axes += 1;
+            if (scales.values.dim(axis) == values.dim(axis)) continue;
+            if (scales.values.dim(axis) != groups) return error.InvalidScaleShape;
+            reduced_axes += 1;
+        }
+        switch (scales.scaling) {
+            .axis => if (reduced_axes > 1 or grouped_axes < 1) return error.InvalidScaleShape,
+            .tile => if (reduced_axes > 2 or grouped_axes < 2) return error.InvalidScaleShape,
+            .tensor => if (grouped_axes < 1) return error.InvalidScaleShape,
+        }
+    }
+
+    pub fn reuseBuffer(self: QuantizedTensor, other: QuantizedTensor) QuantizedTensor {
+        return .{
+            .values = self.values.reuseBuffer(other.values),
+            .scales = self.scales.reuseBuffer(other.scales),
+        };
+    }
+};
+
+pub const Scales = struct {
+    /// Logical floating-point scale values. Plain grids follow the operand's axis order.
+    values: Tensor,
+    scaling: Scaling,
+    global: ?GlobalScale = null,
+    /// Scales use Blackwell's 128x4 blocked MMA layout.
+    swizzled: bool = false,
+
+    pub fn reuseBuffer(self: Scales, other: Scales) Scales {
+        var result = self;
+        result.values = self.values.reuseBuffer(other.values);
+        if (result.global) |*scale| {
+            if (other.global) |previous| scale.value = scale.value.reuseBuffer(previous.value);
+        }
+        return result;
+    }
+};
+
+/// An outer scale using the existing producer multiplier/divisor convention.
+pub const GlobalScale = Quantization.GlobalScale;
+
+pub const Scaling = union(enum) {
+    /// One scale over the selected axes. Unselected axes remain independent.
+    tensor,
+    /// Positive group size along one selected axis; null covers that entire axis.
+    axis: ?u32,
+    /// Positive side length of a square tile over two selected axes.
+    tile: u32,
+
+    pub fn eql(self: Scaling, other: Scaling) bool {
+        return std.meta.eql(self, other);
+    }
+};
+
+/// Logical value encoding and scale coverage.
+/// Consumers bind scaling to tensor axes and handle physical storage layouts.
+pub const Scheme = struct {
+    values: DataType,
+    scales: DataType,
+    scaling: Scaling,
+
+    pub const nvfp4: Scheme = .{ .values = .f4e2m1, .scales = .f8e4m3fn, .scaling = .{ .axis = nvfp4_block_size } };
+    pub const mxfp4: Scheme = .{ .values = .f4e2m1, .scales = .f8e8m0, .scaling = .{ .axis = mx_block_size } };
+    pub const mxfp8: Scheme = .{ .values = .f8e4m3fn, .scales = .f8e8m0, .scaling = .{ .axis = mx_block_size } };
+
+    pub fn eql(a: ?Scheme, b: ?Scheme) bool {
+        if (a == null or b == null) return a == null and b == null;
+        return std.meta.eql(a.?, b.?);
+    }
+
+    pub fn isTiled(self: ?Scheme, size: u32) bool {
+        return switch ((self orelse return false).scaling) {
+            .tile => |tile| tile == size,
+            else => false,
+        };
+    }
+
+    pub fn isPerAxis(self: ?Scheme) bool {
+        return switch ((self orelse return false).scaling) {
+            .axis => |size| size == null,
+            else => false,
+        };
+    }
+
+    pub fn isPerTensor(self: ?Scheme) bool {
+        return (self orelse return false).scaling == .tensor;
+    }
+};
+
+/// Reconstruct logical values in FP32, then convert to dtype.
+/// Scales use the same axis order as values, with one entry per group or tile;
+/// a scalar scale broadcasts over the entire tensor. Unpack values and unswizzle
+/// scales first. Values and scales must carry their logical floating-point dtypes.
+pub fn dequantize(input: QuantizedTensor, dtype: DataType) Tensor {
+    const values = input.values;
+    const scales = input.scales;
+    input.validate() catch |err| stdx.debug.panic("dequantize: {s} for scaling {any}, values {f}, scales {f}", .{ @errorName(err), scales.scaling, values, scales.values });
+    var expanded = scales.values.convert(.f32);
+    if (expanded.count() == 1) {
+        expanded = expanded.asScalar();
+    } else {
+        for (0..values.rank()) |axis| {
+            if (expanded.dim(axis) == values.dim(axis)) continue;
+            const block: i64 = switch (scales.scaling) {
+                .tensor => values.dim(axis),
+                .axis => |size| size orelse values.dim(axis),
+                .tile => |size| size,
+            };
+            const groups = std.math.divCeil(i64, values.dim(axis), block) catch unreachable;
+            const shape = expanded.shape().insert(axis + 1, .{block});
+            expanded = expanded.broadcast(shape, Shape.range(shape.rank(), .i64).remove(axis + 1).dims())
+                .reshape(expanded.shape().setDim(axis, groups * block))
+                .slice(axis, .{ .end = values.dim(axis) });
+        }
+    }
+    var result = values.convert(.f32).mul(expanded.broad(values.shape().withDtype(.f32)));
+    if (scales.global) |scale| result = result.mul(scale.asMultiplier().broad(result.shape()));
+    return result.convert(dtype);
+}
 
 pub const QuantizedInput = struct {
     values: Tensor,
@@ -512,6 +671,177 @@ test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" 
             const normalized = std.math.clamp(host[i] / expected_scales[scale_index], -fp8_max, fp8_max);
             const expected = if (dtype == .f8e4m3fn) zml.floats.Float8E4M3FN.fromF32(normalized).toF32() else zml.floats.Float8E4M3FNUZ.fromF32(normalized).toF32();
             try std.testing.expectEqual(expected, value);
+        }
+    }
+}
+
+test "QuantizedTensor.validate requires logical dtypes, grids and layouts" {
+    const input: QuantizedTensor = .{
+        .values = .init(.{ .m = 2, .k = 64 }, .f8e4m3fn),
+        .scales = .{ .scaling = Scheme.mxfp8.scaling, .values = .init(.{ .m = 2, .k = 2 }, .f8e8m0) },
+    };
+    try input.validate();
+    var invalid = input;
+    invalid.values = .fromShape(input.values.shape().withDtype(.u8));
+    try std.testing.expectError(error.InvalidValueDtype, invalid.validate());
+
+    invalid = input;
+    invalid.scales.values = .init(.{ .m = 2, .k = 2 }, .u8);
+    try std.testing.expectError(error.InvalidScaleDtype, invalid.validate());
+    invalid.scales.values = .init(.{ .m = 2, .k = 4 }, .f8e8m0);
+    try std.testing.expectError(error.InvalidScaleShape, invalid.validate());
+    invalid.scales.values = .init(.{4}, .f8e8m0);
+    try std.testing.expectError(error.InvalidScaleShape, invalid.validate());
+    invalid.scales.values = .init(.{ .m = 2, .k = 64 }, .f8e8m0);
+    try std.testing.expectError(error.InvalidScaleShape, invalid.validate());
+
+    invalid = input;
+    invalid.values = .init(.{ 64, 64 }, .f8e4m3fn);
+    try std.testing.expectError(error.InvalidScaleShape, invalid.validate());
+    invalid.values = .init(.{ 64, 64, 64 }, .f8e4m3fn);
+    invalid.scales.scaling = .{ .tile = 32 };
+    invalid.scales.values = .init(.{ 2, 2, 2 }, .f8e8m0);
+    try std.testing.expectError(error.InvalidScaleShape, invalid.validate());
+
+    invalid = input;
+    invalid.scales.values = .init(.{}, .f8e8m0);
+    for ([_]Scaling{ .{ .axis = 0 }, .{ .tile = 0 } }) |scaling| {
+        invalid.scales.scaling = scaling;
+        try std.testing.expectError(error.InvalidGroupSize, invalid.validate());
+    }
+    invalid = input;
+    invalid.scales.swizzled = true;
+    try std.testing.expectError(error.UnsupportedScaleLayout, invalid.validate());
+}
+
+test "dequantize applies logical E8M0 tile scales" {
+    const Local = struct {
+        fn forward() Tensor {
+            const shape: Shape = .init(.{ .n = 64, .k = 64 }, .f8e4m3fn);
+            const values = Tensor.scalar(2, .f8e4m3fn).broad(shape);
+            const native = Tensor.arange(.{ .end = 4 }, .i32).addConstant(126).convert(.u8)
+                .reshape(.{ .n = 2, .k = 2 }).bitCast(.f8e8m0);
+            return dequantize(.{ .values = values, .scales = .{
+                .scaling = .{ .tile = 32 },
+                .values = native,
+            } }, .f32);
+        }
+    };
+    const platform = zml.testing.env();
+    {
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.forward, .{}, .{});
+        defer exe.deinit();
+        var output = try exe.eval(std.testing.allocator, std.testing.io, {});
+        defer output.deinit();
+        const actual = try output.getValue([64][64]f32, std.testing.io);
+        const expected = [_]f32{ 1, 2, 4, 8 };
+        for (actual, 0..) |row, n| for (row, 0..) |value, k| {
+            try std.testing.expectEqual(expected[(n / 32) * 2 + k / 32], value);
+        };
+    }
+}
+
+test "dequantize expands tensor, axis and square tile grids including partial groups" {
+    const Case = struct { scaling: Scaling, scales: Shape, n_block: usize, k_block: usize };
+    const Local = struct {
+        fn forward(c: Case) Tensor {
+            const shape: Shape = .init(.{ .b = 2, .n = 5, .k = 7 }, .f8e4m3fn);
+            const values = Tensor.arange(.{ .end = 70 }, .i32).remainder(.scalar(3, .i32)).addConstant(-1).convert(.f8e4m3fn).reshape(shape);
+            const q: Scales = .{
+                .scaling = c.scaling,
+                .values = Tensor.arange(.{ .end = @intCast(c.scales.count()) }, .f32).addConstant(1).reshape(c.scales),
+                .global = .{ .value = Tensor.scalar(0.5, .f32), .operation = .multiply },
+            };
+            return dequantize(.{ .values = values, .scales = q }, .bf16).convert(.f32);
+        }
+    };
+    const platform = zml.testing.env();
+    for ([_]Case{
+        .{ .scaling = .tensor, .scales = .scalar(.f32), .n_block = 5, .k_block = 7 },
+        .{ .scaling = .tensor, .scales = .init(.{ .b = 2, .n = 1, .k = 1 }, .f32), .n_block = 5, .k_block = 7 },
+        .{ .scaling = .{ .axis = null }, .scales = .init(.{ .b = 2, .n = 1, .k = 7 }, .f32), .n_block = 5, .k_block = 1 },
+        .{ .scaling = .{ .axis = 2 }, .scales = .init(.{ .b = 2, .n = 3, .k = 7 }, .f32), .n_block = 2, .k_block = 1 },
+        .{ .scaling = .{ .tile = 3 }, .scales = .init(.{ .b = 2, .n = 2, .k = 3 }, .f32), .n_block = 3, .k_block = 3 },
+    }) |c| {
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.forward, .{c}, .{});
+        defer exe.deinit();
+        try zml.testing.expectEqualShapes(.init(.{ .b = 2, .n = 5, .k = 7 }, .f32), exe.output_shapes[0]);
+        var output = try exe.eval(std.testing.allocator, std.testing.io, {});
+        defer output.deinit();
+        const actual = try output.getValue([70]f32, std.testing.io);
+        for (actual, 0..) |value, i| {
+            const scale_index = if (c.scales.rank() == 0) 0 else ((i / 35) * @as(usize, @intCast(c.scales.dim(.n))) + (i / 7 % 5) / c.n_block) * @as(usize, @intCast(c.scales.dim(.k))) + (i % 7) / c.k_block;
+            const source: f32 = @floatFromInt(@as(i32, @intCast(i % 3)) - 1);
+            try std.testing.expectEqual(source * @as(f32, @floatFromInt(scale_index + 1)) / 2, value);
+        }
+    }
+}
+
+test "scale coverage distinguishes identical partial grids" {
+    const Local = struct {
+        fn forward(block: u32) Tensor {
+            const values = Tensor.scalar(1, .f8e4m3fn).broad(.init(.{ .k = 65 }, .f8e4m3fn));
+            return dequantize(.{ .values = values, .scales = .{
+                .values = Tensor.arange(.{ .end = 3 }, .f32).addConstant(1).withTags(.{.k}),
+                .scaling = .{ .axis = block },
+            } }, .f32);
+        }
+    };
+    const platform = zml.testing.env();
+    for ([_]u32{ 24, 32 }) |block| {
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.forward, .{block}, .{});
+        defer exe.deinit();
+        var output = try exe.eval(std.testing.allocator, std.testing.io, {});
+        defer output.deinit();
+        for (try output.getValue([65]f32, std.testing.io), 0..) |value, i| {
+            try std.testing.expectEqual(@as(f32, @floatFromInt(i / block + 1)), value);
+        }
+    }
+}
+
+test "Scales.reuseBuffer reuses scales while preserving coverage and scale polarity" {
+    const Local = struct {
+        fn forward(previous: Scales) Scales {
+            var next = previous;
+            next.values = previous.values.addConstant(1);
+            if (previous.global) |scale| next.global = .{ .value = scale.value.addConstant(2), .operation = scale.operation };
+            next.scaling = .{ .axis = null };
+            const result = next.reuseBuffer(previous);
+            std.debug.assert(result.scaling.eql(next.scaling));
+            if (result.global) |scale| std.debug.assert(scale.operation == .divide);
+            return result;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    for ([_]bool{ false, true }) |with_global| {
+        const previous: Scales = .{
+            .scaling = .{ .axis = 32 },
+            .values = .init(.{ .m = 2, .k = 1 }, .f32),
+            .global = if (with_global) .{ .value = .init(.{}, .f32), .operation = .divide } else null,
+        };
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{previous}, .{});
+        defer exe.deinit();
+        var buffers: zml.Bufferized(Scales) = .{
+            .values = try .fromBytes(io, platform, previous.values.shape(), std.mem.asBytes(&[2]f32{ 1, 2 })),
+            .global = null,
+        };
+        defer zml.Buffer.deinitAll(Scales, &buffers);
+        if (with_global) buffers.global = .{ .value = try .fromBytes(io, platform, .scalar(.f32), std.mem.asBytes(&@as(f32, 2))) };
+        var runner = try exe.runner(allocator);
+        defer runner.deinit(allocator);
+        for (0..2) |step| {
+            const scales_ptr = buffers.values.opaqueDevicePtr(0);
+            const global_ptr = if (buffers.global) |scale| scale.value.opaqueDevicePtr(0) else null;
+            runner.run(io, .{buffers}, .{&buffers}, .{ .wait = true });
+            try std.testing.expectEqual(scales_ptr, buffers.values.opaqueDevicePtr(0));
+            const expected: f32 = @floatFromInt(step + 2);
+            try std.testing.expectEqual([2]f32{ expected, expected + 1 }, try buffers.values.getValue([2]f32, io));
+            if (buffers.global) |scale| {
+                try std.testing.expectEqual(global_ptr.?, scale.value.opaqueDevicePtr(0));
+                try std.testing.expectEqual(expected * 2, try scale.value.getValue(f32, io));
+            }
         }
     }
 }
