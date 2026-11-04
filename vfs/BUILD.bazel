@@ -10,7 +10,6 @@ zig_library(
         "http.zig",
         "http_acceptance_test.zig",
         "mock_server.zig",
-        "parallel_read.zig",
         "range_read.zig",
         "request.zig",
         "s3.zig",

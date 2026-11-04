@@ -741,9 +741,8 @@ pub const S3 = struct {
         return request.perform(u64, &self.governor, .{ .target = url, .key = request.authorityOf(uri) }, &head, SizeRequest.attempt);
     }
 
-    /// The object's size: one signed HEAD (`ExchangeOptions.open`). S3
-    /// answers a principal without `s3:ListBucket` 403 for a missing key too,
-    /// so a missing key may open as `PermissionDenied`.
+    /// The object's size: one signed HEAD (`ExchangeOptions.open`; S3's 403
+    /// for a missing key: vfs.zig's header).
     const SizeRequest = struct {
         s3: *S3,
         uri: std.Uri,

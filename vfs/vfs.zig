@@ -2,28 +2,31 @@
 //! `file://` URI is served by the inner io; a URI such as
 //! `hf://org/model/model.safetensors` or `s3://bucket/key` by the backend
 //! registered for its scheme (`registerBackend`, or the four of `Remotes`).
-//! Readers take `io()` and need not know which they read; one that must (for
-//! read sizes and direct I/O) asks `fromIo`.
+//! Readers take `io()` and need not know which they read; one that must
+//! (the loader, for read sizes and direct I/O) asks `fromIo`.
 //!
 //! The VFS, and every backend registered on it, must outlive each file
-//! opened through it.
+//! opened through it and each reader that keeps one open: a `Loader` may
+//! keep its source files open until its `deinit`.
 //!
-//! Errors of a remote path on a backend that runs its requests through
-//! `request.zig` (`HTTP`, which serves `https://`): opening, stat-ing or
-//! probing it (`access`) fails with `FileNotFound` for a missing object
-//! (404, 410), `PermissionDenied` for a denied one (401, 403), `Canceled`
-//! for a canceled task, and `SystemResources` when a request cannot
-//! allocate. Any other failure of a request is logged at err with the
-//! backend and the path, and surfaces as `Unexpected`. A positional read
-//! that still fails after its retries is logged at err and surfaces as
-//! `Unexpected`; a streaming read as `InputOutput`. A throttled backend
-//! holds its requests rather than failing them, until its throttle budget
-//! runs out (`request.Retry`). A remote path is read-only: creating or
-//! deleting a file or a directory there, or opening a file for writing, is
-//! logged at err and fails with `ReadOnlyFileSystem`. A local file fails as
-//! the inner io does (a denied one is `AccessDenied` there); it may be read
-//! past the page cache (`useDirectIo`). A backend on `request.zig` logs its
-//! read totals at debug from its `deinit`.
+//! Errors of a remote path, alike on `HTTP`, `HF`, `S3` and `GCS`: opening,
+//! stat-ing or probing it (`access`) fails with `FileNotFound` for a missing
+//! object (404, 410, or a path absent from an `HF` repository's listing),
+//! `PermissionDenied` for a denied one (401, 403), `Canceled` for a canceled
+//! task, and `SystemResources` when a request cannot allocate. Any other
+//! failure of a request is logged at err with the backend and the path, and
+//! surfaces as `Unexpected`. On S3 a principal without `s3:ListBucket` gets
+//! 403 for a missing key too, so a probe of an optional object treats both
+//! as absent. A positional read that still fails after its retries is
+//! logged at err and surfaces as `Unexpected`; a streaming read as
+//! `InputOutput`. A throttled backend holds its requests rather than failing
+//! them, until its throttle budget runs out (`request.Retry`). A remote path
+//! is read-only: creating or deleting a file or a directory there, or
+//! opening a file for writing, is logged at err and fails with
+//! `ReadOnlyFileSystem`. A local file fails as the inner io does (a denied
+//! one is `AccessDenied` there); it may be read past the page cache
+//! (`useDirectIo`). Each remote backend logs its read totals at debug from
+//! its `deinit`.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -122,7 +125,8 @@ pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) std.mem
 /// `HTTP.init` for `https`), the client honoring the proxy variables.
 /// Initialized in place, since the backends point at the client; it must not
 /// move afterwards. Close every file opened through these schemes before
-/// `deinit`; the VFS must not reach them after it.
+/// `deinit` (deinitialize a `Loader` first); the VFS must not reach them
+/// after it. Their errors follow this module's contract.
 pub const Remotes = struct {
     /// The proxies' allocations, which must outlive the client.
     arena: std.heap.ArenaAllocator,
