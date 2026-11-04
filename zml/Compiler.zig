@@ -366,16 +366,13 @@ pub fn mesh(compiler: *const Compiler, name: @EnumLiteral()) *const Sharding.Mes
 /// Find a mesh that covers all the given axes
 pub fn resolveMesh(compiler: *const Compiler, logical_axes: anytype) *const Sharding.Mesh {
     if (@TypeOf(logical_axes) != []const Shape.Tag) {
-        const comp_tags = comptime Shape.parseTags(logical_axes);
-        const parsed_tags: []const Shape.Tag = comptime comp_tags.constSlice();
-        return compiler.resolveMesh(parsed_tags);
+        return compiler.resolveMesh(comptime Shape.parseTags(logical_axes));
     }
 
     var ok_meshe: ?*const Sharding.Mesh = null;
     for (compiler.meshes) |shd| {
         var covers_all: bool = true;
-        for (logical_axes) |ax| {
-            const input_axis = Shape.toTag(ax);
+        for (logical_axes) |input_axis| {
             var covers_this: bool = false;
             for (shd.logical.axes.slice()) |existing_axis| {
                 if (std.mem.eql(u8, std.mem.span(existing_axis), std.mem.span(input_axis))) {
