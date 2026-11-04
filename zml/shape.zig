@@ -808,6 +808,19 @@ pub const Shape = struct {
         }
     }
 
+    pub fn assertTags(self: Shape, tagz: anytype) void {
+        const T = @TypeOf(tagz);
+        if (T == Shape) {
+            return self.assertTags(tagz.tags());
+        } else if (T != []const Shape.Tag) {
+            const parsed_tags: []const Shape.Tag = comptime parseTags(tagz).constSlice();
+            return self.assertTags(parsed_tags);
+        }
+
+        stdx.debug.assert(tagz.len == self.rank(), "Not enough tags for shape {f}, got {}", .{ self, stdx.fmt.stringsZ(tagz) });
+        stdx.debug.assert(std.mem.eql(Shape.Tag, tagz, self.tags()), "Expected tags {f}, got {f}", .{ stdx.fmt.stringsZ(tagz), self });
+    }
+
     pub fn withDtype(self: Shape, dt: DataType) Shape {
         var res = self;
         res._dtype = dt;
