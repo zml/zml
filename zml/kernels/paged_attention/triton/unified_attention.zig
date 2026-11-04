@@ -1020,6 +1020,25 @@ fn reduceSegments(
     const query_token_idx = k.programId(.x);
     const query_head_idx = k.programId(.y);
 
+    const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
+    const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+        offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
+    else
+        k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
+    const output_offset = query_token_idx.to(.i64).mul(output_stride_0)
+        .add(query_head_idx.to(.i64).mul(output_stride_1))
+        .add(offs_d.to(.i64));
+
+    // The launch covers the padded query capacity, but the attention pass only
+    // writes scratch for active tokens. Zero the tail before looking up a
+    // sequence or dividing by its segment size (zero for inactive sequences).
+    const active_tokens = k.load(query_start_len_ptr.addPtr(num_seqs));
+    const inactive = query_token_idx.ge(active_tokens);
+    k.storeOpts(output_ptr.addPtr(output_offset), k.zeros(&.{HEAD_SIZE_PADDED}, config.o_dtype), .{
+        .mask = dim_mask.bitAnd(inactive),
+    });
+    k.returnIf(inactive);
+
     const seq_idx = findSeqIdx(k, query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, false);
 
     const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
@@ -1028,12 +1047,6 @@ fn reduceSegments(
 
     const seg_range = k.arange(0, NUM_SEGMENTS_PER_SEQ, .i32);
     const segm_mask = seg_range.lt(act_num_segments);
-
-    const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
-    const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
-        offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
-    else
-        k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
 
     // segm_offset = query_token_idx*NQH*NSPS + query_head_idx*NSPS + arange(NSPS)
     const tok_stride: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ;
@@ -1100,9 +1113,6 @@ fn reduceSegments(
         );
     }
 
-    const output_offset = query_token_idx.to(.i64).mul(output_stride_0)
-        .add(query_head_idx.to(.i64).mul(output_stride_1))
-        .add(offs_d.to(.i64));
     k.storeOpts(
         output_ptr.addPtr(output_offset),
         acc.to(config.o_dtype),
