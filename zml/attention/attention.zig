@@ -93,6 +93,12 @@ pub const Metadata = union(BackendType) {
     }
 };
 
+pub const Options = struct {
+    /// Query j sees the keys up to token_index + j, as in a decoder. Otherwise every query sees every
+    /// key, as in an encoder or a diffusion transformer, and token_index is ignored.
+    causal: bool = true,
+};
+
 /// Causal attention as used in transformers.
 ///
 /// **Shapes**:
@@ -105,18 +111,26 @@ pub const Metadata = union(BackendType) {
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+    return attentionOpts(q, k, v, token_index, metadata, parameters, .{});
+}
+
+/// `attention`, causal or not depending on `opts`.
+pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: Options) zml.Tensor {
     return switch (parameters) {
         .stablehlo => b: {
             // Generate the attention mask.
             const seq_len = k.dim(.k);
-            var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
-
             // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
             // then slice into it, but XLA is able to optimize this correctly.
-            attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.appendAxes(.{.coord}), .{});
+            const attn_mask: ?zml.Tensor = if (opts.causal)
+                zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null)
+                    .gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, q.dtype()), token_index.appendAxes(.{.coord}), .{})
+            else
+                null;
+
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
             break :b attn_output;
         },
-        .flash_attention => flash_attention.attention(q, k, v, token_index, metadata.flash_attention, parameters.flash_attention),
+        .flash_attention => flash_attention.attention(q, k, v, token_index, metadata.flash_attention, parameters.flash_attention, opts),
     };
 }
