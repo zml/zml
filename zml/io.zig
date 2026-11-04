@@ -184,19 +184,22 @@ pub const TensorStore = struct {
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
-            const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
-            const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
+            const parsed_tags: ?[]const Shape.Tag = comptime parseTags(tags);
             if (mesh_ == .replicated) {
-                return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .replicated);
+                return self.maybeCreateTensorInternal(subkey, parsed_tags, .replicated);
             }
+
             const resolved_mesh = self.store.mesh(mesh_);
+            if (@TypeOf(partitioning) == Sharding.Partitioning) {
+                return self.maybeCreateTensorInternal(subkey, parsed_tags, .{ .mesh = resolved_mesh, .partition = partitioning });
+            }
             // Unspecified tensor axes are treated as replicated
-            const partition: Sharding.Partitioning = if (has_tags)
-                .parse(parsed_tags.constSlice(), resolved_mesh, .replicated, partitioning)
+            const partition: Sharding.Partitioning = if (parsed_tags) |p_tags|
+                .parse(p_tags, resolved_mesh, .replicated, partitioning)
             else
                 partitioning;
-            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .{ .mesh = resolved_mesh, .partition = partition });
+            return self.maybeCreateTensorInternal(subkey, parsed_tags, .{ .mesh = resolved_mesh, .partition = partition });
         }
 
         pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
@@ -204,8 +207,8 @@ pub const TensorStore = struct {
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
-            const tensor = self.maybeCreateTensor(subkey, tags, mesh_, partitioning);
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+            const tensor = self.maybeCreateTensor(subkey, comptime parseTags(tags), mesh_, partitioning);
             if (tensor) |t| {
                 const storage = self.store.id_to_sources.getPtr(t.id);
                 storage.?.memory = .host_pinned;
@@ -214,10 +217,7 @@ pub const TensorStore = struct {
         }
 
         pub fn createReplicatedTensor(self: View, subkey: []const u8, tags: anytype) Tensor {
-            const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
-            const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-
-            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, .replicated) orelse
+            return self.maybeCreateTensorInternal(subkey, comptime parseTags(tags), .replicated) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
@@ -242,6 +242,11 @@ pub const TensorStore = struct {
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
+        }
+
+        /// Accepts "null" as tags
+        fn parseTags(tags: anytype) ?[]const Shape.Tag {
+            return if (@TypeOf(tags) == @TypeOf(null)) null else Shape.parseTags(tags);
         }
 
         pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
