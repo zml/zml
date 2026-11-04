@@ -1515,6 +1515,10 @@ pub const LogicalMesh = struct {
         return .{ .axes = axes, .intents = intents, .dimensions = @splat(-1) };
     }
 
+    pub fn hasAxis(m: *const LogicalMesh, logical_ax: Shape.Tag) ?u3 {
+        return @truncate(std.mem.findScalar(Shape.Tag, m.axes.slice(), logical_ax) orelse return null);
+    }
+
     pub fn intent(self: LogicalMesh, tag: Shape.Tag) ?LogicalAxisIntent {
         const target = std.mem.span(tag);
         for (self.axes.slice(), self.intents.slice()) |t, i| {
@@ -1680,13 +1684,17 @@ pub const Mesh = struct {
         return @divExact(self.numDevices(), self.numPartitions());
     }
 
+    pub fn axis(mesh: *const Mesh, ax: @EnumLiteral()) u3 {
+        return mesh.logical.hasAxis(Shape.toTag(ax)) orelse std.debug.panic("Mesh(name={s}) doesn't have axis {}: {f}", .{mesh.name, ax, mesh.logical });
+    }
+
     pub fn sdyMeshAttr(self: *const Mesh, ctx: *mlir.Context) *const shardy.MeshAttr {
         var axes: stdx.BoundedArray(*const shardy.MeshAxisAttr, MAX_MESH_RANK + 1) = .empty;
         var tile_count: usize = 1;
-        for (self.logical.axes.slice(), 0..) |axis, i| {
+        for (self.logical.axes.slice(), 0..) |ax, i| {
             const size = self.grid.axis_sizes[i];
             tile_count *= size;
-            axes.appendAssumeCapacity(.get(ctx, .{ .name = std.mem.span(axis), .size = @intCast(size) }));
+            axes.appendAssumeCapacity(.get(ctx, .{ .name = std.mem.span(ax), .size = @intCast(size) }));
         }
         const replicas = @divExact(self.grid.device_count, tile_count);
         if (replicas > 1) {
@@ -1697,8 +1705,8 @@ pub const Mesh = struct {
         for (0..self.grid.device_count) |partition_index| {
             const coords: [MAX_MESH_RANK]u8 = self.grid.logical_coords[partition_index];
             var tile_index: usize = 0;
-            for (0..self.logical.axes.len) |axis| {
-                tile_index = tile_index * self.grid.axis_sizes[axis] + coords[axis];
+            for (0..self.logical.axes.len) |ax| {
+                tile_index = tile_index * self.grid.axis_sizes[ax] + coords[ax];
             }
             // Device IDs here are executable partition indices, not PJRT device IDs.
             ids[tile_index * replicas + replica_indices[tile_index]] = @intCast(partition_index);
@@ -1711,8 +1719,8 @@ pub const Mesh = struct {
         // There are at most MAX_MESH_RANK logical names, so one candidate is free.
         inline for (0..MAX_MESH_RANK + 1) |i| {
             const name = std.fmt.comptimePrint("__replica_{d}", .{i});
-            const taken = for (self.logical.axes.slice()) |axis| {
-                if (std.mem.eql(u8, std.mem.span(axis), name)) break true;
+            const taken = for (self.logical.axes.slice()) |ax| {
+                if (std.mem.eql(u8, std.mem.span(ax), name)) break true;
             } else false;
             if (!taken) return name;
         }
@@ -1781,16 +1789,16 @@ pub const Mesh = struct {
                 .replicated => .replicated(ctx),
                 .open => .open(ctx, &.{}),
                 else => d: {
-                    const axis = shape.partition(ax).meshAxis().?;
-                    used[axis] = true;
-                    break :d .closed(ctx, &.{.named(ctx, std.mem.span(data.logical.axes.get(axis)))});
+                    const ax = shape.partition(i).meshAxis().?;
+                    used[ax] = true;
+                    break :d .closed(ctx, &.{.named(ctx, std.mem.span(data.logical.axes.get(ax)))});
                 },
             };
         }
 
         var replicated_axes: stdx.BoundedArray(*const shardy.AxisRefAttr, MAX_MESH_RANK + 1) = .empty;
         var tile_count: usize = 1;
-        for (data.logical.axes.slice(), 0..) |axis, i| {
+        for (data.logical.axes.slice(), 0..) |ax, i| {
             tile_count *= data.grid.axis_sizes[i];
             // Open dimensions can acquire unused logical axes during inference.
             // Only reserve those axes for replication when every dimension is closed.
@@ -1810,8 +1818,8 @@ pub const Mesh = struct {
 
         var tile_shape: stdx.BoundedArray(i64, Shape.MAX_RANK + 1) = .empty;
         var tile_count: usize = 1;
-        for (0..shape.rank()) |ax| {
-            const size = if (shape.partition(ax).meshAxis()) |axis| self.grid.axis_sizes[axis] else 1;
+        for (0..shape.rank()) |i| {
+            const size = if (shape.partition(i).meshAxis()) |ax| self.grid.axis_sizes[ax] else 1;
             tile_shape.appendAssumeCapacity(size);
             tile_count *= size;
         }
