@@ -23,6 +23,7 @@ const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
+const TensorStore = @import("io.zig").TensorStore;
 
 const Compiler = @This();
 const log = std.log.scoped(.@"zml/Compiler");
@@ -31,6 +32,7 @@ allocator: std.mem.Allocator,
 io: std.Io,
 arena: std.heap.ArenaAllocator,
 
+options: Options,
 mlir_registry: *mlir.DialectRegistry,
 mlir_ctx: *mlir.Context,
 mlir_pass_manager: *mlir.PassManager,
@@ -77,6 +79,7 @@ pub const Options = struct {
     /// Incremented once after successful compilation.
     progress: std.Progress.Node = .none,
     meshes: []const *const Sharding.Mesh = &.{},
+    store: ?*const TensorStore = null,
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
     /// HACK: Extra bytes added to the device memory size reported to XLA.
@@ -194,6 +197,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .mlir_known_types = mlir_known_types,
         .module = module,
         .platform = platform,
+        .options = opts,
         .partitioner = opts.partitioner orelse .fromTarget(platform.target),
         .meshes = meshes,
         .location = unknown_location,
@@ -288,6 +292,7 @@ test pushLocation {
         .mlir_pass_manager = undefined,
         .mlir_known_types = undefined,
         .module = undefined,
+        .options = .{},
         .platform = undefined,
         .partitioner = undefined,
         .meshes = undefined,
@@ -620,8 +625,15 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{ O
                 return error.OpenShardingAtBoundaries;
             }
             const packed_shape = og_shape.packedShape();
-            const mlir_type = mlirx.Type.rankedTensor(ctx.compiler.mlir_ctx, packed_shape);
-            var value = ctx.scope.block.addArgument(mlir_type, .unknown(ctx.compiler.mlir_ctx));
+            const mlir_ctx = ctx.compiler.mlir_ctx;
+            const mlir_type = mlirx.Type.rankedTensor(mlir_ctx, packed_shape);
+            var location: *const mlir.Location = ctx.compiler.unknown_location;
+            if (ctx.compiler.options.store) |store| {
+                if (store.id_to_sources.get(tensor.id)) |sources| {
+                    location = location.named(mlir_ctx, sources.tensors[0].name);
+                }
+            }
+            var value = ctx.scope.block.addArgument(mlir_type, location);
 
             // But immediately create the MLIR value corresponding to the fp4 data.
             // That way the user code only sees a proper fp4 tensor.
