@@ -30,7 +30,7 @@ pub const Backend = enum {
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
-            .cuda => .triton,
+            .cuda => if (cute.isAvailable(platform)) .cute else .triton,
             .rocm => .triton,
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
