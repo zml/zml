@@ -104,8 +104,8 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
             .cute => if (scheme) |s| switch (s) {
-                .mxfp4 => .{ .gate_up = .interleaved_8, .packing = .mxfp4_interleaved8 },
-                .nvfp4 => .{ .gate_up = .interleaved_1, .packing = .swizzled_scales },
+                .mxfp4 => .{ .gate_up = .row_interleaved_8, .packing = .mxfp4_interleaved8 },
+                .nvfp4 => .{ .gate_up = .row_interleaved_1, .packing = .swizzled_scales },
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme) |s| switch (s) {
@@ -113,7 +113,7 @@ pub const Backend = enum {
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
-            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
+            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .row_interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
 

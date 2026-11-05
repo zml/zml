@@ -199,8 +199,8 @@ fn packFp4Bytes(weight: Tensor) Tensor {
 fn prepareGateUp(tensor: Tensor, layout: ExpertsLayout) Tensor {
     return switch (layout.gate_up) {
         .concatenated => tensor,
-        .interleaved_1 => interleave(tensor, 1),
-        .interleaved_8 => interleave(tensor, 8),
+        .row_interleaved_1 => interleave(tensor, 1),
+        .row_interleaved_8 => interleave(tensor, 8),
     };
 }
 

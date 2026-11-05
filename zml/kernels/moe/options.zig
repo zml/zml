@@ -56,8 +56,8 @@ pub const Activation = union(ActivationKind) {
                 const mid = @divFloor(x.dim(.out), 2);
                 var gate, var up = switch (layout) {
                     .concatenated => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
-                    .interleaved_1 => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
-                    .interleaved_8 => blk: {
+                    .row_interleaved_1 => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
+                    .row_interleaved_8 => blk: {
                         const grouped = x.splitAxis(.out, .{ .group = @divExact(mid, 8), .pair = 2, .row = 8 });
                         break :blk .{
                             grouped.slice(.pair, .{ .end = 1 }).merge(.{ .out = .{ .group, .pair, .row } }),
@@ -103,7 +103,11 @@ pub const Activation = union(ActivationKind) {
 
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
-pub const ProjectionLayout = enum { concatenated, interleaved_1, interleaved_8 };
+pub const ProjectionLayout = enum {
+    concatenated, // G0 G1 … Gn U0 U1 … Un
+    row_interleaved_1, // G0 U0 G1 U1 …
+    row_interleaved_8, // G0…G7 U0…U7 G8…G15 U8…U15 …
+};
 
 /// How a backend expects the expert weights to be stored
 /// The packer writes this layout and forwardMoe reads it
