@@ -54,7 +54,7 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     inputs.sinks = inputs.sinks.withPartitioning(mesh, .{ ._0 = .model });
 
     const compile_start: std.Io.Timestamp = .now(io, .awake);
-    const exe = try platform.compileFn(a, io, fixtures.forward, .{ inputs, global_case }, .{
+    const exe = try platform.compileFn(a, io, forward, .{ inputs, global_case, mesh }, .{
         .program_name = "paged_attention_harness",
         .meshes = &.{mesh},
     });
@@ -112,6 +112,31 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
         median,
         samples[sample_count / 10],
         samples[(sample_count - 1) * 9 / 10],
+    });
+}
+
+fn forward(inputs: Inputs, c: cases.Case, mesh: *const zml.Mesh) zml.Tensor {
+    const Call = struct {
+        inputs: Inputs,
+        case: cases.Case,
+
+        fn local(self: @This(), _: zml.Shape) zml.Tensor {
+            return fixtures.forward(self.inputs, self.case);
+        }
+    };
+    const heads: zml.Sharding.Partitioning.Logical = .parse(.{ .hkv = .model });
+    return zml.ops.manualComputation2(Call.local, .{ .inputs = inputs, .case = c }, inputs.q.shape(), mesh, .{
+        .in_specs = .{ .inputs = .{
+            .q = heads,
+            .k = heads,
+            .v = heads,
+            .table = .replicated,
+            .lengths = .replicated,
+            .starts = .replicated,
+            .sinks = .parse(.{ ._0 = .model }),
+            .indices = .replicated,
+        } },
+        .out_specs = heads,
     });
 }
 

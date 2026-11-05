@@ -3,7 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../zml.zig");
-const cute = @import("cute/cute.zig");
+pub const cute = @import("cute/cute.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
 const stablehlo = @import("stablehlo/stablehlo.zig");
@@ -247,33 +247,47 @@ pub const KvCache = union(enum) {
     }
 };
 
-pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
+pub const Partitioning = zml.ops.ManualPartitioning(Attention.forward);
+
+pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions, mesh: *const zml.Mesh, partitioning: Partitioning) zml.Tensor {
     _ = k;
     _ = v;
-    return switch (parameters) {
-        .cute => |p| switch (kv_cache) {
-            .split => |split| cute.pagedAttention(p, q, split.k, split.v, opts),
-            .dense => @panic("CuTe paged attention requires split KV pages"),
-        },
-        .triton => |triton_parameters| switch (kv_cache) {
-            .split => |split| triton.paged.pagedAttention(triton_parameters, q, split.k, split.v, opts),
-            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
-        },
-        .mosaic_tpu => |mosaic_tpu_parameters| switch (kv_cache) {
-            .split => std.debug.panic("split KV pages is not supported with the mosaic_tpu backend", .{}),
-            .dense => tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, q, kv_cache.dense, opts),
-        },
-        .metal => |metal_parameters| switch (kv_cache) {
-            .split => |split| metal.pagedAttention(metal_parameters, q, split.k, split.v, opts),
-            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
-        },
-        .stablehlo => |params| stablehlo.pagedAttention(params, q, kv_cache, opts),
-        .tcl => |params| switch (kv_cache) {
-            .split => |split| tcl.paged.pagedAttention(params, q, split.k, split.v, opts),
-            .dense => std.debug.panic("TCL paged attention takes separate K and V pages", .{}),
-        },
-    };
+    const args: Attention = .{ .parameters = parameters, .q = q, .kv_cache = kv_cache, .opts = opts };
+    return zml.ops.manualComputation2(Attention.forward, args, q.shape(), mesh, partitioning);
 }
+
+const Attention = struct {
+    parameters: Parameters,
+    q: zml.Tensor,
+    kv_cache: KvCache,
+    opts: AttentionOptions,
+
+    fn forward(args: @This(), _: zml.Shape) zml.Tensor {
+        return switch (args.parameters) {
+            .cute => |p| switch (args.kv_cache) {
+                .split => |split| cute.pagedAttention(p, args.q, split.k, split.v, args.opts),
+                .dense => @panic("CuTe paged attention requires split KV pages"),
+            },
+            .triton => |triton_parameters| switch (args.kv_cache) {
+                .split => |split| triton.paged.pagedAttention(triton_parameters, args.q, split.k, split.v, args.opts),
+                .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            },
+            .mosaic_tpu => |mosaic_tpu_parameters| switch (args.kv_cache) {
+                .split => std.debug.panic("split KV pages is not supported with the mosaic_tpu backend", .{}),
+                .dense => tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, args.q, args.kv_cache.dense, args.opts),
+            },
+            .metal => |metal_parameters| switch (args.kv_cache) {
+                .split => |split| metal.pagedAttention(metal_parameters, args.q, split.k, split.v, args.opts),
+                .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            },
+            .stablehlo => |params| stablehlo.pagedAttention(params, args.q, args.kv_cache, args.opts),
+            .tcl => |params| switch (args.kv_cache) {
+                .split => |split| tcl.paged.pagedAttention(params, args.q, split.k, split.v, args.opts),
+                .dense => std.debug.panic("TCL paged attention takes separate K and V pages", .{}),
+            },
+        };
+    }
+};
 
 test "Backend.auto selects mosaic_tpu on TPU" {
     const platform: zml.Platform = .{
@@ -463,11 +477,25 @@ test pagedAttention {
             backend_options_args.backend = backend;
             const parameters: Parameters = .init(.fromBackend(backend_options_args));
 
+            const head_spec: zml.Sharding.Partitioning.Logical = .parse(.{ .hkv = .model });
+            const ParameterSpecs = zml.meta.MapRestrict(zml.Tensor, zml.Sharding.Partitioning.Logical).map(Parameters);
+            const partitioning: Partitioning = .{
+                .in_specs = .{
+                    .parameters = switch (parameters) {
+                        inline else => |_, tag| @unionInit(ParameterSpecs, @tagName(tag), .{ .block_table = .replicated, .seq_lens = .replicated, .query_start_len = .replicated }),
+                    },
+                    .q = head_spec,
+                    .kv_cache = .{ .split = .{ .k = head_spec, .v = head_spec } },
+                    .opts = .{ .mask = .{ .standard = {} }, .sink = null },
+                },
+                .out_specs = head_spec,
+            };
+
             const exe = try platform.compileFn(
                 allocator,
                 io,
                 pagedAttention,
-                .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, test_case.attention_options },
+                .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, test_case.attention_options, tp, partitioning },
                 .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{s}_{t}", .{ test_case.name, backend }), .meshes = meshes },
             );
             defer exe.deinit();

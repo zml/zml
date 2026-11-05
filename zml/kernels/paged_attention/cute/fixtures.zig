@@ -122,7 +122,7 @@ pub fn forward(i: Inputs, c: cases.Case) zml.Tensor {
             },
         },
     };
-    return zml.paged_attention.pagedAttention(parameters, i.q, i.k, i.v, .{ .split = .{ .k = i.k, .v = i.v } }, i.options(c));
+    return zml.paged_attention.cute.pagedAttention(parameters.cute, i.q, i.k, i.v, i.options(c));
 }
 
 pub fn upload(io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {

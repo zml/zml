@@ -153,32 +153,28 @@ pub const mosaic_tpu = struct {
             "mosaic_tpu ragged paged attention q head_dim {} exceeds kernel/cache head_dim {}",
             .{ q.dim(.hd), target_head_dim },
         );
-        var q_padded = q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } });
-        q_padded._shape._sharding = q._shape._sharding;
-        return q_padded;
+        return q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } });
     }
 
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
-        const mesh = zml.Compiler.current().resolveMesh(.{.model});
-        const kv_pages_partitioned = kv_pages.withPartitioning(mesh, .{ .hkv = .model });
-        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(mesh, .{ .h = .model });
+        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } });
         const logical_head_dim: usize = @intCast(q_merged.dim(.hd));
-        const cache_head_dim: usize = @intCast(kv_pages_partitioned.dim(.hd));
+        const cache_head_dim: usize = @intCast(kv_pages.dim(.hd));
         stdx.debug.assert(
             cache_head_dim == alignedKernelHeadDim(logical_head_dim),
             "mosaic_tpu ragged paged attention expects KV cache head_dim {} to match aligned logical head_dim {}",
             .{ cache_head_dim, logical_head_dim },
         );
-        const q_ragged = alignQueryHeadDimForKernel(q_merged, kv_pages_partitioned.dim(.hd));
-        const query_start_len = parameters.query_start_len.withPartitioning(mesh, .{ .b = .replicated });
+        const q_ragged = alignQueryHeadDimForKernel(q_merged, kv_pages.dim(.hd));
+        const query_start_len = parameters.query_start_len;
 
         return .{
             .q = q_ragged,
-            .kv_pages = kv_pages_partitioned,
-            .seq_lens = parameters.seq_lens.withPartitioning(mesh, .{ ._0 = .replicated }),
-            .block_table = parameters.block_table.withPartitioning(mesh, .{ ._0 = .replicated, ._1 = .replicated }),
+            .kv_pages = kv_pages,
+            .seq_lens = parameters.seq_lens,
+            .block_table = parameters.block_table,
             .query_start_len = query_start_len,
-            .num_seqs = activeSequenceCount(query_start_len).withPartitioning(mesh, .{ ._0 = .replicated }),
+            .num_seqs = activeSequenceCount(query_start_len),
         };
     }
 
@@ -224,57 +220,9 @@ pub const mosaic_tpu = struct {
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         if (opts.mask == .indices) @panic("Sparse Attention is not supported on TPU");
-
         const prepared = prepareInputs(parameters, q, kv_cache);
-
-        const q_out = zml.ops.manualComputation(
-            (struct {
-                q: zml.Tensor,
-                kv_pages: zml.Tensor,
-                seq_lens: zml.Tensor,
-                block_table: zml.Tensor,
-                query_start_len: zml.Tensor,
-                num_seqs: zml.Tensor,
-                opts: AttentionOptions,
-                parameters: Parameters,
-
-                fn body(self: @This(), output: zml.Shape) zml.Tensor {
-                    const prepared_inputs: PreparedInputs = .{
-                        .q = self.q,
-                        .kv_pages = self.kv_pages,
-                        .seq_lens = self.seq_lens,
-                        .block_table = self.block_table,
-                        .query_start_len = self.query_start_len,
-                        .num_seqs = self.num_seqs,
-                    };
-
-                    const cfg = buildCfg(prepared_inputs, self.parameters, self.opts);
-                    const q_out = raggedPagedKernelCall(
-                        prepared_inputs.q,
-                        prepared_inputs.kv_pages,
-                        prepared_inputs.seq_lens,
-                        prepared_inputs.block_table,
-                        prepared_inputs.query_start_len,
-                        prepared_inputs.num_seqs,
-                        cfg,
-                    );
-                    stdx.debug.assert(q_out.shape().eql(output), "mosaic_tpu ragged paged attention output shape mismatch, got {f}, expected {f}", .{ q_out.shape(), output });
-                    return q_out;
-                }
-            }).body,
-            .{
-                .q = prepared.q,
-                .kv_pages = prepared.kv_pages,
-                .seq_lens = prepared.seq_lens,
-                .block_table = prepared.block_table,
-                .query_start_len = prepared.query_start_len,
-                .num_seqs = prepared.num_seqs,
-                .opts = opts,
-                .parameters = parameters,
-            },
-            prepared.q.shape(),
-        );
-
+        const cfg = buildCfg(prepared, parameters, opts);
+        const q_out = raggedPagedKernelCall(prepared.q, prepared.kv_pages, prepared.seq_lens, prepared.block_table, prepared.query_start_len, prepared.num_seqs, cfg);
         const restored = restoreQueryHeads(q, q_out);
         stdx.debug.assert(restored.shape().eql(q.shape()), "mosaic_tpu ragged paged attention output shape mismatch, got {f}, expected {f}", .{ restored.shape(), q.shape() });
         return restored;
