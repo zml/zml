@@ -154,8 +154,8 @@ pub const paged = struct {
         const table = parameters.block_table.pad(-1, .{ .p = Tensor.Pad{ .high = @divExact(cfg.a, page) - parameters.block_table.dim(.p) } });
         // WORKAROUND (TCC 2026.5.0b0): attention over query groups of a size
         // other than a power of two fails ("Inconsistent tensor group
-        // offsets", the 6 query heads per key head of Qwen3.8 27B): pad the
-        // groups with zero queries, whose outputs are dropped. Repro:
+        // offsets"): pad the groups with zero queries, whose outputs are
+        // dropped. Repro:
         // repro_flash_prefill_group6_inconsistent_offsets.py (zml/reproducer,
         // platform/furiosa). Remove once any group size compiles.
         const groups: i64 = @intCast(std.math.ceilPowerOfTwo(u64, @intCast(cfg.g)) catch unreachable);
