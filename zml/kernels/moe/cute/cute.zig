@@ -3,6 +3,7 @@
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
+const Scheme = zml.Quantization.Scheme;
 pub const kernels = @import("sm10x/moe.zig");
 
 // `moe.zig`'s `refAllDecls` reaches this file but not its imports, so the
@@ -49,39 +50,35 @@ pub fn fusedExperts(
     stdx.debug.assert(gate_up.bias == null and down.bias == null, "cute backend expects gate_up bias and down bias to be null", .{});
     const gq = gate_up.quantization orelse @panic("cute backend requires gate_up quantization to be set");
     const dq = down.quantization orelse @panic("cute backend requires down quantization to be set");
-    stdx.debug.assert(gq.scheme == dq.scheme, "cute expects gate_up and down quantization scheme to match, got {} and {}", .{ gq.scheme, dq.scheme });
+    stdx.debug.assert(Scheme.eql(gq.scheme, dq.scheme), "cute expects gate_up and down quantization scheme to match, got {} and {}", .{ gq.scheme, dq.scheme });
 
-    const format: Format = switch (gq.scheme) {
-        .mxfp4 => blk: {
-            // Weight storage for mxfp4 in HF is expressed as u8 or i8
-            stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
-            stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{down.weight.dtype()});
-            // Check the boundary quantizer and CuTe GEMM tile constraints.
-            kernels.validateMxfp4Shapes(down.weight.dim(1), down.weight.dim(2) * 2);
-            // The SwiGLU clamp is a kernel parameter, but the routing weight is
-            // multiplied in the up epilogue, before the down projection: applying it
-            // after would have to move into the down epilogue or the reduction.
-            stdx.debug.assert(options.routing_weight_placement == .before_down, "cute MXFP4 backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
-            break :blk .mxfp4;
-        },
-        .nvfp4 => blk: {
-            stdx.debug.assert(!options.quantize_input, "cute NVFP4 backend always quantizes its inputs to NVFP4", .{});
-            stdx.debug.assert(gq.swizzled_scales and dq.swizzled_scales, "cute NVFP4 backend expects swizzled block scales", .{});
-            stdx.debug.assert(gate_up.weight.dtype() == .u8 and down.weight.dtype() == .u8, "cute NVFP4 backend expects packed u8 weights, got {} and {}", .{ gate_up.weight.dtype(), down.weight.dtype() });
-            const scale = struct {
-                fn f(global: ?zml.Quantization.GlobalScale) zml.Tensor {
-                    return (global orelse @panic("cute NVFP4 backend requires global and input scales")).asMultiplier();
-                }
-            }.f;
-            break :blk .{ .nvfp4 = .{
-                .alpha1 = scale(gq.global_scale),
-                .alpha2 = scale(dq.global_scale),
-                .act1 = scale(gq.input_scale),
-                .act2 = scale(dq.input_scale),
-            } };
-        },
-        else => stdx.debug.panic("cute backend only supports mxfp4 and nvfp4 quantization, got {}", .{gq.scheme}),
-    };
+    const format: Format = if (Scheme.eql(gq.scheme, Scheme.mxfp4)) blk: {
+        // Weight storage for mxfp4 in HF is expressed as u8 or i8
+        stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
+        stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{down.weight.dtype()});
+        // Check the boundary quantizer and CuTe GEMM tile constraints.
+        kernels.validateMxfp4Shapes(down.weight.dim(1), down.weight.dim(2) * 2);
+        // The SwiGLU clamp is a kernel parameter, but the routing weight is
+        // multiplied in the up epilogue, before the down projection: applying it
+        // after would have to move into the down epilogue or the reduction.
+        stdx.debug.assert(options.routing_weight_placement == .before_down, "cute MXFP4 backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
+        break :blk .mxfp4;
+    } else if (Scheme.eql(gq.scheme, Scheme.nvfp4)) blk: {
+        stdx.debug.assert(!options.quantize_input, "cute NVFP4 backend always quantizes its inputs to NVFP4", .{});
+        stdx.debug.assert(gq.swizzled_scales and dq.swizzled_scales, "cute NVFP4 backend expects swizzled block scales", .{});
+        stdx.debug.assert(gate_up.weight.dtype() == .u8 and down.weight.dtype() == .u8, "cute NVFP4 backend expects packed u8 weights, got {} and {}", .{ gate_up.weight.dtype(), down.weight.dtype() });
+        const scale = struct {
+            fn f(global: ?zml.Quantization.GlobalScale) zml.Tensor {
+                return (global orelse @panic("cute NVFP4 backend requires global and input scales")).asMultiplier();
+            }
+        }.f;
+        break :blk .{ .nvfp4 = .{
+            .alpha1 = scale(gq.global_scale),
+            .alpha2 = scale(dq.global_scale),
+            .act1 = scale(gate_up.input_scale),
+            .act2 = scale(down.input_scale),
+        } };
+    } else stdx.debug.panic("cute backend only supports mxfp4 and nvfp4 quantization, got {any}", .{gq.scheme});
 
     const context: Context = .{
         .input = input,

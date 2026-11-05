@@ -3,6 +3,7 @@ const std = @import("std");
 const platforms = @import("platforms");
 
 const zml = @import("../../zml.zig");
+const Scheme = zml.Quantization.Scheme;
 const stdx = zml.stdx;
 pub const tcl = @import("tcl/tcl.zig");
 pub const stablehlo = @import("stablehlo/stablehlo.zig");
@@ -85,51 +86,29 @@ pub const Backend = enum {
     tcl,
 
     pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
-        // Keep the dtype as an argument because non scheme-specific backends may depend on it later
         _ = dtype;
         return switch (platform.target) {
-            .cuda => b: {
-                const s = scheme orelse break :b .triton;
-                break :b switch (s) {
-                    .mxfp4 => if (cute.isAvailable(platform))
-                        .cute
-                    else
-                        .triton,
-                    .nvfp4 => if (cute.isNvfp4Supported(platform))
-                        .cute
-                    else if (cutlass_flashinfer.isNvfp4Supported(platform))
-                        .flashinfer_cutlass
-                    else
-                        error.UnsupportedQuantization,
-                    .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
-                };
-            },
-            .rocm => b: {
-                const s = scheme orelse break :b .triton;
-                break :b switch (s) {
-                    .mxfp4 => if (zml.platform.rocm.computeCapability(platform) == .gfx942) .fly else .triton,
-                    .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
-                    .nvfp4 => error.UnsupportedQuantization,
-                };
-            },
-            .oneapi => b: {
-                const s = scheme orelse break :b .triton;
-                break :b switch (s) {
-                    .mxfp4 => .triton,
-                    .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => error.UnsupportedQuantization,
-                };
-            },
+            .cuda => if (Scheme.eql(scheme, Scheme.mxfp4))
+                (if (cute.isAvailable(platform)) .cute else .triton)
+            else if (Scheme.eql(scheme, Scheme.nvfp4))
+                (if (cute.isNvfp4Supported(platform)) .cute else if (cutlass_flashinfer.isNvfp4Supported(platform)) .flashinfer_cutlass else error.UnsupportedQuantization)
+            else if (triton.supportsScheme(scheme)) .triton else error.UnsupportedQuantization,
+            .rocm => if (Scheme.eql(scheme, Scheme.mxfp4) and zml.platform.rocm.computeCapability(platform) == .gfx942)
+                .fly
+            else if (triton.supportsScheme(scheme)) .triton else error.UnsupportedQuantization,
+            .oneapi => if (scheme == null or Scheme.eql(scheme, Scheme.mxfp4)) .triton else error.UnsupportedQuantization,
             .tpu => if (scheme == null) .mosaic_tpu else error.UnsupportedQuantization,
             .furiosa => if (scheme == null) .tcl else error.UnsupportedQuantization,
-            .metal => b: {
-                const s = scheme orelse break :b .metal;
-                break :b switch (s) {
-                    .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .metal,
-                    .mxfp4 => error.UnsupportedQuantization,
-                };
-            },
+            .metal => if (scheme == null or Scheme.eql(scheme, Scheme.nvfp4) or supportsMetalScheme(scheme.?)) .metal else error.UnsupportedQuantization,
             else => error.UnimplementedMoEBackend,
         };
+    }
+
+    fn supportsMetalScheme(scheme: Scheme) bool {
+        if (scheme.values != .f8e4m3fn and scheme.values != .f8e4m3fnuz and scheme.values != .f8e8m0) return false;
+        if (scheme.scales != .bf16 and scheme.scales != .f32 and scheme.scales != .f8e8m0) return false;
+        return Scheme.eql(scheme, Scheme.mxfp8) or Scheme.isPerAxis(scheme) or Scheme.isPerTensor(scheme) or
+            Scheme.isTiled(scheme, 32) or Scheme.isTiled(scheme, 128);
     }
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
@@ -155,13 +134,10 @@ pub const Backend = enum {
     pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
-            .cute => if (scheme == .mxfp4 or scheme == .nvfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
-            .flashinfer_cutlass => if (scheme) |s| switch (s) {
-                .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
-                else => error.UnsupportedQuantization,
-            } else error.UnsupportedQuantization,
+            .cute => if (Scheme.eql(scheme, Scheme.mxfp4) or Scheme.eql(scheme, Scheme.nvfp4)) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
+            .flashinfer_cutlass => if (Scheme.eql(scheme, Scheme.nvfp4)) .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
-            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
+            .triton, .fly => if (Scheme.eql(scheme, Scheme.mxfp4)) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
 

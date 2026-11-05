@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
+const Scheme = zml.Quantization.Scheme;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
@@ -33,6 +34,27 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+pub fn supportsScheme(scheme: ?Scheme) bool {
+    const s = scheme orelse return true;
+    if (Scheme.eql(s, Scheme.mxfp4) or Scheme.eql(s, Scheme.mxfp8)) return true;
+    if (s.values != .f8e4m3fn and s.values != .f8e4m3fnuz) return false;
+    if (s.scales != .bf16 and s.scales != .f32 and s.scales != .f8e8m0) return false;
+    if (Scheme.isTiled(s, 32)) return true;
+    return s.scales != .f8e8m0 and (Scheme.isPerAxis(s) or Scheme.isPerTensor(s) or Scheme.isTiled(s, 128));
+}
+
+test "Triton supports only its implemented weight formats" {
+    try std.testing.expect(supportsScheme(Scheme.mxfp8));
+    try std.testing.expect(supportsScheme(.{ .values = .f8e4m3fnuz, .scales = .bf16, .scaling = .{ .tile = 128 } }));
+    try std.testing.expect(!supportsScheme(.{ .values = .f8e8m0, .scales = .f32, .scaling = .{ .tile = 128 } }));
+    try std.testing.expect(!supportsScheme(.{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .tile = 64 } }));
+    try std.testing.expect(!supportsScheme(.{ .values = .f8e4m3fn, .scales = .f8e8m0, .scaling = .tensor }));
+    try std.testing.expect(!supportsScheme(.{ .values = .f8e4m3fn, .scales = .f16, .scaling = .{ .tile = 32 } }));
+    try std.testing.expect(!supportsScheme(.{ .values = .i8, .scales = .f32, .scaling = .tensor }));
+    try std.testing.expect(!supportsScheme(.{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .axis = 0 } }));
+    try std.testing.expect(!supportsScheme(.{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .tile = 0 } }));
+}
+
 pub fn fusedExperts(
     input: zml.Tensor,
     ids: zml.Tensor,
@@ -43,12 +65,9 @@ pub fn fusedExperts(
 ) zml.Tensor {
     // HACK(Corentin): only rely on the scheme of gate_up for now.
 
-    if (gate_up.quantization) |q| switch (q.scheme) {
-        .mxfp4 => if (zml.Compiler.current().platform.target == .cuda) {
-            return fusedExpertsMxfp4(input, ids, weights, gate_up, down, options);
-        },
-        else => {},
-    };
+    if (Scheme.eql(gate_up.quantizationScheme(), Scheme.mxfp4) and zml.Compiler.current().platform.target == .cuda) {
+        return fusedExpertsMxfp4(input, ids, weights, gate_up, down, options);
+    }
 
     return fusedExpertsBase(input, ids, weights, gate_up, down, options);
 }
@@ -62,7 +81,7 @@ pub fn fusedExpertsBase(
     opts: zml.moe.Options,
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
-    const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
+    const layout: zml.moe.ExpertsLayout = if (Scheme.eql(gate_up_scheme, Scheme.mxfp4))
         .{ .gate_up = .interleaved, .packing = .plain }
     else
         .{ .gate_up = .concatenated, .packing = .plain };
@@ -138,20 +157,16 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
 
     const gate_up_scheme = opts.gate_up.quantizationScheme();
     const down_scheme = opts.down.quantizationScheme();
-    if (gate_up_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("triton backend doesn't support gate_up nvfp4 quantization scheme", .{}),
-        .fp8_block128 => launch_config.block_size_k = 128,
-        .fp8_block32 => launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
-    };
+    if (gate_up_scheme) |scheme| {
+        if (Scheme.eql(scheme, Scheme.nvfp4)) stdx.debug.panic("triton backend doesn't support gate_up nvfp4 quantization scheme", .{});
+        if (scheme.scaling == .tile) launch_config.block_size_k = scheme.scaling.tile;
+    }
 
     var down_launch_config = launchConfigForTokens(num_tokens);
-    if (down_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("triton backend doesn't support down nvfp4 quantization scheme", .{}),
-        .fp8_block128 => down_launch_config.block_size_k = 128,
-        .fp8_block32 => down_launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
-    };
+    if (down_scheme) |scheme| {
+        if (Scheme.eql(scheme, Scheme.nvfp4)) stdx.debug.panic("triton backend doesn't support down nvfp4 quantization scheme", .{});
+        if (scheme.scaling == .tile) down_launch_config.block_size_k = scheme.scaling.tile;
+    }
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = opts.gate_up.weight.withTags(.{ .expert, .out, .in });
@@ -160,12 +175,12 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
     const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "triton backend expected BF16 hidden states, got {}", .{hidden.dtype()});
-    if (gate_up_scheme == .mxfp4) {
+    if (Scheme.eql(gate_up_scheme, Scheme.mxfp4)) {
         stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "triton backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4, got {}", .{gate_up.dtype()});
     } else {
         stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "triton backend expected gate_up data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{gate_up.dtype()});
     }
-    if (down_scheme == .mxfp4) {
+    if (Scheme.eql(down_scheme, Scheme.mxfp4)) {
         stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "triton backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4, got {}", .{down.dtype()});
     } else {
         stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "triton backend expected down data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{down.dtype()});
@@ -173,8 +188,8 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
 
     stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "triton backend expected f32 or bf16 routing weights, got {}", .{routing_weights.dtype()});
     stdx.debug.assert(ids.dtype() == .i32, "triton backend expected i32 expert ids, got {}", .{ids.dtype()});
-    const gate_up_k = gate_up.dim(.in) * @as(i64, if (gate_up_scheme == .mxfp4 and gate_up.dtype() != .f4e2m1) 2 else 1);
-    const down_k = down.dim(.mid) * @as(i64, if (down_scheme == .mxfp4 and down.dtype() != .f4e2m1) 2 else 1);
+    const gate_up_k = gate_up.dim(.in) * @as(i64, if (Scheme.eql(gate_up_scheme, Scheme.mxfp4) and gate_up.dtype() != .f4e2m1) 2 else 1);
+    const down_k = down.dim(.mid) * @as(i64, if (Scheme.eql(down_scheme, Scheme.mxfp4) and down.dtype() != .f4e2m1) 2 else 1);
     stdx.debug.assert(hidden.dim(.in) == gate_up_k, "triton backend expected hidden width to match gate/up input width, got {} and {}", .{ hidden.dim(.in), gate_up_k });
     const activation_reduction: i64 = switch (opts.activation) {
         .gelu, .relu, .silu => 1,
@@ -255,21 +270,27 @@ pub const GemmOptions = struct {
 };
 
 pub fn gemm(opts: GemmOptions) Tensor {
+    stdx.debug.assert(supportsScheme(opts.quant_scheme), "unsupported Triton quantization scheme {any}", .{opts.quant_scheme});
+    const logical_weight_scale: ?Tensor = if (opts.quant_scheme) |scheme| blk: {
+        const scales = opts.weight_scale orelse stdx.debug.panic("quantized MoE weights require scales", .{});
+        stdx.debug.assert(opts.weight.dtype() == scheme.values or zml.nn.isPackedFp4(scheme, opts.weight.dtype()), "scheme {any} does not match weight dtype {s}", .{ scheme, @tagName(opts.weight.dtype()) });
+        break :blk (zml.Quantization{ .scheme = scheme, .scales = scales }).logicalScales();
+    } else opts.weight_scale;
     // Native FP4 tensors expose logical K; the Triton operand is byte-packed.
-    const weight = if (opts.quant_scheme == .mxfp4 and opts.weight.dtype() == .f4e2m1)
+    const weight = if (Scheme.eql(opts.quant_scheme, Scheme.mxfp4) and opts.weight.dtype() == .f4e2m1)
         opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8)
     else
         opts.weight;
-    const weight_k = weight.dim(2) * @as(i64, if (opts.quant_scheme == .mxfp4) 2 else 1);
+    const weight_k = weight.dim(2) * @as(i64, if (Scheme.eql(opts.quant_scheme, Scheme.mxfp4)) 2 else 1);
     stdx.debug.assert(opts.input.dim(1) == weight_k, "input width {} must match logical weight K {}", .{ opts.input.dim(1), weight_k });
-    if (opts.quant_scheme == .mxfp4) {
+    if (Scheme.eql(opts.quant_scheme, Scheme.mxfp4)) {
         stdx.debug.assert(@mod(weight_k, 32) == 0 and opts.weight_scale != null, "MXFP4 requires K divisible by 32 and weight scales", .{});
         stdx.debug.assert(opts.input.dtype() == .bf16 and opts.input_scale == null, "MXFP4 requires BF16 activations without input scales", .{});
     }
 
-    if (opts.quant_scheme == .fp8_block32) {
-        const scales = opts.weight_scale orelse stdx.debug.panic("block32 FP8 requires weight scales", .{});
-        stdx.debug.assert(weight.dtype() == .f8e4m3fn and @mod(weight.dim(1), 32) == 0 and @mod(weight_k, 32) == 0, "block32 FP8 requires E4M3FN weights with N and K divisible by 32", .{});
+    if (Scheme.isTiled(opts.quant_scheme, 32)) {
+        const scales = logical_weight_scale orelse stdx.debug.panic("block32 FP8 requires weight scales", .{});
+        stdx.debug.assert(@mod(weight.dim(1), 32) == 0 and @mod(weight_k, 32) == 0, "block32 FP8 requires N and K divisible by 32", .{});
         stdx.debug.assert(scales.rank() == 3 and scales.dim(0) == weight.dim(0) and scales.dim(1) == @divExact(weight.dim(1), 32) and scales.dim(2) == @divExact(weight_k, 32), "block32 FP8 requires scales shaped [expert, N/32, K/32], got {f}", .{scales.shape()});
         stdx.debug.assert(scales.dtype() == .f8e8m0 or scales.dtype() == .bf16 or scales.dtype() == .f32, "unsupported block32 FP8 scale dtype {}", .{scales.dtype()});
     }
@@ -290,23 +311,20 @@ pub fn gemm(opts: GemmOptions) Tensor {
         @divExact(em_effective, block_size_m) *
         (std.math.divCeil(i64, weight.dim(1), block_size_n) catch unreachable);
 
-    const weight_scale: ?Tensor = if (opts.weight_scale) |scale| blk: {
+    const weight_scale: ?Tensor = if (logical_weight_scale) |scale| blk: {
         const scheme = opts.quant_scheme orelse break :blk scale;
-        break :blk switch (scheme) {
-            // dot_scaled takes E8M0 encodings as bytes, including native E8M0 tensors.
-            .mxfp4, .mxfp8 => scale.bitCast(.u8),
-            .fp8_per_channel => scale.reshape(.{ weight.dim(0), weight.dim(1), 1 }),
-            .fp8_per_tensor => if (scale.count() == 1) scale else scale.reshape(.{ weight.dim(0), 1, 1 }),
-            // Tiled FP8 uses ordinary dot products with FP32 scale arithmetic.
-            .fp8_block32 => scale.convert(.f32),
-            .fp8_block128, .nvfp4 => scale,
+        if (Scheme.eql(scheme, Scheme.mxfp4) or Scheme.eql(scheme, Scheme.mxfp8)) break :blk scale.bitCast(.u8);
+        break :blk switch (scheme.scaling) {
+            .axis => |size| if (size == null) scale.reshape(.{ weight.dim(0), weight.dim(1), 1 }) else unreachable,
+            .tensor => if (scale.count() == 1) scale else scale.reshape(.{ weight.dim(0), 1, 1 }),
+            .tile => if (Scheme.isTiled(scheme, 32)) scale.convert(.f32) else scale,
         };
     } else null;
 
     const stride_asm: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) scale.dim(1) else 0) else 0;
     const stride_ask: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) 1 else 0) else 0;
     const has_weight_scale_expert_stride = if (weight_scale) |scale|
-        !(opts.quant_scheme == .fp8_per_tensor and scale.count() == 1)
+        !(Scheme.isPerTensor(opts.quant_scheme) and scale.count() == 1)
     else
         false;
     const stride_bse: i64 = if (weight_scale) |scale| (if (scale.rank() == 3 and has_weight_scale_expert_stride) scale.dim(1) * scale.dim(2) else 0) else 0;
@@ -506,7 +524,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
 pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, output_dtype: zml.DataType, quantize: bool) struct { Tensor, ?Tensor } {
     if (quantize) {
         if (scheme) |scheme_| {
-            if (scheme_ != .mxfp4) {
+            if (!Scheme.eql(scheme_, Scheme.mxfp4)) {
                 const input, const scale = quantizeFp8Input(x, scheme_, output_dtype);
                 return .{ input, scale };
             }
@@ -516,13 +534,13 @@ pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, output_dtype: z
 }
 
 fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: DataType) struct { Tensor, Tensor } {
-    const group_size: i64, const scale_dtype: DataType, const absmax_epsilon: f32 = switch (scheme) {
-        .mxfp8 => .{ 32, .u8, 1e-10 },
-        .fp8_per_channel, .fp8_per_tensor => .{ x.dim(1), .f32, 1e-10 },
-        .fp8_block128 => .{ 128, .f32, 1e-10 },
-        .fp8_block32 => .{ 32, .f32, 1e-4 },
-        .mxfp4, .nvfp4 => unreachable,
+    const group_size: i64 = switch (scheme.scaling) {
+        .axis => |size| if (size) |n| n else x.dim(1),
+        .tensor => x.dim(1),
+        .tile => |size| size,
     };
+    const scale_dtype: DataType = if (Scheme.eql(scheme, Scheme.mxfp8)) .u8 else .f32;
+    const absmax_epsilon: f32 = if (Scheme.isTiled(scheme, 32)) 1e-4 else 1e-10;
     stdx.debug.assert(x.rank() == 2, "expected a rank-2 activation matrix, got {f}", .{x.shape()});
     stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "activation width must be divisible by group size {d}, got {d}", .{ group_size, x.dim(1) });
 
@@ -545,7 +563,7 @@ fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: Da
                 .output_dtype = toDType(output_dtype),
                 .scale_dtype = toDType(scale_dtype),
                 .block = std.math.ceilPowerOfTwoAssert(usize, @intCast(group_size)),
-                .quant_scheme = scheme,
+                .power_of_two_scales = Scheme.eql(scheme, Scheme.mxfp8) or Scheme.isTiled(scheme, 32),
             },
             .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
             .num_stages = 1,
@@ -615,22 +633,23 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
             return expanded.withTags(shape.tags());
         }
 
-        fn forward(x: Tensor, w: Tensor, scales: Tensor, ids: Tensor, weights: Tensor, bias: Tensor, scheme: zml.Quantization.Scheme, mx_native: bool, quantize_input: bool) Outputs {
-            const weight = w.convert(.f8e4m3fn);
+        fn forward(x: Tensor, w: Tensor, scales: Tensor, ids: Tensor, weights: Tensor, bias: Tensor, scheme: zml.Quantization.Scheme, native_scales: bool, quantize_input: bool) Outputs {
+            const weight = w.convert(scheme.values);
             var input = x;
             var input_scale: ?Tensor = null;
             var reference_input = x.convert(.f32);
             if (quantize_input) {
-                input, input_scale = prepareInput(x, scheme, .f8e4m3fn, true);
-                const scale = if (scheme == .mxfp8) input_scale.?.bitCast(.f8e8m0) else input_scale.?;
+                input, input_scale = prepareInput(x, scheme, scheme.values, true);
+                const scale = if (Scheme.eql(scheme, Scheme.mxfp8)) input_scale.?.bitCast(.f8e8m0) else input_scale.?;
                 reference_input = input.convert(.f32).withTags(x.shape().tags())
                     .mul(expandScales(scale.convert(.f32), x.shape()));
             }
-            const weight_scale = if (scheme == .mxfp8) blk: {
+            const weight_scale = if (scheme.scales == .f8e8m0) blk: {
                 const native = scales.convert(.f8e8m0);
-                break :blk if (mx_native) native else native.bitCast(.u8);
-            } else scales;
-            const config = launchConfigForTokens(8);
+                break :blk if (native_scales) native else native.bitCast(.u8);
+            } else scales.convert(scheme.scales);
+            var config = launchConfigForTokens(8);
+            if (scheme.scaling == .tile) config.block_size_k = scheme.scaling.tile;
             const routing = prepareRouting(ids, w.dim(.expert), @intCast(config.block_size_m));
             const actual = gemm(.{
                 .input = input,
@@ -646,7 +665,8 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
                 .top_k = 1,
                 .output_shape = Shape.init(.{ .token = x.dim(.token), .topk = 1, .out = w.dim(.out) }, .bf16),
             }).squeeze(.topk);
-            const expanded_weight = weight.convert(.f32).mul(expandScales(scales, weight.shape()));
+            const reference_scales = if (scheme.scales == .f8e8m0) weight_scale.bitCast(.f8e8m0) else weight_scale;
+            const expanded_weight = weight.convert(.f32).mul(expandScales(reference_scales, weight.shape()));
             const selected_weight = expanded_weight.gather(.{ .expert = ids.squeeze(.topk) }, .{});
             const dot = reference_input.dot(selected_weight, .in);
             const selected_bias = if (bias.rank() == 2)
@@ -659,17 +679,26 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
         }
     };
 
-    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 }) |scheme| {
+    for ([_]zml.Quantization.Scheme{
+        Scheme.mxfp8,
+        .{ .values = .f8e4m3fn, .scales = .f8e8m0, .scaling = .{ .tile = 32 } },
+        .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .tensor },
+        .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .tensor },
+        .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .axis = null } },
+        .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .axis = null } },
+        .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .tile = 128 } },
+        .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .tile = 128 } },
+        .{ .values = .f8e4m3fnuz, .scales = .f32, .scaling = .{ .tile = 128 } },
+        .{ .values = .f8e4m3fnuz, .scales = .bf16, .scaling = .{ .tile = 128 } },
+        .{ .values = .f8e8m0, .scales = .f32, .scaling = .{ .tile = 128 } },
+        .{ .values = .f8e8m0, .scales = .bf16, .scaling = .{ .tile = 128 } },
+    }) |scheme| {
+        // This CUDA runtime test requires FN weights; other encodings are covered by IR tests.
+        if (scheme.values != .f8e4m3fn) continue;
         for ([_]bool{ false, true }) |quantize_input| {
             for ([_]i64{ 1, 17 }) |tokens| {
-                const n: i64 = if (scheme == .fp8_block128) 256 else 48;
-                const scale_dims: [3]i64 = switch (scheme) {
-                    .mxfp8 => .{ 8, n, 8 },
-                    .fp8_per_tensor => if (tokens == 1) .{ 1, 1, 1 } else .{ 8, 1, 1 },
-                    .fp8_per_channel => .{ 8, n, 1 },
-                    .fp8_block128 => .{ 8, 2, 2 },
-                    else => unreachable,
-                };
+                const n: i64 = if (Scheme.isTiled(scheme, 128)) 256 else if (Scheme.isTiled(scheme, 32)) 64 else 48;
+                const scale_dims: [3]i64 = if (Scheme.eql(scheme, Scheme.mxfp8)) .{ 8, n, 8 } else if (Scheme.isPerTensor(scheme)) (if (tokens == 1) .{ 1, 1, 1 } else .{ 8, 1, 1 }) else if (Scheme.isPerAxis(scheme)) .{ 8, n, 1 } else .{ 8, @divExact(n, scheme.scaling.tile), @divExact(256, scheme.scaling.tile) };
                 const x: Tensor = .init(.{ .token = tokens, .in = 256 }, .bf16);
                 const w: Tensor = .init(.{ .expert = 8, .out = n, .in = 256 }, .bf16);
                 const scales: Tensor = .init(.{ scale_dims[0], scale_dims[1], scale_dims[2] }, .f32);
@@ -714,7 +743,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
                 runner.run(io, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] }, .{&output}, .{ .wait = true });
                 defer zml.Buffer.deinitAll(Local.Outputs, &output);
                 zml.testing.expectClose(io, output.expected, output.actual, .{ .absolute_tolerance = 0.03125, .relative_tolerance = 0.01 }) catch |err| {
-                    log.warn("FP8 routed GEMM failed for scheme={s}, quantize_input={}, tokens={}", .{ @tagName(scheme), quantize_input, tokens });
+                    log.warn("FP8 routed GEMM failed for scheme={any}, quantize_input={}, tokens={}", .{ scheme, quantize_input, tokens });
                     return err;
                 };
             }
@@ -744,7 +773,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 .weight = gate_up_values.broad(Shape.init(.{ .expert = 8, .dout = 256, .d = @as(i64, if (fp4) 64 else 128) }, dtype)),
                 .tag = Shape.toTag(.d),
                 .quantization = if (fp4) .{
-                    .scheme = .mxfp4,
+                    .scheme = Scheme.mxfp4,
                     .scales = Tensor.scalar(127, .u8).broad(Shape.init(.{ .expert = 8, .dout = 256, .d = 4 }, .u8)),
                 } else null,
             };
@@ -753,7 +782,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 .bias = Tensor.scalar(2, .bf16).broad(Shape.init(.{ .expert = 8, .d = 128 }, .bf16)),
                 .tag = Shape.toTag(.dout),
                 .quantization = if (fp4) .{
-                    .scheme = .mxfp4,
+                    .scheme = Scheme.mxfp4,
                     .scales = Tensor.scalar(127, .u8).broad(Shape.init(.{ .expert = 8, .d = 128, .dout = 4 }, .u8)),
                 } else null,
             };
@@ -889,7 +918,7 @@ pub fn fusedExpertsMxfp4(
 
     const gq = gate_up.quantization orelse @panic("triton backend requires gate_up quantization to be set");
     const dq = down.quantization orelse @panic("triton backend requires down quantization to be set");
-    stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "triton expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
+    stdx.debug.assert(Scheme.eql(gq.scheme, Scheme.mxfp4) and Scheme.eql(dq.scheme, Scheme.mxfp4), "triton expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
 
     // Weight storage for mxfp4 in HF is expressed as u8 or i8
     stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "triton expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});

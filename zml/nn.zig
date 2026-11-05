@@ -8,8 +8,10 @@ const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
+const platform_mod = @import("platform.zig");
 const quantization = @import("quantization.zig");
 pub const Quantization = quantization.Quantization;
+const Scheme = Quantization.Scheme;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
@@ -22,6 +24,8 @@ pub const Linear = struct {
     bias: ?Tensor = null,
     tag: Shape.Tag,
     quantization: ?Quantization = null,
+    /// Global scale used when quantizing this layer's activations.
+    input_scale: ?Quantization.GlobalScale = null,
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -44,9 +48,10 @@ pub const Linear = struct {
     }
 
     pub fn forward(self: Linear, x: Tensor, out_dtype: DataType) Tensor {
-        if (self.quantization) |q| {
-            if (quantization.quantizeInput(q, x, self.tag, zml.Compiler.current().platform)) |input| {
-                return self.forwardQuantized(input, out_dtype);
+        if (self.quantization != null) {
+            if (self.quantizeInput(x)) |input| {
+                const values, const q = input;
+                return self.forwardQuantized(values, q, out_dtype);
             }
             return self.forwardScaled(x.convert(.bf16), null, null, out_dtype);
         }
@@ -54,26 +59,132 @@ pub const Linear = struct {
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 
+    /// Quantize activations along this layer's contracting axis for the current
+    /// platform. Returns null when the layer uses unquantized activations.
+    /// The result can be gathered or reused before calling forwardQuantized.
+    pub fn quantizeInput(self: Linear, input: Tensor) ?struct { Tensor, Quantization } {
+        const q = self.quantization orelse return null;
+        const scheme = inputScheme(q.scheme, zml.Compiler.current().platform) orelse return null;
+        const source = if (Scheme.eql(scheme, Scheme.nvfp4) or Scheme.isTiled(q.scheme, 128)) input.convert(.bf16) else input;
+        return quantization.quantize(source, scheme, self.tag, if (Scheme.eql(scheme, Scheme.nvfp4)) self.input_scale else null) catch unreachable;
+    }
+
+    fn inputScheme(weight: Scheme, platform: *const platform_mod.Platform) ?Scheme {
+        if (Scheme.eql(weight, Scheme.nvfp4)) {
+            const cc = platform_mod.cuda.computeCapability(platform) orelse return null;
+            return if (cc.atLeast(.{ .major = 10, .minor = 0 })) Scheme.nvfp4 else null;
+        }
+        if (weight.values != .f8e4m3fn and weight.values != .f8e4m3fnuz and weight.values != .f8e8m0) return null;
+        if (!Scheme.isTiled(weight, 32) and !Scheme.isTiled(weight, 128)) return null;
+        const dtype: DataType = switch (platform.target) {
+            .cuda => .f8e4m3fn,
+            .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
+                .cdna4, .rdna4 => .f8e4m3fn,
+                .cdna3 => .f8e4m3fnuz,
+                else => return null,
+            } else return null,
+            else => return null,
+        };
+        return .{
+            .values = dtype,
+            .scales = if (Scheme.isTiled(weight, 32)) .f8e8m0 else .f32,
+            .scaling = .{ .axis = weight.scaling.tile },
+        };
+    }
+
     /// Apply this layer to reusable quantized activation values and scales.
+    /// Values must be unpacked; scales must be plain and in the values' axis order.
+    /// Activation and weight schemes are validated independently.
     /// Convert to output_dtype before adding bias.
-    pub fn forwardQuantized(self: Linear, input: quantization.QuantizedInput, output_dtype: DataType) Tensor {
+    pub fn forwardQuantized(self: Linear, input: Tensor, q: Quantization, output_dtype: DataType) Tensor {
         stdx.debug.assert(self.quantization != null, "forwardQuantized requires quantized weights", .{});
-        return self.forwardScaled(input.values, input.scales, input.global_scale, output_dtype);
+        q.validatePlain(input.shape()) catch |err| stdx.debug.panic("forwardQuantized: {s} for scheme {any}, values {f}, scales {f}", .{ @errorName(err), q.scheme, input, q.scales });
+        const global_scale = if (q.global_scale) |scale| scale.asMultiplier() else null;
+        return self.forwardScaled(input, q.logicalScales(), global_scale, output_dtype);
     }
 
     fn forwardScaled(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor, output_dtype: DataType) Tensor {
         const q = self.quantization.?;
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
         const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
-        const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
+        if (!q.swizzled_scales) q.validatePlain(weight.shape()) catch |err| stdx.debug.panic("Linear: {s} for weight scheme {any}, values {f}, scales {f}", .{ @errorName(err), q.scheme, weight, q.scales });
+        const scales = q.logicalScales();
+        stdx.debug.assert(weight.dtype() == q.scheme.values and scales.dtype() == q.scheme.scales, "scheme {any} does not match unpacked weight/scale dtypes {s}/{s}", .{ q.scheme, @tagName(weight.dtype()), @tagName(scales.dtype()) });
         const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{ .rhs_scale_swizzled = q.swizzled_scales });
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 };
 
-pub fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
-    return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
+pub fn isPackedFp4(scheme: Scheme, weight_dtype: DataType) bool {
+    return scheme.values == .f4e2m1 and (weight_dtype == .u8 or weight_dtype == .i8);
+}
+
+test "Linear.forwardQuantized accepts independent schemes and byte-backed activation scales" {
+    const Local = struct {
+        fn forward(bytes: bool) Tensor {
+            const x = Tensor.scalar(1.5, .f32).broad(.init(.{ .m = 2, .k = 64 }, .f32));
+            const input, var q = quantization.quantize(x, Scheme.mxfp8, .k, null) catch unreachable;
+            if (bytes) q.scales = q.scales.bitCast(.u8);
+            const linear: Linear = .{
+                .weight = Tensor.scalar(2, .f8e4m3fn).broad(.init(.{ .n = 32, .k = 64 }, .f8e4m3fn)),
+                .tag = Shape.toTag(.k),
+                .bias = Tensor.scalar(3, .f32),
+                .quantization = .{
+                    .scheme = .{ .values = .f8e4m3fn, .scales = .f8e8m0, .scaling = .{ .tile = 32 } },
+                    .scales = Tensor.scalar(125, .u8).broad(.init(.{ .n = 1, .k = 2 }, .u8)),
+                },
+            };
+            return linear.forwardQuantized(input, q, .f32);
+        }
+    };
+    const platform = zml.testing.env();
+    // CPU has no lowering for the scaled-dot composite.
+    const cc = platform_mod.cuda.computeCapability(platform) orelse return error.SkipZigTest;
+    if (!cc.atLeast(.{ .major = 10, .minor = 0 })) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |bytes| {
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.forward, .{bytes}, .{});
+        defer exe.deinit();
+        var result = try exe.eval(std.testing.allocator, std.testing.io, {});
+        defer result.deinit();
+        const actual = try result.getValue([2][32]f32, std.testing.io);
+        for (actual) |row| for (row) |value| try std.testing.expectEqual(@as(f32, 51), value);
+    }
+}
+
+test "Linear.forwardQuantized applies input and weight global scales before bias" {
+    const Local = struct {
+        fn forward(operation: Quantization.GlobalScale.Operation) Tensor {
+            const x = Tensor.scalar(3, .f32).broad(.init(.{ .m = 16, .k = 128 }, .f32));
+            const global_scale: Quantization.GlobalScale = switch (operation) {
+                .multiply => .multiplier(Tensor.scalar(2, .f32)),
+                .divide => .{ .value = Tensor.scalar(0.5, .f32), .operation = .divide },
+            };
+            const input, const q = quantization.quantize(x, Scheme.nvfp4, .k, global_scale) catch unreachable;
+            const linear: Linear = .{
+                .weight = Tensor.scalar(2, .f4e2m1).broad(.init(.{ .n = 128, .k = 128 }, .f4e2m1)),
+                .bias = Tensor.scalar(1, .f32),
+                .tag = Shape.toTag(.k),
+                .quantization = .{
+                    .scheme = Scheme.nvfp4,
+                    .scales = Tensor.scalar(0.125, .f8e4m3fn).broad(.init(.{ .n = 128, .k = 8 }, .f8e4m3fn)),
+                    .global_scale = .{ .value = Tensor.scalar(0.25, .f32), .operation = .divide },
+                },
+            };
+            return linear.forwardQuantized(input, q, .f32);
+        }
+    };
+    const platform = zml.testing.env();
+    const cc = platform_mod.cuda.computeCapability(platform) orelse return error.SkipZigTest;
+    if (!cc.atLeast(.{ .major = 10, .minor = 0 })) return error.SkipZigTest;
+    for ([_]Quantization.GlobalScale.Operation{ .multiply, .divide }) |operation| {
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.forward, .{operation}, .{});
+        defer exe.deinit();
+        var result = try exe.eval(std.testing.allocator, std.testing.io, {});
+        defer result.deinit();
+        const actual = try result.getValue([16][128]f32, std.testing.io);
+        for (actual) |row| for (row) |value| try std.testing.expectApproxEqAbs(@as(f32, 385), value, 1e-5);
+    }
 }
 
 /// Unpacks two f4e2m1 values per byte along `packed_tag` and names the expanded
@@ -244,16 +355,20 @@ test "block128 scaled dot layouts" {
 
         fn forward(x: Tensor, w: Tensor, scales: Tensor, fp8: DataType, prequantized: bool) Outputs {
             const weight = w.convert(fp8);
-            const input = quantization.quantizeBlockFp8(x, .k, 128, fp8, .f32);
-            const linear: Linear = .{ .weight = weight, .tag = Shape.toTag(.k), .quantization = .{ .scheme = .fp8_block128, .scales = scales } };
+            const input, const q = quantization.quantize(x, .{ .values = fp8, .scales = .f32, .scaling = .{ .axis = 128 } }, .k, null) catch unreachable;
+            const scheme: Scheme = .{ .values = fp8, .scales = scales.dtype(), .scaling = .{ .tile = 128 } };
+            const linear: Linear = .{ .weight = weight, .tag = Shape.toTag(.k), .quantization = .{ .scheme = scheme, .scales = scales } };
             return .{
-                .linear = linear.forward(x, .bf16),
-                .linear_expected = dequantize(input.values, input.scales).dot(dequantize(weight, scales), .k),
+                .linear = if (prequantized) blk: {
+                    const values, const input_quantization = linear.quantizeInput(x).?;
+                    break :blk linear.forwardQuantized(values, input_quantization, .bf16);
+                } else linear.forward(x, .bf16),
+                .linear_expected = dequantize(input, q.scales).dot(dequantize(weight, scales), .k),
                 .actual = if (prequantized)
-                    scaledDot(input.values, weight, input.scales.convert(scales.dtype()), scales, .bf16, .k, .{})
+                    scaledDot(input, weight, q.scales.convert(scales.dtype()), scales, .bf16, .k, .{})
                 else
                     scaledDot(x, weight, null, scales, .bf16, .k, .{}),
-                .expected = (if (prequantized) dequantize(input.values, input.scales.convert(scales.dtype())) else x)
+                .expected = (if (prequantized) dequantize(input, q.scales.convert(scales.dtype())) else x)
                     .dot(dequantize(weight, scales), .k),
             };
         }

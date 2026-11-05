@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const zml = @import("../../zml.zig");
+const Scheme = zml.Quantization.Scheme;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const reference = @import("stablehlo/stablehlo.zig");
@@ -57,7 +58,7 @@ const Case = struct {
         // element must pass; near-zero values use the absolute bound.
         try zml.testing.expectClose(io, output.expected, output.actual, .{
             // Share the NVFP4 comparison budget across CUDA backends.
-            .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
+            .absolute_tolerance = if (Scheme.eql(c.scheme, Scheme.nvfp4)) 0.078125 else 0.015625,
             .relative_tolerance = 0.02,
             .minimum_close_fraction = 1,
         });
@@ -103,35 +104,31 @@ fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier
         .bias = fixture_bias,
     };
 
-    const weight = switch (s) {
-        .mxfp4, .nvfp4 => generateFp4Tensor(shape, multiplier),
-        else => generateDeterministicTensor(shape, multiplier, 16).convert(.f8e4m3fn),
-    };
-
-    const scale_shape: Shape = switch (s) {
-        .mxfp4, .mxfp8 => .init(.{ shape.dim(0), shape.dim(1), @divExact(shape.dim(2), 32) }, .f8e8m0),
-        .nvfp4 => .init(.{ shape.dim(0), shape.dim(1), @divExact(shape.dim(2), 16) }, .f8e4m3fn),
-        .fp8_per_tensor => .init(.{ shape.dim(0), 1, 1 }, .f32),
-        .fp8_per_channel => .init(.{ shape.dim(0), shape.dim(1), 1 }, .f32),
-        .fp8_block128 => .init(.{ shape.dim(0), @divExact(shape.dim(1), 128), @divExact(shape.dim(2), 128) }, .f32),
-        .fp8_block32 => .init(.{ shape.dim(0), @divExact(shape.dim(1), 32), @divExact(shape.dim(2), 32) }, .f32),
+    const weight = if (s.values == .f4e2m1) generateFp4Tensor(shape, multiplier) else generateDeterministicTensor(shape, multiplier, 16).convert(s.values);
+    // Each expert has its own scale grid over the [output, input] matrix.
+    const scale_shape = switch (s.scaling) {
+        .tensor => shape.setDim(1, 1).setDim(2, 1),
+        .axis => |size| shape.setDim(2, if (size) |block| std.math.divCeil(i64, shape.dim(2), block) catch unreachable else 1),
+        .tile => |size| shape
+            .setDim(1, std.math.divCeil(i64, shape.dim(1), size) catch unreachable)
+            .setDim(2, std.math.divCeil(i64, shape.dim(2), size) catch unreachable),
     };
 
     const scales = Tensor.arange(.{ .end = @intCast(scale_shape.count()) }, .i32)
         .remainder(Tensor.scalar(2, .i32)).convert(.f32).addConstant(1).scale(1.0 / 16.0)
-        .reshape(scale_shape.withDtype(.f32)).convert(scale_shape.dtype());
+        .reshape(scale_shape.withDtype(.f32)).convert(s.scales);
 
-    const input_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = Tensor.scalar(1, .f32), .operation = .multiply } else null;
-    const global_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = Tensor.scalar(1, .f32).broad(.init(.{ .expert = shape.dim(0) }, .f32)), .operation = .multiply } else null;
+    const input_scale: ?zml.Quantization.GlobalScale = if (Scheme.eql(s, Scheme.nvfp4)) .{ .value = Tensor.scalar(1, .f32), .operation = .multiply } else null;
+    const global_scale: ?zml.Quantization.GlobalScale = if (Scheme.eql(s, Scheme.nvfp4)) .{ .value = Tensor.scalar(1, .f32).broad(.init(.{ .expert = shape.dim(0) }, .f32)), .operation = .multiply } else null;
 
     return .{
         .weight = weight,
         .tag = shape.tag(2),
         .bias = fixture_bias,
+        .input_scale = input_scale,
         .quantization = .{
             .scheme = s,
             .scales = scales,
-            .input_scale = input_scale,
             .global_scale = global_scale,
         },
     };
@@ -155,9 +152,9 @@ fn makeExpertFixture(c: Case) ExpertFixture {
     if (c.non_unit_scales) {
         for ([_]*zml.nn.Linear{ &fixture.gate_up, &fixture.down }, 0..) |projection, i| {
             const q = &projection.quantization.?;
-            std.debug.assert(q.scheme == .nvfp4);
+            std.debug.assert(Scheme.eql(q.scheme, Scheme.nvfp4));
             // Exercise both scale polarity and distinct per-expert multipliers.
-            q.input_scale = .{ .value = Tensor.scalar(@as(f32, if (i == 0) 2 else 0.5), .f32), .operation = .divide };
+            projection.input_scale = .{ .value = Tensor.scalar(@as(f32, if (i == 0) 2 else 0.5), .f32), .operation = .divide };
             q.global_scale = .{
                 .value = Tensor.arange(.{ .end = @intCast(c.experts) }, .i32)
                     .remainder(Tensor.scalar(2, .i32)).addConstant(1).convert(.f32).withTags(.{.expert}),
@@ -220,28 +217,28 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
                 projection.weight = packFp4Bytes(projection.weight);
                 const q = &projection.quantization.?;
                 q.scales = q.scales.bitCast(.u8);
-                if (scheme == .nvfp4) {
+                if (Scheme.eql(scheme, Scheme.nvfp4)) {
                     // CuTe takes the input quantization multiplier and a GEMM
                     // output multiplier that folds in its inverse.
-                    const input_scale = q.input_scale.?.asMultiplier();
+                    const input_scale = projection.input_scale.?.asMultiplier();
                     q.global_scale = .{ .value = q.global_scale.?.asMultiplier().mul(input_scale), .operation = .multiply };
-                    q.input_scale = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply };
+                    projection.input_scale = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply };
                 }
             },
-            .triton => if (scheme == .mxfp4) {
+            .triton => if (Scheme.eql(scheme, Scheme.mxfp4)) {
                 projection.weight = packFp4Bytes(projection.weight);
             },
             .mosaic_tpu => {
                 projection.weight = projection.weight.transpose(.{ 0, 2, 1 });
             },
             .metal => if (projection.quantization) |*q| {
-                if (q.scheme != .nvfp4) q.scales = q.scales.convert(.bf16);
+                if (!Scheme.eql(q.scheme, Scheme.nvfp4)) q.scales = q.scales.convert(.bf16);
             },
             else => {},
         }
     }
 
-    if (backend == .metal and scheme == .nvfp4) {
+    if (backend == .metal and Scheme.eql(scheme, Scheme.nvfp4)) {
         const global = &prepared.gate_up.quantization.?.global_scale.?;
         global.value = global.value.appendAxes(.{.proj}).repeat1d(.proj, 2);
     }
@@ -276,8 +273,8 @@ fn forward(input: Tensor, c: Case) Outputs {
         .routing_weight_placement = c.placement,
         .input_quantization = switch (c.backend) {
             .metal => .none,
-            .cute => if (c.scheme == .nvfp4) .automatic else .mxfp8_bf16,
-            .triton => if (c.scheme == .mxfp4 and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
+            .cute => if (Scheme.eql(c.scheme, Scheme.nvfp4)) .automatic else .mxfp8_bf16,
+            .triton => if (Scheme.eql(c.scheme, Scheme.mxfp4) and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
             else => .automatic,
         },
     });
@@ -532,11 +529,16 @@ test "Triton compatibility matrix" {
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
         .formats = &.{
             .{},
-            .{ .scheme = .mxfp8 },
-            .{ .scheme = .fp8_per_tensor },
-            .{ .scheme = .fp8_per_channel },
-            .{ .scheme = .fp8_block128 },
-            .{ .scheme = .fp8_block32 },
+            .{ .scheme = Scheme.mxfp8 },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .tensor } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .tensor } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .axis = null } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .axis = null } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .tile = 128 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .tile = 128 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f8e8m0, .scaling = .{ .tile = 32 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .tile = 32 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .tile = 32 } } },
         },
         .activations = &all_activations,
         // BF16 ignores this option; exercise both accepted settings.
@@ -548,7 +550,7 @@ test "Triton compatibility matrix" {
     if (platform.target != .cuda) {
         // Other platforms retain the general MXFP4 path and its full contract.
         try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
-            .formats = &.{.{ .scheme = .mxfp4 }},
+            .formats = &.{.{ .scheme = Scheme.mxfp4 }},
             .activations = &all_activations,
             .quantize_inputs = &.{ false, true },
             .placements = &.{ .before_down, .after_down },
@@ -561,7 +563,7 @@ test "Triton compatibility matrix" {
     // Its other 252 cases require activations or projection bias unsupported
     // by the simplified path. The former specialized matrix remains below.
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
-        .formats = &.{.{ .scheme = .mxfp4 }},
+        .formats = &.{.{ .scheme = Scheme.mxfp4 }},
         .activations = &.{gated_activations[1]},
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
@@ -577,7 +579,7 @@ test "Triton MXFP4 compatibility matrix" {
     // The merged backend uses the former specialized MXFP4 path: clipped
     // SwiGLU without projection bias, with unconditional MXFP8 activations.
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
-        .formats = &.{.{ .scheme = .mxfp4 }},
+        .formats = &.{.{ .scheme = Scheme.mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
@@ -609,7 +611,7 @@ test "FlashInfer compatibility matrix" {
 
     // Only default SwiGLU, no linear bias, and routing after the down projection.
     try pipeline.run(std.testing.io, std.testing.allocator, .flashinfer_cutlass, .{
-        .formats = &.{.{ .scheme = .nvfp4 }},
+        .formats = &.{.{ .scheme = Scheme.nvfp4 }},
         .activations = &.{.{ .swiglu = .{} }},
     }, .{});
 }
@@ -620,7 +622,7 @@ test "specialized CuTe MXFP4 compatibility matrix" {
     const pipeline: Pipeline = .{ .platform = platform };
 
     try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
-        .formats = &.{.{ .scheme = .mxfp4 }},
+        .formats = &.{.{ .scheme = Scheme.mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
@@ -635,8 +637,8 @@ test "CuTe NVFP4 compatibility matrix" {
     const pipeline: Pipeline = .{ .platform = platform };
     try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
         .formats = &.{
-            .{ .scheme = .nvfp4 },
-            .{ .scheme = .nvfp4, .non_unit_scales = true },
+            .{ .scheme = Scheme.nvfp4 },
+            .{ .scheme = Scheme.nvfp4, .non_unit_scales = true },
         },
         .activations = &.{ .{ .swiglu = .{} }, .{ .swiglu = .{ .limit = 0.25 } } },
         .placements = &.{ .before_down, .after_down },
@@ -655,7 +657,7 @@ test "Fly compatibility matrix" {
 
     // These constraints keep execution on Fly rather than its Triton fallback.
     try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
-        .formats = &.{.{ .scheme = .mxfp4 }},
+        .formats = &.{.{ .scheme = Scheme.mxfp4 }},
         .activations = &gated_activations,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
@@ -668,7 +670,7 @@ test "Fly general projection shapes" {
 
     // Cover GEMV, sorted MFMA with 16- and 32-row tiles, and wider projections.
     try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
-        .formats = &.{.{ .scheme = .mxfp4 }},
+        .formats = &.{.{ .scheme = Scheme.mxfp4 }},
         .activations = &.{.{ .swiglu = .{} }},
         .placements = &.{.before_down},
         .shapes = &.{
@@ -692,12 +694,17 @@ test "Metal compatibility matrix" {
             .{},
             .{ .activation_dtype = .f16 },
             .{ .activation_dtype = .f32 },
-            .{ .scheme = .nvfp4 },
-            .{ .scheme = .mxfp8 },
-            .{ .scheme = .fp8_per_tensor },
-            .{ .scheme = .fp8_per_channel },
-            .{ .scheme = .fp8_block128 },
-            .{ .scheme = .fp8_block32 },
+            .{ .scheme = Scheme.nvfp4 },
+            .{ .scheme = Scheme.mxfp8 },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .tensor } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .tensor } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .axis = null } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .axis = null } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .tile = 128 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .tile = 128 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f8e8m0, .scaling = .{ .tile = 32 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .bf16, .scaling = .{ .tile = 32 } } },
+            .{ .scheme = .{ .values = .f8e4m3fn, .scales = .f32, .scaling = .{ .tile = 32 } } },
         },
         .activations = &all_activations,
     }, .{});
