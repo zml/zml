@@ -1,5 +1,3 @@
-const std = @import("std");
-
 const zml = @import("../../../zml.zig");
 const KvCache = @import("../paged_attention.zig").KvCache;
 const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
