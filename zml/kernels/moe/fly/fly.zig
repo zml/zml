@@ -27,7 +27,7 @@ pub fn fusedExperts(
     opts: Options,
 ) Tensor {
     const expert_map_ = routing_.expertMap();
-    const layout: ProjectionLayout = if (gate_up_.quantizationScheme() == .mxfp4) .interleaved else .concatenated;
+    const layout: ProjectionLayout = if (gate_up_.quantizationScheme() == .mxfp4) .interleaved_1 else .concatenated;
     const num_tokens = hidden_states.dim(.t);
     var launch_config = launchConfigForTokens(num_tokens);
 

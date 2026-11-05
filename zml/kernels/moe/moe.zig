@@ -103,13 +103,17 @@ pub const Backend = enum {
     pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
-            .cute => if (scheme == .mxfp4 or scheme == .nvfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
+            .cute => if (scheme) |s| switch (s) {
+                .mxfp4 => .{ .gate_up = .interleaved_8, .packing = .mxfp4_interleaved8 },
+                .nvfp4 => .{ .gate_up = .interleaved_1, .packing = .swizzled_scales },
+                else => error.UnsupportedQuantization,
+            } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme) |s| switch (s) {
                 .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
-            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
+            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
 

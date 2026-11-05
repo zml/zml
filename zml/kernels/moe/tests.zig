@@ -179,20 +179,16 @@ fn makeExpertFixture(c: Case) ExpertFixture {
     return fixture;
 }
 
-/// Interleave the gate/up halves of the output axis: [E, 2, N/2, K] -> [E, N/2, 2, K].
-fn interleave(tensor: Tensor) Tensor {
-    const tags = tensor.shape().tags();
-    return tensor.withTags(.{ .expert, .out, .in })
-        .splitAxis(.out, .{ .projection = 2, .mid = @divExact(tensor.dim(1), 2) })
-        .transpose(.{ .expert, .mid, .projection, .in })
-        .merge(.{ .out = .{ .mid, .projection } }).withTags(tags);
+fn interleave(tensor: Tensor, rows: i64) Tensor {
+    return tensor.reshape(.{ .expert = tensor.dim(0), .projection = 2, .row_block = @divExact(tensor.dim(1), 2 * rows), .row = rows, .column = tensor.dim(2) })
+        .transpose(.{ .expert, .row_block, .projection, .row, .column }).reshape(tensor.shape());
 }
 
 /// Blackwell block scales: [E, N/128, 4, 32, K/4, 4] ->
 /// [E, N/128, K/4, 32, 4, 4], retaining the declared [E, N, K] shape.
 fn swizzleScales(scales: Tensor) Tensor {
-    return scales.reshape(.{ scales.dim(0), @divExact(scales.dim(1), 128), 4, 32, @divExact(scales.dim(2), 4), 4 })
-        .transpose(.{ 0, 1, 4, 3, 2, 5 }).reshape(scales.shape());
+    return scales.reshape(.{ .expert = scales.dim(0), .row_block = @divExact(scales.dim(1), 128), .row_quad = 4, .row_lane = 32, .scale_word = @divExact(scales.dim(2), 4), .scale_byte = 4 })
+        .transpose(.{ .expert, .row_block, .scale_word, .row_lane, .row_quad, .scale_byte }).reshape(scales.shape());
 }
 
 fn packFp4Bytes(weight: Tensor) Tensor {
@@ -203,7 +199,8 @@ fn packFp4Bytes(weight: Tensor) Tensor {
 fn prepareGateUp(tensor: Tensor, layout: ExpertsLayout) Tensor {
     return switch (layout.gate_up) {
         .concatenated => tensor,
-        .interleaved => interleave(tensor),
+        .interleaved_1 => interleave(tensor, 1),
+        .interleaved_8 => interleave(tensor, 8),
     };
 }
 
@@ -226,12 +223,21 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
             q.scales = swizzleScales(q.scales);
             q.swizzled_scales = true;
         }
+        if (layout.packing == .mxfp4_interleaved8) {
+            const q = &projection.quantization.?;
+            const sf = q.scales;
+            q.scales = sf.bitCast(.u8)
+                .reshape(.{ .expert = sf.dim(0), .row_block = @divExact(sf.dim(1), 128), .row_quad = 4, .row_lane = 32, .scale_word = @divExact(sf.dim(2), 4), .scale_byte = 4 })
+                .transpose(.{ .expert, .scale_word, .row_block, .row_lane, .row_quad, .scale_byte })
+                .reshape(.{ .expert = sf.dim(0), .scale_word = @divExact(sf.dim(2), 4), .row = sf.dim(1), .scale_byte = 4 }).bitCast(.i32)
+                .withTags(sf.shape().transpose(.{ 0, 2, 1 }));
+        }
         switch (backend) {
             .cute => {
                 projection.weight = packFp4Bytes(projection.weight);
                 const q = &projection.quantization.?;
-                q.scales = q.scales.bitCast(.u8);
                 if (scheme == .nvfp4) {
+                    q.scales = q.scales.bitCast(.u8);
                     // CuTe takes the input quantization multiplier and a GEMM
                     // output multiplier that folds in its inverse.
                     const input_scale = q.input_scale.?.asMultiplier();

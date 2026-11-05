@@ -715,6 +715,7 @@ pub const ArgSpec = struct {
     pub const MlirTypeSpec = struct {
         type_: *const mlir.Type,
         grid_constant: bool = false,
+        cuda_grid_constant: bool = false,
     };
 
     pub const TensorSpec = struct {
@@ -823,6 +824,7 @@ pub const Builder = struct {
                 .mlir_type => .{ .mlir_type = .{
                     .type_ = inner.type_,
                     .grid_constant = if (@hasField(@TypeOf(inner), "grid_constant")) inner.grid_constant else false,
+                    .cuda_grid_constant = if (@hasField(@TypeOf(inner), "cuda_grid_constant")) inner.cuda_grid_constant else false,
                 } },
             } };
         }
@@ -849,7 +851,7 @@ pub const Builder = struct {
         return @Struct(.auto, null, &names, &types, &@splat(.{}));
     }
 
-    fn declareArgsLow(self: *Builder, args: []const ArgSpec) FinishError!void {
+    pub fn declareArgsLow(self: *Builder, args: []const ArgSpec) FinishError!void {
         std.debug.assert(self.entry_block == null);
         const ctx = self.ctx;
         const scratch = self.arena.allocator();
@@ -871,7 +873,7 @@ pub const Builder = struct {
         var any_arg_attr = false;
         for (arg_attrs, args) |*attr, a| {
             attr.* = switch (a.kind) {
-                .mlir_type => |typed| if (typed.grid_constant) .dict(ctx, &.{cute_nvgpu.gridConstant(ctx)}) else empty_dict,
+                .mlir_type => |typed| if (typed.cuda_grid_constant) .dict(ctx, &.{.named(ctx, "cuda.grid_constant", .unit(ctx))}) else if (typed.grid_constant) .dict(ctx, &.{cute_nvgpu.gridConstant(ctx)}) else empty_dict,
                 else => empty_dict,
             };
             if (attr.* != empty_dict) any_arg_attr = true;

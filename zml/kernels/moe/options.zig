@@ -56,7 +56,14 @@ pub const Activation = union(ActivationKind) {
                 const mid = @divFloor(x.dim(.out), 2);
                 var gate, var up = switch (layout) {
                     .concatenated => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
-                    .interleaved => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
+                    .interleaved_1 => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
+                    .interleaved_8 => blk: {
+                        const grouped = x.splitAxis(.out, .{ .group = @divExact(mid, 8), .pair = 2, .row = 8 });
+                        break :blk .{
+                            grouped.slice(.pair, .{ .end = 1 }).merge(.{ .out = .{ .group, .pair, .row } }),
+                            grouped.slice(.pair, .{ .start = 1 }).merge(.{ .out = .{ .group, .pair, .row } }),
+                        };
+                    },
                 };
 
                 break :b switch (self) {
@@ -96,12 +103,12 @@ pub const Activation = union(ActivationKind) {
 
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
-pub const ProjectionLayout = enum { concatenated, interleaved };
+pub const ProjectionLayout = enum { concatenated, interleaved_1, interleaved_8 };
 
 /// How a backend expects the expert weights to be stored
 /// The packer writes this layout and forwardMoe reads it
 pub const ExpertsLayout = struct {
-    /// Whether the two projections occupy contiguous halves or alternate.
+    /// Gate/up ordering before applying the backend-specific packing.
     gate_up: ProjectionLayout,
     /// Backend specific transformation of the weights and scales.
     packing: Packing,
@@ -113,5 +120,9 @@ pub const ExpertsLayout = struct {
         swizzled_scales,
         /// Weights, block scales and global scales in the FlashInfer CUTLASS NVFP4 layout.
         flashinfer_nvfp4,
+        /// MXFP4 gate/up rows interleaved by 8. E8M0 scales use 512-byte
+        /// 128x4 atoms in MN-major order `[expert, k/128, rows/128, 512]`,
+        /// represented as `[expert, k/128, rows]` i32 words of four scales.
+        mxfp4_interleaved8,
     };
 };
