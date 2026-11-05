@@ -20,7 +20,11 @@ test {
     _ = @import("tests.zig");
 }
 
-pub const ProjectionLayout = enum { concatenated, interleaved_1, interleaved_8 };
+pub const ProjectionLayout = enum {
+    concatenated, // G0 G1 … Gn U0 U1 … Un
+    row_interleaved_1, // G0 U0 G1 U1 …
+    row_interleaved_8, // G0…G7 U0…U7 G8…G15 U8…U15 …
+};
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
 /// How a backend expects the expert weights to be stored
@@ -160,8 +164,8 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
             .cute => if (scheme) |s| switch (s) {
-                .mxfp4 => .{ .gate_up = .interleaved_8, .packing = .mxfp4_interleaved8 },
-                .nvfp4 => .{ .gate_up = .interleaved_1, .packing = .swizzled_scales },
+                .mxfp4 => .{ .gate_up = .row_interleaved_8, .packing = .mxfp4_interleaved8 },
+                .nvfp4 => .{ .gate_up = .row_interleaved_1, .packing = .swizzled_scales },
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme) |s| switch (s) {
@@ -169,7 +173,7 @@ pub const Backend = enum {
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
-            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
+            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .row_interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
 
@@ -246,8 +250,8 @@ pub fn applyActivation(input: zml.Tensor, activation: zml.moe.Activation, layout
             const mid = @divFloor(x.dim(.out), 2);
             var gate, var up = switch (layout) {
                 .concatenated => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
-                .interleaved_1 => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
-                .interleaved_8 => blk: {
+                .row_interleaved_1 => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
+                .row_interleaved_8 => blk: {
                     const grouped = x.splitAxis(.out, .{ .group = @divExact(mid, 8), .pair = 2, .row = 8 });
                     break :blk .{
                         grouped.slice(.pair, .{ .end = 1 }).merge(.{ .out = .{ .group, .pair, .row } }),
