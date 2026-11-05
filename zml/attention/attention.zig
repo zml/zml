@@ -99,6 +99,28 @@ pub const Options = struct {
     causal: bool = true,
 };
 
+pub const Partitioning = struct {
+    const Logical = zml.Sharding.Partitioning.Logical;
+    const InputSpecs = @FieldType(zml.ops.ManualPartitioning(Attention.forward), "in_specs");
+
+    in_specs: struct {
+        q: Logical,
+        k: Logical,
+        v: Logical,
+        token_index: Logical = .replicated,
+        /// Omit to replicate backend metadata tensors.
+        metadata: ?@FieldType(InputSpecs, "metadata") = null,
+    },
+    out_specs: Logical,
+
+    /// Shards the `.h` dimension of Q, K, V and the output over `mesh_axis`.
+    /// Other dimensions, token indices and backend metadata are replicated.
+    pub fn head(comptime mesh_axis: @EnumLiteral()) Partitioning {
+        const heads: Logical = .parse(.{ .h = mesh_axis });
+        return .{ .in_specs = .{ .q = heads, .k = heads, .v = heads }, .out_specs = heads };
+    }
+};
+
 /// Causal attention as used in transformers.
 ///
 /// **Shapes**:
@@ -110,27 +132,53 @@ pub const Options = struct {
 ///   - .q is the number of queries
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-    return attentionOpts(q, k, v, token_index, metadata, parameters, .{});
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, mesh: *const zml.Mesh, partitioning: Partitioning) zml.Tensor {
+    return attentionOpts(q, k, v, token_index, metadata, parameters, .{}, mesh, partitioning);
 }
 
 /// `attention`, causal or not depending on `opts`.
-pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: Options) zml.Tensor {
-    return switch (parameters) {
-        .stablehlo => b: {
-            // Generate the attention mask.
-            const seq_len = k.dim(.k);
-            // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
-            // then slice into it, but XLA is able to optimize this correctly.
-            const attn_mask: ?zml.Tensor = if (opts.causal)
-                zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null)
-                    .gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, q.dtype()), token_index.appendAxes(.{.coord}), .{})
-            else
-                null;
-
-            const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
-            break :b attn_output;
+pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: Options, mesh: *const zml.Mesh, partitioning: Partitioning) zml.Tensor {
+    const args: Attention = .{ .q = q, .k = k, .v = v, .token_index = token_index, .metadata = metadata, .parameters = parameters, .opts = opts };
+    return zml.ops.manualComputation2(Attention.forward, args, q.shape(), mesh, .{
+        .in_specs = .{
+            .q = partitioning.in_specs.q,
+            .k = partitioning.in_specs.k,
+            .v = partitioning.in_specs.v,
+            .token_index = partitioning.in_specs.token_index,
+            .metadata = partitioning.in_specs.metadata orelse switch (metadata) {
+                .stablehlo => .{ .stablehlo = {} },
+                .flash_attention => |metadata_| .{ .flash_attention = switch (metadata_) {
+                    .cute => .{ .cute = {} },
+                    .nki => .{ .nki = {} },
+                    .metal => .{ .metal = .{ .num_tokens = .replicated } },
+                } },
+            },
         },
-        .flash_attention => flash_attention.attention(q, k, v, token_index, metadata.flash_attention, parameters.flash_attention, opts),
-    };
+        .out_specs = partitioning.out_specs,
+    });
 }
+
+const Attention = struct {
+    q: zml.Tensor,
+    k: zml.Tensor,
+    v: zml.Tensor,
+    token_index: zml.Tensor,
+    metadata: Metadata,
+    parameters: Parameters,
+    opts: Options,
+
+    fn forward(args: @This(), _: zml.Shape) zml.Tensor {
+        return switch (args.parameters) {
+            .stablehlo => b: {
+                const seq_len = args.k.dim(.k);
+                const mask: ?zml.Tensor = if (args.opts.causal)
+                    zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, args.q.dtype(), null)
+                        .gatherSlices(zml.Shape.init(.{ .q = args.q.dim(.q) }, args.q.dtype()), args.token_index.appendAxes(.{.coord}), .{})
+                else
+                    null;
+                break :b zml.nn.sdpa(args.q, args.k, args.v, .{ .attn_mask = mask });
+            },
+            .flash_attention => flash_attention.attention(args.q, args.k, args.v, args.token_index, args.metadata.flash_attention, args.parameters.flash_attention, args.opts),
+        };
+    }
+};

@@ -2354,8 +2354,8 @@ pub fn softplus(
     // Using log(1 + exp(x)) directly loses precision for x < ~-16.6, causing strongly negative logits to produce zero scores.
     const z = x.exp();
     const u = z.addConstant(1);
-    const log1p = u.cmp(.EQ, .scalar(1, .f32)).select(z, z.mul(u.log()).div(u.subConstant(1)));
-    return x.cmp(.GT, .scalar(opts.threshold, .f32)).select(x, log1p);
+    const log1p = u.cmp(.EQ, .scalar(1, x.dtype())).select(z, z.mul(u.log()).div(u.subConstant(1)));
+    return x.cmp(.GT, .scalar(opts.threshold, x.dtype())).select(x, log1p);
 }
 
 test "softplus" {
@@ -2365,13 +2365,10 @@ test "softplus" {
     const platform = zml.testing.env();
     const input: Tensor = .init(.{ .x = inputs.len }, .f32);
     const Local = struct {
-        fn call(x: Tensor) Tensor {
-            return softplus(x, .{ .threshold = 2.0 });
+        fn call(x: Tensor, dtype: DataType) Tensor {
+            return softplus(x.convert(dtype), .{ .threshold = 2.0 }).convert(x.dtype());
         }
     };
-
-    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.call, .{input}, .{});
-    defer exe.deinit();
 
     var input_buffer: zml.Buffer = try .fromBytes(
         std.testing.io,
@@ -2381,13 +2378,18 @@ test "softplus" {
     );
     defer input_buffer.deinit();
 
-    var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
-    defer result.deinit();
+    for ([_]DataType{ .f32, .bf16 }) |dtype| {
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.call, .{ input, dtype }, .{});
+        defer exe.deinit();
 
-    try zml.testing.expectClose(
-        std.testing.io,
-        Slice.init(input.shape(), std.mem.sliceAsBytes(&expected)),
-        result,
-        .{},
-    );
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
+        defer result.deinit();
+
+        try zml.testing.expectClose(
+            std.testing.io,
+            Slice.init(input.shape(), std.mem.sliceAsBytes(&expected)),
+            result,
+            .{},
+        );
+    }
 }

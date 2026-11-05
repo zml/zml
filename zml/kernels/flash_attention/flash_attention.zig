@@ -127,6 +127,7 @@ pub const Metadata = union(Backend) {
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: zml.attention.Options) zml.Tensor {
+    zml.stdx.debug.assert(zml.Compiler.current().manual_computation_depth > 0, "Attention kernels require an explicit manualComputation boundary", .{});
     return switch (parameters) {
         .cute => cute.attention(q, k, v, token_index, opts.causal),
         // The NKI and Metal kernels are causal only.
@@ -315,9 +316,19 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     defer token_index.deinit();
 
     const meshes = platform.meshes.values();
+    const mesh = zml.testing.tpMesh();
+    const partitioning: zml.attention.Partitioning = if (@rem(k_shape.dim(.h), mesh.numPartitionsForLogicalAxis(.model)) == 0) .head(.model) else .{
+        .in_specs = .{ .q = .replicated, .k = .replicated, .v = .replicated },
+        .out_specs = .replicated,
+    };
+    const AttentionCall = struct {
+        fn forward(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, position: zml.Tensor, metadata: zml.attention.Metadata, parameters: zml.attention.Parameters, opts_: zml.attention.Options, mesh_: *const zml.Mesh, partitioning_: zml.attention.Partitioning) zml.Tensor {
+            return zml.attention.attentionOpts(q_, k_, v_, position, metadata, parameters, opts_, mesh_, partitioning_);
+        }
+    };
     const reference_metadata: zml.attention.Metadata = .{ .stablehlo = {} };
     const reference_parameters: zml.attention.Parameters = .{ .stablehlo = {} };
-    const reference_exe = try platform.compileFn(allocator, io, zml.attention.attentionOpts, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters, opts }, .{
+    const reference_exe = try platform.compileFn(allocator, io, AttentionCall.forward, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters, opts, mesh, partitioning }, .{
         .program_name = "attention_stablehlo",
         .meshes = meshes,
     });
@@ -326,6 +337,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     var reference_d = try reference_exe.eval(allocator, io, .{ q, k, v, token_index, reference_metadata });
     defer reference_d.deinit();
     try reference_d.await(io);
+    try std.testing.expectEqualDeep(q_shape.withPartitioning(mesh, partitioning.out_specs)._sharding, reference_d.shape()._sharding);
     const reference_h: zml.Slice = try reference_d.toSliceAlloc(allocator, io);
     defer reference_h.free(allocator);
 
@@ -337,8 +349,8 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
         const exe = try platform.compileFn(
             allocator,
             io,
-            attention,
-            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters, opts },
+            AttentionCall.forward,
+            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, .{ .flash_attention = metadata }, .{ .flash_attention = parameters }, opts, mesh, partitioning },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
                 .meshes = meshes,

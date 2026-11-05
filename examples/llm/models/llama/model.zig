@@ -329,7 +329,7 @@ pub const EmbedTokens = struct {
         const tokens = input.tokens.withPartialTags(.{.s});
         return .{ .hidden = input.embedding.embed_tokens.forward(tokens)
             .withPartialTags(.{.d})
-            .withPartitioning(.model, .{ .d = .replicated }) };
+            .replicate() };
     }
 };
 
@@ -587,6 +587,8 @@ const SelfAttn = struct {
             token_index,
             attention_metadata,
             attention_parameters,
+            zml.Compiler.current().mesh(.model),
+            .head(.model),
         );
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
