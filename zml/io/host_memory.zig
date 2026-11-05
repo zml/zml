@@ -2,13 +2,17 @@
 //! its workspace for its whole life: calibration maps its ring there, the
 //! backend grows the set to what its load holds and carves it, and its
 //! `destroy` releases every arena. Callers never supply a workspace, a
-//! budget or a calibration result.
+//! budget, a NUMA policy or a calibration result.
 //!
 //! The memory depends on the target: CUDA and oneAPI take page-backed arenas
 //! registered with PJRT (DmaMap), ROCm and Furiosa PJRT `pinned_host`
 //! buffers, and CPU plain pages, unregistered. The arenas' kind and the
 //! transfer path are separate decisions: CPU loads through the direct
-//! backend too. ROCm balances whole arenas across its devices' host nodes.
+//! backend too. When the task's cpuset and memory policy allow several
+//! memory-bearing NUMA nodes, page-backed arenas interleave over those of the
+//! platform's devices (all of them when a device's node is unknown or none of
+//! theirs is allowed); ROCm balances whole arenas across its devices' host
+//! nodes.
 //! `Workspace.mapped_bytes_ceiling` (16 GiB) is a safety guard, not a
 //! target. A failed allocation or registration, or a growth past the
 //! ceiling, is logged with its cause and returns `OutOfMemory`.
@@ -61,21 +65,29 @@ const ArenaKind = union(enum) {
     /// transfers at 11.01 GiB/s instead of 26.90 (eight DMA caps).
     pages: struct {
         platform: ?*const Platform,
+        /// Zero leaves placement to the kernel. Automatic placement can
+        /// fall back to zero if the kernel refuses it.
+        numa_mask: u64,
     },
 
     const transparent_huge_page_size = 2 * 1024 * 1024;
+    const mpol_interleave = 3;
 
-    fn init(allocator: Allocator, platform: *const Platform) Allocator.Error!ArenaKind {
+    fn init(
+        allocator: Allocator,
+        io: std.Io,
+        platform: *const Platform,
+    ) Allocator.Error!ArenaKind {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .pages = .{ .platform = platform } },
-            .cpu => .{ .pages = .{ .platform = null } },
+            .cuda, .oneapi => .{ .pages = .{ .platform = platform, .numa_mask = pagesNumaMask(allocator, io, platform) } },
+            .cpu => .{ .pages = .{ .platform = null, .numa_mask = pagesNumaMask(allocator, io, platform) } },
             // Furiosa backs `.host_pinned` with SDK pinned (dma-buf) memory
             // from `/dev/dma_heap/system`, which the SDK recognizes by
             // address and transfers without pinning pages on every request.
             .rocm, .furiosa => {
                 // PJRT-pinned allocations choose placement through the device's
-                // host memory space. Retain one allocation path per reported
-                // node; the blocks stay unpartitioned.
+                // host memory space, not our mbind policy. Retain one allocation
+                // path per reported node; the blocks stay unpartitioned.
                 var host_nodes: std.ArrayList(HostNode) = try .initCapacity(allocator, @max(platform.devices.len, 1));
                 devices: for (platform.devices, 0..) |device, device_index| {
                     std.debug.assert(device.memory(.host_pinned) != null);
@@ -169,6 +181,7 @@ const ArenaKind = union(enum) {
                     return error.OutOfMemory;
                 };
                 const data = ptr[0..bytes];
+                place(&pages.numa_mask, data);
                 adviseHugePages(data);
                 if (pages.platform) |p| p.pjrt_client.dmaMap(p.pjrt_api, data) catch |err| {
                     log.err("DMA registration failed for {Bi:.2} of host memory: {s}", .{ bytes, @errorName(err) });
@@ -176,8 +189,10 @@ const ArenaKind = union(enum) {
                     return error.OutOfMemory;
                 };
                 const finished: std.Io.Timestamp = .now(io, .awake);
-                log.debug("DMA arena kind={s} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
+                log.debug("DMA arena kind={s} placement={s} nodes=0x{x} address=0x{x} size={Bi:.2} allocation_ms={d:.3}", .{
                     if (pages.platform != null) "dma_map" else "pageable",
+                    if (pages.numa_mask == 0) "unplaced" else "interleave",
+                    pages.numa_mask,
                     @intFromPtr(data.ptr),
                     bytes,
                     @as(f64, @floatFromInt(elapsedNanoseconds(started, finished))) / std.time.ns_per_ms,
@@ -215,6 +230,35 @@ const ArenaKind = union(enum) {
         if (comptime builtin.os.tag != .linux) return alignment;
         if (len < transparent_huge_page_size) return alignment;
         return alignment.max(.fromByteUnits(transparent_huge_page_size));
+    }
+
+    /// Interleaves `data` over `numa_mask`'s nodes; on refusal, warns and
+    /// zeroes the mask, so later arenas stay unplaced too.
+    fn place(numa_mask: *u64, data: []u8) void {
+        const mask = numa_mask.*;
+        if (mask == 0) return;
+        if (comptime builtin.os.tag != .linux) return;
+
+        const node_mask: [1]u64 = .{mask};
+        const highest_node: usize = 63 - @clz(mask);
+        const rc = std.os.linux.syscall6(
+            .mbind,
+            @intFromPtr(data.ptr),
+            data.len,
+            mpol_interleave,
+            @intFromPtr(&node_mask),
+            // Linux get_nodes() decrements maxnode before copying the mask;
+            // raw callers include the same extra sentinel bit as libnuma.
+            highest_node + 2,
+            0,
+        );
+        if (std.os.linux.errno(rc) == .SUCCESS) return;
+        log.warn("NUMA placement of DMA arenas over nodes 0x{x} refused ({s}); leaving them unplaced", .{
+            mask,
+            @tagName(std.os.linux.errno(rc)),
+        });
+        // Automatic placement is not retried: the arenas stay unplaced.
+        numa_mask.* = 0;
     }
 
     fn adviseHugePages(data: []u8) void {
@@ -259,7 +303,7 @@ pub const Workspace = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .kind = try .init(allocator, platform),
+            .kind = try .init(allocator, io, platform),
         };
     }
 
@@ -348,15 +392,140 @@ pub const Workspace = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .kind = .{ .pages = .{ .platform = null } },
+            .kind = .{ .pages = .{ .platform = null, .numa_mask = 0 } },
         };
     }
 };
 
 pub const Block = []u8;
 
+/// Bits of `/sys/devices/system/node/has_memory`, or zero when unreadable.
+/// Nodes 64 and above cannot be represented and are dropped.
+/// Device-coherent HBM nodes are not candidates for host pages: the measured
+/// four-GB300 topology had 34 NUMA nodes but only two with host memory.
+fn memoryNodeMask(allocator: Allocator, io: std.Io) u64 {
+    if (comptime builtin.os.tag != .linux) return 0;
+    const contents = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "/sys/devices/system/node/has_memory",
+        allocator,
+        .limited(4096),
+    ) catch return 0;
+    defer allocator.free(contents);
+    return parseNodeList(contents);
+}
+
+/// The nodes the task's memory policy allows (`numactl --membind`,
+/// `--interleave`, `--preferred`); every node under the default policy.
+/// An arena placed outside them would defeat the policy: `mbind` on a
+/// range overrides `set_mempolicy`.
+fn taskMemoryPolicyMask() u64 {
+    if (comptime builtin.os.tag != .linux) return std.math.maxInt(u64);
+    var mode: c_int = 0;
+    var nodes: [1]u64 = .{0};
+    const rc = std.os.linux.syscall5(.get_mempolicy, @intFromPtr(&mode), @intFromPtr(&nodes), 64, 0, 0);
+    if (std.os.linux.errno(rc) != .SUCCESS or mode == 0 or nodes[0] == 0) return std.math.maxInt(u64);
+    return nodes[0];
+}
+
+/// The nodes the task's cpuset lets it allocate on (`Mems_allowed`), or
+/// every node when unknown. `mbind` refuses a mask with none of them.
+fn cpusetMemsMask() u64 {
+    if (comptime builtin.os.tag != .linux) return std.math.maxInt(u64);
+    const mpol_f_mems_allowed = 4;
+    var nodes: [1]u64 = .{0};
+    const rc = std.os.linux.syscall5(.get_mempolicy, 0, @intFromPtr(&nodes), 64, 0, mpol_f_mems_allowed);
+    if (std.os.linux.errno(rc) != .SUCCESS or nodes[0] == 0) return std.math.maxInt(u64);
+    return nodes[0];
+}
+
+/// The nodes page-backed arenas interleave over (`placementMask`): the
+/// memory-bearing nodes the task's cpuset and memory policy allow, narrowed
+/// to the nodes of the platform's devices.
+fn pagesNumaMask(allocator: Allocator, io: std.Io, platform: *const Platform) u64 {
+    const candidates = memoryNodeMask(allocator, io) & cpusetMemsMask() & taskMemoryPolicyMask();
+    return placementMask(candidates, deviceNodeMask(platform));
+}
+
+/// The nodes of the platform's devices (`Device.numaNode`), or null when a
+/// device reports none (the CPU plugin never does) or a node past 63.
+fn deviceNodeMask(platform: *const Platform) ?u64 {
+    var mask: u64 = 0;
+    for (platform.devices) |device| {
+        const node = device.numaNode() orelse return null;
+        if (node >= 64) return null;
+        mask |= @as(u64, 1) << @intCast(node);
+    }
+    return if (mask == 0) null else mask;
+}
+
+/// Zero leaves placement to the kernel: with one candidate node or none
+/// there is nothing to choose, and the task's policy or the only node decides.
+/// Among several candidates, the arenas go to the devices' nodes: an arena on
+/// another node crosses the inter-socket link on every H2D copy. Two GB300
+/// on one Grace node loaded Qwen3.8-27B-FP8 in 1.265 s with a task policy
+/// holding the arenas to that node, against 1.64 s interleaved over both
+/// nodes. Devices on several nodes share one pool interleaved over theirs:
+/// four GB300 on two nodes loaded replicated DeepSeek-V4-Flash in 4.35 s
+/// against 4.92 s with per-node pools. When a device's node is unknown, or
+/// none is a candidate, the arenas interleave over every candidate, which no
+/// single node beat everywhere. A single node is placed too, since unplaced
+/// CUDA arenas follow the registering thread's node; the kernel still falls
+/// back when it is full.
+fn placementMask(candidates: u64, device_nodes: ?u64) u64 {
+    if (@popCount(candidates) < 2) return 0;
+    const near = candidates & (device_nodes orelse candidates);
+    return if (near != 0) near else candidates;
+}
+
+/// Parses a kernel node list ("0-1", "0,2-3") into a mask; zero on any error.
+fn parseNodeList(text: []const u8) u64 {
+    var mask: u64 = 0;
+    var ranges = std.mem.tokenizeAny(u8, text, ", \n");
+    while (ranges.next()) |range| {
+        var ends = std.mem.splitScalar(u8, range, '-');
+        const first = std.fmt.parseInt(usize, ends.first(), 10) catch return 0;
+        const last = if (ends.next()) |end|
+            std.fmt.parseInt(usize, end, 10) catch return 0
+        else
+            first;
+        if (last < first or ends.next() != null) return 0;
+        var node = first;
+        while (node <= last) : (node += 1) {
+            if (node < 64) mask |= @as(u64, 1) << @intCast(node);
+        }
+    }
+    return mask;
+}
+
 fn elapsedNanoseconds(started: std.Io.Timestamp, finished: std.Io.Timestamp) u64 {
     return @intCast(@max(started.durationTo(finished).nanoseconds, 0));
+}
+
+test "automatic NUMA placement keeps the devices' nodes among several candidates" {
+    // One candidate or none: the kernel places.
+    try std.testing.expectEqual(@as(u64, 0), placementMask(0, 0b10));
+    try std.testing.expectEqual(@as(u64, 0), placementMask(0b1, 0b1));
+    try std.testing.expectEqual(@as(u64, 0), placementMask(0b1000, null));
+    // Devices on one of two nodes: that node; on both: both.
+    try std.testing.expectEqual(@as(u64, 0b10), placementMask(0b11, 0b10));
+    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b11));
+    // Unknown device nodes, or none among the candidates: every candidate.
+    try std.testing.expectEqual(@as(u64, 0b1001), placementMask(0b1001, null));
+    try std.testing.expectEqual(@as(u64, 0b11), placementMask(0b11, 0b100));
+    // A cpuset of nodes 0 and 2 of four, devices on node 1: the cpuset's
+    // nodes, as `pagesNumaMask` narrows the candidates to them first.
+    try std.testing.expectEqual(@as(u64, 0b101), placementMask(0b1111 & 0b101, 0b10));
+}
+
+test "parseNodeList accepts kernel node lists" {
+    try std.testing.expectEqual(@as(u64, 0b11), parseNodeList("0-1\n"));
+    try std.testing.expectEqual(@as(u64, 0b1101), parseNodeList("0,2-3"));
+    try std.testing.expectEqual(@as(u64, 0b1), parseNodeList("0"));
+    try std.testing.expectEqual(@as(u64, 0), parseNodeList(""));
+    try std.testing.expectEqual(@as(u64, 0), parseNodeList("1-0"));
+    try std.testing.expectEqual(@as(u64, 0), parseNodeList("x"));
+    try std.testing.expectEqual(@as(u64, 0b1), parseNodeList("0,64"));
 }
 
 test "Workspace capacity counts whole blocks under the mapped ceiling, and carve refuses one more" {
