@@ -152,21 +152,31 @@ pub const paged = struct {
         cfg.chunk = if (plan.chunk > 0) plan.chunk else keys;
         cfg.a = (std.math.divCeil(i64, keys, cfg.chunk) catch unreachable) * cfg.chunk;
         const table = parameters.block_table.pad(-1, .{ .p = Tensor.Pad{ .high = @divExact(cfg.a, page) - parameters.block_table.dim(.p) } });
+        // WORKAROUND (TCC 2026.5.0b0): attention over query groups of a size
+        // other than a power of two fails ("Inconsistent tensor group
+        // offsets"): pad the groups with zero queries, whose outputs are
+        // dropped. Repro:
+        // repro_flash_prefill_group6_inconsistent_offsets.py (zml/reproducer,
+        // platform/furiosa). Remove once any group size compiles.
+        const groups: i64 = @intCast(std.math.ceilPowerOfTwo(u64, @intCast(cfg.g)) catch unreachable);
+        const extra = groups - cfg.g;
+        cfg.g = groups;
+        const queries = q.convert(.bf16).pad(0, .{ .hg = Tensor.Pad{ .high = extra } });
         const inputs: OneShot.Inputs = .{
-            .q = q.convert(.bf16),
+            .q = queries,
             .pages = table,
             .seq_lens = parameters.seq_lens,
             .query_offsets = parameters.query_start_len,
             .k_cache = k_cache.convert(.bf16),
             .v_cache = v_cache.convert(.bf16),
-            .sink = sink,
+            .sink = sink.pad(0, .{ .hg = Tensor.Pad{ .high = extra } }),
         };
-        const outputs: OneShot.Outputs = .{ .out = q.shape().withDtype(.bf16) };
+        const outputs: OneShot.Outputs = .{ .out = queries.shape() };
         const out = if (cfg.a == cfg.chunk)
             OneShot.call(inputs, outputs, .{ .cfg = cfg }).out
         else
             Flash.call(inputs, outputs, .{ .cfg = cfg }).out;
-        return out.convert(q.dtype());
+        return out.slice(.hg, .{ .end = groups - extra }).convert(q.dtype());
     }
 };
 
