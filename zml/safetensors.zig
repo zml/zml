@@ -595,17 +595,16 @@ pub fn resolveModelRepo(
 }
 
 pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!struct { std.Io.File, []const u8 } {
-    {
-        const index_name = "model.safetensors.index.json";
-        if (repo.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
-            return .{ index_file, "model.safetensors.index.json" };
-        } else |_| {}
-    }
+    const default_entrypoints = .{
+        "model.safetensors.index.json",
+        "consolidated.safetensors.index.json",
+        "model.safetensors",
+        "consolidated.safetensors",
+    };
 
-    {
-        const model_name = "model.safetensors";
-        if (repo.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
-            return .{ model_file, "model.safetensors" };
+    inline for (default_entrypoints) |entrypoint| {
+        if (repo.openFile(io, entrypoint, .{ .mode = .read_only })) |index_file| {
+            return .{ index_file, entrypoint };
         } else |_| {}
     }
 
