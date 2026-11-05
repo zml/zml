@@ -550,7 +550,7 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
         .weight = .{ .ptr = cute.DType.i8 },
         .schedule = .{ .ptr = cute.DType.i32 },
         .input_quant = .{ .ptr = cute.DType.f8e4m3fn },
-        .weight_scale = .{ .ptr = cute.DType.i8 },
+        .weight_scale = .{ .ptr = cute.DType.i32 },
         .input_scale = .{ .ptr = cute.DType.i8 },
     };
     const shape = .{
@@ -1439,11 +1439,10 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V,
     return .{ .count = count, .route = route, .weight = weight };
 }
 
-/// Python `fused_epilogue`: thread `t` owns output row `128 * tile_m + t`
-/// of the interleaved projection, so even threads hold a gate and their odd
-/// neighbour the matching up value. Each even thread computes one SwiGLU
-/// activation per routed row; 32 consecutive activations span two warps,
-/// whose partial maxima meet in shared memory.
+/// Thread `t` owns output row `128 * tile_m + t` of the interleave-8
+/// projection. Gate and up lanes are paired by XOR 8. Each gate thread
+/// computes one SwiGLU activation per routed row; 32 consecutive activations
+/// span two warps, whose partial maxima meet in shared memory.
 ///
 /// At decode sizes most rows of a group are padding, whose outputs are never
 /// read. `count` is uniform across the CTA, so whole 8-row chunks of padding
@@ -1470,7 +1469,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     const tid = b.threadIdx().x;
     const lane = tid.rem(32);
     const warp = b.makeWarpUniform(b.makeWarpUniform(tid.div(32)));
-    const is_gate = tid.rem(2).eq(0);
+    const is_gate = tid.rem(16).lt(8);
     const first_row = group.mul(operands.group_rows);
     const f32_type = cute.DType.f32.toMlir(b.ctx);
     // The TMA C staging buffer is unused by this epilogue.
@@ -1497,7 +1496,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             if (operands.swiglu_limit) |limit| {
                 gate = gate.minimum(limit);
             }
-            var up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32);
+            var up_value = b.shuffleXor(value, 8).to(.bf16).to(.f32);
             if (operands.swiglu_limit) |limit| {
                 up_value = up_value.maximum(-limit).minimum(limit);
             }
@@ -1506,7 +1505,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
             var result = up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
             result = result.mul(b.shuffleIdx(routed.weight.?, c)).to(.bf16).to(.f32);
-            // Odd threads hold no activation and must not raise the maxima.
+            // Up lanes hold no activation and must not raise the maxima.
             activation.* = b.select(is_gate, result, b.constant(.f32, 0));
             const maximum = b.warpMaxNonNegative(activation.*.abs());
             chunk_maximum = b.select(lane.eq(c), maximum, chunk_maximum);
@@ -1540,7 +1539,8 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     // The next tile reuses the scratch maxima.
     b.barrierCtaSyncAligned(1, 128);
 
-    const activation_index = tile_m.mul(64).add(tid.div(2));
+    const activation_row = tid.div(16).mul(8).add(tid.rem(8));
+    const activation_index = tile_m.mul(64).add(activation_row);
     for (0..row_chunks) |row_chunk| {
         const first = row_chunk * swiglu_chunk;
         const last = @min(first + swiglu_chunk, live);
@@ -1830,7 +1830,13 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const sf_order = b.makeIntTuple(.{ 1, 0, 2 });
     const sfa_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_m), b.arg(host_arg.problem_k), b.arg(host_arg.expert_count) }, b.shapeType(.{ cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic }));
     const sfb_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_n), b.arg(host_arg.problem_k), b.arg(host_arg.problem_l) }, b.shapeType(.{ cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic }));
-    const dynamic_sfa_layout = b.tileToShape(sf_atom_layout, sfa_shape, sf_order, b.layoutType(dynamic_sf_layout));
+    // Weight scales step M atoms first; activation scales retain K-major order.
+    const sfa_order = b.makeIntTuple(.{ 0, 1, 2 });
+    const sfa_layout = b.layoutSpec(
+        .{ .{ .{ 32, 4 }, cute.AlgebraToken.dynamic }, .{ .{ 32, 4 }, cute.AlgebraToken.dynamic }, .{ 1, cute.AlgebraToken.dynamic } },
+        .{ .{ .{ 16, 4 }, 512 }, .{ .{ 0, 1 }, sf_stride }, .{ 0, sf_stride } },
+    );
+    const dynamic_sfa_layout = b.tileToShape(sf_atom_layout, sfa_shape, sfa_order, b.layoutType(sfa_layout));
     const dynamic_sfb_layout = b.tileToShape(sf_atom_layout, sfb_shape, sf_order, b.layoutType(dynamic_sf_layout));
     const gSFA = b.makeTensorView(b.recastPointer(b.arg(host_arg.weight_scale), .f8e8m0fnu, .gmem, 16), dynamic_sfa_layout);
     const gSFB = b.makeTensorView(b.recastPointer(b.arg(host_arg.input_scale), .f8e8m0fnu, .gmem, 16), dynamic_sfb_layout);

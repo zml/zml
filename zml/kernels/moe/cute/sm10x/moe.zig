@@ -19,11 +19,14 @@ pub const Mxfp4Inputs = struct {
     x: zml.Tensor,
     /// `[tokens, topk]` FP32.
     routing_weights: zml.Tensor,
+    /// `[experts, 2 * intermediate, hidden / 2]` packed FP4, gate/up rows interleaved by 8.
     w1: zml.Tensor,
-    /// `w1` scales in the 128x4 tensor-core layout (rows tiled by 4x32, columns by 4).
+    /// `[experts, hidden / 128, 2 * intermediate]` i32 words of four E8M0 scales,
+    /// in MN-major 128x4 atoms, with rows interleaved like `w1`.
     s1: zml.Tensor,
+    /// `[experts, hidden, intermediate / 2]` packed FP4.
     w2: zml.Tensor,
-    /// `w2` scales in the 128x4 tensor-core layout (rows tiled by 4x32, columns by 4).
+    /// `[experts, intermediate / 128, hidden]` i32 words in MN-major 128x4 atoms.
     s2: zml.Tensor,
     /// `[tokens, topk]` local expert ids.
     ids: zml.Tensor,
@@ -207,14 +210,14 @@ pub fn forwardMxfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, t
         .weight = a.w1,
         .schedule = routing.schedule,
         .input_quant = q1.q,
-        .weight_scale = a.s1.bitCast(.u8),
+        .weight_scale = a.s1,
         .input_scale = q1.s,
     }, routing.route_inverse, a.routing_weights.reshape(.{routes}));
     const down = mxfp4_persistent.downRows(down_cfg, .{
         .weight = a.w2,
         .schedule = routing.schedule,
         .input_quant = q2.q,
-        .weight_scale = a.s2.bitCast(.u8),
+        .weight_scale = a.s2,
         .input_scale = q2.s,
     }, routing.route_inverse);
     return reduce.topk(down, routing.route_map orelse routing.schedule, .{

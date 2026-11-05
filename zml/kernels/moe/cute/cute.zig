@@ -35,7 +35,8 @@ pub fn validateOptions(opts: zml.moe.Options) void {
 /// is the per-expert multiplier dequantizing each GEMM output (it folds in
 /// the inverse of the input's global scale), and their input scale is the
 /// multiplier applied to the GEMM's input before NVFP4 quantization. Both
-/// expect block scales in the 128x4 tensor-core layout.
+/// expect block scales in the 128x4 tensor-core layout. MXFP4 gate/up rows
+/// interleave by 8 and its scale atoms are MN-major packed i32 words.
 pub fn fusedExperts(
     input: zml.Tensor,
     ids: zml.Tensor,
