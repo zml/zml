@@ -31,7 +31,7 @@ def _collect_impl(target, ctx):
     """Collect runtime groups from the target and its dependencies."""
 
     if ctx.configuration.is_tool_configuration():
-        return [_RuntimeGroupsInfo(entries = runfiles_groups.entries())] # Build tools do not contribute to the application's runtime package
+        return [_RuntimeGroupsInfo(entries = runfiles_groups.entries())]  # Build tools do not contribute to the application's runtime package
 
     # Read this target runtime-group annotations, ignoring other aspect hints.
     hints = [h for h in getattr(ctx.rule.attr, "aspect_hints", []) if _RuntimeGroupInfo in h]
@@ -62,7 +62,7 @@ def _collect_impl(target, ctx):
 # To be used on the consumer side to collect runtime groups from dependencies
 runtime_groups_aspect = aspect(
     implementation = _collect_impl,
-    attr_aspects = ["*"],
+    attr_aspects = ["exports", "deps"],
     provides = [_RuntimeGroupsInfo],
 )
 
@@ -117,8 +117,7 @@ def collect_runtime_groups(ctx, binary, *, application_files = []):
     original = _entries(binary[DefaultInfo].default_runfiles)
     remaining = {field: dict(entries) for field, entries in original.items()}
 
-    # Visiting all attributes can discover target-configured dependencies that
-    # are not runtime dependencies. Never silently add their files to a package.
+    # A dependency can supply build inputs that are absent from the binary’s runfiles.
     for entry in collected.entries.to_list():
         for field, entries in _entries(runfiles_groups.runfiles(ctx, entry)).items():
             for key in entries:
@@ -151,6 +150,7 @@ def collect_runtime_groups(ctx, binary, *, application_files = []):
         content = _runfiles(ctx, remaining),
         rank = runfiles_groups.RANK_SHARED_DEPS,
     ))
+
     # Return producer, shared and application entries
     return RunfilesGroupInfo(
         entries = runfiles_groups.entries(direct = own, transitive = [collected.entries]),

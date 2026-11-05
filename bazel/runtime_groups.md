@@ -25,6 +25,8 @@ Several targets can contribute to the same group: for instance both `flashinfer_
 
 ## Consumers
 
+The aspect discovers annotated producers through `deps` and `exports`. Once it finds a producer, it assigns that producer default runfiles to the named group.
+
 Apply `runtime_groups_aspect` to the `binary` attribute of the rule that consumes runtime groups:
 
 ```starlark

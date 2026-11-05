@@ -1,4 +1,3 @@
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//bazel:runtime_groups.bzl", "runtime_group")
 load(":fixtures.bzl", "binary", "report", "runtime", "wrapper")
 load(":tests.bzl", "contents", "groups_test", "invalid_test")
@@ -68,22 +67,15 @@ runtime(
     deps = [":cuda"],
 )
 
-cc_library(
-    name = "native_bridge",
-    data = [
-        ":left",
-        ":right",
-    ],
-)
-
 binary(
     name = "app",
-    keyed_deps = {":cuda_extra": "runtime"},
     make_executable = True,
     tool = ":tool",
     deps = [
         ":crashpad",
-        ":native_bridge",
+        ":cuda_extra",
+        ":left",
+        ":right",
         ":shared",
     ],
 )
@@ -158,8 +150,8 @@ groups_test(
 
 binary(
     name = "contaminated",
-    annotation_inputs = [":tool"],
     make_executable = True,
+    exports = [":tool"],
     deps = [":cuda"],
 )
 
@@ -193,14 +185,21 @@ invalid_test(
     target_under_test = ":root_executable",
 )
 
+# The wrapper test expects a Crashpad group so it can detect a missed exports edge.
+binary(
+    name = "crashpad_app",
+    make_executable = True,
+    deps = [":crashpad"],
+)
+
 wrapper(
     name = "wrapped",
-    binary = ":plain",
+    exports = ":crashpad_app",
 )
 
 report(
     name = "wrapped_report",
-    application_binary = ":plain",
+    application_binary = ":crashpad_app",
     binary = ":wrapped",
 )
 
@@ -208,12 +207,16 @@ groups_test(
     name = "wrapper_test",
     executable_group = "application",
     expected = {
-        "shared": ["file:plain.txt"],
+        "crashpad": contents(
+            "crashpad",
+            executable = True,
+        ),
+        "shared": ["file:crashpad_app.txt"],
         "application": [
-            "file:plain",
+            "file:crashpad_app",
             "file:wrapped",
-            "root_symlink:plain/root_alias=plain",
-            "symlink:plain/alias=plain",
+            "root_symlink:crashpad_app/root_alias=crashpad_app",
+            "symlink:crashpad_app/alias=crashpad_app",
         ],
     },
     target_under_test = ":wrapped_report",

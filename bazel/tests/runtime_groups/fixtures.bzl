@@ -20,15 +20,14 @@ def _fixture_impl(ctx):
         root_symlinks = {ctx.label.name + "/root_alias": executable or output},
     ).merge_all([
         dep[DefaultInfo].default_runfiles
-        for dep in ctx.attr.deps + ctx.attr.keyed_deps.keys()
+        for dep in ctx.attr.deps
     ])
     return [DefaultInfo(files = depset(files), executable = executable, runfiles = runfiles)]
 
 _attrs = {
     "deps": attr.label_list(),
-    "keyed_deps": attr.label_keyed_string_dict(),
     # Intentionally absent from runfiles, despite using the target configuration.
-    "annotation_inputs": attr.label_list(),
+    "exports": attr.label_list(),
     "tool": attr.label(cfg = "exec"),
     "make_executable": attr.bool(),
 }
@@ -37,7 +36,7 @@ runtime = rule(implementation = _fixture_impl, attrs = _attrs)
 binary = rule(implementation = _fixture_impl, attrs = _attrs, executable = True)
 
 def _wrapper_impl(ctx):
-    original = ctx.attr.binary[DefaultInfo]
+    original = ctx.attr.exports[DefaultInfo]
     executable = ctx.actions.declare_file(ctx.label.name)
     ctx.actions.symlink(output = executable, target_file = original.files_to_run.executable)
     return [DefaultInfo(
@@ -50,7 +49,7 @@ def _wrapper_impl(ctx):
 wrapper = rule(
     implementation = _wrapper_impl,
     executable = True,
-    attrs = {"binary": attr.label()},
+    attrs = {"exports": attr.label(mandatory = True)},
 )
 
 def _contents(runfiles):
