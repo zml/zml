@@ -194,6 +194,8 @@ pub const Converter = struct {
         defer self.allocator.free(namespaces);
         for (metrics, 0..) |metric, stage| {
             namespaces[stage] = label: {
+                // A single local stage needs no enclosing box in Model Explorer.
+                if (metrics.len == 1) break :label "";
                 if (gpu) |g| {
                     if (g.overhead(metric.communication, metric.memory)) |ov| {
                         break :label try std.fmt.allocPrint(self.allocator, "stage_{d:0>3} ({s} CMR)", .{ stage, gpu_info.bucket(ov) });
@@ -207,6 +209,7 @@ pub const Converter = struct {
         };
         var groups = try graph.openDict("groupNodeAttributes");
         for (metrics, 0..) |metric, stage| {
+            if (namespaces[stage].len == 0) continue;
             var attrs = try groups.openDict(namespaces[stage]);
             try attrs.write("CMR", try std.fmt.allocPrint(self.allocator, "{f}", .{Cmr{ .metric = metric }}));
             if (gpu) |info| {
@@ -254,7 +257,7 @@ pub const Converter = struct {
         // node name + attrs
         try node.write("id", node_id);
         try node.write("namespace", namespace);
-        try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}\nreads: {?B:.1}", .{ self.instrLabel(instr), self.instructionReads(instr) }));
+        try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}", .{self.instrLabel(instr)}));
         {
             var attrs = try node.openList("attrs");
             try self.writeAttr(Writer, &attrs, instr, comp_caller);
@@ -485,7 +488,13 @@ pub const Converter = struct {
     pub fn writeAttr(self: *const Converter, Writer: type, list: *json_writer.List(Writer), instr: hlo.HloInstructionProto, comp_caller: ?*const hlo.HloInstructionProto) !void {
         try list.write(.{ .key = "instruction", .value = instr.name });
         try list.write(.{ .key = "opcode", .value = instr.opcode });
-        if (instr.custom_call_target.len > 0) try list.write(.{ .key = "custom call target", .value = instr.custom_call_target });
+        if (instr.custom_call_target.len > 0) {
+            const target = if (tritonKernelName(instr)) |name|
+                try std.fmt.allocPrint(self.allocator, "triton: {s}", .{name})
+            else
+                instr.custom_call_target;
+            try list.write(.{ .key = "custom call target", .value = target });
+        }
         if (isCollective(instr.opcode)) {
             var input_bytes: ?u64 = if (instr.operand_ids.items.len > 0) 0 else null;
             for (instr.operand_ids.items) |id| {
@@ -586,6 +595,28 @@ pub const Converter = struct {
     }
 };
 
+// The GPU custom-call backend config embeds escaped textual Triton IR.
+// Read the public entry point, skipping private helper functions.
+fn tritonKernelName(instr: hlo.HloInstructionProto) ?[]const u8 {
+    if (!std.mem.eql(u8, instr.custom_call_target, "__gpu$xla.gpu.triton")) return null;
+    var remaining = instr.backend_config;
+    while (std.mem.indexOf(u8, remaining, "tt.func ")) |offset| {
+        remaining = remaining[offset + "tt.func ".len ..];
+        var declaration = std.mem.trimStart(u8, remaining, " \t\r\n");
+        if (std.mem.startsWith(u8, declaration, "public ")) {
+            declaration = std.mem.trimStart(u8, declaration["public ".len..], " \t\r\n");
+        }
+        if (declaration.len == 0 or declaration[0] != '@') continue;
+        const symbol = declaration[1..];
+        var end: usize = 0;
+        while (end < symbol.len and (std.ascii.isAlphanumeric(symbol[end]) or std.mem.indexOfScalar(u8, "_.$-", symbol[end]) != null)) : (end += 1) {}
+        if (end == 0) continue;
+        const tail = std.mem.trimStart(u8, symbol[end..], " \t\r\n");
+        if (tail.len > 0 and tail[0] == '(') return symbol[0..end];
+    }
+    return null;
+}
+
 const InstrLabel = struct {
     instr: hlo.HloInstructionProto,
     converter: *const Converter,
@@ -610,6 +641,7 @@ const InstrLabel = struct {
         }
 
         if (std.mem.eql(u8, opcode, "custom-call")) {
+            if (tritonKernelName(instr)) |name| return writer.print("triton: {s}", .{name});
             return try writer.print("custom-call: {s}", .{if (instr.custom_call_target.len > 0) instr.custom_call_target else instr.name});
         }
 
@@ -830,9 +862,11 @@ test "decode HLO and emit Model Explorer graphs" {
     try std.testing.expectEqualStrings("entry", graph.get("id").?.string);
     const nodes = graph.get("nodes").?.array.items;
     try std.testing.expectEqual(@as(usize, 3), nodes.len);
-    try std.testing.expectEqualStrings("Parameter 0\nreads: 0B", nodes[0].object.get("label").?.string);
-    try std.testing.expectEqualStrings("constant({ 2.5e0 }, F32)\nreads: 0B", nodes[1].object.get("label").?.string);
-    try std.testing.expectEqualStrings("custom-call: call\"\\\n\nreads: 8B", nodes[2].object.get("label").?.string);
+    try std.testing.expectEqual(@as(usize, 0), graph.get("groupNodeAttributes").?.object.count());
+    for (nodes) |node| try std.testing.expectEqualStrings("", node.object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("Parameter 0", nodes[0].object.get("label").?.string);
+    try std.testing.expectEqualStrings("constant({ 2.5e0 }, F32)", nodes[1].object.get("label").?.string);
+    try std.testing.expectEqualStrings("custom-call: call\"\\\n", nodes[2].object.get("label").?.string);
     const attrs = nodes[2].object.get("attrs").?.array.items;
     try std.testing.expectEqualStrings("a\"\\b.zig:42", attrs[2].object.get("value").?.string);
     try std.testing.expectEqualStrings("type:op\nname", attrs[3].object.get("value").?.string);
@@ -874,7 +908,11 @@ fn isCollective(opcode: []const u8) bool {
 fn logicalBytes(shape: hlo.ShapeProto) ?u64 {
     for (shape.is_dynamic_dimension.items) |dynamic| if (dynamic) return null;
     const bits: u64 = switch (shape.element_type) {
-        .PRED, .S8, .U8 => 8,
+        .S1, .U1 => 1,
+        .S2, .U2 => 2,
+        .S4, .U4, .F4E2M1FN => 4,
+        .F6E3M2FN, .F6E2M3FN => 6,
+        .PRED, .S8, .U8, .F8E5M2, .F8E4M3, .F8E4M3FN, .F8E4M3B11FNUZ, .F8E3M4, .F8E5M2FNUZ, .F8E4M3FNUZ, .F8E8M0FNU => 8,
         .S16, .U16, .F16, .BF16 => 16,
         .S32, .U32, .F32 => 32,
         .S64, .U64, .F64, .C64 => 64,
@@ -1115,7 +1153,9 @@ test "partition namespaces retain edges and called computations" {
     try std.testing.expectEqualStrings("stage_001", nodes[2].object.get("namespace").?.string);
     try std.testing.expectEqualStrings("1", nodes[1].object.get("incomingEdges").?.array.items[0].object.get("sourceNodeId").?.string);
     try std.testing.expectEqualStrings("callee", nodes[2].object.get("subgraphIds").?.array.items[0].string);
-    try std.testing.expectEqualStrings("stage_000", graphs[1].object.get("nodes").?.array.items[0].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("", graphs[1].object.get("nodes").?.array.items[0].object.get("namespace").?.string);
+    try std.testing.expectEqual(@as(usize, 0), graphs[1].object.get("groupNodeAttributes").?.object.count());
+    try std.testing.expectEqual(@as(usize, 2), graphs[0].object.get("groupNodeAttributes").?.object.count());
 }
 
 const PartitionMetrics = struct {
@@ -1396,4 +1436,72 @@ test "partition IDs are rendered per operand use in the consumer namespace" {
     try std.testing.expectEqualStrings("partition-id_2_1", add_edges[1].object.get("sourceNodeId").?.string);
     try std.testing.expectEqualStrings("1", add_edges[1].object.get("targetNodeInputId").?.string);
     try std.testing.expectEqualStrings("3", by_id.get("4").?.object.get("incomingEdges").?.array.items[0].object.get("sourceNodeId").?.string);
+}
+
+test "low precision custom call inputs contribute to stage memory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    inline for (.{
+        .{ hlo.PrimitiveType.S1, 2 },             .{ hlo.PrimitiveType.U1, 2 },
+        .{ hlo.PrimitiveType.S2, 3 },             .{ hlo.PrimitiveType.U2, 3 },
+        .{ hlo.PrimitiveType.S4, 6 },             .{ hlo.PrimitiveType.U4, 6 },
+        .{ hlo.PrimitiveType.F4E2M1FN, 6 },       .{ hlo.PrimitiveType.F6E3M2FN, 9 },
+        .{ hlo.PrimitiveType.F6E2M3FN, 9 },       .{ hlo.PrimitiveType.F8E5M2, 11 },
+        .{ hlo.PrimitiveType.F8E4M3, 11 },        .{ hlo.PrimitiveType.F8E4M3FN, 11 },
+        .{ hlo.PrimitiveType.F8E4M3B11FNUZ, 11 }, .{ hlo.PrimitiveType.F8E3M4, 11 },
+        .{ hlo.PrimitiveType.F8E5M2FNUZ, 11 },    .{ hlo.PrimitiveType.F8E4M3FNUZ, 11 },
+        .{ hlo.PrimitiveType.F8E8M0FNU, 11 },
+    }) |case| {
+        var nodes = [_]hlo.HloInstructionProto{
+            readTestInstruction(1, "parameter", case[0], 11, &.{}),
+            readTestInstruction(2, "parameter", .F32, 3, &.{}),
+            readTestInstruction(3, "custom-call", .F32, 3, &.{ 1, 2 }),
+        };
+        var converter: Converter = .{ .allocator = allocator };
+        var partition: graph_partitioner.ComputationPartition = .{};
+        partition.node_counts = try allocator.dupe(usize, &.{3});
+        for (&nodes) |*node| {
+            try converter.instructions.put(allocator, node.id, node);
+            try partition.instructions.put(allocator, node.id, 0);
+        }
+        try std.testing.expectEqual(@as(?u64, case[1]), instructionBytes(nodes[0]));
+        try std.testing.expectEqual(@as(?u64, case[1] + 12), converter.instructionReads(nodes[2]));
+        const metrics = try converter.partitionMetrics(.{ .instructions = .fromOwnedSlice(&nodes) }, &partition);
+        try std.testing.expectEqual(@as(?u64, case[1] + 12), metrics[0].memory);
+        nodes[0].shape = null;
+        try std.testing.expectEqual(@as(?u64, null), converter.instructionReads(nodes[2]));
+    }
+}
+
+test "Triton custom calls use their public kernel name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const converter: Converter = .{ .allocator = allocator };
+    var instr: hlo.HloInstructionProto = .{
+        .opcode = "custom-call",
+        .custom_call_target = "__gpu$xla.gpu.triton",
+        .backend_config =
+        \\{ir = "module {\0A tt.func private @helper() {}\0A tt.func public @mxfp4_triton_down(%q: !tt.ptr<i8>) {}\0A}"}
+        ,
+    };
+    try std.testing.expectEqualStrings("mxfp4_triton_down", tritonKernelName(instr).?);
+    try std.testing.expectEqualStrings("triton: mxfp4_triton_down", try std.fmt.allocPrint(allocator, "{f}", .{converter.instrLabel(instr)}));
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    var attrs = try json_writer.list(&output.writer);
+    try converter.writeAttr(*std.Io.Writer, &attrs, instr, null);
+    try attrs.close();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    try std.testing.expectEqualStrings("triton: mxfp4_triton_down", parsed.value.array.items[2].object.get("value").?.string);
+    instr.backend_config = "tt.func @kernel_2() {}";
+    try std.testing.expectEqualStrings("kernel_2", tritonKernelName(instr).?);
+    instr.custom_call_target = "another_target";
+    try std.testing.expectEqual(@as(?[]const u8, null), tritonKernelName(instr));
+    instr.custom_call_target = "__gpu$xla.gpu.triton";
+    for ([_][]const u8{ "", "tt.func private @helper() {}", "tt.func public @", "tt.func public @broken" }) |config| {
+        instr.backend_config = config;
+        try std.testing.expectEqual(@as(?[]const u8, null), tritonKernelName(instr));
+        try std.testing.expectEqualStrings("custom-call: __gpu$xla.gpu.triton", try std.fmt.allocPrint(allocator, "{f}", .{converter.instrLabel(instr)}));
+    }
 }
