@@ -54,19 +54,19 @@ pub fn fusedExperts(
 }
 
 pub fn fusedExpertsBase(
-    input: Tensor,
-    routing: zml.moe.LocalRouting,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
+    hidden_states: Tensor,
+    routing_: zml.moe.LocalRouting,
+    gate_up_: zml.nn.Linear,
+    down_: zml.nn.Linear,
     layout: ProjectionLayout,
     opts: zml.moe.Options,
 ) Tensor {
-    const expert_map_ = routing.expertMap();
-    const num_tokens = input.dim(.t);
+    const expert_map_ = routing_.expertMap();
+    const num_tokens = hidden_states.dim(.t);
     var launch_config = launchConfigForTokens(num_tokens);
 
-    const gate_up_scheme = gate_up.quantizationScheme();
-    const down_scheme = down.quantizationScheme();
+    const gate_up_scheme = gate_up_.quantizationScheme();
+    const down_scheme = down_.quantizationScheme();
     if (gate_up_scheme) |scheme| switch (scheme) {
         .nvfp4 => stdx.debug.panic("triton backend doesn't support gate_up nvfp4 quantization scheme", .{}),
         .fp8_block128 => launch_config.block_size_k = 128,
@@ -82,90 +82,90 @@ pub fn fusedExpertsBase(
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
-    const hidden = input.reshape(.{ .token = num_tokens, .in = input.dim(.d) }).withTags(.{ .token, .in });
-    const gate_up_ = gate_up.weight.withTags(.{ .expert, .out, .in });
-    const down_ = down.weight.withTags(.{ .expert, .out, .mid });
-    const routing_weights = routing.weights.reshape(.{ .token = num_tokens, .in = routing.weights.dim(.topk) }).withTags(.{ .token, .topk });
-    const ids = routing.ids.reshape(.{ .token = num_tokens, .in = routing.ids.dim(.topk) }).withTags(.{ .token, .topk });
+    const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
+    const gate_up = gate_up_.weight.withTags(.{ .expert, .out, .in });
+    const down = down_.weight.withTags(.{ .expert, .out, .mid });
+    const routing_weights = routing_.weights.reshape(.{ .token = num_tokens, .in = routing_.weights.dim(.topk) }).withTags(.{ .token, .topk });
+    const ids = routing_.ids.reshape(.{ .token = num_tokens, .in = routing_.ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "triton backend expected BF16 hidden states, got {}", .{hidden.dtype()});
     if (gate_up_scheme == .mxfp4) {
-        stdx.debug.assert(gate_up_.dtype() == .u8 or gate_up_.dtype() == .i8 or gate_up_.dtype() == .f4e2m1, "triton backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4, got {}", .{gate_up_.dtype()});
+        stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "triton backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4, got {}", .{gate_up.dtype()});
     } else {
-        stdx.debug.assert(gate_up_.dtype() == .bf16 or gate_up_.dtype() == .f8e4m3fn or gate_up_.dtype() == .f8e4m3fnuz, "triton backend expected gate_up data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{gate_up_.dtype()});
+        stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "triton backend expected gate_up data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{gate_up.dtype()});
     }
     if (down_scheme == .mxfp4) {
-        stdx.debug.assert(down_.dtype() == .u8 or down_.dtype() == .i8 or down_.dtype() == .f4e2m1, "triton backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4, got {}", .{down_.dtype()});
+        stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "triton backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4, got {}", .{down.dtype()});
     } else {
-        stdx.debug.assert(down_.dtype() == .bf16 or down_.dtype() == .f8e4m3fn or down_.dtype() == .f8e4m3fnuz, "triton backend expected down data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{down_.dtype()});
+        stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "triton backend expected down data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{down.dtype()});
     }
 
     stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "triton backend expected f32 or bf16 routing weights, got {}", .{routing_weights.dtype()});
     stdx.debug.assert(ids.dtype() == .i32, "triton backend expected i32 expert ids, got {}", .{ids.dtype()});
-    const gate_up_k = gate_up_.dim(.in) * @as(i64, if (gate_up_scheme == .mxfp4 and gate_up_.dtype() != .f4e2m1) 2 else 1);
-    const down_k = down_.dim(.mid) * @as(i64, if (down_scheme == .mxfp4 and down_.dtype() != .f4e2m1) 2 else 1);
+    const gate_up_k = gate_up.dim(.in) * @as(i64, if (gate_up_scheme == .mxfp4 and gate_up.dtype() != .f4e2m1) 2 else 1);
+    const down_k = down.dim(.mid) * @as(i64, if (down_scheme == .mxfp4 and down.dtype() != .f4e2m1) 2 else 1);
     stdx.debug.assert(hidden.dim(.in) == gate_up_k, "triton backend expected hidden width to match gate/up input width, got {} and {}", .{ hidden.dim(.in), gate_up_k });
     const activation_reduction: i64 = switch (opts.activation) {
         .gelu, .relu, .silu => 1,
         .swiglu, .swiglu_step, .geglu, .geglu_tanh => 2,
     };
-    stdx.debug.assert(@rem(gate_up_.dim(.out), activation_reduction) == 0, "triton backend expected gate/up output width to be divisible by {}, got {}", .{ activation_reduction, gate_up_.dim(.out) });
-    stdx.debug.assert(down_k == @divFloor(gate_up_.dim(.out), activation_reduction), "triton backend expected down input width to match activated width, got {} and {}", .{ down_k, @divFloor(gate_up_.dim(.out), activation_reduction) });
+    stdx.debug.assert(@rem(gate_up.dim(.out), activation_reduction) == 0, "triton backend expected gate/up output width to be divisible by {}, got {}", .{ activation_reduction, gate_up.dim(.out) });
+    stdx.debug.assert(down_k == @divFloor(gate_up.dim(.out), activation_reduction), "triton backend expected down input width to match activated width, got {} and {}", .{ down_k, @divFloor(gate_up.dim(.out), activation_reduction) });
     stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and routing_weights.dim(.token) == hidden.dim(.token), "triton backend expected routing ids and weights to match hidden token count, got {}, {} and {}", .{ ids.dim(.token), routing_weights.dim(.token), hidden.dim(.token) });
     stdx.debug.assert(ids.dim(.topk) == routing_weights.dim(.topk), "triton backend expected routing ids and weights to have matching top-k dimensions, got {} and {}", .{ ids.dim(.topk), routing_weights.dim(.topk) });
-    stdx.debug.assert(gate_up_.dim(.expert) == down_.dim(.expert), "triton backend expected gate/up and down expert counts to match, got {} and {}", .{ gate_up_.dim(.expert), down_.dim(.expert) });
+    stdx.debug.assert(gate_up.dim(.expert) == down.dim(.expert), "triton backend expected gate/up and down expert counts to match, got {} and {}", .{ gate_up.dim(.expert), down.dim(.expert) });
     if (expert_map_) |expert_map|
         stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "triton backend expected a rank-1 i32 expert map, got rank {} and dtype {}", .{ expert_map.rank(), expert_map.dtype() });
 
-    const num_experts = if (expert_map_) |expert_map| expert_map.dim(.expert) else gate_up_.dim(.expert);
-    const routing_ = prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
+    const num_experts = if (expert_map_) |expert_map| expert_map.dim(.expert) else gate_up.dim(.expert);
+    const routing = prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
 
     const expert_ids = if (expert_map_) |expert_map|
-        expert_map.gather(.{ .expert = routing_.expert_ids }, .{}).withTags(.{.g})
+        expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
     else
-        routing_.expert_ids;
+        routing.expert_ids;
 
-    const hidden_quant, const input_scale = prepareInput(hidden, gate_up_scheme, gate_up_.dtype(), opts.quantize_input);
+    const hidden_quant, const input_scale = prepareInput(hidden, gate_up_scheme, gate_up.dtype(), opts.quantize_input);
 
     const gate_up_out = gemm(.{
         .input = hidden_quant,
-        .weight = gate_up_,
-        .bias = gate_up.bias,
+        .weight = gate_up,
+        .bias = gate_up_.bias,
         .input_scale = input_scale,
-        .weight_scale = gate_up.quantizationScales(),
-        .routing = routing_,
+        .weight_scale = gate_up_.quantizationScales(),
+        .routing = routing,
         .expert_ids = expert_ids,
         .launch_config = launch_config,
         .quant_scheme = gate_up_scheme,
         .top_k = @intCast(ids.dim(.topk)),
-        .output_shape = Shape.init(.{ .token = routing_.num_assignments, .out = gate_up_.dim(.out) }, .bf16),
+        .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
     var activated = zml.moe.applyActivation(gate_up_out, opts.activation, layout);
     if (opts.routing_weight_placement == .before_down) {
-        const weights = routing_weights.reshape(.{ .token = routing_.num_assignments }).convert(.f32);
+        const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
     }
-    const activated_quant, const down_input_scale = prepareInput(activated, down_scheme, down_.dtype(), opts.quantize_input);
+    const activated_quant, const down_input_scale = prepareInput(activated, down_scheme, down.dtype(), opts.quantize_input);
 
     const down_out = gemm(.{
         .input = activated_quant,
-        .weight = down_,
-        .bias = down.bias,
+        .weight = down,
+        .bias = down_.bias,
         .input_scale = down_input_scale,
-        .weight_scale = down.quantizationScales(),
+        .weight_scale = down_.quantizationScales(),
         .routing_weights = if (opts.routing_weight_placement == .after_down) routing_weights else null,
-        .routing = routing_,
+        .routing = routing,
         .expert_ids = expert_ids,
         .launch_config = down_launch_config,
         .quant_scheme = down_scheme,
         .top_k = 1,
-        .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down_.dim(.out) }, .bf16),
+        .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
     const output = down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
 
-    return output.reshape(.{ .t = num_tokens, .d = down_.dim(.out) });
+    return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
 
 pub const GemmOptions = struct {

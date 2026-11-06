@@ -63,46 +63,46 @@ fn applyDownGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tenso
 }
 
 pub fn fusedExperts(
-    input: zml.Tensor,
+    hidden_states: zml.Tensor,
     routing: zml.moe.LocalRouting,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
+    gate_up_: zml.nn.Linear,
+    down_: zml.nn.Linear,
     opts: zml.moe.Options,
 ) zml.Tensor {
     validateOptions(opts);
-    stdx.debug.assert(gate_up.bias == null, "metal backend doesn't support gate_up bias", .{});
-    stdx.debug.assert(down.bias == null, "metal backend doesn't support down bias", .{});
+    stdx.debug.assert(gate_up_.bias == null, "metal backend doesn't support gate_up bias", .{});
+    stdx.debug.assert(down_.bias == null, "metal backend doesn't support down bias", .{});
 
-    const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
-    const gate_up_global_scale: ?zml.Tensor = if (gate_up.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
+    const gate_up_scales: ?zml.Tensor = if (gate_up_.quantization) |q| q.scales else null;
+    const gate_up_global_scale: ?zml.Tensor = if (gate_up_.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
 
-    const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
-    const down_global_scale: ?zml.Tensor = if (down.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
+    const down_scales: ?zml.Tensor = if (down_.quantization) |q| q.scales else null;
+    const down_global_scale: ?zml.Tensor = if (down_.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
 
-    const gate_up_ = zml.moe.unpackedWeight(gate_up);
-    const down_ = zml.moe.unpackedWeight(down);
-    stdx.debug.assert(gate_up_.dtype() == down_.dtype(), "metal backend expected gate_up and down data type to match, got {} and {}", .{ gate_up_.dtype(), down_.dtype() });
-    const mode = quantMode(gate_up_.dtype());
+    const gate_up = zml.moe.unpackedWeight(gate_up_);
+    const down = zml.moe.unpackedWeight(down_);
+    stdx.debug.assert(gate_up.dtype() == down.dtype(), "metal backend expected gate_up and down data type to match, got {} and {}", .{ gate_up.dtype(), down.dtype() });
+    const mode = quantMode(gate_up.dtype());
     switch (mode) {
         .none => {
             stdx.debug.assert(gate_up_scales == null and down_scales == null, "metal backend expected gate_up and down scale to be null when the weights are not quantized", .{});
             stdx.debug.assert(gate_up_global_scale == null and down_global_scale == null, "metal backend expected gate_up and down global scale to be null when the weights are not quantized", .{});
-            const is_hidden_states_valid_dtype = switch (input.dtype()) {
+            const is_hidden_states_valid_dtype = switch (hidden_states.dtype()) {
                 .bf16, .f16, .f32 => true,
                 else => false,
             };
-            stdx.debug.assert(is_hidden_states_valid_dtype, "metal backend expected hidden_states data type to be bf16, f16 or f32, got {}", .{input.dtype()});
+            stdx.debug.assert(is_hidden_states_valid_dtype, "metal backend expected hidden_states data type to be bf16, f16 or f32, got {}", .{hidden_states.dtype()});
         },
         .fp8 => {
             stdx.debug.assert(gate_up_scales != null and down_scales != null, "metal backend expected gate_up and down scale to be non null", .{});
             stdx.debug.assert(gate_up_scales.?.dtype() == .bf16 and down_scales.?.dtype() == .bf16, "metal backend expected gate_up and down scale data type to be bf16, got {} and {}", .{ gate_up_scales.?.dtype(), down_scales.?.dtype() });
             stdx.debug.assert(gate_up_global_scale == null and down_global_scale == null, "metal backend expected gate_up and down global scale to be null", .{});
-            stdx.debug.assert(input.dtype() == .bf16, "metal backend expected hidden_states data type to be bf16, got {}", .{input.dtype()});
+            stdx.debug.assert(hidden_states.dtype() == .bf16, "metal backend expected hidden_states data type to be bf16, got {}", .{hidden_states.dtype()});
         },
         .nvfp4 => {
             stdx.debug.assert(gate_up_scales != null and down_scales != null, "metal backend expected gate_up and down scale to be non null", .{});
             stdx.debug.assert(gate_up_scales.?.dtype() == .f8e4m3fn and down_scales.?.dtype() == .f8e4m3fn, "metal backend expected gate_up and down scale data type to be f8e4m3fn, got {} and {}", .{ gate_up_scales.?.dtype(), down_scales.?.dtype() });
-            stdx.debug.assert(input.dtype() == .bf16, "metal backend expected hidden_states data type to be bf16, got {}", .{input.dtype()});
+            stdx.debug.assert(hidden_states.dtype() == .bf16, "metal backend expected hidden_states data type to be bf16, got {}", .{hidden_states.dtype()});
         },
     }
 
@@ -113,17 +113,17 @@ pub fn fusedExperts(
     stdx.debug.assert(is_topk_weights_valid_dtype, "metal backend expected topk_weights data type to be bf16, f16 or f32, got {}", .{routing.weights.dtype()});
     stdx.debug.assert(routing.ids.dtype() == .i32, "metal backend expected topk_ids data type to be i32, got {}", .{routing.ids.dtype()});
 
-    const d = input.dim(.d);
-    const num_tokens = input.dim(.t);
+    const d = hidden_states.dim(.d);
+    const num_tokens = hidden_states.dim(.t);
     const topk = routing.ids.dim(.topk);
     const num_routes = num_tokens * topk;
 
     const act_dtype: zml.DataType = switch (mode) {
-        .none => input.dtype(),
+        .none => hidden_states.dtype(),
         .fp8, .nvfp4 => .bf16,
     };
 
-    const hidden = input.reshape(.{ .token = num_tokens, .d = d }).withTags(.{ .token, .d });
+    const hidden = hidden_states.reshape(.{ .token = num_tokens, .d = d }).withTags(.{ .token, .d });
     const x_rows = hidden.insertAxes(.d, .{.topk})
         .broad(zml.Shape.init(.{ .token = num_tokens, .topk = topk, .d = d }, act_dtype))
         .merge(.{ .r = .{ .token, .topk } });
@@ -132,20 +132,20 @@ pub fn fusedExperts(
 
     const gate_up_out = applyGateUpGlobalScale(moeGemm(
         x_rows,
-        gate_up_,
+        gate_up,
         gate_up_scales,
         expert_ids,
-        zml.Shape.init(.{ .r = num_routes, .out = gate_up_.dim(.dout) }, act_dtype),
+        zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
         mode,
     ), gate_up_global_scale, expert_ids);
     const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated).convert(act_dtype);
 
     const down_out = applyDownGlobalScale(moeGemm(
         activated,
-        down_,
+        down,
         down_scales,
         expert_ids,
-        zml.Shape.init(.{ .r = num_routes, .d = down_.dim(.d) }, act_dtype),
+        zml.Shape.init(.{ .r = num_routes, .d = down.dim(.d) }, act_dtype),
         mode,
     ), down_global_scale, expert_ids);
 
@@ -155,5 +155,5 @@ pub fn fusedExperts(
     const combined = weighted.splitAxis(.r, .{ .token = num_tokens, .topk = topk })
         .sum(.topk).squeeze(.topk);
 
-    return combined.reshape(.{ .t = num_tokens, .d = down_.dim(.d) });
+    return combined.reshape(.{ .t = num_tokens, .d = down.dim(.d) });
 }
