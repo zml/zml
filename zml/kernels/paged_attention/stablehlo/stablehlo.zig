@@ -15,10 +15,11 @@ pub fn pagedAttention(
     }
 
     const page_size = kv_cache.split.k.dim(.k_chunk);
+    const padded_q = q.pad(0, .{ .b = zml.Tensor.Pad{ .high = page_size } });
 
     const final_state = zml.ops.@"while"(
         AttentionLoop,
-        .{ .q = q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
+        .{ .q = padded_q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
         .{
             // i32 to match triton conventions
             .slot_id = .scalar(0, .i32),
@@ -28,11 +29,11 @@ pub fn pagedAttention(
             // Note: we do all partial softmax in f32
             .partial_softmax_prefill = .zeroes(q.shape().setDim(.b, page_size).withDtype(.f32)),
             .partial_softmax_decode = .zeroes(q.shape().setDim(.b, 1).withDtype(.f32)),
-            .out = .zeroes(q.shape()),
+            .out = .zeroes(padded_q.shape()),
         },
     );
 
-    return final_state.out;
+    return final_state.out.slice(.b, .{ .end = q.dim(.b) });
 }
 
 const AttentionLoop = struct {
@@ -93,7 +94,7 @@ const AttentionLoop = struct {
                     const sequence_has_more_queries: zml.Tensor = .cmp(state.q_page_idx.addConstant(1).scale(num_slots), .LT, if_ctx.seq_num_queries);
 
                     const partial_softmax = while_body.attentionOnePage(state, q_offset, num_slots, page_size);
-                    return updateState(state, num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax);
+                    return updateState(state, num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax, while_body.nextQueryStart(state));
                 }
 
                 /// Decode version: num_slots == 1, we multiply one query with a page of keys.
@@ -112,7 +113,7 @@ const AttentionLoop = struct {
                     const sequence_has_more_queries: zml.Tensor = .scalar(false, .bool);
 
                     const partial_softmax = while_body.attentionOnePage(state, q_offset, num_slots, page_size);
-                    return updateState(state, num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax);
+                    return updateState(state, num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax, while_body.nextQueryStart(state));
                 }
             },
             .{
@@ -162,7 +163,11 @@ const AttentionLoop = struct {
         return og_softmax.merge(partial);
     }
 
-    pub fn updateState(state: State, num_slots: u32, query_has_more_keys: zml.Tensor, sequence_has_more_queries: zml.Tensor, softmax: PartialSoftmax) State {
+    fn nextQueryStart(self: While, state: State) zml.Tensor {
+        return self.parameters.query_start_len.slice(0, .dynSingle(state.seq_id.addConstant(1))).asScalar();
+    }
+
+    pub fn updateState(state: State, num_slots: u32, query_has_more_keys: zml.Tensor, sequence_has_more_queries: zml.Tensor, softmax: PartialSoftmax, next_query_start: zml.Tensor) State {
         return zml.ops.if2(
             query_has_more_keys,
             // If the query has more pages: update partial softmax with attention on current page, delay updating output.
@@ -181,7 +186,7 @@ const AttentionLoop = struct {
                 .partial_softmax_prefill = if (num_slots == 1) state.partial_softmax_prefill else .reset(softmax),
                 .partial_softmax_decode = if (num_slots == 1) .reset(softmax) else state.partial_softmax_decode,
                 .out = state.out.dynamicUpdateSlice(.{ .b = state.slot_id }, softmax.finalize().convert(state.out.dtype())),
-                .slot_id = state.slot_id.addConstant(num_slots),
+                .slot_id = .select(sequence_has_more_queries, state.slot_id.addConstant(num_slots), next_query_start),
                 // If the sequence has more query chunks: increment q_page_idx, otherwise start over at 0.
                 .q_page_idx = .select(sequence_has_more_queries, state.q_page_idx.addConstant(1), .scalar(0, .i32)),
                 // If the sequence has more query chunks: keep seq_id, otherwise increment seq_id.
