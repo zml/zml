@@ -1,0 +1,19 @@
+[[language]]
+auto-format = true
+file-types = [ "zig" ]
+language-servers = [ "zls" ]
+name = "zig"
+roots = [ "build.zig", "build.zig.zon", "zls.build.json" ]
+scope = "source.zig"
+
+[language.indent]
+tab-width = 4
+unit = "    "
+
+[language-server.zls]
+command = "sh"
+args = [
+  "-c",
+  "exec \"$(git rev-parse --show-toplevel)/tools/zls.sh\" \"$@\"",
+  "zls"
+]
