@@ -1,5 +1,6 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@zml//bazel:runtime_groups.bzl", "runtime_group")
 
 # XLA owns the full payload. ZML only places it in the platform's runfiles.
 copy_to_directory(
@@ -16,8 +17,14 @@ copy_to_directory(
     visibility = ["//visibility:public"],
 )
 
+runtime_group(
+    name = "runtime_group",
+    group = "furiosa",
+)
+
 cc_library(
     name = "libzml_furiosa",
+    aspect_hints = [":runtime_group"],
     data = [":sandbox"],
     visibility = ["//visibility:public"],
 )
