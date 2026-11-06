@@ -30,7 +30,7 @@ zls_toolchain(
 
 toolchain(
     name = "toolchain",
-    target_settings = ["@zig_toolchains//:0.17.0"],
+    target_settings = ["@zig_toolchains//:any_0.17.release"],
     toolchain = ":zls",
     toolchain_type = "@rules_zig//zig/zls:toolchain_type",
 )
