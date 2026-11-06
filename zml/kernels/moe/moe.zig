@@ -85,8 +85,6 @@ pub const Backend = enum {
     tcl,
 
     pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
-        // Keep the dtype as an argument because non scheme-specific backends may depend on it later
-        _ = dtype;
         return switch (platform.target) {
             .cuda => b: {
                 const s = scheme orelse break :b .triton;
@@ -120,7 +118,7 @@ pub const Backend = enum {
                 };
             },
             .tpu => if (scheme == null) .mosaic_tpu else error.UnsupportedQuantization,
-            .furiosa => if (scheme == null) .tcl else error.UnsupportedQuantization,
+            .furiosa => if (scheme == null or (scheme == .fp8_block128 and dtype == .f8e4m3fn)) .tcl else error.UnsupportedQuantization,
             .metal => b: {
                 const s = scheme orelse break :b .metal;
                 break :b switch (s) {
@@ -177,6 +175,21 @@ pub const Backend = enum {
         };
     }
 };
+
+test "TCL MoE backend selection" {
+    const platform = zml.testing.env();
+    if (platform.target != .furiosa) return error.SkipZigTest;
+
+    try std.testing.expectEqual(Backend.tcl, try Backend.auto(platform, null, .bf16));
+    try std.testing.expectEqual(Backend.tcl, try Backend.auto(platform, .fp8_block128, .f8e4m3fn));
+    try std.testing.expectError(error.UnsupportedQuantization, Backend.auto(platform, .fp8_block128, .f8e4m3fnuz));
+    try std.testing.expectError(error.UnsupportedQuantization, Backend.auto(platform, .fp8_block128, .bf16));
+    for (std.enums.values(zml.Quantization.Scheme)) |scheme| {
+        if (scheme != .fp8_block128) {
+            try std.testing.expectError(error.UnsupportedQuantization, Backend.auto(platform, scheme, .f8e4m3fn));
+        }
+    }
+}
 
 pub const Options = struct {
     activation: Activation,
