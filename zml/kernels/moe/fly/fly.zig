@@ -8,7 +8,6 @@ const Shape = zml.Shape;
 const DataType = zml.DataType;
 const fly = @import("moe.zig");
 const ProjectionLayout = zml.moe.ProjectionLayout;
-const RoutingWeightPlacement = zml.moe.RoutingWeightPlacement;
 
 const log = std.log.scoped(.@"zml/moe/fused_experts");
 
@@ -17,90 +16,19 @@ test {
 }
 
 pub fn fusedExperts(
-    input: zml.Tensor,
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
-    opts: zml.moe.Options,
-) zml.Tensor {
-    const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
-    const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
-        .{ .gate_up = .interleaved, .packing = .plain }
-    else
-        .{ .gate_up = .concatenated, .packing = .plain };
-
-    const args: FusedExpertsArgs = .{
-        .hidden_states = input,
-        .gate_up = gate_up,
-        .down = down,
-        .topk_weights = topk_weights,
-        .topk_ids = topk_ids,
-        .activation = opts.activation,
-        .quantize_input = opts.quantize_input,
-        .gate_up_layout = layout.gate_up,
-        .routing_weight_placement = opts.routing_weight_placement,
-    };
-    const expert_partition = gate_up.weight.shape().partition(.expert);
-
-    if (!expert_partition.isSharded()) {
-        return fusedExpertsImpl(args);
-    }
-
-    return zml.ops.manualComputation(
-        (struct {
-            args: FusedExpertsArgs,
-            global_num_experts: i64,
-
-            fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                const local_args = self.args;
-                const local_num_experts = local_args.gate_up.weight.dim(.expert);
-                const partition_id = zml.ops.partitionId().convert(.i32);
-                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                // Map global expert ids to local ids, or -1 for experts outside this partition.
-                const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                    .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                var mapped_args = local_args;
-                mapped_args.expert_map = local_expert_mask.select(
-                    global_expert_ids.sub(expert_start),
-                    zml.Tensor.scalar(-1, .i32),
-                );
-
-                const local_output = fusedExpertsImpl(mapped_args);
-                const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
-                return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
-            }
-        }).call,
-        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
-        input.shape(),
-    );
-}
-
-pub const FusedExpertsArgs = struct {
     hidden_states: Tensor,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
-    topk_weights: Tensor,
-    topk_ids: Tensor,
-    activation: zml.moe.Activation,
-    expert_map: ?Tensor = null,
-    /// Use FP8 activations for FP8 weights; false keeps BF16 activations.
-    quantize_input: bool,
-    gate_up_layout: ProjectionLayout,
-    routing_weight_placement: RoutingWeightPlacement,
-};
-
-pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
-    const hidden_states = opts.hidden_states;
-    const topk_weights = opts.topk_weights;
-    const topk_ids = opts.topk_ids;
+    routing_: zml.moe.LocalRouting,
+    gate_up_: zml.nn.Linear,
+    down_: zml.nn.Linear,
+    opts: zml.moe.Options,
+) Tensor {
+    const expert_map_ = routing_.expertMap();
+    const layout: ProjectionLayout = if (gate_up_.quantizationScheme() == .mxfp4) .interleaved else .concatenated;
     const num_tokens = hidden_states.dim(.t);
     var launch_config = launchConfigForTokens(num_tokens);
 
-    const gate_up_scheme = opts.gate_up.quantizationScheme();
-    const down_scheme = opts.down.quantizationScheme();
+    const gate_up_scheme = gate_up_.quantizationScheme();
+    const down_scheme = down_.quantizationScheme();
     if (gate_up_scheme) |scheme| switch (scheme) {
         .nvfp4 => stdx.debug.panic("fly backend doesn't support gate_up nvfp4 quantization scheme", .{}),
         .fp8_block128 => launch_config.block_size_k = 128,
@@ -117,10 +45,10 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
     };
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    const gate_up = opts.gate_up.weight.withTags(.{ .expert, .out, .in });
-    const down = opts.down.weight.withTags(.{ .expert, .out, .mid });
-    const routing_weights = topk_weights.reshape(.{ .token = num_tokens, .in = topk_weights.dim(.topk) }).withTags(.{ .token, .topk });
-    const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.topk) }).withTags(.{ .token, .topk });
+    const gate_up = gate_up_.weight.withTags(.{ .expert, .out, .in });
+    const down = down_.weight.withTags(.{ .expert, .out, .mid });
+    const routing_weights = routing_.weights.reshape(.{ .token = num_tokens, .in = routing_.weights.dim(.topk) }).withTags(.{ .token, .topk });
+    const ids = routing_.ids.reshape(.{ .token = num_tokens, .in = routing_.ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "fly backend expected BF16 hidden states, got {}", .{hidden.dtype()});
     if (gate_up_scheme == .mxfp4) {
@@ -148,13 +76,13 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
     stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and routing_weights.dim(.token) == hidden.dim(.token), "fly backend expected routing ids and weights to match hidden token count, got {}, {} and {}", .{ ids.dim(.token), routing_weights.dim(.token), hidden.dim(.token) });
     stdx.debug.assert(ids.dim(.topk) == routing_weights.dim(.topk), "fly backend expected routing ids and weights to have matching top-k dimensions, got {} and {}", .{ ids.dim(.topk), routing_weights.dim(.topk) });
     stdx.debug.assert(gate_up.dim(.expert) == down.dim(.expert), "fly backend expected gate/up and down expert counts to match, got {} and {}", .{ gate_up.dim(.expert), down.dim(.expert) });
-    if (opts.expert_map) |expert_map|
+    if (expert_map_) |expert_map|
         stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "fly backend expected a rank-1 i32 expert map, got rank {} and dtype {}", .{ expert_map.rank(), expert_map.dtype() });
 
-    const num_experts = if (opts.expert_map) |expert_map| expert_map.dim(.expert) else gate_up.dim(.expert);
+    const num_experts = if (expert_map_) |expert_map| expert_map.dim(.expert) else gate_up.dim(.expert);
     const routing = prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
 
-    const expert_ids = if (opts.expert_map) |expert_map|
+    const expert_ids = if (expert_map_) |expert_map|
         expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
     else
         routing.expert_ids;
@@ -164,9 +92,9 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
     const gate_up_out = gemm(.{
         .input = hidden_quant,
         .weight = gate_up,
-        .bias = opts.gate_up.bias,
+        .bias = gate_up_.bias,
         .input_scale = input_scale,
-        .weight_scale = opts.gate_up.quantizationScales(),
+        .weight_scale = gate_up_.quantizationScales(),
         .routing = routing,
         .expert_ids = expert_ids,
         .launch_config = launch_config,
@@ -175,7 +103,7 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    var activated = zml.moe.applyActivation(gate_up_out, opts.activation, opts.gate_up_layout);
+    var activated = zml.moe.applyActivation(gate_up_out, opts.activation, layout);
     if (opts.routing_weight_placement == .before_down) {
         const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
@@ -185,9 +113,9 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
     const down_out = gemm(.{
         .input = activated_quant,
         .weight = down,
-        .bias = opts.down.bias,
+        .bias = down_.bias,
         .input_scale = down_input_scale,
-        .weight_scale = opts.down.quantizationScales(),
+        .weight_scale = down_.quantizationScales(),
         .routing_weights = if (opts.routing_weight_placement == .after_down) routing_weights else null,
         .routing = routing,
         .expert_ids = expert_ids,
@@ -203,18 +131,18 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
 }
 
 // TODO(Corentin): unused for now
-pub fn supports(opts: FusedExpertsArgs) bool {
-    if (opts.hidden_states.dtype() != .bf16 or opts.gate_up.quantizationScheme() != .mxfp4 or
-        opts.down.quantizationScheme() != .mxfp4 or opts.gate_up.bias != null or opts.down.bias != null or
+pub fn supports(hidden_states: Tensor, routing: zml.moe.LocalRouting, gate_up_: zml.nn.Linear, down_: zml.nn.Linear, opts: zml.moe.Options) bool {
+    if (hidden_states.dtype() != .bf16 or gate_up_.quantizationScheme() != .mxfp4 or
+        down_.quantizationScheme() != .mxfp4 or gate_up_.bias != null or down_.bias != null or
         opts.routing_weight_placement != .before_down) return false;
-    const gate_up = opts.gate_up.weight;
-    const down = opts.down.weight;
+    const gate_up = gate_up_.weight;
+    const down = down_.weight;
     if (gate_up.rank() != 3 or down.rank() != 3) return false;
-    const gate_up_scale = opts.gate_up.quantizationScales() orelse return false;
-    const down_scale = opts.down.quantizationScales() orelse return false;
-    const experts = if (opts.expert_map) |map| map.dim(.expert) else gate_up.dim(0);
+    const gate_up_scale = gate_up_.quantizationScales() orelse return false;
+    const down_scale = down_.quantizationScales() orelse return false;
+    const experts = routing.global_num_experts;
     if (experts < 1 or experts > 512) return false;
-    var max_width: i64 = opts.hidden_states.dim(.d);
+    var max_width: i64 = hidden_states.dim(.d);
     inline for (.{ .{ gate_up, gate_up_scale }, .{ down, down_scale } }) |projection| {
         const weight, const scale = projection;
         const packing_factor: i64 = switch (weight.dtype()) {
@@ -233,7 +161,7 @@ pub fn supports(opts: FusedExpertsArgs) bool {
             else => return false,
         }
     }
-    const routes = opts.hidden_states.dim(.t) * opts.topk_ids.dim(.topk);
+    const routes = hidden_states.dim(.t) * routing.ids.dim(.topk);
     return routes > 0 and routes <= @divTrunc(std.math.maxInt(i32), max_width);
 }
 
