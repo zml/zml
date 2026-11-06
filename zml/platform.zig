@@ -860,6 +860,12 @@ pub const cuda = struct {
         }
     };
 
+    /// SM count of an addressable CUDA device; unavailable attributes return null.
+    pub fn smCount(platform: *const zml.Platform, device_index: usize) ?u32 {
+        const attribute = platform.devices[device_index].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return null;
+        return std.math.cast(u32, attribute.int64);
+    }
+
     pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
         if (platform.target != .cuda) return null;
         const devices = platform.pjrt_client.devices(platform.pjrt_api);
