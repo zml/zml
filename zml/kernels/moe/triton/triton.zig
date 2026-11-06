@@ -63,7 +63,7 @@ pub fn fusedExpertsBase(
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
-        .{ .gate_up = .interleaved, .packing = .plain }
+        .{ .gate_up = .row_interleaved_1, .packing = .plain }
     else
         .{ .gate_up = .concatenated, .packing = .plain };
 
@@ -568,7 +568,7 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
     const x: Tensor = .init(.{ .token = 1, .out = 6 }, .bf16);
     const gates = [_]f32{ 0.75, -1.25, 3.5 };
     const ups = [_]f32{ 0.875, -2.25, 4.5 };
-    for ([_]ProjectionLayout{ .concatenated, .interleaved }) |layout| {
+    for ([_]ProjectionLayout{ .concatenated, .row_interleaved_1 }) |layout| {
         var values: [6]zml.floats.BFloat16 = undefined;
         for (gates, ups, 0..) |gate, up, i| {
             values[if (layout == .concatenated) i else 2 * i] = .fromF32(gate);
@@ -733,7 +733,8 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
             const columns = Tensor.arange(.{ .end = 256 }, .i32).withTags(.{.dout});
             const is_gate = switch (layout) {
                 .concatenated => columns.cmp(.LT, Tensor.scalar(128, .i32)),
-                .interleaved => columns.remainder(Tensor.scalar(2, .i32)).cmp(.EQ, Tensor.scalar(0, .i32)),
+                .row_interleaved_1 => columns.remainder(Tensor.scalar(2, .i32)).cmp(.EQ, Tensor.scalar(0, .i32)),
+                .row_interleaved_8 => columns.divByConst(8).remainder(Tensor.scalar(2, .i32)).cmp(.EQ, Tensor.scalar(0, .i32)),
             };
             const dtype: DataType = if (fp4) .u8 else .bf16;
             // E2M1 codes 1, 2, 3 encode 0.5, 1, 1.5; each byte holds two values.
@@ -786,7 +787,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
         @memset(host.items(zml.floats.BFloat16), .fromF32(1.0 / 128.0));
         var input = try zml.Buffer.fromSlice(io, platform, host);
         defer input.deinit();
-        for ([_]ProjectionLayout{ .concatenated, .interleaved }) |layout| {
+        for ([_]ProjectionLayout{ .concatenated, .row_interleaved_1 }) |layout| {
             for ([_]RoutingWeightPlacement{ .before_down, .after_down }) |placement| {
                 var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, layout, placement, storage_dtype }, .{});
                 defer exe.deinit();

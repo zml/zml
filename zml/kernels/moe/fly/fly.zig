@@ -26,7 +26,7 @@ pub fn fusedExperts(
 ) zml.Tensor {
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
-        .{ .gate_up = .interleaved, .packing = .plain }
+        .{ .gate_up = .row_interleaved_1, .packing = .plain }
     else
         .{ .gate_up = .concatenated, .packing = .plain };
 

@@ -20,13 +20,17 @@ test {
     _ = @import("tests.zig");
 }
 
-pub const ProjectionLayout = enum { concatenated, interleaved };
+pub const ProjectionLayout = enum {
+    concatenated, // G0 G1 … Gn U0 U1 … Un
+    row_interleaved_1, // G0 U0 G1 U1 …
+    row_interleaved_8, // G0…G7 U0…U7 G8…G15 U8…U15 …
+};
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
 /// How a backend expects the expert weights to be stored
 /// The packer writes this layout and forwardMoe reads it
 pub const ExpertsLayout = struct {
-    /// Whether the two projections occupy contiguous halves or alternate.
+    /// Gate/up ordering before applying the backend-specific packing.
     gate_up: ProjectionLayout,
     /// Backend specific transformation of the weights and scales.
     packing: Packing,
@@ -38,6 +42,10 @@ pub const ExpertsLayout = struct {
         swizzled_scales,
         /// Weights, block scales and global scales in the FlashInfer CUTLASS NVFP4 layout.
         flashinfer_nvfp4,
+        /// MXFP4 gate/up rows interleaved by 8. E8M0 scales use 512-byte
+        /// 128x4 atoms in MN-major order `[expert, k/128, rows/128, 512]`,
+        /// represented as `[expert, k/128, rows]` i32 words of four scales.
+        mxfp4_interleaved8,
     };
 };
 
@@ -155,13 +163,17 @@ pub const Backend = enum {
     pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
-            .cute => if (scheme == .mxfp4 or scheme == .nvfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
+            .cute => if (scheme) |s| switch (s) {
+                .mxfp4 => .{ .gate_up = .row_interleaved_8, .packing = .mxfp4_interleaved8 },
+                .nvfp4 => .{ .gate_up = .row_interleaved_1, .packing = .swizzled_scales },
+                else => error.UnsupportedQuantization,
+            } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme) |s| switch (s) {
                 .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
-            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
+            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .row_interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
 
@@ -238,7 +250,14 @@ pub fn applyActivation(input: zml.Tensor, activation: zml.moe.Activation, layout
             const mid = @divFloor(x.dim(.out), 2);
             var gate, var up = switch (layout) {
                 .concatenated => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
-                .interleaved => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
+                .row_interleaved_1 => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
+                .row_interleaved_8 => blk: {
+                    const grouped = x.splitAxis(.out, .{ .group = @divExact(mid, 8), .pair = 2, .row = 8 });
+                    break :blk .{
+                        grouped.slice(.pair, .{ .end = 1 }).merge(.{ .out = .{ .group, .pair, .row } }),
+                        grouped.slice(.pair, .{ .start = 1 }).merge(.{ .out = .{ .group, .pair, .row } }),
+                    };
+                },
             };
 
             break :b switch (activation) {
