@@ -268,6 +268,10 @@ pub const Tensor = struct {
         try std.testing.expectEqual(Sharding.PartitionSpec.sharded(1), x.shape().partition(.h));
         try std.testing.expectEqual(&dp_mp, x.shape().reshape(.{ 2, 4 })._sharding.mesh);
 
+        const identical = x.broad(x.shape());
+        try std.testing.expectEqual(&dp_mp, identical.shape()._sharding.mesh);
+        try std.testing.expectEqual(Sharding.PartitionSpec.sharded(1), identical.shape().partition(.h));
+
         const x2 = x.withPartitioning(&mp_dp, .{ .h = .model });
         try std.testing.expectEqual(&mp_dp, x2.shape()._sharding.mesh);
         try std.testing.expectEqual(Sharding.PartitionSpec.sharded(0), x2.shape().partition(.h));
@@ -2846,9 +2850,11 @@ pub const Tensor = struct {
         }
 
         const res_shape = output_shape.withDtype(self.dtype());
-        if (std.mem.eql(i64, self.dims(), output_shape.dims())) {
-            // No broadcast needed. We don't emit a new stablehlo value
-            // but we propagate output_shape tags.
+        if (std.mem.eql(i64, self.dims(), output_shape.dims()) and
+            std.mem.eql(i64, axes_, constants.AXES_IOTA[0..axes_.len]))
+        {
+            // Identity axis mapping only: a permutation still needs broadcast_in_dim
+            // even when the input and output have the same dimensions.
             return _result(res_shape, self.value());
         }
         const result_type = mlirx.Type.rankedTensor(mlirCtx(), res_shape);
@@ -2885,10 +2891,23 @@ pub const Tensor = struct {
         // Note: if you code below, make sure to update Shape.canBroadcastTo.
         stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {f} to {f}", .{ self, other });
 
-        // Already the right shape
-        if (std.mem.eql(i64, self.dims(), other.dims())) return self;
+        // An unchanged shape must retain the tensor's existing sharding metadata.
+        if (self._shape.eqlWithTags(other)) return self;
 
         if (ops.LoweringCompatibility.preserveIntegerScalarBroadcast(self, other)) |rewritten| return rewritten;
+
+        if (shouldUseTaggedBroadcast(self._shape, other)) {
+            const axes_ = self.broadcastAxesForTags(other);
+            if (std.mem.eql(i64, self.dims(), other.dims()) and
+                std.mem.eql(i64, axes_.constSlice(), constants.AXES_IOTA[0..axes_.len]))
+            {
+                return self;
+            }
+            return self.broadcast(other, axes_.constSlice());
+        }
+
+        // Already the right shape
+        if (std.mem.eql(i64, self.dims(), other.dims())) return self;
 
         // Non ambiguous broadcasting
         // TODO: broad is error prone because of this:
@@ -2903,6 +2922,87 @@ pub const Tensor = struct {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
         return self.broadcast(other, axes_.constSlice());
+    }
+
+    fn shouldUseTaggedBroadcast(self_shape: Shape, other: Shape) bool {
+        return self_shape.rank() != 0 and self_shape.isFullyTagged() and other.isFullyTagged();
+    }
+
+    fn broadcastAxesForTags(self: Tensor, other: Shape) stdx.BoundedArray(i64, constants.MAX_RANK) {
+        var axes_: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+        for (self._shape.tags()) |t| {
+            axes_.appendAssumeCapacity(@intCast(other.axis(t)));
+        }
+        return axes_;
+    }
+
+    test "Tensor.broad does not route rank-0 scalars through tagged broadcast" {
+        const batch_len = 8;
+        const scalar_shape = Shape.init(.{}, .i32);
+        const tagged = Shape.init(.{ .a = batch_len }, .i32);
+
+        try std.testing.expect(!shouldUseTaggedBroadcast(scalar_shape, tagged));
+    }
+
+    test "Tensor.broad maps fully tagged axes by tag" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            const batch_len = 8;
+            const singleton_len = 1;
+            const hidden_len = 16;
+
+            pub fn _fwd(x: Tensor) Tensor {
+                const target = Shape.init(.{ .k = hidden_len, .a = batch_len }, .f32);
+                const res = x.broad(target);
+                std.debug.assert(res.shape().eql(target));
+                return res;
+            }
+        };
+
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Local._fwd,
+            .{Tensor.init(.{ .a = Local.singleton_len, .k = Local.hidden_len }, .f32)},
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+    }
+
+    test "Tensor.broad transposes equal-size tagged axes" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const input_shape = Shape.init(.{ .a = 2, .b = 2 }, .f32);
+        const Local = struct {
+            pub fn _fwd(x: Tensor) Tensor {
+                return x.broad(Shape.init(.{ .b = 2, .a = 2 }, .f32));
+            }
+        };
+
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Local._fwd,
+            .{Tensor.init(.{ .a = 2, .b = 2 }, .f32)},
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        const input_values = [2][2]f32{ .{ 1, 2 }, .{ 3, 4 } };
+        var input = try zml.Buffer.fromBytes(std.testing.io, platform, input_shape, std.mem.sliceAsBytes(&input_values));
+        defer input.deinit();
+        var result: zml.Buffer = undefined;
+        var runner = try exe.runner(std.testing.allocator);
+        defer runner.deinit(std.testing.allocator);
+        runner.run(std.testing.io, .{input}, .{&result}, .{ .wait = true });
+        defer result.deinit();
+
+        const actual = try result.getValue([2][2]f32, std.testing.io);
+        try std.testing.expectEqualDeep([2][2]f32{ .{ 1, 3 }, .{ 2, 4 } }, actual);
     }
 
     pub fn optimizationBarrier(self: Tensor) Tensor {
