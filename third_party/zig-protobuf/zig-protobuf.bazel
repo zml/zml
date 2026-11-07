@@ -1,0 +1,28 @@
+load("@com_google_protobuf//bazel/toolchains:proto_lang_toolchain.bzl", "proto_lang_toolchain")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_library(
+    name = "protobuf",
+    import_name = "protobuf",
+    main = "src/protobuf.zig",
+    srcs = glob(["src/**/*.zig"]),
+    visibility = ["//visibility:public"],
+)
+
+zig_binary(
+    name = "generator",
+    main = "bootstrapped-generator/main.zig",
+    srcs = glob(["bootstrapped-generator/**/*.zig"]),
+    deps = [":protobuf"],
+)
+
+proto_lang_toolchain(
+    name = "zig_toolchain",
+    command_line = "--zig_out=$(OUT)",
+    # proto_common needs an explicit path for a tree artifact.
+    output_files = "legacy",
+    plugin = ":generator",
+    plugin_format_flag = "--plugin=protoc-gen-zig=%s",
+    runtime = ":protobuf",
+    visibility = ["//visibility:public"],
+)
