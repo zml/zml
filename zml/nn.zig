@@ -82,9 +82,12 @@ pub fn unpackFp4(w: Tensor, packed_tag: anytype, contracting_tag: anytype) Tenso
     stdx.debug.assert(w.dtype() == .u8 or w.dtype() == .i8, "unpackFp4 expects packed 8-bit weights, got {}", .{w.dtype()});
     const source_tag = Shape.toTag(packed_tag);
     const result_tag = Shape.toTag(contracting_tag);
-    return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
+    const unpacked = w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
         .merge(.{ .kb = .{ source_tag, .bitcast } })
         .renameTag(.kb, result_tag);
+
+    const sharding = w.shape()._sharding;
+    return if (sharding.mesh) |mesh| unpacked.withPartitioning(mesh, sharding.partition) else unpacked;
 }
 
 test "unpackFp4 expands the requested axis" {
