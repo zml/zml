@@ -78,6 +78,7 @@ zig_library(
     srcs = [
         "Compiler.zig",
         "Sharding.zig",
+        "attention/Options.zig",
         "attention/attention.zig",
         "buffer.zig",
         "buffer/HostAccessible.zig",
@@ -88,6 +89,7 @@ zig_library(
         "io.zig",
         "kernel.zig",
         "kernels/flash_attention/flash_attention.zig",
+        "kernels/flash_attention/tests.zig",
         "kernels/moe/moe.zig",
         "kernels/moe/tests.zig",
         "kernels/paged_attention/paged_attention.zig",
