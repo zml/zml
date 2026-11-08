@@ -23,10 +23,8 @@ pub const manualComputation2 = manual_computation2.manualComputation2;
 pub const ManualPartitioning = manual_computation2.ManualPartitioning;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
-const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
 test {
     _ = manual_computation;
@@ -2733,85 +2731,6 @@ fn metadataFieldToMlirAttribute(mlir_ctx: *mlir.Context, comptime T: type, value
     };
 }
 
-pub fn CustomCall(
-    // A, I and O are assumed to be simple struct without any nesting like: { a: zml.Tensor }
-    I: type,
-    O: type,
-    A: type,
-    // Receives the custom call buffers for the input and outputs a struct with the same fields as I and O
-    // and the provided attributes. So if I is `{a: zml.Tensor}`, the first argument is `{a: CustomCallBuffer}`
-    // (TensorToCustomCallBuffer(i), ShapeToCustomCallBuffer(O), A) -> !?*pjrt.ffi.Error
-    comptime func_: anytype,
-    comptime params: struct {
-        /// Name of the custom call, must be unique.
-        name: [:0]const u8,
-        /// Custom call will see the data of a single device. So for a sharded buffer, it will only see a single partition. This applies
-        /// for both the input and output buffers. By default, the partitioning algorithm will assume nothing on the custom call input/output,
-        /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
-        /// sharding, this setting will avoid the shuffling of the buffer's data.
-        sharding_aware: bool,
-        /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
-        has_side_effect: bool,
-        /// Similar to reuseBuffer on tensors, tells XLA that the custom call re-uses an input buffer for its output.
-        /// Use the input/output field names to express the mapping: `{ .<out field> = .<in field> }`
-        output_operand_aliases: ?CustomCallOutputOperandAliases(I, O) = null,
-        /// Request XLA host-compute offload for this custom call on accelerator backends.
-        /// Input/Output buffers will automatically be moved d2h/h2d without the need for an explicit `.toMemory(...)`.
-        compute_on_host: bool = false,
-    },
-) type {
-    return struct {
-        pub const InputTensors = I;
-        pub const OutputShapes = O;
-        pub const Attributes = A;
-
-        /// Register the custom call so you can use it.
-        pub fn register(platform: *const Platform) !void {
-            try platform.registerFfi(.{
-                .name = params.name,
-                .platform_name = if (params.compute_on_host) "Host" else null,
-                .handler = @This().handler,
-                .traits = .{
-                    .command_buffer_compatible = true,
-                },
-            });
-        }
-
-        pub fn call(input_tensors: I, output_shapes: O, attributes: A) ShapeToTensor(O) {
-            const opts: CustomCallOptions = .{
-                .has_side_effect = params.has_side_effect,
-                .output_operand_aliases = comptime customCallOutputOperandAliases(I, O, params.output_operand_aliases),
-                .compute_on_host = params.compute_on_host,
-            };
-            if (params.sharding_aware) {
-                return shardingAwareTypedCustomCall(
-                    params.name,
-                    opts,
-                    input_tensors,
-                    output_shapes,
-                    attributes,
-                );
-            } else {
-                return typedCustomCall(
-                    params.name,
-                    opts,
-                    input_tensors,
-                    output_shapes,
-                    attributes,
-                );
-            }
-        }
-
-        fn handler(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
-            if (call_frame.registeringHook()) return null;
-
-            const input_buffers: TensorToCustomCallBuffer(I), const output_buffers: ShapeToCustomCallBuffer(O), const attributes: A = customCallArgsFromPjrtCallFrame(I, O, A, call_frame);
-            return func_(call_frame, input_buffers, output_buffers, attributes) catch |err|
-                pjrt.ffi.Error.create(call_frame.api, .unknown, @errorName(err));
-        }
-    };
-}
-
 pub fn ShapeToTensor(T: type) type {
     return meta.MapRestrict(Shape, Tensor).map(T);
 }
@@ -2993,41 +2912,6 @@ pub fn typedCustomCall(
         },
         else => @compileError("Unsupported output type: " ++ @typeName(Output)),
     }
-}
-
-fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.ffi.CallFrame) struct {
-    TensorToCustomCallBuffer(I),
-    ShapeToCustomCallBuffer(O),
-    A,
-} {
-    var input: TensorToCustomCallBuffer(I) = undefined;
-    inline for (@typeInfo(I).@"struct".field_names, 0..) |field_name, i| {
-        const buf = call_frame.args.buffers()[i];
-        @field(input, field_name) = .fromPjrt(buf);
-    }
-
-    var output: ShapeToCustomCallBuffer(O) = undefined;
-    inline for (@typeInfo(O).@"struct".field_names, 0..) |field_name, i| {
-        const shape_buf = call_frame.results.buffers()[i];
-        @field(output, field_name) = .fromPjrt(shape_buf);
-    }
-
-    const attributes: A = switch (@typeInfo(A)) {
-        .void => {},
-        .@"struct" => blk: {
-            var attrs: A = undefined;
-            inline for (@typeInfo(A).@"struct".field_names, @typeInfo(A).@"struct".field_types) |field_name, Field| {
-                // TODO: Use getByIndex instead?
-                const attribute = call_frame.attrs.getByName(.scalar, field_name) orelse
-                    @panic("Attribute not found: " ++ field_name);
-                @field(attrs, field_name) = attribute.get(Field);
-            }
-            break :blk attrs;
-        },
-        else => @compileError("Unsupported attributes type: " ++ @typeName(A)),
-    };
-
-    return .{ input, output, attributes };
 }
 
 test customCall {

@@ -45,14 +45,6 @@ pub const Client = opaque {
     }
 };
 
-pub fn TensorToCustomCallBuffer(T: type) type {
-    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
-}
-
-pub fn ShapeToCustomCallBuffer(T: type) type {
-    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
-}
-
 pub const CustomCallBuffer = struct {
     shape: Shape,
     ptr: *anyopaque,
