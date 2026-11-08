@@ -3,7 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
-
+const AttentionOptions = @import("../options.zig").AttentionOptions;
 const paged_attn = @import("paged_attn.zig");
 
 const log = std.log.scoped(.@"zml/attention/metal");
@@ -55,36 +55,6 @@ pub const Parameters = struct {
     pub fn options(self: Parameters) Options {
         return self.options_;
     }
-};
-
-/// See AttentionMask in `zml/kernels/paged_attention/paged_attention.zig`
-pub const AttentionMask = union(enum) {
-    standard: struct {
-        causal: bool = true,
-        sliding_window: ?u32 = null,
-    },
-    indices: zml.Tensor,
-
-    pub fn isCausal(mask: AttentionMask) bool {
-        return switch (mask) {
-            .standard => |options| options.causal,
-            .indices => false,
-        };
-    }
-
-    pub fn slidingWindow(mask: AttentionMask) ?u32 {
-        return switch (mask) {
-            .standard => |options| options.sliding_window,
-            .indices => null,
-        };
-    }
-};
-
-/// See AttentionOptions in `zml/kernels/paged_attention/paged_attention.zig`
-pub const AttentionOptions = struct {
-    mask: AttentionMask = .{ .standard = .{} },
-    scale: ?f32 = null,
-    sink: ?zml.Tensor = null,
 };
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {

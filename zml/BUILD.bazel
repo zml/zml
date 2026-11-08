@@ -92,6 +92,7 @@ zig_library(
         "kernels/flash_attention/tests.zig",
         "kernels/moe/moe.zig",
         "kernels/moe/tests.zig",
+        "kernels/paged_attention/options.zig",
         "kernels/paged_attention/paged_attention.zig",
         "logo.zig",
         "mem.zig",

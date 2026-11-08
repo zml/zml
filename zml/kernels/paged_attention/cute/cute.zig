@@ -1,9 +1,10 @@
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
+pub const AttentionOptions = @import("../options.zig").AttentionOptions;
+const kernel = @import("attention.zig");
 const sm10x = @import("sm10x/sm10x.zig");
 const sm120 = @import("sm120/sm120.zig");
-const kernel = @import("attention.zig");
 
 pub const Options = struct {
     batch_size: usize,
@@ -62,36 +63,6 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
     return cc.major > 8 or (cc.major == 8 and cc.minor >= 9);
 }
-
-/// See AttentionMask in `zml/kernels/paged_attention/paged_attention.zig`
-pub const AttentionMask = union(enum) {
-    standard: struct {
-        causal: bool = true,
-        sliding_window: ?u32 = null,
-    },
-    indices: zml.Tensor,
-
-    pub fn isCausal(mask: AttentionMask) bool {
-        return switch (mask) {
-            .standard => |options| options.causal,
-            .indices => false,
-        };
-    }
-
-    pub fn slidingWindow(mask: AttentionMask) ?u32 {
-        return switch (mask) {
-            .standard => |options| options.sliding_window,
-            .indices => null,
-        };
-    }
-};
-
-/// See AttentionOptions in `zml/kernels/paged_attention/paged_attention.zig`
-pub const AttentionOptions = struct {
-    mask: AttentionMask = .{ .standard = .{} },
-    scale: ?f32 = null,
-    sink: ?zml.Tensor = null,
-};
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) zml.Tensor {
     stdx.debug.assert(isAvailable(zml.Compiler.current().platform), "CuTe paged attention requires SM89 or newer", .{});
