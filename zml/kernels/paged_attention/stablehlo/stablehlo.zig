@@ -1,12 +1,41 @@
 const zml = @import("../../../zml.zig");
-const KvCache = @import("../paged_attention.zig").KvCache;
-const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
 const triton = @import("../triton/triton.zig");
+
+/// See AttentionMask in `zml/kernels/paged_attention/paged_attention.zig`
+pub const AttentionMask = union(enum) {
+    standard: struct {
+        causal: bool = true,
+        sliding_window: ?u32 = null,
+    },
+    indices: zml.Tensor,
+
+    pub fn isCausal(mask: AttentionMask) bool {
+        return switch (mask) {
+            .standard => |options| options.causal,
+            .indices => false,
+        };
+    }
+
+    pub fn slidingWindow(mask: AttentionMask) ?u32 {
+        return switch (mask) {
+            .standard => |options| options.sliding_window,
+            .indices => null,
+        };
+    }
+};
+
+/// See AttentionOptions in `zml/kernels/paged_attention/paged_attention.zig`
+pub const AttentionOptions = struct {
+    mask: AttentionMask = .{ .standard = .{} },
+    scale: ?f32 = null,
+    sink: ?zml.Tensor = null,
+};
 
 pub fn pagedAttention(
     parameters: triton.paged.Parameters,
     q: zml.Tensor,
-    kv_cache: KvCache,
+    k: zml.Tensor,
+    v: zml.Tensor,
     opts: AttentionOptions,
 ) zml.Tensor {
     switch (opts.mask) {
@@ -14,12 +43,12 @@ pub fn pagedAttention(
         .indices => @panic("Sparse attention mask is not supported on StableHLO"),
     }
 
-    const page_size = kv_cache.split.k.dim(.k_chunk);
+    const page_size = k.dim(.k_chunk);
     const padded_q = q.pad(0, .{ .b = zml.Tensor.Pad{ .high = page_size } });
 
     const final_state = zml.ops.@"while"(
         AttentionLoop,
-        .{ .q = padded_q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
+        .{ .q = padded_q, .k = k, .v = v, .parameters = parameters, .opts = opts },
         .{
             // i32 to match triton conventions
             .slot_id = .scalar(0, .i32),
@@ -38,7 +67,8 @@ pub fn pagedAttention(
 
 const AttentionLoop = struct {
     q: zml.Tensor,
-    kv_cache: KvCache,
+    k: zml.Tensor,
+    v: zml.Tensor,
     parameters: triton.paged.Parameters,
     opts: AttentionOptions,
 
@@ -66,7 +96,7 @@ const AttentionLoop = struct {
         const query_start = self.parameters.query_start_len.slice(0, .dynSingle(state_.seq_id));
         const query_end = self.parameters.query_start_len.slice(0, .dynSingle(state_.seq_id.addConstant(1)));
         const seq_num_queries_: zml.Tensor = .asScalar(.sub(query_end, query_start));
-        const page_size_: u32 = @intCast(self.kv_cache.split.k.dim(.k_chunk));
+        const page_size_: u32 = @intCast(self.k.dim(.k_chunk));
 
         return zml.ops.@"if"(
             struct {
@@ -134,7 +164,10 @@ const AttentionLoop = struct {
             .{ .b, .p },
             &.{ .dynSingle(state.seq_id), .dynSingle(state.k_page_idx) },
         );
-        const active_k, const active_v = self.kv_cache.getPage(active_k_page_id);
+
+        const page_axis = self.k.axis(.page);
+        const active_k = self.k.slice(page_axis, .dynSingle(active_k_page_id));
+        const active_v = self.v.slice(page_axis, .dynSingle(active_k_page_id));
 
         const dtype = self.q.dtype();
         const attn_mask: zml.Tensor = attn_mask: {

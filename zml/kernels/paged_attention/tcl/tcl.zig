@@ -9,7 +9,6 @@ const builder = @import("dsl/tcl/builder");
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const tcl = zml.kernel.tcl;
-const paged_attention = @import("../paged_attention.zig");
 const triton = @import("../triton/triton.zig");
 
 /// WORKAROUND (TCC 2026.5.0b0): flash decode with 8192-key chunks fails to
@@ -47,9 +46,39 @@ pub const paged = struct {
     pub const Options = triton.paged.Options;
     pub const Parameters = triton.paged.Parameters;
 
+    /// See AttentionMask in `zml/kernels/paged_attention/paged_attention.zig`
+    pub const AttentionMask = union(enum) {
+        standard: struct {
+            causal: bool = true,
+            sliding_window: ?u32 = null,
+        },
+        indices: zml.Tensor,
+
+        pub fn isCausal(mask: AttentionMask) bool {
+            return switch (mask) {
+                .standard => |options| options.causal,
+                .indices => false,
+            };
+        }
+
+        pub fn slidingWindow(mask: AttentionMask) ?u32 {
+            return switch (mask) {
+                .standard => |options| options.sliding_window,
+                .indices => null,
+            };
+        }
+    };
+
+    /// See AttentionOptions in `zml/kernels/paged_attention/paged_attention.zig`
+    pub const AttentionOptions = struct {
+        mask: AttentionMask = .{ .standard = .{} },
+        scale: ?f32 = null,
+        sink: ?zml.Tensor = null,
+    };
+
     /// `q` is `{.b = tokens, .hkv, .hg, .hd}`, the caches `{.page, .k_chunk, .hkv, .hd}`.
     /// Sinks are one logit per query head.
-    pub fn pagedAttention(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: paged_attention.AttentionOptions) Tensor {
+    pub fn pagedAttention(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: AttentionOptions) Tensor {
         if (opts.mask == .indices) @panic("Sparse attention masks are not supported by TCL paged attention");
         stdx.debug.assert(q.rank() == 4 and k_cache.rank() == 4 and v_cache.rank() == 4 and k_cache.shape().eqlDims(v_cache.shape()), "TCL attention requires matching rank-four split K/V caches", .{});
         stdx.debug.assert(q.dtype().isFloat() and k_cache.dtype().isFloat() and v_cache.dtype().isFloat(), "TCL attention requires floating-point queries and caches", .{});
@@ -76,14 +105,14 @@ pub const paged = struct {
         q: Tensor,
         k_cache: Tensor,
         v_cache: Tensor,
-        opts: paged_attention.AttentionOptions,
+        opts: AttentionOptions,
 
         fn body(self: Shard, _: zml.Shape) Tensor {
             return attend(self.parameters, self.q, self.k_cache, self.v_cache, self.opts);
         }
     };
 
-    fn attend(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: paged_attention.AttentionOptions) Tensor {
+    fn attend(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: AttentionOptions) Tensor {
         if (q.dim(.b) == 0) return Tensor.zeroes(q.shape());
         const page = k_cache.dim(.k_chunk);
         // WORKAROUND (TCC 2026.5.0b0): no DPE tactic for 32-key attention, so pad to
@@ -1664,11 +1693,11 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
         const params: paged.Parameters = .init(.{ .batch_size = batch, .max_num_pages = max_pages, .max_seqlen_q = 128, .is_prefill = case.prefill });
         const q_t: Tensor = .init(.{ .b = tokens, .hkv = hkv, .hg = g, .hd = d }, dims.dtype);
         const Mod = struct {
-            pub fn forward(p: paged.Parameters, q: Tensor, k: Tensor, v: Tensor, opts: paged_attention.AttentionOptions) Tensor {
+            pub fn forward(p: paged.Parameters, q: Tensor, k: Tensor, v: Tensor, opts: paged.AttentionOptions) Tensor {
                 return paged.pagedAttention(p, q, k, v, opts);
             }
         };
-        const opts: paged_attention.AttentionOptions = .{
+        const opts: paged.AttentionOptions = .{
             .mask = .{ .standard = .{
                 .causal = case.opts.is_causal,
                 .sliding_window = if (case.opts.sliding_window > 0) @intCast(case.opts.sliding_window) else null,
@@ -1742,11 +1771,11 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
             .query_start_len = try .fromBytes(io, platform, params.query_start_len.shape(), std.mem.sliceAsBytes(&starts)),
         };
         defer zml.Buffer.deinitAll(paged.Parameters, &bp);
-        var opts_d: zml.Bufferized(paged_attention.AttentionOptions) = .{
+        var opts_d: zml.Bufferized(paged.AttentionOptions) = .{
             .mask = .{ .standard = {} },
             .sink = if (case.opts.sink) |s| try .fromBytes(io, platform, opts.sink.?.shape(), std.mem.sliceAsBytes(s)) else null,
         };
-        defer zml.Buffer.deinitAll(paged_attention.AttentionOptions, &opts_d);
+        defer zml.Buffer.deinitAll(paged.AttentionOptions, &opts_d);
         var result = try exe.eval(allocator, io, .{ bp, bq, bk, bv, opts_d });
         defer result.deinit();
         const host = try result.toSliceAlloc(allocator, io);

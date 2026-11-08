@@ -5,7 +5,6 @@ const ragged_paged = @import("platforms/tpu/ragged_paged");
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
-const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
 const ragged_attention = @import("ragged_attention.zig");
 
 const log = std.log.scoped(.tpu_attention);
@@ -217,6 +216,36 @@ pub const mosaic_tpu = struct {
             .sliding_window = sliding_window,
         };
     }
+
+    /// See AttentionMask in `zml/kernels/paged_attention/paged_attention.zig`
+    pub const AttentionMask = union(enum) {
+        standard: struct {
+            causal: bool = true,
+            sliding_window: ?u32 = null,
+        },
+        indices: zml.Tensor,
+
+        pub fn isCausal(mask: AttentionMask) bool {
+            return switch (mask) {
+                .standard => |options| options.causal,
+                .indices => false,
+            };
+        }
+
+        pub fn slidingWindow(mask: AttentionMask) ?u32 {
+            return switch (mask) {
+                .standard => |options| options.sliding_window,
+                .indices => null,
+            };
+        }
+    };
+
+    /// See AttentionOptions in `zml/kernels/paged_attention/paged_attention.zig`
+    pub const AttentionOptions = struct {
+        mask: AttentionMask = .{ .standard = .{} },
+        scale: ?f32 = null,
+        sink: ?zml.Tensor = null,
+    };
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         if (opts.mask == .indices) @panic("Sparse Attention is not supported on TPU");

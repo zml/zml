@@ -178,12 +178,27 @@ pub const AttentionMask = union(enum) {
             .indices => null,
         };
     }
+
+    fn toBackendStruct(self: AttentionMask, comptime T: type) T {
+        return switch (self) {
+            .standard => |v| .{ .standard = .{ .causal = v.causal, .sliding_window = v.sliding_window } },
+            .indices => |v| .{ .indices = v },
+        };
+    }
 };
 
 pub const AttentionOptions = struct {
     mask: AttentionMask = .{ .standard = .{} },
     scale: ?f32 = null,
     sink: ?zml.Tensor = null,
+
+    fn toBackendStruct(self: AttentionOptions, comptime T: type) T {
+        return .{
+            .mask = self.mask.toBackendStruct(@FieldType(T, "mask")),
+            .scale = self.scale,
+            .sink = self.sink,
+        };
+    }
 };
 
 pub const KvCache = union(enum) {
@@ -232,19 +247,6 @@ pub const KvCache = union(enum) {
         const offset = slot_mapping.remainder(.scalar(page_size, slot_mapping.dtype()));
         return .{ page_index, offset };
     }
-
-    pub fn getPage(
-        self: KvCache,
-        page_index: zml.Tensor,
-    ) [2]zml.Tensor {
-        return switch (self) {
-            .split => |split| .{
-                split.k.slice(split.k.axis(.page), .dynSingle(page_index)),
-                split.v.slice(split.k.axis(.page), .dynSingle(page_index)),
-            },
-            .dense => @panic("TODO"),
-        };
-    }
 };
 
 pub const Partitioning = zml.ops.ManualPartitioning(Attention.forward);
@@ -265,24 +267,27 @@ const Attention = struct {
     fn forward(args: @This(), _: zml.Shape) zml.Tensor {
         return switch (args.parameters) {
             .cute => |p| switch (args.kv_cache) {
-                .split => |split| cute.pagedAttention(p, args.q, split.k, split.v, args.opts),
+                .split => |split| cute.pagedAttention(p, args.q, split.k, split.v, args.opts.toBackendStruct(cute.AttentionOptions)),
                 .dense => @panic("CuTe paged attention requires split KV pages"),
             },
             .triton => |triton_parameters| switch (args.kv_cache) {
-                .split => |split| triton.paged.pagedAttention(triton_parameters, args.q, split.k, split.v, args.opts),
+                .split => |split| triton.paged.pagedAttention(triton_parameters, args.q, split.k, split.v, args.opts.toBackendStruct(triton.paged.AttentionOptions)),
                 .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
             },
             .mosaic_tpu => |mosaic_tpu_parameters| switch (args.kv_cache) {
                 .split => std.debug.panic("split KV pages is not supported with the mosaic_tpu backend", .{}),
-                .dense => tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, args.q, args.kv_cache.dense, args.opts),
+                .dense => tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, args.q, args.kv_cache.dense, args.opts.toBackendStruct(tpu.mosaic_tpu.AttentionOptions)),
             },
             .metal => |metal_parameters| switch (args.kv_cache) {
-                .split => |split| metal.pagedAttention(metal_parameters, args.q, split.k, split.v, args.opts),
+                .split => |split| metal.pagedAttention(metal_parameters, args.q, split.k, split.v, args.opts.toBackendStruct(metal.AttentionOptions)),
                 .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
             },
-            .stablehlo => |params| stablehlo.pagedAttention(params, args.q, args.kv_cache, args.opts),
+            .stablehlo => |params| switch (args.kv_cache) {
+                .split => |split| stablehlo.pagedAttention(params, args.q, split.k, split.v, args.opts.toBackendStruct(stablehlo.AttentionOptions)),
+                .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            },
             .tcl => |params| switch (args.kv_cache) {
-                .split => |split| tcl.paged.pagedAttention(params, args.q, split.k, split.v, args.opts),
+                .split => |split| tcl.paged.pagedAttention(params, args.q, split.k, split.v, args.opts.toBackendStruct(tcl.paged.AttentionOptions)),
                 .dense => std.debug.panic("TCL paged attention takes separate K and V pages", .{}),
             },
         };
