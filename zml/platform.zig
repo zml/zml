@@ -8,6 +8,8 @@ pub const Target = @import("platforms").Platform;
 
 const constants = @import("constants.zig");
 const Exe = @import("exe.zig").Exe;
+const flashinfer_cutlass_contract = @import("kernels/moe/flashinfer_cutlass/contract.zig");
+const flashinfer_cutlass_runtime = @import("kernels/moe/flashinfer_cutlass/runtime.zig");
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
@@ -257,12 +259,12 @@ pub const State = union(Target) {
     furiosa: void,
 
     pub const CudaState = struct {
-        fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
+        flashinfer_cutlass_moe_runners: ?*flashinfer_cutlass_runtime.Runners = null,
 
         fn deinit(self: *CudaState) void {
-            if (self.fi_cutlass_moe_runners) |runners| {
+            if (self.flashinfer_cutlass_moe_runners) |runners| {
                 runners.deinit();
-                self.fi_cutlass_moe_runners = null;
+                self.flashinfer_cutlass_moe_runners = null;
             }
         }
     };
@@ -381,16 +383,9 @@ pub const Platform = struct {
 
         switch (target) {
             .cuda => {
-                if (zml.moe.cutlass_flashinfer.load(arena, io, platform)) {
-                    zml.moe.cutlass_flashinfer.register(platform) catch |err| {
-                        log.warn(
-                            "Failed to register FlashInfer CUTLASS MoE custom calls: {}",
-                            .{err},
-                        );
-                    };
-                } else |err| {
-                    log.warn("Failed to load FlashInfer CUTLASS MoE: {}", .{err});
-                }
+                cuda.initFlashinferCutlass(platform, io) catch |err| {
+                    log.warn("Failed to initialize Flashinfer CUTLASS MoE: {}", .{err});
+                };
             },
             else => {},
         }
@@ -876,6 +871,29 @@ pub const cuda = struct {
                 break ComputeCapability.parse(attr.value().string);
             }
         } else null;
+    }
+
+    fn initFlashinferCutlass(platform: *Platform, io: std.Io) !void {
+        if (comptime !Target.cuda.isEnabled()) return error.UnsupportedPlatform;
+        const cc = computeCapability(platform) orelse return error.UnsupportedArchitecture;
+
+        const allocator = platform.arena.allocator();
+        const runners = try allocator.create(flashinfer_cutlass_runtime.Runners);
+        errdefer allocator.destroy(runners);
+
+        try flashinfer_cutlass_runtime.load(allocator, io, cc.sm());
+
+        runners.* = .{};
+        errdefer runners.deinit();
+
+        try platform.registerFfi(.{
+            .name = flashinfer_cutlass_contract.name,
+            .handler = flashinfer_cutlass_runtime.handler,
+            .traits = .{ .command_buffer_compatible = true },
+            .platform_name = if (flashinfer_cutlass_contract.compute_on_host) "Host" else null,
+        });
+
+        platform.state.cuda.flashinfer_cutlass_moe_runners = runners;
     }
 };
 

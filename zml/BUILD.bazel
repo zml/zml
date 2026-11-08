@@ -119,7 +119,7 @@ zig_library(
         "//zml/kernels/flash_attention/metal",
         "//zml/kernels/flash_attention/nki",
         "//zml/kernels/moe/cute",
-        "//zml/kernels/moe/cutlass_flashinfer",
+        "//zml/kernels/moe/flashinfer_cutlass",
         "//zml/kernels/moe/fly",
         "//zml/kernels/moe/metal",
         "//zml/kernels/moe/mosaic_tpu",
