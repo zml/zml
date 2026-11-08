@@ -12,6 +12,7 @@ pub const mxfp4_persistent = @import("persistent_mxfp4.zig");
 pub const nvfp4 = @import("nvfp4.zig");
 pub const nvfp4_persistent = @import("persistent_nvfp4.zig");
 const reduce = @import("reduce.zig");
+const RoutingWeightPlacement = @import("../../options.zig").RoutingWeightPlacement;
 const triton_kernels = @import("../../triton/moe.zig");
 
 pub const Mxfp4Inputs = struct {
@@ -252,7 +253,7 @@ pub const Nvfp4Inputs = struct {
 
 pub const Nvfp4Options = struct {
     swiglu_limit: ?f32 = null,
-    routing_weight_placement: zml.moe.RoutingWeightPlacement = .after_down,
+    routing_weight_placement: RoutingWeightPlacement = .after_down,
     /// GEMM tile N; null selects it from the batch size.
     tile_n: ?i64 = null,
 };

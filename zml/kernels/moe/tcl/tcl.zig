@@ -12,17 +12,17 @@
 const std = @import("std");
 
 const builder = @import("dsl/tcl/builder");
-
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const tcl = zml.kernel.tcl;
+const Options = @import("../options.zig").Options;
 
 /// `input` is `{.t, .d}`, routing IDs and weights `{.t, .topk}`, `gate_up` `{.expert, .dout = 2 * inter (gate then up), .d}`
 /// and `down` `{.expert, .d, .dout = inter}`, all bf16 but the ids (i32).
 /// SwiGLU, routing weights applied after the down projection.
-pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: zml.moe.Options) Tensor {
+pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: Options) Tensor {
     const topk_ids = routing.ids;
     const topk_weights = routing.weights;
     stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL MoE applies routing weights after the down projection, without FP8 input quantization", .{});

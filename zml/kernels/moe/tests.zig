@@ -5,12 +5,15 @@ const std = @import("std");
 const zml = @import("../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const Placement = @import("moe.zig").RoutingWeightPlacement;
+const ExpertsLayout = @import("options.zig").ExpertsLayout;
+const GlobalOptions = @import("options.zig").Options;
+const Activation = @import("options.zig").Activation;
+const Placement = @import("options.zig").RoutingWeightPlacement;
 const reference = @import("stablehlo/stablehlo.zig");
 
 const Case = struct {
     backend: zml.moe.Backend,
-    activation: zml.moe.Activation = .{ .swiglu = .{} },
+    activation: Activation = .{ .swiglu = .{} },
     scheme: ?zml.Quantization.Scheme = null,
     activation_dtype: zml.DataType = .bf16,
     quantize_input: bool = false,
@@ -197,7 +200,7 @@ fn packFp4Bytes(weight: Tensor) Tensor {
     return weight.reshape(weight.shape().setDim(2, @divExact(weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8);
 }
 
-fn prepareGateUp(tensor: Tensor, layout: zml.moe.ExpertsLayout) Tensor {
+fn prepareGateUp(tensor: Tensor, layout: ExpertsLayout) Tensor {
     return switch (layout.gate_up) {
         .concatenated => tensor,
         .interleaved => interleave(tensor),
@@ -271,7 +274,7 @@ fn forward(input: Tensor, c: Case) Outputs {
     const ids = route.mul(Tensor.scalar(5, .i32)).addConstant(2).remainder(Tensor.scalar(@min(c.experts, 6), .i32));
 
     const weights = route.remainder(Tensor.scalar(3, .i32)).convert(.f32).addConstant(1).scale(0.25);
-    const options: zml.moe.Options = .{
+    const options: GlobalOptions = .{
         .activation = c.activation,
         .quantize_input = c.quantize_input,
         .routing_weight_placement = c.placement,
@@ -305,7 +308,7 @@ fn forward(input: Tensor, c: Case) Outputs {
     return .{ .actual = actual, .expected = expected };
 }
 
-const gated_activations = [_]zml.moe.Activation{
+const gated_activations = [_]Activation{
     .{ .swiglu = .{} },
     .{ .swiglu = .{ .limit = 0.25 } },
     .{ .swiglu = .{ .bias = 1 } },
@@ -315,8 +318,8 @@ const gated_activations = [_]zml.moe.Activation{
     .geglu,
     .geglu_tanh,
 };
-const all_activations = gated_activations ++ [_]zml.moe.Activation{ .relu, .silu, .gelu };
-const clipped_swiglu = [_]zml.moe.Activation{
+const all_activations = gated_activations ++ [_]Activation{ .relu, .silu, .gelu };
+const clipped_swiglu = [_]Activation{
     .{ .swiglu = .{ .limit = 0.25 } },
     .{ .swiglu = .{ .limit = 7 } },
 };
@@ -354,7 +357,7 @@ const Format = struct {
 
 const Matrix = struct {
     formats: []const Format = &.{.{}},
-    activations: []const zml.moe.Activation,
+    activations: []const Activation,
     quantize_inputs: []const bool = &.{false},
     placements: []const Placement = &.{.after_down},
     biases: []const bool = &.{false},

@@ -6,8 +6,12 @@ const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
+const ExpertsLayout = @import("../options.zig").ExpertsLayout;
+const ProjectionLayout = @import("../options.zig").ProjectionLayout;
+const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
+const Activation = @import("../options.zig").Activation;
+const Options = @import("../options.zig").Options;
 const fly = @import("moe.zig");
-const ProjectionLayout = zml.moe.ProjectionLayout;
 
 const log = std.log.scoped(.@"zml/moe/fused_experts");
 
@@ -20,7 +24,7 @@ pub fn fusedExperts(
     routing_: zml.moe.LocalRouting,
     gate_up_: zml.nn.Linear,
     down_: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: Options,
 ) Tensor {
     const expert_map_ = routing_.expertMap();
     const layout: ProjectionLayout = if (gate_up_.quantizationScheme() == .mxfp4) .interleaved else .concatenated;
@@ -103,7 +107,7 @@ pub fn fusedExperts(
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    var activated = zml.moe.applyActivation(gate_up_out, opts.activation, layout);
+    var activated = opts.activation.applyActivation(gate_up_out, layout);
     if (opts.routing_weight_placement == .before_down) {
         const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
@@ -131,7 +135,7 @@ pub fn fusedExperts(
 }
 
 // TODO(Corentin): unused for now
-pub fn supports(hidden_states: Tensor, routing: zml.moe.LocalRouting, gate_up_: zml.nn.Linear, down_: zml.nn.Linear, opts: zml.moe.Options) bool {
+pub fn supports(hidden_states: Tensor, routing: zml.moe.LocalRouting, gate_up_: zml.nn.Linear, down_: zml.nn.Linear, opts: Options) bool {
     if (hidden_states.dtype() != .bf16 or gate_up_.quantizationScheme() != .mxfp4 or
         down_.quantizationScheme() != .mxfp4 or gate_up_.bias != null or down_.bias != null or
         opts.routing_weight_placement != .before_down) return false;
