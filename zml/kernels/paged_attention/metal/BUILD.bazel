@@ -5,5 +5,7 @@ filegroup(
     srcs = [
         "metal.zig",
         "paged_attn.zig",
+        "sparse_unified_attention.zig",
+        "sparse_unified_attention_test.zig",
     ],
 )

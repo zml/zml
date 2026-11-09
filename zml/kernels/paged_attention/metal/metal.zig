@@ -6,11 +6,13 @@ const zml = @import("../../../zml.zig");
 
 const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
 const paged_attn = @import("paged_attn.zig");
+const sparse = @import("sparse_unified_attention.zig");
 
 const log = std.log.scoped(.@"zml/attention/metal");
 
 test {
     _ = paged_attn;
+    _ = @import("sparse_unified_attention_test.zig");
 }
 
 pub const Options = struct {
@@ -59,7 +61,7 @@ pub const Parameters = struct {
 };
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-    if (opts.mask == .indices) @panic("Sparse Attention is not implemented on Metal");
+    if (opts.mask == .indices) return sparseAttention(parameters, q, k_cache, v_cache, opts);
 
     const num_kv_heads = q.dim(.hkv);
 
@@ -210,4 +212,38 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         .threadgroup = .{ 256, 1, 1 },
         .constants = .{ .num_seqs = .of(num_seqs), .row_stride = .of(num_heads * head_dim) },
     }).out;
+}
+
+fn sparseAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+    const indices = opts.mask.indices;
+    stdx.debug.assert(indices.rank() == 2 and indices.dtype() == .i32 and indices.shape().hasTags(.{ .b, .topk }), "Sparse indices must be an i32 tensor tagged .b, .topk", .{});
+    stdx.debug.assert(indices.dim(.b) == q.dim(.b) and indices.dim(.topk) > 0, "Sparse indices must match queries and have nonempty capacity", .{});
+    stdx.debug.assert(q.dtype() == .bf16 or q.dtype() == .f16, "Metal sparse attention requires bf16 or f16", .{});
+    stdx.debug.assert(q.dtype() == k.dtype() and q.dtype() == v.dtype(), "Sparse attention requires matching query and KV dtypes", .{});
+    stdx.debug.assert(q.dim(.hkv) == k.dim(.hkv) and q.dim(.hkv) == v.dim(.hkv) and q.dim(.hd) == k.dim(.hd) and q.dim(.hd) == v.dim(.hd), "Sparse attention requires matching query and KV heads and dimensions", .{});
+    if (opts.sink) |sink| stdx.debug.assert(sink.count() == q.dim(.hkv) * q.dim(.hg), "Sparse attention requires one sink per query head", .{});
+
+    const qh = q.merge(.{ .h = .{ .hkv, .hg } }).transpose(.{ .b, .h, .hd });
+    const out = sparse.call(.{
+        .q = qh,
+        .k = k.transpose(.{ .page, .k_chunk, .hkv, .hd }),
+        .v = v.transpose(.{ .page, .k_chunk, .hkv, .hd }),
+        .indices = indices.transpose(.{ .b, .topk }),
+        .block_tables = parameters.block_table.transpose(.{ .b, .p }),
+        .seq_lens = parameters.seq_lens,
+        .query_starts = parameters.query_start_len,
+        .sinks = if (opts.sink) |sink| sink.convert(.f32) else .scalar(0, .f32),
+    }, qh.shape(), .{
+        .dtype = zml.kernel.metal.from(q.dtype()),
+        .head_size = @intCast(q.dim(.hd)),
+        .num_heads = @intCast(qh.dim(.h)),
+        .num_queries_per_kv = @intCast(q.dim(.hg)),
+        .block_size = @intCast(k.dim(.k_chunk)),
+        .indices_count = @intCast(indices.dim(.topk)),
+        .max_blocks = @intCast(parameters.block_table.dim(.p)),
+        .num_seqs = @intCast(parameters.block_table.dim(.b)),
+        .use_sinks = opts.sink != null,
+        .num_segments = sparse.selectNumSegments(@intCast(indices.dim(.topk)), !parameters.options_.is_prefill),
+    }, opts.scale orelse 1.0 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd)))));
+    return out.splitAxis(.h, .{ .hkv = q.dim(.hkv), .hg = .auto }).transpose(q.shape());
 }
