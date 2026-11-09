@@ -5,12 +5,13 @@ const platforms = @import("platforms");
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
-const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 const GlobalOptions = @import("../options.zig").Options;
 const Activation = @import("../options.zig").Activation;
 const unpackedWeight = @import("../weights.zig").unpackedWeight;
+const contract = @import("contract.zig");
+const runtime = @import("runtime.zig");
 
-const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
+const log = std.log.scoped(.@"zml/moe/flashinfer_cutlass");
 
 pub const auto_tactic: i32 = -1;
 
@@ -45,112 +46,15 @@ pub fn validateOptions(opts: GlobalOptions) void {
     stdx.debug.assert(opts.activation.swiglu.scale == null, "flashinfer_cutlass backend requires swiglu scale to be null", .{});
 }
 
-const Input = struct {
-    hidden_states: zml.Tensor,
-    fc1_weights: zml.Tensor,
-    fc2_weights: zml.Tensor,
-    topk_weights: zml.Tensor,
-    topk_ids: zml.Tensor,
-    fc1_act_global: zml.Tensor,
-    fc1_weight_block: zml.Tensor,
-    fc1_global: zml.Tensor,
-    fc2_act_global: zml.Tensor,
-    fc2_weight_block: zml.Tensor,
-    fc2_global: zml.Tensor,
-};
+const Inputs = contract.Inputs(zml.Tensor);
 
-const Output = struct {
-    output: zml.Shape,
-    workspace: zml.Shape,
-};
+const Outputs = contract.Outputs(zml.Shape);
 
-const Attributes = struct {
-    runners: u64 = 0,
-    num_tokens: i64,
-    hidden_size: i64,
-    intermediate_size: i64,
-    num_experts: i32,
-    top_k: i32,
-    activation: i32,
-    enable_pdl: bool,
-    fc1_act_per_expert: bool,
-    fc2_act_per_expert: bool,
-    gemm1_tactic: i32,
-    gemm2_tactic: i32,
-};
+const Attributes = contract.Attributes;
 
-const DeviceRunner = struct {
-    api: *fi_cutlass_moe.Api,
-    runner: *fi_cutlass_moe.Runner,
-};
-
-pub const Runners = struct {
-    runners: [max_num_devices]?DeviceRunner = @splat(null),
-
-    pub fn deinit(self: *Runners) void {
-        for (self.runners) |device_runner| {
-            if (device_runner) |runner| {
-                _ = runner.api.runnerDestroy(runner.runner);
-            }
-        }
-    }
-
-    fn ensureRunner(self: *Runners, device: i32) !DeviceRunner {
-        if (device < 0 or device >= max_num_devices) return error.UnsupportedDevice;
-
-        const index: usize = @intCast(device);
-        if (self.runners[index]) |runner| return runner;
-
-        const api = try fi_cutlass_moe.apiForDevice(device);
-        const options = runnerOptions(device);
-        var runner: ?*fi_cutlass_moe.Runner = null;
-        try checkStatus(api, api.runnerCreate(&options, &runner));
-        const result: DeviceRunner = .{
-            .api = api,
-            .runner = runner orelse return error.RunnerInitializationFailed,
-        };
-        self.runners[index] = result;
-        return result;
-    }
-};
-
-fn checkStatus(api: *const fi_cutlass_moe.Api, status: fi_cutlass_moe.Status) !void {
-    if (status == fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_SUCCESS) return;
-    if (api.lastError()) |message| {
-        log.err("FlashInfer CUTLASS MoE failed (status {d}): {s}", .{
-            status,
-            std.mem.span(message),
-        });
-    } else {
-        log.err("FlashInfer CUTLASS MoE failed with status {d}", .{status});
-    }
-    return switch (status) {
-        fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_INVALID_ARGUMENT => error.InvalidArgument,
-        fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_UNSUPPORTED => error.UnsupportedArchitecture,
-        fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_CUDA_ERROR => error.Cuda,
-        else => error.FlashinferCutlassMoe,
-    };
-}
-
-fn runnerOptions(device: i32) fi_cutlass_moe.RunnerOptions {
-    var options = std.mem.zeroes(fi_cutlass_moe.RunnerOptions);
-    options.struct_size = @sizeOf(fi_cutlass_moe.RunnerOptions);
-    options.activation_dtype = fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
-    options.weight_dtype = fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_DTYPE_PACKED_FP4;
-    options.output_dtype = fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
-    options.device = device;
-    options.use_fused_finalize = 1;
-    return options;
-}
-
-fn runnersFromAttributes(attributes: Attributes) !*Runners {
-    if (attributes.runners == 0) return error.RunnersNotLoaded;
-    return @ptrFromInt(attributes.runners);
-}
-
-fn currentRunners() !*Runners {
+fn currentRunners() !*runtime.Runners {
     const platform = zml.Compiler.current().platform;
-    const runners = platform.state.cuda.fi_cutlass_moe_runners;
+    const runners = platform.state.cuda.flashinfer_cutlass_moe_runners;
     return runners orelse error.RunnersNotLoaded;
 }
 
@@ -166,79 +70,21 @@ fn cutlassActivation(activation: Activation) i32 {
     };
 }
 
-fn makeContext(attributes: Attributes) fi_cutlass_moe.Context {
-    var context = std.mem.zeroes(fi_cutlass_moe.Context);
-    context.struct_size = @sizeOf(fi_cutlass_moe.Context);
-    context.num_tokens = attributes.num_tokens;
-    context.hidden_size = attributes.hidden_size;
-    context.intermediate_size = attributes.intermediate_size;
-    context.num_experts = attributes.num_experts;
-    context.num_experts_on_rank = attributes.num_experts;
-    context.top_k = attributes.top_k;
-    context.tp_size = 1;
-    context.ep_size = 1;
-    context.activation = @intCast(attributes.activation);
-    context.enable_pdl = @intFromBool(attributes.enable_pdl);
-    context.swizzled_input_sf = 1;
-    return context;
-}
+pub fn call(input_tensors: Inputs, output_shapes: Outputs, attributes: Attributes) zml.ops.ShapeToTensor(Outputs) {
+    const opts: zml.ops.CustomCallOptions = .{
+        .has_side_effect = false,
+        .output_operand_aliases = comptime zml.ops.customCallOutputOperandAliases(Inputs, Outputs, null),
+        .compute_on_host = contract.compute_on_host,
+    };
 
-fn ffiCallNvfp4(
-    call_frame: *zml.pjrt.ffi.CallFrame,
-    input: zml.pjrtx.TensorToCustomCallBuffer(Input),
-    output: zml.pjrtx.ShapeToCustomCallBuffer(Output),
-    attributes: Attributes,
-) !?*zml.pjrt.ffi.Error {
-    const device = try call_frame.ctx.getDeviceOrdinal(call_frame.api);
-    const runners = try runnersFromAttributes(attributes);
-    const deviceRunner = try runners.ensureRunner(device);
-    const context = makeContext(attributes);
-
-    var io = std.mem.zeroes(fi_cutlass_moe.Io);
-    io.struct_size = @sizeOf(fi_cutlass_moe.Io);
-    io.input = input.hidden_states.ptr;
-    io.token_selected_experts = @ptrCast(@alignCast(input.topk_ids.ptr));
-    io.token_final_scales = @ptrCast(@alignCast(input.topk_weights.ptr));
-    io.fc1_expert_weights = input.fc1_weights.ptr;
-    io.fc2_expert_weights = input.fc2_weights.ptr;
-    io.quant_scales[0] = input.fc1_act_global.ptr;
-    io.quant_scales[1] = input.fc1_weight_block.ptr;
-    io.quant_scales[2] = input.fc1_global.ptr;
-    io.quant_scales[3] = input.fc2_act_global.ptr;
-    io.quant_scales[4] = input.fc2_weight_block.ptr;
-    io.quant_scales[5] = input.fc2_global.ptr;
-    io.quant_scale_count = 6;
-    io.quant_scale_per_expert_mask =
-        (@as(u32, @intFromBool(attributes.fc1_act_per_expert)) << 0) |
-        (@as(u32, @intFromBool(attributes.fc2_act_per_expert)) << 3);
-    io.output = output.output.ptr;
-
-    var workspace = std.mem.zeroes(fi_cutlass_moe.Workspace);
-    workspace.struct_size = @sizeOf(fi_cutlass_moe.Workspace);
-    workspace.data = output.workspace.ptr;
-    workspace.data_bytes = output.workspace.shape.byteSize();
-
-    try checkStatus(
-        deviceRunner.api,
-        deviceRunner.api.run(
-            deviceRunner.runner,
-            &context,
-            &io,
-            &workspace,
-            @ptrCast(call_frame.api.stream(call_frame.ctx)),
-            attributes.gemm1_tactic,
-            attributes.gemm2_tactic,
-        ),
+    return zml.ops.typedCustomCall(
+        contract.name,
+        opts,
+        input_tensors,
+        output_shapes,
+        attributes,
     );
-    return null;
 }
-
-const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCallNvfp4, .{
-    .name = "flashinfer_cutlass_nvfp4_routed_moe",
-    // Expert mesh is owned by forwardMoe outer manual computation.
-    .sharding_aware = false,
-    .has_side_effect = false,
-});
 
 fn computeCapability(platform: *const zml.Platform) !u16 {
     const cc = zml.platform.cuda.computeCapability(platform) orelse return error.UnsupportedPlatform;
@@ -248,60 +94,20 @@ fn computeCapability(platform: *const zml.Platform) !u16 {
     };
 }
 
-pub fn load(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *zml.Platform,
-) !void {
-    if (comptime platforms.isEnabled(.cuda)) {
-        var cuda_state = &platform.state.cuda;
-        if (cuda_state.fi_cutlass_moe_runners != null) return;
-        try fi_cutlass_moe.load(allocator, io, try computeCapability(platform));
-        const runners = try allocator.create(Runners);
-        runners.* = .{};
-        cuda_state.fi_cutlass_moe_runners = runners;
-        return;
-    }
-    return error.UnsupportedPlatform;
-}
-
-pub fn register(platform: *const zml.Platform) !void {
-    if (comptime platforms.isEnabled(.cuda)) {
-        try routedNvfp4Call.register(platform);
-        return;
-    }
-    return error.UnsupportedPlatform;
-}
-
 pub fn isAvailable(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
-    if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
+    if (platform.state.cuda.flashinfer_cutlass_moe_runners == null) return false;
     _ = computeCapability(platform) catch return false;
     return true;
 }
 
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
-    if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
+    if (platform.state.cuda.flashinfer_cutlass_moe_runners == null) return false;
     const compute_capability = computeCapability(platform) catch return false;
     return switch (compute_capability) {
         100, 103, 120 => true,
         else => false,
     };
-}
-
-pub fn tacticCounts(
-    platform: *const zml.Platform,
-    device: i32,
-) !struct { gemm1: i32, gemm2: i32 } {
-    const runners = platform.state.cuda.fi_cutlass_moe_runners orelse return error.RunnersNotLoaded;
-    const deviceRunner = try runners.ensureRunner(device);
-    var gemm1: i32 = 0;
-    var gemm2: i32 = 0;
-    try checkStatus(
-        deviceRunner.api,
-        deviceRunner.api.getTacticCounts(deviceRunner.runner, &gemm1, &gemm2),
-    );
-    return .{ .gemm1 = gemm1, .gemm2 = gemm2 };
 }
 
 fn roundUp(value: i64, alignment: i64) i64 {
@@ -468,10 +274,10 @@ pub fn fusedExpertsNvfp4(
 
     attributes.runners = @intFromPtr(runners);
     const deviceRunner = runners.ensureRunner(options.workspace_query_device) catch |e| stdx.debug.panic("Failed to ensure runner: {}", .{e});
-    const context = makeContext(attributes);
+    const context = runtime.makeContext(attributes);
     var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
     requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
-    checkStatus(
+    runtime.checkStatus(
         deviceRunner.api,
         deviceRunner.api.getWorkspaceRequirements(
             deviceRunner.runner,
@@ -480,7 +286,7 @@ pub fn fusedExpertsNvfp4(
         ),
     ) catch |e| stdx.debug.panic("Failed to get workspace requirements: {}", .{e});
 
-    const result = routedNvfp4Call.call(
+    const result = call(
         .{
             .hidden_states = hidden_states,
             .fc1_weights = fc1_weights,

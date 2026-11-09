@@ -1,8 +1,0 @@
-package(default_visibility = ["//zml:__pkg__"])
-
-filegroup(
-    name = "cutlass_flashinfer",
-    srcs = [
-        "cutlass_flashinfer.zig",
-    ],
-)

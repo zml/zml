@@ -5,11 +5,11 @@ const platforms = @import("platforms");
 const zml = @import("../../zml.zig");
 const stdx = zml.stdx;
 pub const cute = @import("cute/cute.zig");
-pub const cutlass_flashinfer = @import("cutlass_flashinfer/cutlass_flashinfer.zig");
+const ExpertsLayout = @import("options.zig").ExpertsLayout;
+pub const flashinfer_cutlass = @import("flashinfer_cutlass/flashinfer_cutlass.zig");
 pub const fly = @import("fly/fly.zig");
 pub const metal = @import("metal/metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu/mosaic_tpu.zig");
-const ExpertsLayout = @import("options.zig").ExpertsLayout;
 const Options = @import("options.zig").Options;
 pub const stablehlo = @import("stablehlo/stablehlo.zig");
 pub const tcl = @import("tcl/tcl.zig");
@@ -45,7 +45,7 @@ pub const Backend = enum {
                         .triton,
                     .nvfp4 => if (cute.isNvfp4Supported(platform))
                         .cute
-                    else if (cutlass_flashinfer.isNvfp4Supported(platform))
+                    else if (flashinfer_cutlass.isNvfp4Supported(platform))
                         .flashinfer_cutlass
                     else
                         error.UnsupportedQuantization,
@@ -84,7 +84,7 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => true,
             .cute => cute.isAvailable(platform),
-            .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
+            .flashinfer_cutlass => flashinfer_cutlass.isAvailable(platform),
             .fly => switch (platform.target) {
                 .rocm => zml.platform.rocm.computeCapability(platform) == .gfx942,
                 else => false,
@@ -117,7 +117,7 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => {},
             .cute => {},
-            .flashinfer_cutlass => cutlass_flashinfer.register(platform),
+            .flashinfer_cutlass => flashinfer_cutlass.register(platform),
             .triton, .fly => {},
             .mosaic_tpu => {},
             .metal => {},
@@ -262,7 +262,7 @@ pub fn forwardMoe(
             const output = switch (args.backend) {
                 .stablehlo => stablehlo.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .cute => cute.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
-                .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                .flashinfer_cutlass => flashinfer_cutlass.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .triton => triton.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .fly => fly.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .mosaic_tpu => mosaic_tpu.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),

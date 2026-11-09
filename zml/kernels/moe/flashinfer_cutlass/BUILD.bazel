@@ -1,0 +1,10 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "flashinfer_cutlass",
+    srcs = [
+        "contract.zig",
+        "flashinfer_cutlass.zig",
+        "runtime.zig",
+    ],
+)
