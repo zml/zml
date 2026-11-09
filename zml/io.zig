@@ -1287,20 +1287,52 @@ pub const DirectMemoryWriter = struct {
         self.shard_progress = states;
     }
 
-    fn drain(w: *std.Io.Writer, data: []const []const u8, _: usize) std.Io.Writer.Error!usize {
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
 
-        const chunk = data[0];
         try self.commitWindow();
+        if (self.interface.end == self.interface.buffer.len) return std.Io.Writer.Error.WriteFailed;
 
-        const writable = self.interface.buffer.len - self.interface.end;
-        if (writable == 0) return std.Io.Writer.Error.WriteFailed;
+        const consumed = consumed: {
+            var n: usize = 0;
+            for (data[0 .. data.len - 1]) |bytes| {
+                const copied = self.writeWindow(bytes);
+                n += copied;
 
-        const n = @min(writable, chunk.len);
-        @memcpy(self.interface.buffer[self.interface.end..][0..n], chunk[0..n]);
+                if (copied < bytes.len) break :consumed n;
+            }
+
+            const pattern = data[data.len - 1];
+            switch (pattern.len) {
+                0 => {},
+                1 => {
+                    const dest = self.interface.buffer[self.interface.end..];
+                    const count = @min(dest.len, splat);
+                    @memset(dest[0..count], pattern[0]);
+
+                    self.interface.end += count;
+                    n += count;
+                },
+                else => for (0..splat) |_| {
+                    const copied = self.writeWindow(pattern);
+                    n += copied;
+
+                    if (copied < pattern.len) break;
+                },
+            }
+
+            break :consumed n;
+        };
+
+        try self.commitWindow();
+        return consumed;
+    }
+
+    fn writeWindow(self: *DirectMemoryWriter, bytes: []const u8) usize {
+        const dest = self.interface.buffer[self.interface.end..];
+        const n = @min(dest.len, bytes.len);
+        @memcpy(dest[0..n], bytes[0..n]);
         self.interface.end += n;
-        try self.commitWindow();
-
         return n;
     }
 
