@@ -132,13 +132,9 @@ pub fn main(init: std.process.Init) !void {
 
             const root = try TensorNode.init(init.arena.allocator(), "");
 
-            var registry_it = registry.iterator();
-            while (registry_it.next()) |kv| {
-                const name = kv.key_ptr.*;
-                const tensor = kv.value_ptr.*;
-
+            for (registry.tensors.values()) |tensor| {
                 var current = root;
-                var parts = std.mem.tokenizeScalar(u8, name, '.');
+                var parts = std.mem.tokenizeScalar(u8, tensor.name, '.');
                 while (parts.next()) |part| {
                     const gop = try current.children.getOrPut(current.allocator, part);
                     if (!gop.found_existing) {
@@ -183,16 +179,16 @@ pub fn main(init: std.process.Init) !void {
             const tensors = try allocator.alloc(zml.Tensor, tensor_count);
             defer allocator.free(tensors);
 
-            var registry_it = registry.iterator();
             var load_count: usize = 0;
-            while (registry_it.next()) |entry| : (load_count += 1) {
+            for (registry.tensors.keys(), registry.tensors.values()) |name, tensor| {
                 tensors[load_count] = switch (mesh_type) {
-                    .replicated => store.view().createReplicatedTensor(entry.key_ptr.*, null),
-                    .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)
+                    .replicated => store.view().createReplicatedTensor(name, null),
+                    .sharded => if (tensor.shape.rank() > 0)
+                        store.view().createTensor(name, null, .tp, tp_partitioning)
                     else
-                        store.view().createReplicatedTensor(entry.key_ptr.*, null),
+                        store.view().createReplicatedTensor(name, null),
                 };
+                load_count += 1;
             }
 
             const model: AllTensorsModel = .{ .tensors = tensors };

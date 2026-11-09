@@ -68,16 +68,22 @@ pub const TensorRegistry = struct {
                 const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
 
                 var registry: TensorRegistry = .init(allocator);
-                switch (file_type) {
+                try switch (file_type) {
                     .index => registry.parseIndexJson(io, allocator, repo, file),
-                    // .full_index => registry.parseFullIndexJson(io, allocator, repo, file),
+                    .full_index => registry.parseFullIndexJson(io, allocator, repo, file),
                     .safetensors, .unknown => unreachable,
-                }
+                };
                 return registry;
             },
             .unknown => {
                 // the path is possibly a folder, let's try that
-                return try fromRepo(allocator, io, path);
+                const repo = std.Io.Dir.openDir(.cwd(), io, path, .{}) catch |e| {
+                    return switch (e) {
+                        error.FileNotFound => ModelPathResolutionError.FileNotFound,
+                        else => ModelPathResolutionError.InvalidPath,
+                    };
+                };
+                return try fromRepo(allocator, io, repo);
             },
         }
     }
