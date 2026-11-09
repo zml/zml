@@ -218,19 +218,22 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
     }
 
     for ([_]*zml.nn.Linear{ &prepared.gate_up, &prepared.down }) |projection| {
-        if (layout.packing == .swizzled_scales or layout.packing == .flashinfer_nvfp4) {
-            const q = &projection.quantization.?;
-            q.scales = swizzleScales(q.scales);
-            q.swizzled_scales = true;
-        }
-        if (layout.packing == .mxfp4_interleaved8) {
-            const q = &projection.quantization.?;
-            const sf = q.scales;
-            q.scales = sf.bitCast(.u8)
-                .reshape(.{ .expert = sf.dim(0), .row_block = @divExact(sf.dim(1), 128), .row_quad = 4, .row_lane = 32, .scale_word = @divExact(sf.dim(2), 4), .scale_byte = 4 })
-                .transpose(.{ .expert, .scale_word, .row_block, .row_lane, .row_quad, .scale_byte })
-                .reshape(.{ .expert = sf.dim(0), .scale_word = @divExact(sf.dim(2), 4), .row = sf.dim(1), .scale_byte = 4 }).bitCast(.i32)
-                .withTags(sf.shape().transpose(.{ 0, 2, 1 }));
+        switch (layout.packing) {
+            .swizzled_scales, .flashinfer_nvfp4 => {
+                const q = &projection.quantization.?;
+                q.scales = swizzleScales(q.scales);
+                q.swizzled_scales = true;
+            },
+            .mxfp4_interleaved8 => {
+                const q = &projection.quantization.?;
+                const sf = q.scales;
+                q.scales = sf.bitCast(.u8)
+                    .reshape(.{ .expert = sf.dim(0), .row_block = @divExact(sf.dim(1), 128), .row_quad = 4, .row_lane = 32, .scale_word = @divExact(sf.dim(2), 4), .scale_byte = 4 })
+                    .transpose(.{ .expert, .scale_word, .row_block, .row_lane, .row_quad, .scale_byte })
+                    .reshape(.{ .expert = sf.dim(0), .scale_word = @divExact(sf.dim(2), 4), .row = sf.dim(1), .scale_byte = 4 }).bitCast(.i32)
+                    .withTags(sf.shape().transpose(.{ 0, 2, 1 }));
+            },
+            .plain => {},
         }
         switch (backend) {
             .cute => {
