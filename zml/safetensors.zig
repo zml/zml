@@ -14,7 +14,7 @@ pub const TensorRegistry = struct {
 
     /// Metadata found in `__metadata__` field of the safetensors header.
     /// This is rarely use and the information there is not standardized, so we let user code handle it.
-    metadata: std.json.Value,
+    metadata: []const u8,
 
     // mutex: std.Io.Mutex = .init,
 
@@ -22,7 +22,7 @@ pub const TensorRegistry = struct {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
-            .metadata = .null,
+            .metadata = "",
         };
     }
 
@@ -51,7 +51,7 @@ pub const TensorRegistry = struct {
                 // open directly
                 const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
                 var registry: TensorRegistry = .init(allocator);
-                try registry.parseSafetensors(io, allocator, file, path);
+                try registry.parseSafetensors(io, allocator, file);
                 return registry;
             },
             .full_index,
@@ -82,7 +82,9 @@ pub const TensorRegistry = struct {
         }
     }
 
-    /// Register a tensor, takes ownership of tensor metadata.
+    /// Register a tensor, duplicate tensor name and uri.
+    /// If you create a lot of tensors sharing the same uri,
+    /// considere calling `registry.tensors` directly and avoid duplicated uris.
     pub fn registerTensor(self: *TensorRegistry, tensor: Tensor) !void {
         const allocator = self.arena.allocator();
 
@@ -133,10 +135,12 @@ pub const TensorRegistry = struct {
         defer tmp_state.deinit();
         const tmp_arena = tmp_state.allocator();
 
-        const self_allocator = self.arena.allocator();
-        var file_uri_buf = try self_allocator.alloc(u8, 1024);
-        const file_uri_len = try file.realPath(io, file_uri_buf);
-        const owned_file_name = file_uri_buf[0..file_uri_len];
+        const self_arena = self.arena.allocator();
+        var owned_file_name = try self_arena.alloc(u8, std.fs.max_path_bytes);
+        const file_name_len = try file.realPath(io, owned_file_name);
+        // Try to release extra memory, but we don't care if it fails
+        _ = self_arena.resize(owned_file_name, file_name_len);
+        owned_file_name = owned_file_name[0..file_name_len];
 
         const header_buf = try tmp_arena.alloc(u8, 64 * 1024);
         var file_reader: std.Io.File.Reader = file.reader(io, header_buf);
@@ -154,14 +158,17 @@ pub const TensorRegistry = struct {
             .{},
         );
 
-        try self.tensors.ensureUnusedCapacity(self_allocator, headers.object.count());
+        try self.tensors.ensureUnusedCapacity(self_arena, headers.object.count());
         for (headers.object.keys(), headers.object.values()) |key, value| {
             if (std.mem.eql(u8, key, "__metadata__")) {
-                self.metadata = value;
+                // value belong to tmp arena, duplicate it into self arena.
+                var owned_metadata: std.Io.Writer.Allocating = .init(self_arena);
+                try std.json.fmt(value, .{ .whitespace = .minified }).format(&owned_metadata.writer);
+                self.metadata = owned_metadata.written();
                 continue;
             }
 
-            const owned_name = try self_allocator.dupe(u8, key);
+            const owned_name = try self_arena.dupe(u8, key);
             const tensor: Tensor = try .parse(value.object, owned_file_name, owned_name, data_start_offset);
             self.tensors.putAssumeCapacity(owned_name, tensor);
         }
@@ -198,8 +205,6 @@ pub const TensorRegistry = struct {
             log.warn("No weight_map attribute found in index", .{});
         }
 
-        if (index.object.get("metadata")) |metadata| self.metadata = metadata;
-
         for (safetensors_files.keys()) |file_name| {
             const file = try repo.openFile(io, file_name, .{});
             defer file.close(io);
@@ -218,7 +223,7 @@ pub const TensorRegistry = struct {
         defer tmp_state.deinit();
         const tmp = tmp_state.allocator();
 
-        const registry_arena = self.arena.allocator();
+        const self_arena = self.arena.allocator();
 
         var repo_uri_buf = try tmp.alloc(u8, 1024);
         const repo_name = repo_uri_buf[0..try repo.realPath(io, repo_uri_buf)];
@@ -241,16 +246,16 @@ pub const TensorRegistry = struct {
         try realpaths.ensureUnusedCapacity(tmp, 64);
         const wm = index.object.get("weight_map") orelse return error.InvalidJson;
 
-        try self.tensors.ensureUnusedCapacity(registry_arena, wm.object.count());
+        try self.tensors.ensureUnusedCapacity(self_arena, wm.object.count());
         for (wm.object.keys(), wm.object.values()) |key, value| {
-            const tensor_name = try registry_arena.dupe(u8, key);
+            const tensor_name = try self_arena.dupe(u8, key);
             const object = value.object;
             const filename = value.object.get("filename").?.string;
             const filename_entry = try realpaths.getOrPut(tmp, filename);
             const file_uri = if (filename_entry.found_existing)
                 filename_entry.value_ptr.*
             else uri: {
-                const uri = try std.fs.path.join(registry_arena, &.{ repo_name, filename });
+                const uri = try std.fs.path.join(self_arena, &.{ repo_name, filename });
                 filename_entry.value_ptr.* = uri;
                 break :uri uri;
             };
@@ -259,7 +264,12 @@ pub const TensorRegistry = struct {
             self.tensors.putAssumeCapacity(tensor_name, tensor_info);
         }
 
-        if (index.object.get("metadata")) |metadata| self.metadata = metadata;
+        if (index.object.get("metadata")) |metadata| {
+            // value belong to tmp arena, duplicate it into self arena.
+            var owned_metadata: std.Io.Writer.Allocating = .init(self_arena);
+            try std.json.fmt(metadata, .{ .whitespace = .minified }).format(&owned_metadata.writer);
+            self.metadata = owned_metadata.written();
+        }
     }
 
     pub fn saveAsFullIndexJson(
@@ -269,24 +279,23 @@ pub const TensorRegistry = struct {
         repo: std.Io.Dir,
         out: *std.Io.Writer,
     ) !void {
-        var tmp_state: std.heap.ArenaAllocator = .init(gpa);
-        defer tmp_state.deinit();
-        const tmp = tmp_state.allocator();
-
-        var repo_uri_buf = try tmp.alloc(u8, 1024);
+        var repo_uri_buf = try gpa.alloc(u8, std.fs.max_path_bytes);
+        defer gpa.free(repo_uri_buf);
         const repo_name = repo_uri_buf[0..try repo.realPath(io, repo_uri_buf)];
+        var total_size: u64 = 0;
+        for (self.tensors.values()) |value| total_size += value.byteSize();
 
         try out.print(
             \\{{
-            \\"metadata": {},
+            \\"metadata": {{"num_tensors":{d},"total_size":{d}}},
             \\"weight_map": {{
             \\
-        , .{std.json.fmt(self.metadata, .{ .whitespace = .minified })});
+        , .{ self.tensors.count(), total_size });
 
         const n = self.tensors.count();
         for (0.., self.tensors.keys(), self.tensors.values()) |i, key, value| {
             std.debug.assert(std.mem.startsWith(u8, value.file_uri, repo_name));
-            const local_name = value.file_uri[repo_name.len..];
+            const local_name = value.file_uri[repo_name.len + 1 ..];
             const end_offset = value.offset + value.byteSize();
             const safetensors_dtype: []const u8 = dt: {
                 for (safetensors_dtype_to_zml_dtype.keys(), safetensors_dtype_to_zml_dtype.values()) |st_dt, zml_dt| {
@@ -294,21 +303,21 @@ pub const TensorRegistry = struct {
                 }
                 // Note: we could bitcast to u8,
                 // but reaching this panic implies the user didn't loaded this TensorRegistry
-                // from a safetensors file, but manually created the dict.
+                // from a safetensors file, and manually created the dict.
                 // In which case, they know what they are doing,
                 // and can easily insert the bitcast themselves.
                 std.debug.panic("Safetensors doesn't support data type {}", .{value.shape._dtype});
             };
             const comma = if (i + 1 == n) "" else ",";
             try out.print(
-                \\  "{q}": {{"filename":"{q}","shape":{any},"data_offsets":[{d}, {d}],"dtype":"{s}"}}{s}
+                \\  "{s}": {{"filename":"{s}","shape":{f},"data_offsets":[{d},{d}],"dtype":"{s}"}}{s}
                 \\
-            , .{ key, local_name, value.shape.dims(), value.offset, end_offset, safetensors_dtype, comma });
+            , .{ key, local_name, std.json.fmt(value.shape.dims(), .{ .whitespace = .minified }), value.offset, end_offset, safetensors_dtype, comma });
         }
 
         try out.writeAll(
-            \\  }}
-            \\}}
+            \\}
+            \\}
             \\
         );
         try out.flush();
