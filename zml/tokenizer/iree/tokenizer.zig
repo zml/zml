@@ -420,6 +420,9 @@ pub const Tokenizer = struct {
         }
 
         pub fn maxOutputLength(self: *const Decoder) usize {
+            // As IREE sizes its own decode buffer: "WordPiece can add 1 byte (space prefix), ByteLevel finalize can add
+            // 3 bytes (U+FFFD)."
+            // https://github.com/iree-org/iree/blob/3de6b83fba779c8b93e9cc9a10382eb25785cb22/runtime/src/iree/tokenizer/tokenizer.c#L694-L695
             return c.iree_tokenizer_vocab_max_token_length(c.iree_tokenizer_vocab(self.tokenizer.inner)) + 4;
         }
 

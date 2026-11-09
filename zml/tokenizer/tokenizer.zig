@@ -104,6 +104,7 @@ pub const Tokenizer = union(Tokenizers) {
         pub fn maxOutputLength(self: *const Decoder) usize {
             return switch (self.*) {
                 .iree => |*d| d.maxOutputLength(),
+                // SentencePiece returns text from its own storage and never writes to the buffer.
                 inline else => 0,
             };
         }
