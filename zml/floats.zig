@@ -500,7 +500,11 @@ pub const Float4E2M1 = packed struct(u4) {
         for (&from_f32_res, 0..) |*r, i| {
             r.* = .fromF32(Float4E2M1.values[i]);
         }
-        try std.testing.expectEqualSlices(u4, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, @ptrCast(&from_f32_res));
+        // An unpacked FP4 value occupies a byte with unspecified padding bits.
+        // Compare each four-bit value instead of the backing bytes through a cast.
+        for (from_f32_res, 0..) |value, expected| {
+            try std.testing.expectEqual(@as(u4, @intCast(expected)), @as(u4, @bitCast(value)));
+        }
     }
 
     pub const Packed = packed struct(@Int(.unsigned, @bitSizeOf(Float4E2M1) * 2)) {
