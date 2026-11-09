@@ -2867,8 +2867,8 @@ pub const Builder = struct {
 
     /// Arrive and expect `bytes` of asynchronous transactions (SM90+), as a
     /// TMA producer does before issuing its copies.
-    pub fn mbarrierArriveExpectTx(self: *Builder, mbar: Value, bytes: u32) void {
-        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(mbar).inner, self.constant(.i32, bytes).inner, .cta, self.loc()));
+    pub fn mbarrierArriveExpectTx(self: *Builder, mbar: Value, bytes: anytype) void {
+        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(mbar).inner, self.lift(bytes).to(.i32).inner, .cta, self.loc()));
     }
 
     pub const MBarrierArriveOptions = struct {
@@ -4523,34 +4523,15 @@ pub fn trap(b: *Builder) void {
     asmVoid(b, "trap;", &.{}, "~{memory}");
 }
 
-/// `ptx::sync_aligned(num_threads, barrier_idx)`: `bar.sync id, n`.
-pub fn syncAligned(b: *Builder, num_threads: anytype, barrier_idx: anytype) void {
-    asmVoid(b, "bar.sync $0, $1;", &.{ liftAs(b, barrier_idx, .i32), liftAs(b, num_threads, .i32) }, "r,r,~{memory}");
-}
-
 /// `ptx::sync_unaligned(num_threads, barrier_idx)`: `barrier.sync id, n` (threads of a warp may
 /// reach it at different program points).
 pub fn syncUnaligned(b: *Builder, num_threads: anytype, barrier_idx: anytype) void {
     asmVoid(b, "barrier.sync $0, $1;", &.{ liftAs(b, barrier_idx, .i32), liftAs(b, num_threads, .i32) }, "r,r,~{memory}");
 }
 
-pub fn syncWarp(b: *Builder) void {
-    b.syncWarp();
-}
-
-/// `cute::cluster_arrive_relaxed`.
-pub fn clusterArriveRelaxed(b: *Builder) void {
-    asmVoid(b, "barrier.cluster.arrive.relaxed.aligned;\n", &.{}, "~{memory}");
-}
-
 /// `cute::cluster_arrive`.
 pub fn clusterArrive(b: *Builder) void {
     asmVoid(b, "barrier.cluster.arrive.aligned;\n", &.{}, "~{memory}");
-}
-
-/// `cute::cluster_wait`.
-pub fn clusterWait(b: *Builder) void {
-    asmVoid(b, "barrier.cluster.wait.aligned;\n", &.{}, "~{memory}");
 }
 
 /// `cudaGridDependencySynchronize()` (`griddepcontrol.wait;`, PDL).
@@ -4652,38 +4633,6 @@ pub fn stmatrixU32x4T(b: *Builder, src: [4]Value, smem: Value) void {
     asmVoid(b, "stmatrix.sync.aligned.x4.m8n8.shared.b16.trans [$0], {$1, $2, $3, $4};\n", &.{ zext64(b, smem), src[0], src[1], src[2], src[3] }, "l,r,r,r,r");
 }
 
-/// `ClusterBarrier::init(arrive_count)`.
-pub fn mbarrierInit(b: *Builder, bar: Value, arrive_count: u32) void {
-    asmVoid(b, "{\n\tmbarrier.init.shared::cta.b64 [$1], $0; \n}", &.{ cst32(b, arrive_count), bar }, "r,r,~{memory}");
-}
-
-/// `cutlass::arch::fence_barrier_init`.
-pub fn fenceBarrierInit(b: *Builder) void {
-    asmVoid(b, "{\n\tfence.mbarrier_init.release.cluster; \n}", &.{}, "~{memory}");
-}
-
-/// `ClusterBarrier::wait(phase)`: block until phase `phase` (i32 parity) completes, retrying
-/// `mbarrier.try_wait` with the 0x989680-tick suspend hint.
-pub fn mbarrierWait(b: *Builder, bar: Value, phase: Value) void {
-    asmVoid(
-        b,
-        "{\n\t.reg .pred       P1; \n\tLAB_WAIT: \n\tmbarrier.try_wait.parity.shared::cta.b64 P1, [$0], $1, $2; \n\t@P1 bra DONE; \n\tbra     LAB_WAIT; \n\tDONE: \n\t}",
-        &.{ bar, phase, cst32(b, 0x989680) },
-        "r,r,r,~{memory}",
-    );
-}
-
-/// `ptx::mbarrier_wait_and_flip_phase(ptr, phase)`: the same wait, then `phase ^ 1`.
-pub fn mbarrierWaitAndFlipPhase(b: *Builder, bar: Value, phase: Value) Value {
-    asmVoid(
-        b,
-        "{\n\t.reg .pred       P1; \n\tLAB_WAIT: \n\tmbarrier.try_wait.parity.shared::cta.b64 P1, [$0], $1, $2; \n\t@P1 bra DONE; \n\tbra     LAB_WAIT; \n\tDONE: \n\t}",
-        &.{ bar, phase, cst32(b, 0x989680) },
-        "r,r,r,~{memory}",
-    );
-    return phase.bitXor(1);
-}
-
 /// `ClusterBarrier::arrive()` on this CTA's barrier.
 pub fn mbarrierArrive(b: *Builder, bar: Value) void {
     asmVoid(b, "{\n\tmbarrier.arrive.shared::cta.b64 _, [$0];\n\t}", &.{bar}, "r,~{memory}");
@@ -4700,11 +4649,6 @@ pub fn mbarrierArriveCluster(b: *Builder, bar: Value, cta_id: Value) void {
     );
 }
 
-/// `ClusterTransactionBarrier::arrive_and_expect_tx(bytes)`.
-pub fn mbarrierArriveAndExpectTx(b: *Builder, bar: Value, transaction_bytes: anytype) void {
-    asmVoid(b, "{\n\tmbarrier.arrive.expect_tx.shared::cta.b64 _, [$1], $0; \n\t}", &.{ liftAs(b, transaction_bytes, .i32), bar }, "r,r,~{memory}");
-}
-
 /// `ClusterTransactionBarrier::arrive_and_expect_tx(bytes, cta_id, pred)`: on cluster CTA
 /// `cta_id`'s barrier, only when `pred == 1`.
 pub fn mbarrierArriveAndExpectTxCluster(b: *Builder, bar: Value, transaction_bytes: anytype, cta_id: Value, pred: Value) void {
@@ -4714,11 +4658,6 @@ pub fn mbarrierArriveAndExpectTxCluster(b: *Builder, bar: Value, transaction_byt
         &.{ bar, cta_id, pred, liftAs(b, transaction_bytes, .i32) },
         "r,r,r,r,~{memory}",
     );
-}
-
-/// `ptx::mbarrier_arrive_and_set_tx(ptr, num_bytes)` (DeepGEMM's own spelling).
-pub fn mbarrierArriveAndSetTx(b: *Builder, bar: Value, num_bytes: anytype) void {
-    asmVoid(b, "mbarrier.arrive.expect_tx.shared::cta.b64 _, [$1], $0; \n\t", &.{ liftAs(b, num_bytes, .i32), bar }, "r,r,~{memory}");
 }
 
 /// `cute::prefetch_tma_descriptor(desc)` (generic descriptor address).
@@ -4771,26 +4710,6 @@ pub fn tmaStore1d(b: *Builder, dst: Value, src: Value, num_bytes: anytype, cache
 /// `cute::SM90_TMA_STORE_2D::copy(desc, smem, c0, c1)`.
 pub fn tmaStore2d(b: *Builder, desc: Value, smem: Value, c0: Value, c1: Value) void {
     asmVoid(b, "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [$0, {$2, $3}], [$1];", &.{ desc, smem, c0, c1 }, "l,r,r,r,~{memory}");
-}
-
-/// `cute::tma_store_fence`.
-pub fn tmaStoreFence(b: *Builder) void {
-    asmVoid(b, "fence.proxy.async.shared::cta;", &.{}, "~{memory}");
-}
-
-/// `cutlass::arch::fence_view_async_shared`.
-pub fn fenceViewAsyncShared(b: *Builder) void {
-    asmVoid(b, "{\n\tfence.proxy.async.shared::cta; \n}", &.{}, "~{memory}");
-}
-
-/// `cute::tma_store_arrive`.
-pub fn tmaStoreArrive(b: *Builder) void {
-    asmVoid(b, "cp.async.bulk.commit_group;", &.{}, "~{memory}");
-}
-
-/// `ptx::tma_store_wait<N>` (no `.read`).
-pub fn tmaStoreWait(b: *Builder, comptime num_remaining_waits: u32) void {
-    asmVoid(b, std.fmt.comptimePrint("cp.async.bulk.wait_group {d};", .{num_remaining_waits}), &.{}, "~{memory}");
 }
 
 /// `cute::TMEM::Allocator2Sm::allocate(num_columns, dst)`: write the base column to shared `dst`.
@@ -4916,11 +4835,6 @@ pub fn reduceMinSync(b: *Builder, v: Value) Value {
     return asmValue(b, "redux.sync.min.u32 $0, $1, $2;", &.{ v, cst32(b, 0xFFFFFFFF) }, .i32, "=r,r,r", true);
 }
 
-/// `__ballot_sync(0xffffffff, pred)` (`pred` i1).
-pub fn ballotSync(b: *Builder, pred: Value) Value {
-    return asmValue(b, "{ .reg .pred p; setp.ne.u32 p, $1, 0; vote.sync.ballot.b32 $0, p, $2; }", &.{ pred.to(.i32), cst32(b, 0xFFFFFFFF) }, .i32, "=r,r,r", true);
-}
-
 /// `__all_sync(0xffffffff, pred)` (`pred` i1; returns i1).
 pub fn allSync(b: *Builder, pred: Value) Value {
     const r = asmValue(b, "{ .reg .pred p, q; setp.ne.u32 p, $1, 0; vote.sync.all.pred q, p, $2; selp.u32 $0, 1, 0, q; }", &.{ pred.to(.i32), cst32(b, 0xFFFFFFFF) }, .i32, "=r,r,r", true);
@@ -4939,11 +4853,6 @@ pub fn ffs(b: *Builder, v: Value) Value {
 /// `__fns(mask, base, offset)`: position of the `offset`-th set bit of `mask` from `base`.
 pub fn fns(b: *Builder, mask: Value, base: anytype, offset: Value) Value {
     return asmValue(b, "fns.b32 $0, $1, $2, $3;", &.{ mask, liftAs(b, base, .i32), offset }, .i32, "=r,r,r,r", false);
-}
-
-/// `fmaxf(a, b)` (`max.f32`, NaN-ignoring; also `math::ReduceMax<float>`).
-pub fn fmaxf(b: *Builder, x: Value, y: Value) Value {
-    return asmValue(b, "max.f32 $0, $1, $2;", &.{ x, y }, .f32, "=f,f,f", false);
 }
 
 /// `fminf(a, b)` (`min.f32`, NaN-ignoring; `kClampAfterSilu`).
@@ -5007,4 +4916,38 @@ pub fn divRn(b: *Builder, x: Value, y: Value) Value {
 }
 pub fn mulRn(b: *Builder, x: Value, y: Value) Value {
     return asmValue(b, "mul.rn.f32 $0, $1, $2;", &.{ x, y }, .f32, "=f,f,f", false);
+}
+
+test "canonical primitives preserve aligned barriers and runtime transaction counts" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "compatibility_primitives");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const bar = b.constant(.i32, 0);
+    const phase = b.constant(.i32, 0);
+    const bytes = b.threadIdx().x.add(16);
+    b.barrierCtaSyncAligned(1, 32);
+    b.barrierClusterArriveRelaxedAligned();
+    b.barrierClusterWaitAligned();
+    b.mbarrierInit(bar, 1);
+    b.fenceMbarrierInit();
+    b.mbarrierArriveExpectTx(bar, bytes);
+    b.mbarrierArriveExpectTx(bar, 16);
+    b.mbarrierWait(bar, phase, .{ .test_first = false });
+    _ = phase.bitXor(1);
+    b.fenceProxyAsyncShared();
+    b.fenceProxyAsyncShared();
+    b.cpAsyncBulkCommitGroup();
+    b.cpAsyncBulkWaitGroup(0, false);
+    _ = b.voteBallotSync(bytes.ne(0), null);
+    _ = b.fmax(b.constant(.f32, 1), b.constant(.f32, 2), .{});
+    const ir = try b.finish(.{ 32, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "llvm.nvvm.barrier.cta.sync.aligned.count");
+    try expectContains(ir, "barrier.cluster.arrive.relaxed.aligned");
+    try expectContains(ir, "nvvm.mbarrier.arrive.expect_tx");
+    const parsed = try mlir.Module.parse(ctx, ir);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
 }
