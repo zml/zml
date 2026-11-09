@@ -5,6 +5,8 @@ const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
+const Activation = @import("../options.zig").Activation;
+const GlobalOptions = @import("../options.zig").Options;
 pub const gmm_ep = @import("gmm_ep.zig");
 
 const log = std.log.scoped(.@"zml/moe/mosaic_tpu");
@@ -12,7 +14,7 @@ const log = std.log.scoped(.@"zml/moe/mosaic_tpu");
 var gate_up_transpose: std.atomic.Value(bool) = .init(false);
 var down_transpose: std.atomic.Value(bool) = .init(false);
 
-fn validateOptions(opts: zml.moe.Options) void {
+fn validateOptions(opts: GlobalOptions) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
 }
@@ -215,7 +217,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up_: zml.nn.Linear,
     down_: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: GlobalOptions,
 ) zml.Tensor {
     validateOptions(opts);
     const expert_map_ = routing.expertMap();
@@ -276,7 +278,7 @@ pub fn fusedExperts(
         gate_up_out = gate_up_out.add(bias_per_token);
     }
 
-    const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated);
+    const activated = opts.activation.applyActivation(gate_up_out, .concatenated);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
     var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)

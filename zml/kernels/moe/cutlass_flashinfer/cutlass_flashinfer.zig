@@ -1,9 +1,14 @@
 const std = @import("std");
-const stdx = @import("stdx");
 
 const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
+const stdx = @import("stdx");
+
 const zml = @import("../../../zml.zig");
+const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
+const GlobalOptions = @import("../options.zig").Options;
+const Activation = @import("../options.zig").Activation;
+const unpackedWeight = @import("../weights.zig").unpackedWeight;
 
 const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 
@@ -13,14 +18,14 @@ pub const Options = struct {
     /// Device used at graph-construction time to select the architecture
     /// library and size the XLA-owned scratch buffer.
     workspace_query_device: i32,
-    activation: zml.moe.Activation,
+    activation: Activation,
     enable_pdl: bool,
     gemm1_tactic: i32,
     /// GEMM2 uses FlashInfer's absolute tactic index. Query tacticCounts() to
     /// obtain the first valid GEMM2 index.
     gemm2_tactic: i32,
 
-    pub fn fromOptions(opts: zml.moe.Options) Options {
+    pub fn fromGlobalOptions(opts: GlobalOptions) Options {
         return .{
             .workspace_query_device = 0,
             .activation = opts.activation,
@@ -31,7 +36,7 @@ pub const Options = struct {
     }
 };
 
-pub fn validateOptions(opts: zml.moe.Options) void {
+pub fn validateOptions(opts: GlobalOptions) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
     stdx.debug.assert(opts.activation == .swiglu, "flashinfer_cutlass backend only accepts swiglu activation, got {}", .{opts.activation});
@@ -78,8 +83,6 @@ const DeviceRunner = struct {
     api: *fi_cutlass_moe.Api,
     runner: *fi_cutlass_moe.Runner,
 };
-
-const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 
 pub const Runners = struct {
     runners: [max_num_devices]?DeviceRunner = @splat(null),
@@ -151,7 +154,7 @@ fn currentRunners() !*Runners {
     return runners orelse error.RunnersNotLoaded;
 }
 
-fn cutlassActivation(activation: zml.moe.Activation) i32 {
+fn cutlassActivation(activation: Activation) i32 {
     return switch (activation) {
         .gelu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GELU,
         .relu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU,
@@ -309,7 +312,7 @@ pub fn fc1BlockScaleShape(
     num_experts: i64,
     hidden_size: i64,
     intermediate_size: i64,
-    activation: zml.moe.Activation,
+    activation: Activation,
 ) zml.Shape {
     const rows = switch (activation) {
         .silu, .gelu, .relu => intermediate_size,
@@ -505,7 +508,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: GlobalOptions,
 ) zml.Tensor {
     if (comptime !platforms.isEnabled(.cuda)) {
         @panic("FlashInfer CUTLASS MoE is only supported on CUDA platforms");
@@ -519,13 +522,13 @@ pub fn fusedExperts(
     // The runner ignores routes whose local expert id is -1.
     const topk_weights = topk_ids.cmp(.GE, .scalar(0, .i32)).select(routing.weights, .scalar(-1, routing.weights.dtype()));
 
-    const runner_options: Options = .fromOptions(opts);
+    const runner_options: Options = .fromGlobalOptions(opts);
 
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     stdx.debug.assert(quant_scheme == .nvfp4, "FlashInfer CUTLASS MoE only supports NVFP4, got {?}", .{quant_scheme});
 
-    const gate_up_weight_unpacked = zml.moe.unpackedWeight(gate_up);
-    const down_weight_unpacked = zml.moe.unpackedWeight(down);
+    const gate_up_weight_unpacked = unpackedWeight(gate_up);
+    const down_weight_unpacked = unpackedWeight(down);
 
     // TODO(Corentin): Do error checking on nvfp4
     // Also, maybe pass `zml.nn.Linear` directly

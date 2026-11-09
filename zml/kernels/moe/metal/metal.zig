@@ -1,12 +1,16 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
+const Activation = @import("../options.zig").Activation;
+const GlobalOptions = @import("../options.zig").Options;
+const unpackedWeight = @import("../weights.zig").unpackedWeight;
 
 const log = std.log.scoped(.@"zml/moe/metal");
 
-fn validateOptions(opts: zml.moe.Options) void {
+fn validateOptions(opts: GlobalOptions) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
 }
@@ -67,7 +71,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up_: zml.nn.Linear,
     down_: zml.nn.Linear,
-    opts: zml.moe.Options,
+    opts: GlobalOptions,
 ) zml.Tensor {
     validateOptions(opts);
     stdx.debug.assert(gate_up_.bias == null, "metal backend doesn't support gate_up bias", .{});
@@ -79,8 +83,8 @@ pub fn fusedExperts(
     const down_scales: ?zml.Tensor = if (down_.quantization) |q| q.scales else null;
     const down_global_scale: ?zml.Tensor = if (down_.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
 
-    const gate_up = zml.moe.unpackedWeight(gate_up_);
-    const down = zml.moe.unpackedWeight(down_);
+    const gate_up = unpackedWeight(gate_up_);
+    const down = unpackedWeight(down_);
     stdx.debug.assert(gate_up.dtype() == down.dtype(), "metal backend expected gate_up and down data type to match, got {} and {}", .{ gate_up.dtype(), down.dtype() });
     const mode = quantMode(gate_up.dtype());
     switch (mode) {
@@ -138,7 +142,7 @@ pub fn fusedExperts(
         zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
         mode,
     ), gate_up_global_scale, expert_ids);
-    const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated).convert(act_dtype);
+    const activated = opts.activation.applyActivation(gate_up_out, .concatenated).convert(act_dtype);
 
     const down_out = applyDownGlobalScale(moeGemm(
         activated,

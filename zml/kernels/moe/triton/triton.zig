@@ -6,10 +6,13 @@ const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
-const kernels = @import("moe.zig");
 const toDType = zml.kernel.triton.from;
-const ProjectionLayout = zml.moe.ProjectionLayout;
-const RoutingWeightPlacement = zml.moe.RoutingWeightPlacement;
+const ExpertsLayout = @import("../options.zig").ExpertsLayout;
+const ProjectionLayout = @import("../options.zig").ProjectionLayout;
+const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
+const Activation = @import("../options.zig").Activation;
+const Options = @import("../options.zig").Options;
+const kernels = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/triton");
 
@@ -38,7 +41,7 @@ pub fn fusedExperts(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.Options,
+    options: Options,
 ) zml.Tensor {
     // HACK(Corentin): only rely on the scheme of gate_up for now.
 
@@ -59,7 +62,7 @@ pub fn fusedExpertsBase(
     gate_up_: zml.nn.Linear,
     down_: zml.nn.Linear,
     layout: ProjectionLayout,
-    opts: zml.moe.Options,
+    opts: Options,
 ) Tensor {
     const expert_map_ = routing_.expertMap();
     const num_tokens = hidden_states.dim(.t);
@@ -141,7 +144,7 @@ pub fn fusedExpertsBase(
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    var activated = zml.moe.applyActivation(gate_up_out, opts.activation, layout);
+    var activated = opts.activation.applyActivation(gate_up_out, layout);
     if (opts.routing_weight_placement == .before_down) {
         const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
@@ -490,8 +493,8 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
     const io = std.testing.io;
     const platform = zml.testing.env();
     const Local = struct {
-        fn forward(x: Tensor, layout: ProjectionLayout, activation: zml.moe.Activation) Tensor {
-            return zml.moe.applyActivation(x, activation, layout);
+        fn forward(x: Tensor, layout: ProjectionLayout, activation: Activation) Tensor {
+            return activation.applyActivation(x, layout);
         }
     };
     const x: Tensor = .init(.{ .token = 1, .out = 6 }, .bf16);
@@ -506,7 +509,7 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
         var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
         defer input.deinit();
         for ([_]?f32{ null, 2 }) |threshold| {
-            const activation: zml.moe.Activation = .{ .swiglu = .{ .limit = threshold } };
+            const activation: Activation = .{ .swiglu = .{ .limit = threshold } };
             var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, layout, activation }, .{});
             defer exe.deinit();
             try zml.testing.expectEqualShapes(Shape.init(.{ .token = 1, .out = 3 }, .f32), exe.output_shapes[0]);
@@ -794,7 +797,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub fn validateOptions(opts: zml.moe.Options) void {
+pub fn validateOptions(opts: Options) void {
     stdx.debug.assert(opts.activation == .swiglu, "triton backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.limit != null, "triton backend requires swiglu limit to be set", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "triton backend requires swiglu bias to be null", .{});
@@ -899,7 +902,7 @@ pub fn fusedExpertsMxfp4(
     routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
-    options: zml.moe.Options,
+    options: Options,
 ) zml.Tensor {
     validateOptions(options);
     stdx.debug.assert(input.dtype() == .bf16, "triton backend only supports bf16 inputs, got {}", .{input.dtype()});

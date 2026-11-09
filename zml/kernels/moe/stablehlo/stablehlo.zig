@@ -1,13 +1,17 @@
 //! Deliberately simple MoE reference: no routed GEMMs, packing, or custom calls.
 //! Weights use [expert, output, input] order with concatenated gate/up columns.
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
+const GlobalOptions = @import("../options.zig").Options;
+const Activation = @import("../options.zig").Activation;
+const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
 
-pub fn activate(x: Tensor, activation: zml.moe.Activation) Tensor {
+pub fn activate(x: Tensor, activation: Activation) Tensor {
     return switch (activation) {
         .silu => x.silu(),
         .gelu => x.gelu(),
@@ -148,13 +152,13 @@ fn project(x: Tensor, linear: zml.nn.Linear, ids: Tensor, opts: Options, dtype: 
 }
 
 pub const Options = struct {
-    activation: zml.moe.Activation,
+    activation: Activation,
     quantize_input: bool = false,
     /// Model fixed backend contracts independently of optional input quantization:
     /// Metal uses weight-only quantization; specialized MXFP4 GEMMs always use MXFP8 inputs.
     /// CuTe additionally rounds the intermediate activation to BF16 before quantizing.
     input_quantization: enum { automatic, none, mxfp8, mxfp8_bf16 } = .automatic,
-    routing_weight_placement: zml.moe.RoutingWeightPlacement = .after_down,
+    routing_weight_placement: RoutingWeightPlacement = .after_down,
 };
 
 /// Negative expert IDs denote nonlocal routes and contribute zero, including bias.
@@ -187,7 +191,7 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
         .sum(.topk).squeeze(.topk).convert(input.dtype());
 }
 
-pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: zml.moe.Options) Tensor {
+pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: GlobalOptions) Tensor {
     stdx.debug.assert(routing.ids.dim(.topk) > 0 and routing.ids.dim(.topk) <= routing.global_num_experts, "MoE top-k must fit the global expert count", .{});
     return reference(input, routing.localIds(), routing.weights, gate_up, down, .{
         .activation = opts.activation,

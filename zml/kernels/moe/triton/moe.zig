@@ -12,6 +12,7 @@ const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
+const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
 
 const log = std.log.scoped(.@"zml/moe/triton_kernels");
 
@@ -1026,7 +1027,7 @@ pub const Combine = struct {
         topk: i64,
         expert_offset: i64,
         experts: i64,
-        routing_weight_placement: zml.moe.RoutingWeightPlacement = .before_down,
+        routing_weight_placement: RoutingWeightPlacement = .before_down,
         bn: i64,
     };
     pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm", "rw" }, .outputs = &.{"y"}, .run = run });
@@ -1092,7 +1093,7 @@ const GemmConfig = struct {
     // Swiglu clamping. Set to 0 to disable.
     swiglu_limit: f32,
     scale_stride: i64,
-    routing_weight_placement: zml.moe.RoutingWeightPlacement = .before_down,
+    routing_weight_placement: RoutingWeightPlacement = .before_down,
     bn: i64,
     bk: i64,
 };
