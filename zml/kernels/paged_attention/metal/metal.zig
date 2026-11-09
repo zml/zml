@@ -85,8 +85,8 @@ const DispatchOptions = struct {
     scale: f32,
 };
 
-/// Launches fa_vec_paged for causal bf16 decode, split over 4 threadgroups at
-/// head_dim 512 past 4096 KV positions, and paged_attention_tiled otherwise.
+/// Launches fa_vec_paged for causal bf16 decode and paged_attention_tiled
+/// otherwise.
 /// `q` and the result are `[tokens, heads, head_dim]`, the caches
 /// `[pages, block_size, kv_heads, head_dim]`, `block_table`
 /// `[seqs, max_blocks]`, `seq_lens` `[seqs]` and `query_start_len`
@@ -105,7 +105,7 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
     const max_blocks: i32 = @intCast(block_table.dim(1));
 
     const vec_decode = opts.is_causal and total_q_tokens == num_seqs and
-        (head_dim == 128 or head_dim == 256 or head_dim == 512) and
+        (head_dim == 32 or head_dim == 64 or head_dim == 128 or head_dim == 256 or head_dim == 512) and
         dtype == .bf16;
 
     if (vec_decode) {
@@ -128,35 +128,30 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         };
 
         const kv_capacity = max_blocks * block_size;
-        if (head_dim == 512 and kv_capacity > 4096) {
-            const nwg = 4;
-            const nrows = total_q_tokens * num_heads;
+        const span = if (opts.sliding_window < 0) kv_capacity else @min(kv_capacity, opts.sliding_window + 32);
+        const nrows = total_q_tokens * num_heads;
+        const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), span, coreCount());
 
-            const partial = paged_attn.FaVecPaged.Kernel.call(inputs, .{ .dst = zml.Shape.init(.{nrows * (head_dim * nwg + 2 * nwg)}, .f32) }, .{
-                .cfg = .{ .head_dim = head_dim, .nsg = 8, .block_size = block_size, .position_stride = num_kv_heads * head_dim, .nwg = nwg },
-                .grid = .{ nwg, @intCast(num_heads), @intCast(total_q_tokens) },
-                .threadgroup = .{ 32, 8, 1 },
-                .threadgroup_memory = paged_attn.FaVecPaged.threadgroupMemory(head_dim, 8),
-                .constants = .{ .args = .of(args) },
-            }).dst;
+        const cfg: paged_attn.FaVecPaged.Cfg = .{
+            .head_dim = head_dim,
+            .block_size = block_size,
+            .position_stride = num_kv_heads * head_dim,
+            .heads = launch.heads,
+            .splits = launch.splits,
+        };
+        const dst = if (launch.splits == 1) q.shape() else zml.Shape.init(.{nrows * (head_dim * launch.splits + 2 * launch.splits)}, .f32);
+        const out = paged_attn.FaVecPaged.Kernel.call(inputs, .{ .dst = dst }, .{
+            .cfg = cfg,
+            .grid = .{ @intCast(@divExact(launch.splits, launch.splits_per_threadgroup)), @intCast(@divExact(num_heads, launch.heads)), @intCast(total_q_tokens) },
+            .threadgroup = .{ 32, @intCast(launch.heads * launch.splits_per_threadgroup), 1 },
+            .constants = .{ .args = .of(args) },
+        }).dst;
+        if (launch.splits == 1) return out;
 
-            return paged_attn.FaVecPagedReduce.Kernel.call(.{ .htmp = partial }, .{ .dst = q.shape() }, .{
-                .cfg = .{ .nwg = nwg, .head_dim = head_dim },
-                .grid = .{ @intCast(nrows), 1, 1 },
-                .threadgroup = .{ 32, nwg, 1 },
-                .constants = .{ .args = .of(@as(i32, nrows)) },
-            }).dst;
-        }
-
-        var idx: usize = if (kv_capacity <= 1024) 0 else if (kv_capacity <= 2048) 1 else 2;
-        if (head_dim == 512 and idx > 1) idx = 1;
-        const nsg = ([_]i32{ 4, 8, 16 })[idx];
-
-        return paged_attn.FaVecPaged.Kernel.call(inputs, .{ .dst = q.shape() }, .{
-            .cfg = .{ .head_dim = head_dim, .nsg = nsg, .block_size = block_size, .position_stride = num_kv_heads * head_dim, .nwg = 1 },
-            .grid = .{ 1, @intCast(num_heads), @intCast(total_q_tokens) },
-            .threadgroup = .{ 32, @intCast(nsg), 1 },
-            .threadgroup_memory = paged_attn.FaVecPaged.threadgroupMemory(head_dim, nsg),
+        return paged_attn.FaVecPagedReduce.Kernel.call(.{ .htmp = out, .seq_lens = seq_lens, .cu_seqlens_q = query_start_len }, .{ .dst = q.shape() }, .{
+            .cfg = .{ .splits = launch.splits, .head_dim = head_dim },
+            .grid = .{ @intCast(nrows), @intCast(@divExact(head_dim, 4 * paged_attn.FaVecPagedReduce.simdgroups)), 1 },
+            .threadgroup = .{ 32, paged_attn.FaVecPagedReduce.simdgroups, 1 },
             .constants = .{ .args = .of(args) },
         }).dst;
     }
@@ -209,4 +204,37 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         .threadgroup = .{ 256, 1, 1 },
         .constants = .{ .num_seqs = .of(num_seqs), .row_stride = .of(num_heads * head_dim) },
     }).out;
+}
+
+const VecLaunch = struct {
+    heads: i32,
+    splits: i32,
+    splits_per_threadgroup: i32,
+};
+
+/// At most 256 threads, which every Apple GPU pipeline accepts. Splits past a
+/// row's length exit early, so `splits` follows the core and row counts.
+fn vecLaunch(rows: i32, group: i32, span: i32, cores: i32) VecLaunch {
+    var heads: i32 = @min(group, 4);
+    while (@rem(group, heads) != 0) heads -= 1;
+    const want: i32 = if (rows <= 2 * cores) 128 else 64;
+    const chunks = @divFloor(span + 31, 32);
+    var splits: i32 = 1;
+    while (splits * 2 <= @min(want, chunks)) splits *= 2;
+    return .{ .heads = heads, .splits = splits, .splits_per_threadgroup = @min(splits, @divFloor(8, heads)) };
+}
+
+fn coreCount() i32 {
+    const platform = zml.Compiler.current().platform;
+    if (platform.devices.len == 0) return 1;
+    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
+    return @intCast(std.math.clamp(attribute.int64, 1, 1024));
+}
+
+test vecLaunch {
+    try std.testing.expectEqual(VecLaunch{ .heads = 4, .splits = 128, .splits_per_threadgroup = 2 }, vecLaunch(16, 4, 128000, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 2, .splits = 64, .splits_per_threadgroup = 4 }, vecLaunch(256, 2, 128000, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 4, .splits = 64, .splits_per_threadgroup = 2 }, vecLaunch(512, 4, 128000, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 3, .splits = 8, .splits_per_threadgroup = 2 }, vecLaunch(48, 6, 288, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 1, .splits = 1, .splits_per_threadgroup = 1 }, vecLaunch(8, 1, 20, 40));
 }
