@@ -261,6 +261,58 @@ pub const TensorRegistry = struct {
 
         if (index.object.get("metadata")) |metadata| self.metadata = metadata;
     }
+
+    pub fn saveAsFullIndexJson(
+        self: *const TensorRegistry,
+        io: std.Io,
+        gpa: std.mem.Allocator,
+        repo: std.Io.Dir,
+        out: *std.Io.Writer,
+    ) !void {
+        var tmp_state: std.heap.ArenaAllocator = .init(gpa);
+        defer tmp_state.deinit();
+        const tmp = tmp_state.allocator();
+
+        var repo_uri_buf = try tmp.alloc(u8, 1024);
+        const repo_name = repo_uri_buf[0..try repo.realPath(io, repo_uri_buf)];
+
+        try out.print(
+            \\{{
+            \\"metadata": {},
+            \\"weight_map": {{
+            \\
+        , .{std.json.fmt(self.metadata, .{ .whitespace = .minified })});
+
+        const n = self.tensors.count();
+        for (0.., self.tensors.keys(), self.tensors.values()) |i, key, value| {
+            std.debug.assert(std.mem.startsWith(u8, value.file_uri, repo_name));
+            const local_name = value.file_uri[repo_name.len..];
+            const end_offset = value.offset + value.byteSize();
+            const safetensors_dtype: []const u8 = dt: {
+                for (safetensors_dtype_to_zml_dtype.keys(), safetensors_dtype_to_zml_dtype.values()) |st_dt, zml_dt| {
+                    if (zml_dt == value.shape._dtype) break :dt st_dt;
+                }
+                // Note: we could bitcast to u8,
+                // but reaching this panic implies the user didn't loaded this TensorRegistry
+                // from a safetensors file, but manually created the dict.
+                // In which case, they know what they are doing,
+                // and can easily insert the bitcast themselves.
+                std.debug.panic("Safetensors doesn't support data type {}", .{value.shape._dtype});
+            };
+            const comma = if (i + 1 == n) "" else ",";
+            try out.print(
+                \\  "{q}": {{"filename":"{q}","shape":{any},"data_offsets":[{d}, {d}],"dtype":"{s}"}}{s}
+                \\
+            , .{ key, local_name, value.shape.dims(), value.offset, end_offset, safetensors_dtype, comma });
+        }
+
+        try out.writeAll(
+            \\  }}
+            \\}}
+            \\
+        );
+        try out.flush();
+    }
 };
 
 pub const TensorReader = struct {
@@ -544,28 +596,28 @@ pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionE
     return error.FileNotFound;
 }
 
-fn stringToDtype(safetensor_type: []const u8) !DataType {
-    const map = std.StaticStringMap(DataType).initComptime(.{
-        .{ "F64", .f64 },
-        .{ "F32", .f32 },
-        .{ "F16", .f16 },
-        .{ "BF16", .bf16 },
-        .{ "F8_E8M0", .f8e8m0 },
-        .{ "F8_E4M3", .f8e4m3fn },
-        .{ "F4_E2M1", .f4e2m1 },
-        .{ "I64", .i64 },
-        .{ "I32", .i32 },
-        .{ "I16", .i16 },
-        .{ "I8", .i8 },
-        .{ "U64", .u64 },
-        .{ "U32", .u32 },
-        .{ "U16", .u16 },
-        .{ "U8", .u8 },
-        .{ "BOOL", .bool },
-    });
+const safetensors_dtype_to_zml_dtype = std.StaticStringMap(DataType).initComptime(.{
+    .{ "F64", .f64 },
+    .{ "F32", .f32 },
+    .{ "F16", .f16 },
+    .{ "BF16", .bf16 },
+    .{ "F8_E8M0", .f8e8m0 },
+    .{ "F8_E4M3", .f8e4m3fn },
+    .{ "F4_E2M1", .f4e2m1 },
+    .{ "I64", .i64 },
+    .{ "I32", .i32 },
+    .{ "I16", .i16 },
+    .{ "I8", .i8 },
+    .{ "U64", .u64 },
+    .{ "U32", .u32 },
+    .{ "U16", .u16 },
+    .{ "U8", .u8 },
+    .{ "BOOL", .bool },
+});
 
-    return map.get(safetensor_type) orelse {
-        log.err("Unsupported safetensor data type: {s}", .{safetensor_type});
+fn stringToDtype(safetensor_dtype: []const u8) !DataType {
+    return safetensors_dtype_to_zml_dtype.get(safetensor_dtype) orelse {
+        log.err("Unsupported safetensor data type: {s}", .{safetensor_dtype});
         return error.UnsupportedDataType;
     };
 }
