@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 
 var runfiles_global: bazel_runfiles.Runfiles = undefined;
 
-export fn _bazel_runfiles_init_impl(argc: c_int, argv: [*c][*:0]u8, envp: [*:null]?[*:0]u8) callconv(.c) void {
+pub export fn _bazel_runfiles_init_impl(argc: c_int, argv: [*c][*:0]u8, envp: [*:null]?[*:0]u8) callconv(.c) void {
     _ = argc;
     _ = envp;
     var threaded: std.Io.Threaded = .init_single_threaded;
