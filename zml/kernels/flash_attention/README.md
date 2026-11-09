@@ -265,7 +265,7 @@ are not uniformly supported by the current kernels; an existing prefill path
 requires equal query/key lengths and assumes positions begin at zero. Treat
 these as current conformance gaps, not alternative definitions of causality.
 
-The tests in [flash_attention.zig](flash_attention.zig) compare results
+The tests in [tests.zig](tests.zig) compare results
 against `sdpa` with the gathered causal mask. The original shared cases cover
 `D = 64`, MHA and GQA,
 single-token decode at full and partial context lengths, batched decode with
