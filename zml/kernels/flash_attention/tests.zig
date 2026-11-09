@@ -46,6 +46,22 @@ test "attention: q=1,qh=8,kh=8" {
     );
 }
 
+test "attention: q=1,k=4096,qh=32,kh=8,hd=128" {
+    try testAttention(
+        .init(.{ .q = 1, .h = 32, .hd = 128 }, .bf16),
+        .init(.{ .k = 4096, .h = 8, .hd = 128 }, .bf16),
+        &.{3000},
+    );
+}
+
+test "attention: q=1,k=1000,qh=8,kh=2,hd=32" {
+    try testAttention(
+        .init(.{ .q = 1, .h = 8, .hd = 32 }, .bf16),
+        .init(.{ .k = 1000, .h = 2, .hd = 32 }, .bf16),
+        &.{900},
+    );
+}
+
 test "attention: q=8,qh=64,kh=8" {
     try testAttention(
         .init(.{ .q = 8, .h = 64, .hd = 64 }, .bf16),
