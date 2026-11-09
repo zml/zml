@@ -13,17 +13,8 @@ const Args = struct {
     pub const help =
         \\Usage: convert [--output=<file>] <model>
         \\
-        \\Read safetensors headers and write model.safetensors.full_index.json in the
-        \\working directory. Accepts a model directory, *.safetensors.index.json,
-        \\or a single *.safetensors file, using local paths or file://, hf://,
-        \\http://, https://, s3://, and gs:// URIs. HF revisions use model@revision.
-        \\
-        \\Each weight is written on one line with file, data_offsets, shape, and dtype.
-        \\data_offsets are absolute [start, end) byte offsets from the file's beginning,
-        \\including its 8-byte prefix and JSON header. Tensor data is not read.
-        \\
-        \\Example: bazel run //tools/safetensors:convert -- hf://owner/model
-        \\
+        \\Read safetensors headers and write model.safetensors.full_index.json in the working directory
+        \\Example: bazel run //tools/safetensors:convert -- hf://owner/model --output="model.safetensors.full_index.json"
     ;
 };
 

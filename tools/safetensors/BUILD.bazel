@@ -1,8 +1,8 @@
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
-    name = "convert",
-    main = "convert.zig",
+    name = "safetensors",
+    main = "main.zig",
     visibility = ["//visibility:public"],
     zigopts = ["-lc"],
     deps = [
