@@ -419,6 +419,10 @@ pub const Tokenizer = struct {
             self.state = state.?;
         }
 
+        pub fn maxOutputLength(self: *const Decoder) usize {
+            return c.iree_tokenizer_vocab_max_token_length(c.iree_tokenizer_vocab(self.tokenizer.inner)) + 4;
+        }
+
         pub fn feedOne(self: *Decoder, token_id: u32, out: []u8) ![]u8 {
             std.debug.assert(out.len != 0);
             var consumed: usize = 0;

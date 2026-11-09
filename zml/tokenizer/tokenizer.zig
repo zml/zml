@@ -101,6 +101,13 @@ pub const Tokenizer = union(Tokenizers) {
             };
         }
 
+        pub fn maxOutputLength(self: *const Decoder) usize {
+            return switch (self.*) {
+                .iree => |*d| d.maxOutputLength(),
+                inline else => 0,
+            };
+        }
+
         // Only valid until the next decode and while the decoder AND buffer is alive.
         pub fn feedOne(self: *Decoder, token_id: u32, buffer: []u8) ![]const u8 {
             return switch (self.*) {
