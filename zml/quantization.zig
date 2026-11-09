@@ -14,6 +14,16 @@ const Tensor = @import("tensor.zig").Tensor;
 pub const nvfp4_block_size = 16;
 pub const mx_block_size = 32;
 
+pub const PackedColumnScaleLayout = @import("packed_scale_layout.zig");
+
+pub const ScaleStorageLayout = enum {
+    logical,
+    /// Each device's scale plane uses the independently padded 128x4 layout.
+    blackwell_128x4,
+    /// Four adjacent scale bytes per column-major u32, independently per device.
+    packed_column_4,
+};
+
 pub const Quantization = struct {
     scheme: Scheme, // decided when the checkpoint is read
     scales: Tensor,
@@ -22,6 +32,16 @@ pub const Quantization = struct {
     /// HACK: `scales` is stored in the 128x4 blocked layout of Blackwell's block-scaled mma.
     // Something cleaner will need to be done to differentiate different kinds of swizzling
     swizzled_scales: bool = false,
+    /// Explicit storage for new producers; null preserves swizzled_scales.
+    scale_layout: ?ScaleStorageLayout = null,
+
+    pub fn scaleStorageLayout(self: Quantization) ScaleStorageLayout {
+        if (self.scale_layout) |layout| {
+            stdx.debug.assert(!self.swizzled_scales or layout == .blackwell_128x4, "conflicting scale storage layouts", .{});
+            return layout;
+        }
+        return if (self.swizzled_scales) .blackwell_128x4 else .logical;
+    }
 
     /// A per-tensor scale and the polarity its producer wrote it in
     pub const GlobalScale = struct {
@@ -113,11 +133,7 @@ pub const QuantizedInput = struct {
     global_scale: ?Tensor,
     scale_layout: ScaleLayout = .logical,
 
-    pub const ScaleLayout = enum {
-        logical,
-        /// Each device's scale grid is independently padded and packed.
-        blackwell_128x4,
-    };
+    pub const ScaleLayout = ScaleStorageLayout;
 
     pub fn reuseBuffer(self: QuantizedInput, other: QuantizedInput) QuantizedInput {
         stdx.debug.assert(self.scale_layout == other.scale_layout, "cannot reuse quantized scales with different layouts", .{});
@@ -149,6 +165,20 @@ pub const BlackwellScaleLayout = struct {
             row % 32 * 16 + row % rows / 32 * columns + column % columns;
     }
 };
+
+test "scale storage layout preserves legacy flags and explicit packed metadata" {
+    var q: Quantization = .{ .scheme = .mxfp8, .scales = undefined };
+    try std.testing.expectEqual(.logical, q.scaleStorageLayout());
+    q.swizzled_scales = true;
+    try std.testing.expectEqual(.blackwell_128x4, q.scaleStorageLayout());
+    q.scale_layout = .blackwell_128x4;
+    try std.testing.expectEqual(.blackwell_128x4, q.scaleStorageLayout());
+    q.swizzled_scales = false;
+    q.scale_layout = .packed_column_4;
+    try std.testing.expectEqual(.packed_column_4, q.scaleStorageLayout());
+    q.scale_layout = .logical;
+    try std.testing.expectEqual(.logical, q.scaleStorageLayout());
+}
 
 test "Blackwell scale layout padding and address bijection" {
     inline for (.{ 1, 31, 32, 127, 128, 129, 255, 256 }) |m| {
