@@ -38,8 +38,7 @@ pub fn validateOptions(opts: zml.moe.Options) void {
 /// expect block scales in the 128x4 tensor-core layout.
 pub fn fusedExperts(
     input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
+    routing: zml.moe.LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: zml.moe.Options,
@@ -83,24 +82,43 @@ pub fn fusedExperts(
         else => stdx.debug.panic("cute backend only supports mxfp4 and nvfp4 quantization, got {}", .{gq.scheme}),
     };
 
-    const context: Context = .{
-        .input = input,
-        .ids = ids,
-        .weights = weights,
-        .w1 = gate_up.weight,
-        .s1 = gq.scales,
-        .w2 = down.weight,
-        .s2 = dq.scales,
-        .topk = ids.dim(.topk),
-        .swiglu_limit = options.activation.swiglu.limit,
-        .routing_weight_placement = options.routing_weight_placement,
-        .format = format,
-        .expert_parallel = gate_up.weight.shape().partition(.expert).isSharded(),
-    };
-    return if (context.expert_parallel)
-        zml.ops.manualComputation(Context.body, context, input.shape())
-    else
-        context.body(input.shape());
+    const hidden = down.weight.dim(1);
+    const intermediate = down.weight.dim(2) * 2;
+    const topk = routing.ids.dim(.topk);
+    const experts = gate_up.weight.dim(.expert);
+    const ids = routing.localIds().convert(.i32).reshape(.{ .token = .auto, .topk = topk });
+    const tokens = ids.dim(.token);
+    const routing_weights = routing.weights.convert(.f32).reshape(.{ tokens, topk });
+
+    return switch (format) {
+        .mxfp4 => kernels.forwardMxfp4(tokens, hidden, intermediate, experts, topk, options.activation.swiglu.limit, .{
+            .x = input.reshape(.{ tokens, hidden }),
+            .routing_weights = routing_weights,
+            .w1 = gate_up.weight,
+            .s1 = gq.scales,
+            .w2 = down.weight,
+            .s2 = dq.scales,
+            .ids = ids,
+        }, null),
+        .nvfp4 => |f| kernels.forwardNvfp4(tokens, hidden, intermediate, experts, topk, .{
+            .x = input.reshape(.{ tokens, hidden }),
+            .routing_weights = routing_weights,
+            .ids = ids,
+            .w1 = gate_up.weight,
+            .s1 = gq.scales,
+            .w2 = down.weight,
+            .s2 = dq.scales,
+            // `alpha` is per expert; `act` is one scale shared by every
+            // expert, which the kernels read per expert.
+            .alpha1 = f.alpha1.reshape(.{experts}),
+            .alpha2 = f.alpha2.reshape(.{experts}),
+            .act1 = f.act1.reshape(.{}).broad(.init(.{experts}, .f32)),
+            .act2 = f.act2.reshape(.{}).broad(.init(.{experts}, .f32)),
+        }, .{
+            .swiglu_limit = options.activation.swiglu.limit,
+            .routing_weight_placement = options.routing_weight_placement,
+        }),
+    }.reshape(input.shape().dims()).withTags(input.shape());
 }
 
 /// The format-specific tensors: NVFP4's per-expert global scales. They stay
@@ -114,70 +132,4 @@ const Format = union(enum) {
         act1: zml.Tensor,
         act2: zml.Tensor,
     },
-};
-
-const Context = struct {
-    input: zml.Tensor,
-    ids: zml.Tensor,
-    weights: zml.Tensor,
-    w1: zml.Tensor,
-    s1: zml.Tensor,
-    w2: zml.Tensor,
-    s2: zml.Tensor,
-    topk: i64,
-    swiglu_limit: ?f32,
-    routing_weight_placement: zml.moe.RoutingWeightPlacement,
-    format: Format,
-    expert_parallel: bool,
-
-    fn body(self: Context, _: zml.Shape) zml.Tensor {
-        const experts = self.w1.dim(.expert);
-        const hidden = self.w2.dim(1);
-        const intermediate = self.w2.dim(2) * 2;
-        const tokens = self.input.dim(.t);
-        var ids = self.ids.convert(.i32);
-        const routing_weights = self.weights.convert(.f32);
-        if (self.expert_parallel) {
-            const partition_id = zml.ops.partitionId().convert(.i32);
-            const expert_start = partition_id.scale(experts);
-            const expert_end = expert_start.addConstant(experts);
-            // Routes of other ranks get expert -1 and are not computed here.
-            const local = ids.cmp(.GE, expert_start).logical(.AND, ids.cmp(.LT, expert_end));
-            ids = local.select(ids.sub(expert_start), .scalar(-1, .i32));
-        }
-        const result = switch (self.format) {
-            .mxfp4 => kernels.forwardMxfp4(tokens, hidden, intermediate, experts, self.topk, self.swiglu_limit, .{
-                .x = self.input,
-                .routing_weights = routing_weights,
-                .w1 = self.w1,
-                .s1 = self.s1,
-                .w2 = self.w2,
-                .s2 = self.s2,
-                .ids = ids,
-            }, null),
-            .nvfp4 => |f| kernels.forwardNvfp4(tokens, hidden, intermediate, experts, self.topk, .{
-                .x = self.input,
-                .routing_weights = routing_weights,
-                .ids = ids,
-                .w1 = self.w1,
-                .s1 = self.s1,
-                .w2 = self.w2,
-                .s2 = self.s2,
-                // `alpha` is per expert; `act` is one scale shared by every
-                // expert, which the kernels read per expert.
-                .alpha1 = f.alpha1.reshape(.{experts}),
-                .alpha2 = f.alpha2.reshape(.{experts}),
-                .act1 = f.act1.reshape(.{}).broad(.init(.{experts}, .f32)),
-                .act2 = f.act2.reshape(.{}).broad(.init(.{experts}, .f32)),
-            }, .{
-                .swiglu_limit = self.swiglu_limit,
-                .routing_weight_placement = self.routing_weight_placement,
-            }),
-        }.withTags(self.input.shape());
-
-        return if (self.expert_parallel)
-            zml.ops.allReduce(result, zml.Tensor.add)
-        else
-            result;
-    }
 };

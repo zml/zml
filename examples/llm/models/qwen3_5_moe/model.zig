@@ -787,6 +787,8 @@ pub const Moe = struct {
             self.gate_up_proj,
             self.down_proj,
             moe_backend,
+            zml.Compiler.current().mesh(.experts),
+            .expert(.experts),
             .{
                 .activation = .{ .swiglu = .{} },
                 .quantize_input = false,

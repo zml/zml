@@ -157,14 +157,19 @@ pub const Options = struct {
     routing_weight_placement: zml.moe.RoutingWeightPlacement = .after_down,
 };
 
+/// Negative expert IDs denote nonlocal routes and contribute zero, including bias.
 pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: Options) Tensor {
+    stdx.debug.assert(topk_ids.dim(.topk) > 0, "reference top-k must be positive", .{});
     stdx.debug.assert(topk_ids.dtype() == .i32, "reference expects i32 expert ids", .{});
     stdx.debug.assert(gate_up.weight.rank() == 3 and down.weight.rank() == 3, "reference expects rank-three expert weights", .{});
     stdx.debug.assert(gate_up.weight.dim(.expert) == down.weight.dim(.expert), "reference expert counts must match", .{});
     const tokens = input.dim(.t);
     const k = topk_ids.dim(.topk);
-    stdx.debug.assert(k > 0 and k <= gate_up.weight.dim(.expert), "reference top-k must fit the expert count", .{});
-    const ids = topk_ids.reshape(.{ .route = tokens * k });
+    // Nonlocal routes use expert zero for safe gathers; discard their full
+    // contribution after the down projection, including any projection bias.
+    const local_routes = topk_ids.cmp(.GE, Tensor.scalar(0, .i32));
+    const safe_ids = topk_ids.maximum(Tensor.scalar(0, .i32));
+    const ids = safe_ids.reshape(.{ .route = tokens * k });
     const weights = topk_weights.reshape(.{ .route = tokens * k }).convert(.f32);
     const hidden = input.reshape(.{ .token = tokens, .in = input.dim(.d) })
         .insertAxes(.in, .{.topk}).broad(Shape.init(.{ .token = tokens, .topk = k, .in = input.dim(.d) }, input.dtype()))
@@ -176,13 +181,15 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
     if (opts.routing_weight_placement == .before_down) activated = activated.mul(weights.broad(activated.shape()));
     var output = project(activated.rename(.{ .out = .in }), down, ids, opts, input.dtype());
     if (opts.routing_weight_placement == .after_down) output = output.mul(weights.broad(output.shape()));
+    output = local_routes.reshape(.{ .route = tokens * k }).broad(output.shape()).select(output, Tensor.scalar(0, output.dtype()));
     return output.convert(input.dtype()).convert(.f32)
         .reshape(.{ .t = tokens, .topk = k, .d = output.dim(.out) })
         .sum(.topk).squeeze(.topk).convert(input.dtype());
 }
 
-pub fn fusedExperts(input: Tensor, ids: Tensor, weights: Tensor, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: zml.moe.Options) Tensor {
-    return reference(input, ids, weights, gate_up, down, .{
+pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: zml.moe.Options) Tensor {
+    stdx.debug.assert(routing.ids.dim(.topk) > 0 and routing.ids.dim(.topk) <= routing.global_num_experts, "MoE top-k must fit the global expert count", .{});
+    return reference(input, routing.localIds(), routing.weights, gate_up, down, .{
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,
         .routing_weight_placement = opts.routing_weight_placement,
