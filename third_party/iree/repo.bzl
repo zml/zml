@@ -19,6 +19,7 @@ def repo():
             "//third_party/iree:laguna-tokenizer-compat.patch",
             "//third_party/iree:fix-normalizer-lifetime-and-boundaries.patch",
             "//third_party/iree:mistral-right-aligned-numbers.patch",
+            "//third_party/iree:regex-skip-failed-start.patch",
         ],
         patch_args = ["-p1"],
     )

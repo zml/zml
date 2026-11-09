@@ -1,0 +1,260 @@
+diff --git a/runtime/src/iree/tokenizer/regex/exec.c b/runtime/src/iree/tokenizer/regex/exec.c
+--- a/runtime/src/iree/tokenizer/regex/exec.c
++++ b/runtime/src/iree/tokenizer/regex/exec.c
+@@ -1330,6 +1330,20 @@
+     return iree_ok_status();
+   }
+ 
++  // Exact ranges take precedence over the byte table and may include ASCII.
++  // Only use the initial state's byte table directly when no such range can
++  // override it. Start-anchored patterns retain the ordinary per-byte exit.
++  bool scan_failed_start_ascii =
++      !requires_start &&
++      dfa->header->start_state == dfa->header->unanchored_start_state;
++  for (uint16_t i = 0; i < dfa->num_ranges && scan_failed_start_ascii; ++i) {
++    const iree_tokenizer_regex_dfa_range_transition_t* range = &dfa->ranges[i];
++    if (range->from_state == dfa->header->start_state && range->start < 0x80) {
++      scan_failed_start_ascii = false;
++    }
++  }
++  const uint16_t* start_transitions =
++      dfa->transitions + (iree_host_size_t)dfa->header->start_state * 256;
+   iree_host_size_t position = 0;
+ 
+   // Resolve pending lookahead from previous chunk if we have new data.
+@@ -1511,6 +1525,29 @@
+         // With start anchor, give up if not at position 0.
+         if (requires_start && abs_pos > 0) {
+           return iree_ok_status();
++        }
++        // This transition was already attempted from the start state. No
++        // match state changed, so retrying the same character cannot succeed.
++        if (state->dfa_state == dfa->header->start_state) {
++          state->match_start = abs_pos;
++          if (scan_failed_start_ascii) {
++            const iree_host_size_t scan_begin = position;
++            while (position < chunk.size) {
++              const uint8_t b = (uint8_t)chunk.data[position];
++              if (b >= 0x80 ||
++                  start_transitions[b] !=
++                      IREE_TOKENIZER_UTIL_REGEX_NO_TRANSITION) {
++                break;
++              }
++              ++position;
++            }
++            // Preserve the same last failed character as scalar execution,
++            // including when the initial failure was a multi-byte codepoint.
++            if (position != scan_begin) {
++              state->match_start = base_offset + position - 1;
++            }
++          }
++          continue;
+         }
+         // If we already tried, advance.
+         if (state->match_start == abs_pos) {
+diff --git a/runtime/src/iree/tokenizer/regex/exec_test.cc b/runtime/src/iree/tokenizer/regex/exec_test.cc
+--- a/runtime/src/iree/tokenizer/regex/exec_test.cc
++++ b/runtime/src/iree/tokenizer/regex/exec_test.cc
+@@ -504,6 +504,40 @@
+                                            &collector));
+ 
+   EXPECT_EQ(collector.matches.size(), 0);
++}
++
++TEST(DfaExec, UnmatchedPrefixAndStreamingPartialMatch) {
++  auto data = BuildAbcDfa();
++  iree_tokenizer_regex_dfa_t dfa;
++  IREE_ASSERT_OK(iree_tokenizer_regex_dfa_load(
++      iree_make_const_byte_span(data.data(), data.size()), &dfa));
++  std::string text(4096, 'x');
++  text += "abxabc";
++  text.append(512, 'x');
++  text += "abc";
++  MatchCollector reference;
++  IREE_ASSERT_OK(iree_tokenizer_regex_exec(
++      &dfa, iree_make_string_view(text.data(), text.size()),
++      MatchCollector::Callback, &reference));
++  ASSERT_EQ(reference.matches.size(), 2);
++  EXPECT_EQ(reference.matches[0].first, 4099);
++  EXPECT_EQ(reference.matches[0].second, 4102);
++  EXPECT_EQ(reference.matches[1].first, 4614);
++  EXPECT_EQ(reference.matches[1].second, 4617);
++  for (size_t chunk_size : {1, 2, 7, 64, 1024}) {
++    iree_tokenizer_regex_exec_state_t state;
++    iree_tokenizer_regex_exec_initialize(&state, &dfa);
++    MatchCollector actual;
++    for (size_t offset = 0; offset < text.size(); offset += chunk_size) {
++      const size_t length = std::min(chunk_size, text.size() - offset);
++      IREE_ASSERT_OK(iree_tokenizer_regex_exec_feed(
++          &dfa, &state, iree_make_string_view(text.data() + offset, length),
++          offset, nullptr, MatchCollector::Callback, &actual));
++    }
++    IREE_ASSERT_OK(iree_tokenizer_regex_exec_finalize(
++        &dfa, &state, text.size(), MatchCollector::Callback, &actual));
++    EXPECT_EQ(actual.matches, reference.matches);
++  }
+ }
+ 
+ TEST(DfaExec, EmptyInput) {
+@@ -2839,4 +2873,161 @@
+   TestWithChunkSizes(&dfa, "a  b  ", expected, {1, 2, 3, 4, 5, 6, 10});
+ }
+ 
++
++// Exercises the failed-start scan with hand-built exact range transitions.
++// Ranges may cover ASCII even when the byte table has NO_TRANSITION.
++std::vector<uint8_t> BuildAbcWithExactRange(uint16_t from_state,
++                                          uint16_t target_state,
++                                          uint32_t codepoint) {
++  auto data = BuildAbcDfa();
++  const size_t offset = data.size();
++  data.resize(offset + sizeof(uint32_t) +
++              sizeof(iree_tokenizer_regex_dfa_range_transition_t));
++  auto* header =
++      reinterpret_cast<iree_tokenizer_regex_dfa_header_t*>(data.data());
++  header->flags |= IREE_TOKENIZER_UTIL_REGEX_DFA_FLAG_HAS_RANGES;
++  const uint16_t counts[] = {1, 0};
++  std::memcpy(data.data() + offset, counts, sizeof(counts));
++  const iree_tokenizer_regex_dfa_range_transition_t range = {
++      from_state, target_state, codepoint, codepoint};
++  std::memcpy(data.data() + offset + sizeof(counts), &range, sizeof(range));
++  return data;
++}
++
++void CheckFailedStartScanChunks(
++    const iree_tokenizer_regex_dfa_t* dfa, const std::string& text,
++    const std::vector<std::pair<size_t, size_t>>& expected) {
++  for (bool use_stride : {false, true}) {
++    iree_tokenizer_regex_stride_t* stride = nullptr;
++    if (use_stride) {
++      IREE_ASSERT_OK(iree_tokenizer_regex_stride_allocate(
++          dfa, iree_allocator_system(), &stride));
++    }
++    for (size_t chunk_size : {1, 2, 7, 64, 1024, 4097}) {
++      iree_tokenizer_regex_exec_state_t state;
++      iree_tokenizer_regex_exec_initialize(&state, dfa);
++      MatchCollector actual;
++      size_t offset = 0;
++      while (offset < text.size()) {
++        size_t end = std::min(offset + chunk_size, text.size());
++        // exec_feed requires complete UTF-8 codepoints in each chunk.
++        while (end > offset && end < text.size() &&
++               (static_cast<uint8_t>(text[end]) & 0xC0) == 0x80) {
++          --end;
++        }
++        if (end == offset) {
++          ++end;
++          while (end < text.size() &&
++                 (static_cast<uint8_t>(text[end]) & 0xC0) == 0x80) {
++            ++end;
++          }
++        }
++        IREE_ASSERT_OK(iree_tokenizer_regex_exec_feed(
++            dfa, &state,
++            iree_make_string_view(text.data() + offset, end - offset), offset,
++            stride, MatchCollector::Callback, &actual));
++        offset = end;
++        // Empty feeds must preserve pending/backtrack state and absolute offsets.
++        IREE_ASSERT_OK(iree_tokenizer_regex_exec_feed(
++            dfa, &state, iree_make_string_view("", 0), offset, stride,
++            MatchCollector::Callback, &actual));
++      }
++      IREE_ASSERT_OK(iree_tokenizer_regex_exec_finalize(
++          dfa, &state, text.size(), MatchCollector::Callback, &actual));
++      EXPECT_EQ(actual.matches, expected)
++          << "stride=" << use_stride << " chunk_size=" << chunk_size;
++    }
++    iree_tokenizer_regex_stride_free(stride, iree_allocator_system());
++  }
++}
++
++TEST(FailedStartAsciiScan, HonorsExactAsciiRangeAtInitialState) {
++  auto data = BuildAbcWithExactRange(0, 1, 'x');
++  iree_tokenizer_regex_dfa_t dfa;
++  IREE_ASSERT_OK(iree_tokenizer_regex_dfa_load(
++      iree_make_const_byte_span(data.data(), data.size()), &dfa));
++  std::string text(2048, 'z');
++  text += "xbc";
++  text.append(33, 'z');
++  text += "abc";
++  CheckFailedStartScanChunks(&dfa, text, {{2048, 2051}, {2084, 2087}});
++}
++
++TEST(FailedStartAsciiScan, StopsBeforeExactNonAsciiRange) {
++  auto data = BuildAbcWithExactRange(0, 1, 0x4E2D);
++  iree_tokenizer_regex_dfa_t dfa;
++  IREE_ASSERT_OK(iree_tokenizer_regex_dfa_load(
++      iree_make_const_byte_span(data.data(), data.size()), &dfa));
++  std::string text(4096, 'z');
++  text += "\xE4\xB8\xAD" "bc";
++  text.append(127, 'z');
++  text += "abc";
++  CheckFailedStartScanChunks(&dfa, text, {{4096, 4101}, {4228, 4231}});
++}
++
++TEST(FailedStartAsciiScan, PreservesExactRangeFromAnotherState) {
++  auto data = BuildAbcWithExactRange(1, 2, 'x');
++  iree_tokenizer_regex_dfa_t dfa;
++  IREE_ASSERT_OK(iree_tokenizer_regex_dfa_load(
++      iree_make_const_byte_span(data.data(), data.size()), &dfa));
++  std::string text(4096, 'z');
++  text += "axc";
++  text.append(511, 'z');
++  text += "abc";
++  CheckFailedStartScanChunks(&dfa, text, {{4096, 4099}, {4610, 4613}});
++}
++
++TEST(FailedStartAsciiScan, PreservesFailedCodepointOffsetAtChunkEnd) {
++  auto data = BuildAbcDfa();
++  iree_tokenizer_regex_dfa_t dfa;
++  IREE_ASSERT_OK(iree_tokenizer_regex_dfa_load(
++      iree_make_const_byte_span(data.data(), data.size()), &dfa));
++  std::string text(4096, 'x');
++  text += "\xE4\xB8\xAD";
++  iree_tokenizer_regex_exec_state_t state;
++  iree_tokenizer_regex_exec_initialize(&state, &dfa);
++  MatchCollector actual;
++  IREE_ASSERT_OK(iree_tokenizer_regex_exec_feed(
++      &dfa, &state, iree_make_string_view(text.data(), text.size()), 0, nullptr,
++      MatchCollector::Callback, &actual));
++  EXPECT_EQ(state.match_start, 4096);
++  EXPECT_FALSE(state.in_match);
++  EXPECT_FALSE(state.has_accept);
++  EXPECT_FALSE(state.has_accept_fallback);
++  EXPECT_FALSE(state.pending_lookahead);
++  EXPECT_TRUE(actual.matches.empty());
++  CheckFailedStartScanChunks(&dfa, text, {});
++}
++
++TEST(FailedStartAsciiScan, PreservesLookaheadFallbackAndRewind) {
++  auto data = BuildOnePlusAWithFallbackDfa();
++  iree_tokenizer_regex_dfa_t dfa;
++  IREE_ASSERT_OK(iree_tokenizer_regex_dfa_load(
++      iree_make_const_byte_span(data.data(), data.size()), &dfa));
++  std::string text(2048, 'z');
++  text += "aaXa";
++  text.append(1024, 'z');
++  text += "aX";
++  CheckFailedStartScanChunks(
++      &dfa, text, {{2048, 2049}, {2049, 2050}, {2051, 2052}, {3076, 3077}});
++}
++
++TEST(FailedStartAsciiScan, PreservesStartAnchorExit) {
++  auto data = BuildStartAnchoredHelloDfa();
++  // Set the actual per-state start constraint that exec_feed checks. The
++  // original fixture has different start states but no anchor bitmap.
++  const size_t offset = data.size();
++  const uint64_t anchors[] = {(1ull << 0) | (1ull << 5), 0};
++  data.resize(offset + sizeof(anchors));
++  auto* header =
++      reinterpret_cast<iree_tokenizer_regex_dfa_header_t*>(data.data());
++  header->flags |= IREE_TOKENIZER_UTIL_REGEX_DFA_FLAG_HAS_ANCHORS;
++  std::memcpy(data.data() + offset, anchors, sizeof(anchors));
++  iree_tokenizer_regex_dfa_t dfa;
++  IREE_ASSERT_OK(iree_tokenizer_regex_dfa_load(
++      iree_make_const_byte_span(data.data(), data.size()), &dfa));
++  CheckFailedStartScanChunks(&dfa, "Hello" + std::string(4096, 'x'), {{0, 5}});
++  CheckFailedStartScanChunks(&dfa, std::string(4096, 'x') + "Hello", {});
++}
++
+ }  // namespace
