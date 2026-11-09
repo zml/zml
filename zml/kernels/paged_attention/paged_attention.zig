@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../zml.zig");
+pub const AttentionOptions = @import("options.zig").AttentionOptions;
 pub const cute = @import("cute/cute.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
@@ -151,41 +152,6 @@ pub const Parameters = union(Backend) {
     }
 };
 
-pub const AttentionMask = union(enum) {
-    standard: struct {
-        /// Restrict attention to keys at or before the query position.
-        causal: bool = true,
-        /// Optional left window size, including the current token.
-        /// Non-causal attention also includes every later valid key.
-        sliding_window: ?u32 = null,
-    },
-    /// Attend to keys at specific positions.
-    indices: zml.Tensor,
-
-    /// Attend to every valid key in the sequence.
-    pub const none: AttentionMask = .{ .standard = .{ .causal = false } };
-
-    pub fn isCausal(mask: AttentionMask) bool {
-        return switch (mask) {
-            .standard => |options| options.causal,
-            .indices => false,
-        };
-    }
-
-    pub fn slidingWindow(mask: AttentionMask) ?u32 {
-        return switch (mask) {
-            .standard => |options| options.sliding_window,
-            .indices => null,
-        };
-    }
-};
-
-pub const AttentionOptions = struct {
-    mask: AttentionMask = .{ .standard = .{} },
-    scale: ?f32 = null,
-    sink: ?zml.Tensor = null,
-};
-
 pub const KvCache = union(enum) {
     split: struct {
         k: zml.Tensor,
@@ -232,19 +198,6 @@ pub const KvCache = union(enum) {
         const offset = slot_mapping.remainder(.scalar(page_size, slot_mapping.dtype()));
         return .{ page_index, offset };
     }
-
-    pub fn getPage(
-        self: KvCache,
-        page_index: zml.Tensor,
-    ) [2]zml.Tensor {
-        return switch (self) {
-            .split => |split| .{
-                split.k.slice(split.k.axis(.page), .dynSingle(page_index)),
-                split.v.slice(split.k.axis(.page), .dynSingle(page_index)),
-            },
-            .dense => @panic("TODO"),
-        };
-    }
 };
 
 pub const Partitioning = zml.ops.ManualPartitioning(Attention.forward);
@@ -280,7 +233,10 @@ const Attention = struct {
                 .split => |split| metal.pagedAttention(metal_parameters, args.q, split.k, split.v, args.opts),
                 .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
             },
-            .stablehlo => |params| stablehlo.pagedAttention(params, args.q, args.kv_cache, args.opts),
+            .stablehlo => |params| switch (args.kv_cache) {
+                .split => |split| stablehlo.pagedAttention(params, args.q, split.k, split.v, args.opts),
+                .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            },
             .tcl => |params| switch (args.kv_cache) {
                 .split => |split| tcl.paged.pagedAttention(params, args.q, split.k, split.v, args.opts),
                 .dense => std.debug.panic("TCL paged attention takes separate K and V pages", .{}),

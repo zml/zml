@@ -1,7 +1,6 @@
 const stdx = @import("stdx");
 
 const zml = @import("../../../../zml.zig");
-const paged = @import("../../paged_attention.zig");
 const cute = @import("../cute.zig");
 const kernel = @import("attention.zig");
 
@@ -18,7 +17,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 12;
 }
 
-pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.AttentionOptions) zml.Tensor {
+pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: cute.AttentionOptions) zml.Tensor {
     const q_ = q.transpose(.{ .b, .hkv, .hg, .hd });
     const k_ = k.transpose(.{ .page, .k_chunk, .hkv, .hd });
     const v_ = v.transpose(.{ .page, .k_chunk, .hkv, .hd });
