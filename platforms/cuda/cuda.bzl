@@ -264,8 +264,8 @@ _PLUGINS = {
         "url": "https://mirror.zml.ai/plugins/202611101651.363.1.d46c7471c419/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "caeefd717960fa2acec6304cd8296299e262abdba669ecf4d487e3af76d73a7b",
-        "url": "https://mirror.zml.ai/plugins/202611101651.363.1.d46c7471c419/zml-cuda-linux-arm64.tar.zst",
+        "sha256": "842746eaec0fd2403ce2b5567d51dbba400fc43b46f37175c8d6d25a7c65b814",
+        "url": "file:///home/benjamin/deepseek41-cp-master-revalidate-20261111/xla/cuda-d79645f2-nccl23004-linux-arm64.tar.zst",
     },
 }
 
@@ -275,8 +275,8 @@ _NCCL_ASSETS = {
         "sha256": "534dbf3058cadb625f08ab0d17f1dffad3b961a2bfa360d66633fcf21be53f57",
     },
     "arm64": {
-        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.30.4-py3-none-manylinux_2_18_aarch64.whl",
-        "sha256": "e99308a3a89fba78918d50886e81072a6c8b0b4199feb02c3903e63713a6525a",
+        "url": "file:///home/benjamin/deepseek41-cp-evidence-20261107/workspaces/tmp-benjamin/llmd-cp-kernel-tuning-20261027/nccl-single-host-backport-review/v1/gnu9-build/frozen/nccl-2.30.4-host-cache-arm64.zip",
+        "sha256": "38cc66b24f83adfe9e2ae8d96642ef3f0b8674bf6fae048e0fbda4e86fe02c41",
     },
 }
 
