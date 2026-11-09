@@ -287,7 +287,12 @@ fn AllReduceReturnType(comptime InputsT: type) type {
     };
 }
 
-/// The executing device's coordinate on a caller-selected logical mesh axis.
+/// Returns the current process's zero based coordinate on `axis` in `mesh`
+/// as a scalar u32.
+///
+/// Example: for a mesh {.data = 2, .experts = 2}, each data group has expert coordinates
+/// 0 and 1. Use this coordinate inside a manual computation to identify a shard
+/// along one axis while `partitionId()` identifies a partition across the whole mesh.
 pub fn axisIndex(mesh: *const Sharding.Mesh, axis: anytype) Tensor {
     const logical_axis = mesh.resolveLogicalAxis(Shape.toTag(axis)) orelse @panic("Unknown logical mesh axis");
     var coords: [Platform.MAX_NUM_DEVICES]u32 = undefined;

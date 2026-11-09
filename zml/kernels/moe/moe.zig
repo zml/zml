@@ -4,14 +4,14 @@ const platforms = @import("platforms");
 
 const zml = @import("../../zml.zig");
 const stdx = zml.stdx;
-pub const tcl = @import("tcl/tcl.zig");
-pub const stablehlo = @import("stablehlo/stablehlo.zig");
 pub const cute = @import("cute/cute.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer/cutlass_flashinfer.zig");
+pub const fly = @import("fly/fly.zig");
 pub const metal = @import("metal/metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu/mosaic_tpu.zig");
+pub const stablehlo = @import("stablehlo/stablehlo.zig");
+pub const tcl = @import("tcl/tcl.zig");
 pub const triton = @import("triton/triton.zig");
-pub const fly = @import("fly/fly.zig");
 
 const log = std.log.scoped(.@"zml/moe");
 
@@ -178,22 +178,30 @@ pub const Backend = enum {
     }
 };
 
-/// Global routing with the expert range owned by this local computation.
-/// Kernels select local ids or a global-to-local map to match their routing algorithm.
-/// Kernels return this range's contribution; `forwardMoe` sums contributions.
+/// Routing for a local token batch and a contiguous range of experts.
+/// IDs retain the model's global expert numbering, while the projection weights
+/// contain only the local experts. Kernels compute those experts contributions and
+/// `forwardMoe` sums them along the expert axis.
 pub const LocalRouting = struct {
+    /// Global expert IDs for local tokens, with shape {.t, .topk}
     ids: zml.Tensor,
     weights: zml.Tensor,
-    global_num_experts: i64,
-    local_num_experts: i64,
+    global_num_experts: u32,
+    local_num_experts: u32,
+    /// Scalar i32 containing the first local expert's global ID.
+    /// Null when all experts are local and global IDs already index the weights.
     expert_start: ?zml.Tensor = null,
 
+    /// Maps routing IDs to local weight indices, using -1 for nonlocal experts.
+    /// For a shard owning experts 4–7, routing IDs [1, 6] become [-1, 2].
     pub fn localIds(self: LocalRouting) zml.Tensor {
         const start = self.expert_start orelse return self.ids;
         const local = self.ids.cmp(.GE, start).logical(.AND, self.ids.cmp(.LT, start.addConstant(self.local_num_experts)));
         return local.select(self.ids.sub(start), .scalar(-1, .i32));
     }
 
+    /// Returns a lookup table from every global expert ID to its local weight
+    /// index or -1 if nonlocal. Returns null when every expert is local.
     pub fn expertMap(self: LocalRouting) ?zml.Tensor {
         const start = self.expert_start orelse return null;
         const ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
@@ -275,7 +283,10 @@ pub fn forwardMoe(
 
     const tokens = shapes.input.partition(.t);
     const experts = shapes.gate_up.partition(.expert);
+    // Local kernels require complete feature vectors and top-k routing lists.
     stdx.debug.assert(shapes.input.partition(.d) == .replicated and shapes.ids.partition(.topk) == .replicated and shapes.weights.partition(.topk) == .replicated, "MoE feature and top-k dimensions must be replicated", .{});
+    // The expert-axis reduction must add contributions for the same token rows.
+    // Sharding tokens along that axis would mix contributions for different tokens.
     stdx.debug.assert(shapes.ids.partition(.t) == tokens and shapes.weights.partition(.t) == tokens and output_shape.partition(.t) == tokens and output_shape.partition(.d) == .replicated, "MoE input, routing and output must have matching token partitioning", .{});
     stdx.debug.assert(shapes.down.partition(.expert) == experts and (!experts.isSharded() or experts != tokens), "MoE projections must agree on expert partitioning; tokens must be replicated along the expert axis", .{});
     for ([_]zml.Shape{ shapes.gate_up, shapes.down }) |shape| {
@@ -298,14 +309,14 @@ pub fn forwardMoe(
         opts: Options,
         mesh: *const zml.Mesh,
         expert_axis: ?u3,
-        global_experts: i64,
+        global_experts: u32,
 
         fn forward(args: @This(), _: zml.Shape) zml.Tensor {
             const routing: LocalRouting = .{
                 .ids = args.ids,
                 .weights = args.weights,
                 .global_num_experts = args.global_experts,
-                .local_num_experts = args.gate_up.weight.dim(.expert),
+                .local_num_experts = @intCast(args.gate_up.weight.dim(.expert)),
                 .expert_start = if (args.expert_axis) |axis| zml.ops.axisIndex(args.mesh, args.mesh.logical.axes.get(axis)).convert(.i32).scale(args.gate_up.weight.dim(.expert)) else null,
             };
             const output = switch (args.backend) {
@@ -331,7 +342,7 @@ pub fn forwardMoe(
         .opts = opts,
         .mesh = mesh,
         .expert_axis = if (parallel) expert_axis else null,
-        .global_experts = gate_up.weight.dim(.expert),
+        .global_experts = @intCast(gate_up.weight.dim(.expert)),
     };
     const Logical = zml.Sharding.Partitioning.Logical;
     var projection_specs: [2]zml.meta.MapRestrict(zml.Tensor, Logical).map(zml.nn.Linear) = undefined;
