@@ -173,9 +173,6 @@ pub const Session = struct {
         var active_length_buf: zml.Buffer = try .fromSlice(self.io, self.platform, active_length_slice);
         defer active_length_buf.deinit();
 
-        const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
-        defer self.allocator.free(out_tokens_buffer);
-
         const params = self.compiled_model.params;
         var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
@@ -185,7 +182,7 @@ pub const Session = struct {
 
             if (token_id == self.config.eos_token_id) break :generation;
 
-            const token = try decoder.feedOne(token_id, out_tokens_buffer);
+            const token = try decoder.feedOne(token_id);
             if (self.think_start) |think_start| if (token_id == think_start) {
                 try stdout.writeAll("\x1b[2m");
             };
@@ -221,7 +218,7 @@ pub const Session = struct {
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 
-        try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
+        try stdout.writeAll(try decoder.finalize());
         try stdout.flush();
     }
 };

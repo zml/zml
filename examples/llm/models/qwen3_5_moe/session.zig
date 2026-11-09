@@ -147,9 +147,6 @@ pub const Session = struct {
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
-        const out_tokens_buffer = try self.allocator.alloc(u8, 1024);
-        defer self.allocator.free(out_tokens_buffer);
-
         var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice);
         defer current_token_buffer.deinit();
         var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32);
@@ -161,7 +158,7 @@ pub const Session = struct {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
-            const token = try decoder.feedOne(token_id, out_tokens_buffer);
+            const token = try decoder.feedOne(token_id);
             if (self.think_start) |think_start| if (token_id == think_start) try stdout.writeAll("\x1b[2m");
             try stdout.writeAll(token);
             if (self.think_end) |think_end| if (token_id == think_end) try stdout.writeAll("\x1b[0m");
@@ -183,7 +180,7 @@ pub const Session = struct {
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 
-        try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
+        try stdout.writeAll(try decoder.finalize());
         try stdout.flush();
     }
 };

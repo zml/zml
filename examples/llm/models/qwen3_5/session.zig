@@ -138,9 +138,6 @@ pub const Session = struct {
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
-        const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
-        defer self.allocator.free(out_tokens_buffer);
-
         var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice);
         defer current_token_buffer.deinit();
 
@@ -153,7 +150,7 @@ pub const Session = struct {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
-            const token = try decoder.feedOne(token_id, out_tokens_buffer);
+            const token = try decoder.feedOne(token_id);
             if (self.think_start) |think_start| if (token_id == think_start) {
                 try stdout.writeAll("\x1b[2m");
             };
@@ -179,7 +176,7 @@ pub const Session = struct {
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 
-        try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
+        try stdout.writeAll(try decoder.finalize());
         try stdout.flush();
     }
 };

@@ -380,6 +380,7 @@ pub const Tokenizer = struct {
         tokenizer: *const Tokenizer,
         state_storage: []u8,
         state: *c.iree_tokenizer_decode_state_t,
+        text: std.Io.Writer.Allocating,
 
         fn init(tokenizer: *const Tokenizer, allocator: std.mem.Allocator) !Decoder {
             var state_size: usize = undefined;
@@ -399,12 +400,14 @@ pub const Tokenizer = struct {
                 .tokenizer = tokenizer,
                 .state_storage = state_storage,
                 .state = state.?,
+                .text = .init(allocator),
             };
         }
 
         pub fn deinit(self: *Decoder) void {
             c.iree_tokenizer_decode_state_deinitialize(self.state);
             self.tokenizer.allocator.free(self.state_storage);
+            self.text.deinit();
         }
 
         pub fn reset(self: *Decoder) !void {
@@ -419,33 +422,24 @@ pub const Tokenizer = struct {
             self.state = state.?;
         }
 
-        pub fn feedOne(self: *Decoder, token_id: u32, out: []u8) ![]u8 {
-            std.debug.assert(out.len != 0);
-            var consumed: usize = 0;
-            var produced: usize = 0;
-            try checkOk(c.iree_tokenizer_decode_state_feed(
-                self.state,
-                tokenIdList(&.{token_id}),
-                mutableStringView(out),
-                &consumed,
-                &produced,
-            ));
-            std.debug.assert(consumed == 1);
-            return out[0..produced];
+        pub fn feedOne(self: *Decoder, token_id: u32) ![]const u8 {
+            self.text.clearRetainingCapacity();
+            try self.feedInto(&.{token_id}, &self.text.writer);
+            return self.text.written();
         }
 
-        pub fn finalize(self: *Decoder, out: []u8) ![]u8 {
-            std.debug.assert(out.len != 0);
-            var produced: usize = 0;
-            try checkOk(c.iree_tokenizer_decode_state_finalize(
-                self.state,
-                mutableStringView(out),
-                &produced,
-            ));
-            return out[0..produced];
+        pub fn finalize(self: *Decoder) ![]const u8 {
+            self.text.clearRetainingCapacity();
+            try self.finalizeInto(&self.text.writer);
+            return self.text.written();
         }
 
         pub fn decode(self: *Decoder, token_ids: []const u32, out: *std.Io.Writer) !void {
+            try self.feedInto(token_ids, out);
+            try self.finalizeInto(out);
+        }
+
+        fn feedInto(self: *Decoder, token_ids: []const u32, out: *std.Io.Writer) !void {
             var min_output: usize = @max(token_ids.len * 4, 128);
             var remaining = token_ids;
             while (remaining.len > 0) {
@@ -480,8 +474,10 @@ pub const Tokenizer = struct {
                 min_output = @max(128, min_output -| produced);
                 remaining = remaining[consumed..];
             }
+        }
 
-            min_output = 32;
+        fn finalizeInto(self: *Decoder, out: *std.Io.Writer) !void {
+            var min_output: usize = 32;
             while (true) {
                 var produced: usize = 0;
 
