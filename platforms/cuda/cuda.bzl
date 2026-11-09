@@ -202,6 +202,42 @@ NVSHMEM_PACKAGES = {
 }
 
 _UBUNTU_PACKAGES = {
+    "ibverbs-providers": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libmlx5.so.1",
+                "usr/share/doc/ibverbs-providers/copyright",
+            ],
+        ),
+    ],
+    "libibverbs1": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libibverbs.so.1",
+                "usr/share/doc/libibverbs1/copyright",
+            ],
+        ),
+    ],
+    "libnl-3-200": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libnl-3.so.200",
+                "usr/share/doc/libnl-3-200/copyright",
+            ],
+        ),
+    ],
+    "libnl-route-3-200": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libnl-route-3.so.200",
+                "usr/share/doc/libnl-route-3-200/copyright",
+            ],
+        ),
+    ],
     "llvm-libunwind1": [
         """filegroup(
             name = "libunwind",
@@ -262,6 +298,7 @@ def _read_redist_json(mctx, url, sha256):
 def _cuda_impl(mctx):
     loaded_packages = packages.read(mctx, [
         "@zml//platforms/cuda:packages.lock.json",
+        "@zml//platforms/cuda:rdma.packages.lock.json",
     ])
 
     CUDA_REDIST = _read_redist_json(

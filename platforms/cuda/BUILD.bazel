@@ -1,6 +1,16 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
 
+filegroup(
+    name = "rdma_license_texts",
+    srcs = [
+        "rdma/GPL-2",
+        "rdma/LGPL-2.1",
+        "rdma/README.md",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 zig_binary(
     name = "compat_probe",
     main = "compat_probe.zig",
