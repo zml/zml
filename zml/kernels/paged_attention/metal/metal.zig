@@ -226,9 +226,9 @@ fn vecLaunch(rows: i32, group: i32, span: i32, cores: i32) VecLaunch {
 
 fn coreCount() i32 {
     const platform = zml.Compiler.current().platform;
-    if (platform.devices.len == 0) return 1;
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
-    return @intCast(std.math.clamp(attribute.int64, 1, 1024));
+    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse
+        std.debug.panic("Metal device has no core_count attribute", .{});
+    return @intCast(attribute.int64);
 }
 
 test vecLaunch {
