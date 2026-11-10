@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../zml.zig");
+pub const AttentionMask = @import("options.zig").AttentionMask;
 pub const AttentionOptions = @import("options.zig").AttentionOptions;
 pub const cute = @import("cute/cute.zig");
 const metal = @import("metal/metal.zig");

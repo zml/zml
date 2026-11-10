@@ -16,6 +16,49 @@ const vector = @import("mlir/dialects/vector");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+/// `CUtensorMapDataType`.
+pub const TensorMapDataType = enum(u32) {
+    uint8 = 0,
+    uint16 = 1,
+    uint32 = 2,
+    int32 = 3,
+    uint64 = 4,
+    int64 = 5,
+    float16 = 6,
+    float32 = 7,
+    float64 = 8,
+    bfloat16 = 9,
+    float32_ftz = 10,
+    tfloat32 = 11,
+    tfloat32_ftz = 12,
+    @"16u4_align8b" = 13,
+    @"16u4_align16b" = 14,
+    @"16u6_align16b" = 15,
+};
+
+/// `CUtensorMapSwizzle`.
+pub const TensorMapSwizzle = enum(u32) { none = 0, @"32b" = 1, @"64b" = 2, @"128b" = 3, @"128b_atom_32b" = 4 };
+/// `CUtensorMapL2promotion`.
+pub const TensorMapL2Promotion = enum(u32) { none = 0, @"64b" = 1, @"128b" = 2, @"256b" = 3 };
+/// `CUtensorMapInterleave`.
+pub const TensorMapInterleave = enum(u32) { none = 0, @"16b" = 1, @"32b" = 2 };
+/// `CUtensorMapFloatOOBfill`.
+pub const TensorMapOobFill = enum(u32) { none = 0, nan_request_zero_fma = 1 };
+
+pub const TensorMapSpec = struct {
+    data_type: TensorMapDataType,
+    rank: u32,
+    global_dims: [5]u64 = @splat(1),
+    /// Byte strides of dimensions 1..rank-1.
+    global_strides: [4]u64 = @splat(0),
+    box_dims: [5]u32 = @splat(1),
+    element_strides: [5]u32 = @splat(1),
+    interleave: TensorMapInterleave = .none,
+    swizzle: TensorMapSwizzle,
+    l2_promotion: TensorMapL2Promotion = .none,
+    oob_fill: TensorMapOobFill = .none,
+};
+
 const dtypes = @import("dtype.zig");
 pub const DType = dtypes.DType;
 const isFloatDtype = dtypes.isFloatDtype;
@@ -715,6 +758,7 @@ pub const ArgSpec = struct {
     pub const MlirTypeSpec = struct {
         type_: *const mlir.Type,
         grid_constant: bool = false,
+        cuda_grid_constant: bool = false,
     };
 
     pub const TensorSpec = struct {
@@ -823,6 +867,7 @@ pub const Builder = struct {
                 .mlir_type => .{ .mlir_type = .{
                     .type_ = inner.type_,
                     .grid_constant = if (@hasField(@TypeOf(inner), "grid_constant")) inner.grid_constant else false,
+                    .cuda_grid_constant = if (@hasField(@TypeOf(inner), "cuda_grid_constant")) inner.cuda_grid_constant else false,
                 } },
             } };
         }
@@ -849,7 +894,7 @@ pub const Builder = struct {
         return @Struct(.auto, null, &names, &types, &@splat(.{}));
     }
 
-    fn declareArgsLow(self: *Builder, args: []const ArgSpec) FinishError!void {
+    pub fn declareArgsLow(self: *Builder, args: []const ArgSpec) FinishError!void {
         std.debug.assert(self.entry_block == null);
         const ctx = self.ctx;
         const scratch = self.arena.allocator();
@@ -871,7 +916,7 @@ pub const Builder = struct {
         var any_arg_attr = false;
         for (arg_attrs, args) |*attr, a| {
             attr.* = switch (a.kind) {
-                .mlir_type => |typed| if (typed.grid_constant) .dict(ctx, &.{cute_nvgpu.gridConstant(ctx)}) else empty_dict,
+                .mlir_type => |typed| if (typed.cuda_grid_constant) .dict(ctx, &.{.named(ctx, "cuda.grid_constant", .unit(ctx))}) else if (typed.grid_constant) .dict(ctx, &.{cute_nvgpu.gridConstant(ctx)}) else empty_dict,
                 else => empty_dict,
             };
             if (attr.* != empty_dict) any_arg_attr = true;
@@ -1079,6 +1124,75 @@ pub const Builder = struct {
             .inputs = values,
             .callee = self.kernelSymbol(kernel_name),
             .assume_kernel_attr = cuda.assumeKernelAttr(self.ctx, true),
+            .location = self.loc(),
+        }));
+    }
+
+    /// `!cuda.tensor_map`: the kernel argument type of an explicitly encoded map.
+    pub fn tensorMapType(self: *Builder) *const mlir.Type {
+        return (cuda.ops.TensorMapType.get(self.ctx, .{}) catch unreachable).type_();
+    }
+
+    /// A host stack array of `values` (u64 -> i64 slots, u32 -> i32 slots): a `cuuint64_t*` /
+    /// `cuuint32_t*` argument of `cuTensorMapEncodeTiled`.
+    fn tensorMapHostArray(self: *Builder, comptime T: type, values: []const T) Value {
+        const ctx = self.ctx;
+        const elem: *const mlir.Type = if (T == u64) .int(ctx, .i64) else .int(ctx, .i32);
+        const ptr_type = llvm.pointerType(ctx, llvm.NVPTXAddressSpace.generic);
+        const array = self.emit(mlir.Operation.make(ctx, "llvm.alloca", .{
+            .operands = .{ .flat = &.{self.constant(.i32, @as(i32, @intCast(@max(values.len, 1)))).inner} },
+            .results = .{ .flat = &.{ptr_type} },
+            .attributes = &.{ .named(ctx, "elem_type", .typeAttr(elem)), .named(ctx, "alignment", .int(ctx, .i64, 8)) },
+            .location = self.loc(),
+        }));
+        for (values, 0..) |v, i| {
+            const slot = self.emit(mlir.Operation.make(ctx, "llvm.getelementptr", .{
+                .operands = .{ .flat = &.{array.inner} },
+                .results = .{ .flat = &.{ptr_type} },
+                .attributes = &.{ .named(ctx, "elem_type", .typeAttr(elem)), .named(ctx, "rawConstantIndices", .denseArray(ctx, .i32, &[_]i32{@intCast(i)})) },
+                .location = self.loc(),
+            }));
+            const value = if (T == u64) self.constant(.i64, @as(i64, @intCast(v))) else self.constant(.i32, @as(i32, @intCast(v)));
+            self.emitVoid(llvm.store(ctx, value.inner, slot.inner, .{ .alignment = @sizeOf(T) }, self.loc()));
+        }
+        return array;
+    }
+
+    /// Encode a tiled map in a host function and return both the map and CUDA status.
+    /// The caller supplies the final device address and handles the returned status.
+    pub fn encodeTensorMap(self: *Builder, spec: TensorMapSpec, address: Value) struct { map: Value, result: Value } {
+        const ctx = self.ctx;
+        // The `cuda` dialect's address operand is a `ptr` dialect pointer, which zml does not register.
+        ctx.setAllowUnregisteredDialects(true);
+        const addr = self.emit(cuda.cast(ctx, (mlir.Type.parse(self.ctx, "!ptr.ptr<#ptr.generic_space>") catch @panic("invalid tensor-map IR")), address.inner, self.loc()));
+        const results = self.emitResults(2, cuda.ops.tensor_map_encode_tiled(
+            ctx,
+            self.constant(.i32, @as(i32, @intCast(@backingInt(spec.data_type)))).inner,
+            self.constant(.i32, @as(i32, @intCast(spec.rank))).inner,
+            addr.inner,
+            self.tensorMapHostArray(u64, spec.global_dims[0..spec.rank]).inner,
+            self.tensorMapHostArray(u64, spec.global_strides[0 .. spec.rank - 1]).inner,
+            self.tensorMapHostArray(u32, spec.box_dims[0..spec.rank]).inner,
+            self.tensorMapHostArray(u32, spec.element_strides[0..spec.rank]).inner,
+            self.constant(.i32, @as(i32, @intCast(@backingInt(spec.interleave)))).inner,
+            self.constant(.i32, @as(i32, @intCast(@backingInt(spec.swizzle)))).inner,
+            self.constant(.i32, @as(i32, @intCast(@backingInt(spec.l2_promotion)))).inner,
+            self.constant(.i32, @as(i32, @intCast(@backingInt(spec.oob_fill)))).inner,
+            cuda.resultType(ctx),
+            self.tensorMapType(),
+            self.loc(),
+        ));
+        return .{ .map = results[1], .result = results[0] };
+    }
+
+    /// Device side: the generic address (i64) of the `!cuda.tensor_map` kernel argument `arg`
+    /// (`&tensor_map` for a `__grid_constant__` parameter).
+    pub fn tensorMapAddress(self: *Builder, descriptor: Value) Value {
+        const ctx = self.ctx;
+        const llvm_ptr = self.emit(cuda.cast(ctx, llvm.pointerType(ctx, llvm.NVPTXAddressSpace.generic), descriptor.inner, self.loc()));
+        return self.emit(mlir.Operation.make(ctx, "llvm.ptrtoint", .{
+            .operands = .{ .flat = &.{llvm_ptr.inner} },
+            .results = .{ .flat = &.{DType.i64.toMlir(ctx)} },
             .location = self.loc(),
         }));
     }
@@ -1717,18 +1831,25 @@ pub const Builder = struct {
 
     /// `projection`, like Python's `proj`, selects the modes of `tile` that
     /// apply, such as `b.expr(.{ 1, AlgebraToken.all, 1 })`.
-    pub fn localTile(self: *Builder, input: anytype, tile: anytype, coord: anytype, result_type: *const mlir.Type, projection: ?AlgebraExpr) View {
+    pub fn localTile(self: *Builder, input: anytype, tile: anytype, coord: anytype, result_type: ?*const mlir.Type, projection: ?AlgebraExpr) View {
+        if (result_type == null) return self.inferView("cute.local_tile", &.{ self.asValue(input).inner, self.asValue(tile).inner, if (@TypeOf(coord) == View) coord.inner else self.makeCoord(coord) }, if (projection) |p| &.{.named(self.ctx, "proj", self.algebraAttr(cute_ir.CoordAttr, p).attribute())} else &.{});
         const coord_value = if (@TypeOf(coord) == View) coord.inner else self.makeCoord(coord);
         const result = self.emit(cute_ir.local_tile(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tile).inner,
             coord_value,
-            result_type,
+            result_type.?,
             .{ .proj = if (projection) |p| self.algebraAttr(cute_ir.CoordAttr, p).attribute() else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
+    }
+
+    // A null result type on the algebra operations below requests dialect inference.
+    fn inferView(self: *Builder, name: []const u8, operands: []const *const mlir.Value, attrs: []const mlir.NamedAttribute) View {
+        const value = self.emit(mlir.Operation.make(self.ctx, name, .{ .operands = .{ .flat = operands }, .attributes = attrs, .result_type_inference = true, .location = self.loc() }));
+        return .{ .inner = value.inner, .kernel = self };
     }
 
     pub fn localPartition(self: *Builder, input: anytype, tiler: anytype, index: anytype, result_type: *const mlir.Type) View {
@@ -1743,12 +1864,13 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn slice(self: *Builder, input: anytype, coord: anytype, result_type: *const mlir.Type) View {
+    pub fn slice(self: *Builder, input: anytype, coord: anytype, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.slice", &.{ self.asValue(input).inner, self.makeCoord(coord) }, &.{});
         const result = self.emit(cute_ir.slice(
             self.ctx,
             self.asValue(input).inner,
             self.makeCoord(coord),
-            result_type,
+            result_type.?,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -1767,13 +1889,17 @@ pub const Builder = struct {
             (cute_ir.MemRefType.get(self.ctx, .{ .ptr = memref.ptr_(), .layout = layout_value.type_() }) catch @panic("invalid regrouped memref")).type_()
         else if (input_type.isA(cute_ir.CoordTensorType)) |coords|
             (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = coords.arithTuple(), .layout = layout_value.type_() }) catch @panic("invalid regrouped coordinate tensor")).type_()
+        else if (input_type.isA(cute_nvgpu.SmemDescViewType)) |desc|
+            (cute_nvgpu.SmemDescViewType.get(self.ctx, .{ .desc = desc.desc(), .layout = layout_value.type_().isA(cute_ir.LayoutType).?.attr() }) catch @panic("invalid regrouped descriptor")).type_()
         else
-            std.debug.panic("withLayout: expected memref or coordinate tensor, got {f}", .{input_type});
+            std.debug.panic("withLayout: expected memref, coordinate tensor or shared-memory descriptor view, got {f}", .{input_type});
 
         const iterator_type: *const mlir.Type = if (input_type.isA(cute_ir.MemRefType)) |memref|
             memref.ptr_()
         else if (input_type.isA(cute_ir.CoordTensorType)) |coords|
             (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = coords.arithTuple() }) catch @panic("invalid arithmetic tuple iterator")).type_()
+        else if (input_type.isA(cute_nvgpu.SmemDescViewType)) |desc|
+            desc.desc()
         else
             unreachable;
         const iterator = self.emit(cute_ir.get_iter(self.ctx, value.inner, iterator_type, self.loc()));
@@ -1781,11 +1907,12 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn groupModes(self: *Builder, input: anytype, begin: u32, end: u32, result_type: *const mlir.Type) View {
+    pub fn groupModes(self: *Builder, input: anytype, begin: u32, end: u32, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.group_modes", &.{self.asValue(input).inner}, &.{ .named(self.ctx, "begin", .int(self.ctx, .i32, begin)), .named(self.ctx, "end", .int(self.ctx, .i32, end)) });
         const result = self.emit(cute_ir.group_modes(
             self.ctx,
             self.asValue(input).inner,
-            result_type,
+            result_type.?,
             .int(self.ctx, .i32, begin),
             .int(self.ctx, .i32, end),
             self.loc(),
@@ -1804,12 +1931,13 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn flatDivide(self: *Builder, input: anytype, tiler: anytype, result_type: *const mlir.Type) View {
+    pub fn flatDivide(self: *Builder, input: anytype, tiler: anytype, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.flat_divide", &.{ self.asValue(input).inner, self.asValue(tiler).inner }, &.{});
         const result = self.emit(cute_ir.flat_divide(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tiler).inner,
-            result_type,
+            result_type.?,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -1826,39 +1954,44 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn filterZeros(self: *Builder, input: anytype, target_profile: ?View, result_type: *const mlir.Type) View {
+    pub fn filterZeros(self: *Builder, input: anytype, target_profile: ?View, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.filter_zeros", if (target_profile) |target| &.{ self.asValue(input).inner, target.inner } else &.{self.asValue(input).inner}, &.{});
         const result = self.emit(cute_ir.filter_zeros(
             self.ctx,
             self.asValue(input).inner,
-            result_type,
+            result_type.?,
             .{ .target_profile = if (target_profile) |target| target.inner else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn getLayout(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute_ir.get_layout(self.ctx, self.asValue(input).inner, result_type, self.loc()));
+    pub fn getLayout(self: *Builder, input: anytype, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.get_layout", &.{self.asValue(input).inner}, &.{});
+        const result = self.emit(cute_ir.get_layout(self.ctx, self.asValue(input).inner, result_type.?, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     /// `cute.get_iter`: the iterator of `input`, of type `result_type`.
-    pub fn getIter(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute_ir.get_iter(self.ctx, self.asValue(input).inner, result_type, self.loc()));
+    pub fn getIter(self: *Builder, input: anytype, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.get_iter", &.{self.asValue(input).inner}, &.{});
+        const result = self.emit(cute_ir.get_iter(self.ctx, self.asValue(input).inner, result_type.?, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn getShape(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute_ir.get_shape(self.ctx, self.asValue(input).inner, result_type, self.loc()));
+    pub fn getShape(self: *Builder, input: anytype, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.get_shape", &.{self.asValue(input).inner}, &.{});
+        const result = self.emit(cute_ir.get_shape(self.ctx, self.asValue(input).inner, result_type.?, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn addOffset(self: *Builder, input: anytype, offset: anytype, result_type: *const mlir.Type) View {
+    pub fn addOffset(self: *Builder, input: anytype, offset: anytype, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.add_offset", &.{ self.asValue(input).inner, self.asValue(offset).inner }, &.{});
         const result = self.emit(cute_ir.add_offset(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(offset).inner,
-            result_type,
+            result_type.?,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -1895,36 +2028,39 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn tiledCopyRetile(self: *Builder, tiled: Atom, input: anytype, result_type: *const mlir.Type) View {
+    pub fn tiledCopyRetile(self: *Builder, tiled: Atom, input: anytype, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.tiled.copy.retile", &.{ tiled.inner, self.asValue(input).inner }, &.{});
         const result = self.emit(cute_ir.tiled_copy_retile(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
-            result_type,
+            result_type.?,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn tiledMmaPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, operand_id: u2, result_type: *const mlir.Type) View {
+    pub fn tiledMmaPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, operand_id: u2, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.tiled.mma.partition", &.{ tiled.inner, self.asValue(input).inner, self.makeCoord(coord) }, &.{.named(self.ctx, "operand_id", .int(self.ctx, .i32, operand_id))});
         const result = self.emit(cute_ir.tiled_mma_partition(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
             self.makeCoord(coord),
-            result_type,
+            result_type.?,
             .int(self.ctx, .i32, operand_id),
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn mmaMakeFragment(self: *Builder, tiled: Atom, input: anytype, operand_id: u2, result_type: *const mlir.Type) View {
+    pub fn mmaMakeFragment(self: *Builder, tiled: Atom, input: anytype, operand_id: u2, result_type: ?*const mlir.Type) View {
+        if (result_type == null) return self.inferView("cute.mma.make_fragment", &.{ tiled.inner, self.asValue(input).inner }, &.{.named(self.ctx, "operand_id", .int(self.ctx, .i32, operand_id))});
         const result = self.emit(cute_ir.mma_make_fragment(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
-            result_type,
+            result_type.?,
             .int(self.ctx, .i32, operand_id),
             self.loc(),
         ));
@@ -2731,8 +2867,8 @@ pub const Builder = struct {
 
     /// Arrive and expect `bytes` of asynchronous transactions (SM90+), as a
     /// TMA producer does before issuing its copies.
-    pub fn mbarrierArriveExpectTx(self: *Builder, mbar: Value, bytes: u32) void {
-        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(mbar).inner, self.constant(.i32, bytes).inner, .cta, self.loc()));
+    pub fn mbarrierArriveExpectTx(self: *Builder, mbar: Value, bytes: anytype) void {
+        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(mbar).inner, self.lift(bytes).to(.i32).inner, .cta, self.loc()));
     }
 
     pub const MBarrierArriveOptions = struct {
@@ -4199,6 +4335,618 @@ test "gather4 uses CuTe TMA atom construction, partitioning and copy options" {
     try expectContains(ir, "non_exec_2d_gather4_tma_load<sm_100_2sm");
     try expectContains(ir, "cute.copy");
     try expectContains(ir, "cache_policy");
+    const parsed = try mlir.Module.parse(ctx, ir);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
+}
+
+/// Low-level CUDA primitives. Prefer typed operations where they preserve the
+/// instruction semantics. Assembly fallbacks retain exact memory scopes, rounding,
+/// CTA-group/cache modifiers, and tied-register dependencies for asynchronous loads.
+const sm100_mma_peer_bit_mask: u32 = 0xFEFFFFFF;
+
+/// Side-effecting inline assembly with no result.
+pub fn asmVoid(b: *Builder, text: []const u8, args: []const Value, constraints: []const u8) void {
+    const inner = b.arena.allocator().alloc(*const mlir.Value, args.len) catch @panic("OOM");
+    for (args, inner) |a, *x| x.* = a.inner;
+    b.emitVoid(llvm.inline_asm(b.ctx, text, inner, .{ .constraints = constraints, .has_side_effects = true }, b.loc()));
+}
+
+/// Inline assembly with one result of `dtype`.
+pub fn asmValue(b: *Builder, text: []const u8, args: []const Value, dtype: DType, constraints: []const u8, side_effects: bool) Value {
+    const inner = b.arena.allocator().alloc(*const mlir.Value, args.len) catch @panic("OOM");
+    for (args, inner) |a, *x| x.* = a.inner;
+    return b.emit(llvm.inline_asm(b.ctx, text, inner, .{ .result_type = dtype.toMlir(b.ctx), .constraints = constraints, .has_side_effects = side_effects }, b.loc()));
+}
+
+/// Inline assembly with `n` results of `dtype` (an `!llvm.struct` result split with
+/// `llvm.extractvalue`, how LLVM represents multi-output asm).
+pub fn asmValues(b: *Builder, comptime n: usize, text: []const u8, args: []const Value, dtype: DType, constraints: []const u8, side_effects: bool) [n]Value {
+    return asmValuesSlice(b, n, text, args, dtype, constraints, side_effects)[0..n].*;
+}
+
+/// Inline assembly with a host-computed number of results of the same dtype.
+pub fn asmValuesSlice(b: *Builder, n: usize, text: []const u8, args: []const Value, dtype: DType, constraints: []const u8, side_effects: bool) []Value {
+    const inner = b.arena.allocator().alloc(*const mlir.Value, args.len) catch @panic("OOM");
+    for (args, inner) |a, *x| x.* = a.inner;
+    const elem = dtype.toMlir(b.ctx);
+    const struct_type = (mlir.Type.parse(b.ctx, std.fmt.allocPrint(b.arena.allocator(), "!llvm.struct<({s})>", .{structFields(b, n, elem)}) catch @panic("OOM")) catch @panic("invalid inline assembly result type"));
+    const packed_ = b.emit(llvm.inline_asm(b.ctx, text, inner, .{ .result_type = struct_type, .constraints = constraints, .has_side_effects = side_effects }, b.loc()));
+    const out = b.arena.allocator().alloc(Value, n) catch @panic("OOM");
+    for (out, 0..) |*o, i| {
+        o.* = b.emit(mlir.Operation.make(b.ctx, "llvm.extractvalue", .{
+            .operands = .{ .flat = &.{packed_.inner} },
+            .results = .{ .flat = &.{elem} },
+            .attributes = &.{.named(b.ctx, "position", .denseArray(b.ctx, .i64, &[_]i64{@intCast(i)}))},
+            .location = b.loc(),
+        }));
+    }
+    return out;
+}
+
+pub fn structFields(b: *Builder, n: usize, elem: *const mlir.Type) []const u8 {
+    var w: std.Io.Writer.Allocating = .init(b.arena.allocator());
+    for (0..n) |i| w.writer.print("{s}{f}", .{ if (i == 0) "" else ", ", elem }) catch @panic("OOM");
+    return w.written();
+}
+
+pub fn ldAcq(b: *Builder, ptr: Value) Value {
+    return asmValue(b, "ld.acquire.gpu.global.b32 $0, [$1];", &.{ptr}, .i32, "=r,l,~{memory}", true);
+}
+
+pub fn ldAcqSysU64(b: *Builder, ptr: Value) Value {
+    return asmValue(b, "ld.acquire.sys.global.b64 $0, [$1];", &.{ptr}, .i64, "=l,l,~{memory}", true);
+}
+
+pub fn ldAcqSysS32(b: *Builder, ptr: Value) Value {
+    return asmValue(b, "ld.acquire.sys.global.s32 $0, [$1];", &.{ptr}, .i32, "=r,l,~{memory}", true);
+}
+
+pub fn ldAcqSysU32(b: *Builder, ptr: Value) Value {
+    return asmValue(b, "ld.acquire.sys.global.u32 $0, [$1];", &.{ptr}, .i32, "=r,l,~{memory}", true);
+}
+
+pub fn ldAcqGpuU64(b: *Builder, ptr: Value) Value {
+    return asmValue(b, "ld.acquire.gpu.global.u64 $0, [$1];", &.{ptr}, .i64, "=l,l,~{memory}", true);
+}
+
+pub fn atomicAddU32(b: *Builder, ptr: Value, value: anytype) Value {
+    return asmValue(b, "atom.global.add.u32 $0, [$1], $2;", &.{ ptr, liftAs(b, value, .i32) }, .i32, "=r,l,r", true);
+}
+
+pub fn atomicAddU64(b: *Builder, ptr: Value, value: Value) Value {
+    return asmValue(b, "atom.global.add.u64 $0, [$1], $2;", &.{ ptr, value }, .i64, "=l,l,l", true);
+}
+
+pub fn atomicAddSys(b: *Builder, ptr: Value, value: Value) Value {
+    return asmValue(b, "atom.sys.global.add.u64 $0, [$1], $2;", &.{ ptr, value }, .i64, "=l,l,l", true);
+}
+
+pub fn atomicAddRel(b: *Builder, ptr: Value, value: anytype) Value {
+    return asmValue(b, "atom.release.gpu.global.add.u32 $0, [$1], $2;", &.{ ptr, liftAs(b, value, .i32) }, .i32, "=r,l,r,~{memory}", true);
+}
+
+pub fn stRelSys(b: *Builder, ptr: Value, value: Value) void {
+    asmVoid(b, "st.release.sys.global.u64 [$0], $1;", &.{ ptr, value }, "l,l,~{memory}");
+}
+
+pub fn redAddS32(b: *Builder, ptr: Value, value: anytype) void {
+    asmVoid(b, "red.gpu.global.add.s32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r");
+}
+
+pub fn redAddU32(b: *Builder, ptr: Value, value: anytype) void {
+    asmVoid(b, "red.gpu.global.add.u32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r");
+}
+
+pub fn redXorRel(b: *Builder, ptr: Value, value: Value) void {
+    asmVoid(b, "red.release.gpu.global.xor.b64 [$0], $1;", &.{ ptr, value }, "l,l,~{memory}");
+}
+
+pub fn redAddRel(b: *Builder, ptr: Value, value: anytype) void {
+    asmVoid(b, "red.release.gpu.global.add.u32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r,~{memory}");
+}
+
+pub fn redAddRelSys(b: *Builder, ptr: Value, value: anytype) void {
+    asmVoid(b, "red.release.sys.global.add.s32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r,~{memory}");
+}
+
+pub fn atomicAddBlockShared(b: *Builder, smem: Value, value: anytype) Value {
+    return asmValue(b, "atom.shared.cta.add.u32 $0, [$1], $2;", &.{ smem, liftAs(b, value, .i32) }, .i32, "=r,r,r,~{memory}", true);
+}
+
+pub fn fenceAcqRelCta(b: *Builder) void {
+    asmVoid(b, "fence.acq_rel.cta;", &.{}, "~{memory}");
+}
+
+pub fn liftAs(b: *Builder, value: anytype, dt: DType) Value {
+    if (@TypeOf(value) == Value) return value;
+    return b.constant(dt, value);
+}
+
+/// `cvta`-style widening of an `i32` shared-memory address to the 64-bit operand
+/// `__cvta_generic_to_shared` gives DeepGEMM's `"l"` constraints.
+pub fn zext64(b: *Builder, v: Value) Value {
+    if (v.dtype() == .i64) return v;
+    return b.emit(arith.extui(b.ctx, v.inner, DType.i64.toMlir(b.ctx), b.loc()));
+}
+
+pub fn i16Of(b: *Builder, v: Value) Value {
+    return if (v.dtype() == .i16) v else b.emit(arith.trunci(b.ctx, v.inner, DType.i16.toMlir(b.ctx), b.loc()));
+}
+
+pub fn cst32(b: *Builder, v: anytype) Value {
+    return b.constant(.i32, @as(i32, @bitCast(@as(u32, @truncate(@as(u64, @bitCast(@as(i64, v))))))));
+}
+
+pub fn cst64(b: *Builder, v: u64) Value {
+    return b.constant(.i64, @as(i64, @bitCast(v)));
+}
+
+pub fn getSmIdx(b: *Builder) Value {
+    return asmValue(b, "mov.u32 $0, %smid;", &.{}, .i32, "=r", false);
+}
+
+pub fn getLaneIdx(b: *Builder) Value {
+    return asmValue(b, "mov.u32 $0, %laneid;", &.{}, .i32, "=r", false);
+}
+
+/// `ptx::get_grid_idx`: the 64-bit `%gridid`, unique per launch.
+pub fn getGridIdx(b: *Builder) Value {
+    return asmValue(b, "mov.u64 $0, %gridid;", &.{}, .i64, "=l", true);
+}
+
+pub fn blockRankInCluster(b: *Builder) Value {
+    return asmValue(b, "mov.u32 $0, %cluster_ctarank;\n", &.{}, .i32, "=r", true);
+}
+
+/// `clock64()` (`mov.u64 %rd, %clock64;`).
+pub fn clock64(b: *Builder) Value {
+    return asmValue(b, "mov.u64 $0, %clock64;", &.{}, .i64, "=l", true);
+}
+
+/// Keep the original election sequence until typed election matches its small-batch performance.
+pub fn electOneSync(b: *Builder) Value {
+    const pred = asmValue(b,
+        \\{
+        \\.reg .b32 %rx;
+        \\.reg .pred %px;
+        \\     mov.u32 $0, 0;
+        \\     elect.sync %rx|%px, $1;
+        \\@%px mov.s32 $0, 1;
+        \\}
+    , &.{cst32(b, 0xFFFFFFFF)}, .i32, "=r,r", true);
+    return pred.ne(0);
+}
+
+/// `asm volatile("trap;")` (`DG_TRAP_ONLY_DEVICE_ASSERT`, and this port's timeout).
+pub fn trap(b: *Builder) void {
+    asmVoid(b, "trap;", &.{}, "~{memory}");
+}
+
+/// `ptx::sync_unaligned(num_threads, barrier_idx)`: `barrier.sync id, n` (threads of a warp may
+/// reach it at different program points).
+pub fn syncUnaligned(b: *Builder, num_threads: anytype, barrier_idx: anytype) void {
+    asmVoid(b, "barrier.sync $0, $1;", &.{ liftAs(b, barrier_idx, .i32), liftAs(b, num_threads, .i32) }, "r,r,~{memory}");
+}
+
+/// `cute::cluster_arrive`.
+pub fn clusterArrive(b: *Builder) void {
+    asmVoid(b, "barrier.cluster.arrive.aligned;\n", &.{}, "~{memory}");
+}
+
+/// `cudaGridDependencySynchronize()` (`griddepcontrol.wait;`, PDL).
+pub fn gridDependencySynchronize(b: *Builder) void {
+    asmVoid(b, "griddepcontrol.wait;", &.{}, "~{memory}");
+}
+
+/// `cutlass::arch::warpgroup_reg_alloc<RegCount>`.
+pub fn warpgroupRegAlloc(b: *Builder, reg_count: u32) void {
+    asmVoid(b, std.fmt.allocPrint(b.arena.allocator(), "setmaxnreg.inc.sync.aligned.u32 {d};\n", .{reg_count}) catch @panic("OOM"), &.{}, "");
+}
+
+/// `cutlass::arch::warpgroup_reg_dealloc<RegCount>`.
+pub fn warpgroupRegDealloc(b: *Builder, reg_count: u32) void {
+    asmVoid(b, std.fmt.allocPrint(b.arena.allocator(), "setmaxnreg.dec.sync.aligned.u32 {d};\n", .{reg_count}) catch @panic("OOM"), &.{}, "");
+}
+
+/// `ptx::ld_volatile(const uint64_t*)`.
+pub fn ldVolatileU64(b: *Builder, ptr: Value) Value {
+    return asmValue(b, "ld.volatile.global.b64 $0, [$1];", &.{ptr}, .i64, "=l,l", true);
+}
+
+/// `ptx::ld_volatile(const uint32_t*)`.
+pub fn ldVolatileU32(b: *Builder, ptr: Value) Value {
+    return asmValue(b, "ld.volatile.global.b32 $0, [$1];", &.{ptr}, .i32, "=r,l", true);
+}
+
+/// `ptx::ld_shared(const uint32_t*)`.
+pub fn ldSharedU32(b: *Builder, smem: Value) Value {
+    return asmValue(b, "ld.shared.u32 $0, [$1];", &.{zext64(b, smem)}, .i32, "=r,l", true);
+}
+
+/// `ptx::ld_shared(const float2*)`.
+pub fn ldSharedF32x2(b: *Builder, smem: Value) [2]Value {
+    return asmValues(b, 2, "ld.shared.v2.f32 {$0, $1}, [$2];", &.{zext64(b, smem)}, .f32, "=f,=f,l", true);
+}
+
+/// `ptx::ld_shared(const float4*)`.
+pub fn ldSharedF32x4(b: *Builder, smem: Value) [4]Value {
+    return asmValues(b, 4, "ld.shared.v4.f32 {$0, $1, $2, $3}, [$4];", &.{zext64(b, smem)}, .f32, "=f,=f,=f,=f,l", true);
+}
+
+/// `ptx::ld_shared(const uint4*)`.
+pub fn ldSharedU32x4(b: *Builder, smem: Value) [4]Value {
+    return asmValues(b, 4, "ld.shared.v4.u32 {$0, $1, $2, $3}, [$4];", &.{zext64(b, smem)}, .i32, "=r,=r,=r,=r,l", true);
+}
+
+/// `ptx::st_shared(const void*, x, y, z, w)`.
+pub fn stSharedU32x4(b: *Builder, smem: Value, w: [4]Value) void {
+    asmVoid(b, "st.shared.v4.u32 [$0], {$1, $2, $3, $4};", &.{ zext64(b, smem), w[0], w[1], w[2], w[3] }, "l,r,r,r,r");
+}
+
+/// `ptx::st_shared(const uint32_t*, uint32_t)`.
+pub fn stSharedU32(b: *Builder, smem: Value, value: Value) void {
+    asmVoid(b, "st.shared.u32 [$0], $1;", &.{ zext64(b, smem), value }, "l,r");
+}
+
+/// `ptx::st_shared(const float2*, float2)`.
+pub fn stSharedF32x2(b: *Builder, smem: Value, v: [2]Value) void {
+    asmVoid(b, "st.shared.v2.f32 [$0], {$1, $2};", &.{ zext64(b, smem), v[0], v[1] }, "l,f,f");
+}
+
+/// `ptx::st_shared_bulk(smem, num_bytes)`: zero `num_bytes` (a multiple of 8) of shared memory.
+pub fn stSharedBulk(b: *Builder, smem: Value, num_bytes: u32) void {
+    std.debug.assert(num_bytes % 8 == 0);
+    asmVoid(b, "st.bulk.weak.shared::cta [$0], $1, 0;", &.{ zext64(b, smem), b.constant(.i64, num_bytes) }, "l,l,~{memory}");
+}
+
+/// `ptx::mapa_shared(ptr, dst_cta_idx)`: this CTA's shared address in cluster CTA `cta`.
+pub fn mapaShared(b: *Builder, smem: Value, dst_cta_idx: Value) Value {
+    return asmValue(b, "mapa.shared::cluster.u32 $0, $1, $2;", &.{ smem, dst_cta_idx }, .i32, "=r,r,r", true);
+}
+
+/// `ptx::st_async_cluster(dst, src, dst_cta_idx, barrier)` for `words.len / 4` 16-byte
+/// chunks: `st.async` into CTA `dst_cta_idx`'s shared memory, completing the bytes on its
+/// mbarrier at `barrier` (both local addresses, mapped with `mapa`).
+pub fn stAsyncCluster(b: *Builder, dst: Value, words: []const Value, dst_cta_idx: Value, barrier: Value) void {
+    std.debug.assert(words.len % 4 == 0);
+    const mapped_barrier = mapaShared(b, barrier, dst_cta_idx);
+    const mapped_dst = mapaShared(b, dst, dst_cta_idx);
+    var i: usize = 0;
+    while (i < words.len) : (i += 4) {
+        asmVoid(
+            b,
+            "st.async.shared::cluster.mbarrier::complete_tx::bytes.u32.v4 [$0], {$1, $2, $3, $4}, [$5];",
+            &.{ mapped_dst.add(@as(i32, @intCast(i * 4))), words[i], words[i + 1], words[i + 2], words[i + 3], mapped_barrier },
+            "r,r,r,r,r,r,~{memory}",
+        );
+    }
+}
+
+/// `ptx::SM100_U8x4_STSM_T<T>::copy(src, smem)`: `stmatrix.m16n8.x1.trans.b8`.
+pub fn stmatrixU8x4T(b: *Builder, src: Value, smem: Value) void {
+    asmVoid(b, "stmatrix.sync.aligned.m16n8.x1.trans.shared.b8 [$0], {$1};\n", &.{ zext64(b, smem), src }, "l,r");
+}
+
+/// `ptx::SM90_U32x4_STSM_T<T>::copy(s0, s1, s2, s3, smem)`: `stmatrix.x4.m8n8.trans.b16`.
+pub fn stmatrixU32x4T(b: *Builder, src: [4]Value, smem: Value) void {
+    asmVoid(b, "stmatrix.sync.aligned.x4.m8n8.shared.b16.trans [$0], {$1, $2, $3, $4};\n", &.{ zext64(b, smem), src[0], src[1], src[2], src[3] }, "l,r,r,r,r");
+}
+
+/// `ClusterBarrier::arrive()` on this CTA's barrier.
+pub fn mbarrierArrive(b: *Builder, bar: Value) void {
+    asmVoid(b, "{\n\tmbarrier.arrive.shared::cta.b64 _, [$0];\n\t}", &.{bar}, "r,~{memory}");
+}
+
+/// `ClusterBarrier::arrive(cta_id, pred = true)`: arrive on the barrier at the same offset of
+/// cluster CTA `cta_id`.
+pub fn mbarrierArriveCluster(b: *Builder, bar: Value, cta_id: Value) void {
+    asmVoid(
+        b,
+        "{\n\t.reg .b32 remAddr32;\n\tmapa.shared::cluster.u32  remAddr32, $0, $1;\n\tmbarrier.arrive.shared::cluster.b64  _, [remAddr32];\n\t}",
+        &.{ bar, cta_id },
+        "r,r,~{memory}",
+    );
+}
+
+/// `ClusterTransactionBarrier::arrive_and_expect_tx(bytes, cta_id, pred)`: on cluster CTA
+/// `cta_id`'s barrier, only when `pred == 1`.
+pub fn mbarrierArriveAndExpectTxCluster(b: *Builder, bar: Value, transaction_bytes: anytype, cta_id: Value, pred: Value) void {
+    asmVoid(
+        b,
+        "{\n\t.reg .pred p;\n\t.reg .b32 remAddr32;\n\tsetp.eq.u32 p, $2, 1;\n\t@p mapa.shared::cluster.u32  remAddr32, $0, $1;\n\t@p mbarrier.arrive.expect_tx.shared::cluster.b64  _, [remAddr32], $3;\n\t}",
+        &.{ bar, cta_id, pred, liftAs(b, transaction_bytes, .i32) },
+        "r,r,r,r,~{memory}",
+    );
+}
+
+/// `cute::prefetch_tma_descriptor(desc)` (generic descriptor address).
+pub fn prefetchTmaDescriptor(b: *Builder, desc: Value) void {
+    asmVoid(b, "prefetch.tensormap [$0];", &.{desc}, "l,~{memory}");
+}
+
+/// `SM100_TMA_2SM_LOAD_2D::copy(desc, mbar, cache_hint, smem, c0, c1)`: issued by both CTAs of
+/// the pair; the barrier address is masked so the bytes complete on the leader's barrier.
+pub fn tma2SmLoad2d(b: *Builder, desc: Value, mbar: Value, cache_hint: u64, smem: Value, c0: Value, c1: Value) void {
+    asmVoid(
+        b,
+        "cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [$0], [$1, {$3, $4}], [$2], $5;",
+        &.{ smem, desc, mbar.bitAnd(cst32(b, sm100_mma_peer_bit_mask)), c0, c1, cst64(b, cache_hint) },
+        "r,l,r,r,r,l,~{memory}",
+    );
+}
+
+/// `SM100_TMA_2SM_LOAD_4D::copy(desc, mbar, cache_hint, smem, c0, c1, c2, c3)`.
+pub fn tma2SmLoad4d(b: *Builder, desc: Value, mbar: Value, cache_hint: u64, smem: Value, c: [4]Value) void {
+    asmVoid(
+        b,
+        "cp.async.bulk.tensor.4d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [$0], [$1, {$3, $4, $5, $6}], [$2], $7;",
+        &.{ smem, desc, mbar.bitAnd(cst32(b, sm100_mma_peer_bit_mask)), c[0], c[1], c[2], c[3], cst64(b, cache_hint) },
+        "r,l,r,r,r,r,r,l,~{memory}",
+    );
+}
+
+/// `ptx::tma_load_1d(dst, src, mbar, num_bytes, hint = EVICT_FIRST)`: non-tensor bulk copy of
+/// `num_bytes` from a global (possibly peer) address into this CTA's shared memory.
+pub fn tmaLoad1d(b: *Builder, dst: Value, src: Value, mbar: Value, num_bytes: anytype, cache_hint: u64) void {
+    asmVoid(
+        b,
+        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [$0], [$1], $2, [$3], $4;\n",
+        &.{ dst, src, liftAs(b, num_bytes, .i32), mbar, cst64(b, cache_hint) },
+        "r,l,r,r,l,~{memory}",
+    );
+}
+
+/// `ptx::tma_store_1d(dst, src, num_bytes, hint = EVICT_NORMAL)`.
+pub fn tmaStore1d(b: *Builder, dst: Value, src: Value, num_bytes: anytype, cache_hint: u64) void {
+    asmVoid(
+        b,
+        "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint [$0], [$1], $2, $3;\n",
+        &.{ dst, src, liftAs(b, num_bytes, .i32), cst64(b, cache_hint) },
+        "l,r,r,l,~{memory}",
+    );
+}
+
+/// `cute::SM90_TMA_STORE_2D::copy(desc, smem, c0, c1)`.
+pub fn tmaStore2d(b: *Builder, desc: Value, smem: Value, c0: Value, c1: Value) void {
+    asmVoid(b, "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [$0, {$2, $3}], [$1];", &.{ desc, smem, c0, c1 }, "l,r,r,r,~{memory}");
+}
+
+/// `cute::TMEM::Allocator2Sm::allocate(num_columns, dst)`: write the base column to shared `dst`.
+pub fn tmemAllocate2Sm(b: *Builder, num_columns: u32, dst: Value) void {
+    asmVoid(b, "tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [$0], $1;", &.{ dst, cst32(b, num_columns) }, "r,r,~{memory}");
+}
+
+/// `cute::TMEM::Allocator2Sm::free(tmem_ptr, num_columns)`.
+pub fn tmemFree2Sm(b: *Builder, tmem_ptr: Value, num_columns: u32) void {
+    asmVoid(b, "{\n\ttcgen05.dealloc.cta_group::2.sync.aligned.b32  $0, $1; \n\t}", &.{ tmem_ptr, cst32(b, num_columns) }, "r,r,~{memory}");
+}
+
+/// `ptx::tcgen05_before_thread_sync`.
+pub fn tcgen05BeforeThreadSync(b: *Builder) void {
+    asmVoid(b, "tcgen05.fence::before_thread_sync;", &.{}, "~{memory}");
+}
+
+/// `ptx::tcgen05_after_thread_sync`.
+pub fn tcgen05AfterThreadSync(b: *Builder) void {
+    asmVoid(b, "tcgen05.fence::after_thread_sync;", &.{}, "~{memory}");
+}
+
+/// `cutlass::arch::fence_view_async_tmem_load` (`tcgen05.wait::ld`).
+pub fn fenceViewAsyncTmemLoad(b: *Builder) void {
+    asmVoid(b, "{\n\ttcgen05.wait::ld.sync.aligned; \n}", &.{}, "~{memory}");
+}
+
+/// `fence_view_async_tmem_load` with the values of earlier TMEM loads threaded through it, so
+/// LLVM cannot move their uses above the wait (the PTX is the same single instruction).
+pub fn fenceViewAsyncTmemLoadValues(b: *Builder, comptime n: usize, values: [n]Value) [n]Value {
+    comptime var constraints: []const u8 = "";
+    inline for (0..n) |i| constraints = constraints ++ (if (i == 0) "" else ",") ++ "=r";
+    inline for (0..n) |i| constraints = constraints ++ std.fmt.comptimePrint(",{d}", .{i});
+    constraints = constraints ++ ",~{memory}";
+    return asmValues(b, n, "{\n\ttcgen05.wait::ld.sync.aligned; \n}", &values, .i32, constraints, true);
+}
+
+/// `fenceViewAsyncTmemLoadValues` for a run-time number of values (the epilogue's store blocks
+/// hold `STORE_BLOCK_M / ATOM_M * 8` words): the same single `tcgen05.wait::ld`, every value
+/// tied through it.
+pub fn fenceViewAsyncTmemLoadSlice(b: *Builder, values: []const Value) []Value {
+    const n = values.len;
+    const a = b.arena.allocator();
+    var w: std.Io.Writer.Allocating = .init(a);
+    for (0..n) |i| w.writer.print("{s}=r", .{if (i == 0) "" else ","}) catch @panic("OOM");
+    for (0..n) |i| w.writer.print(",{d}", .{i}) catch @panic("OOM");
+    w.writer.writeAll(",~{memory}") catch @panic("OOM");
+    return asmValuesSlice(b, n, "{\n\ttcgen05.wait::ld.sync.aligned; \n}", values, .i32, w.written(), true);
+}
+
+/// `cute::SM100_TMEM_LOAD_16dp256b1x::copy(src, d0, d1, d2, d3)`: lane t of the warp gets
+/// rows `base + t/4` (d0, d1) and `base + 8 + t/4` (d2, d3), columns `2(t%4)`, `2(t%4)+1`.
+pub fn tmemLoad16dp256b1x(b: *Builder, taddr: Value) [4]Value {
+    return asmValues(b, 4, "tcgen05.ld.sync.aligned.16x256b.x1.b32{$0, $1, $2, $3},[$4];\n", &.{taddr}, .i32, "=r,=r,=r,=r,r", true);
+}
+
+/// `cute::SM100_UTCCP_4x32dp128bit_2cta::copy(src_desc, dst_taddr)`.
+pub fn utccp4x32dp128bit2cta(b: *Builder, src_desc: Value, dst_taddr: Value) void {
+    asmVoid(b, "tcgen05.cp.cta_group::2.32x128b.warpx4 [$0], $1;", &.{ dst_taddr, src_desc }, "r,l");
+}
+
+/// `ptx::SM100_MMA_MXF8F6F4_2x1SM_SS::fma(desc_a, desc_b, tmem_c, scale_c, desc, tmem_sfa,
+/// tmem_sfb)`: `desc` is the 64-bit runtime descriptor (`instr << 32`), `scale_c` (i32)
+/// nonzero accumulates.
+pub fn mmaMxf8f6f42x1SmSs(b: *Builder, desc_a: Value, desc_b: Value, tmem_c: Value, scale_c: Value, desc: Value, tmem_sfa: Value, tmem_sfb: Value) void {
+    const idesc = b.emit(arith.trunci(b.ctx, desc.shrLogical(32).inner, DType.i32.toMlir(b.ctx), b.loc()));
+    asmVoid(
+        b,
+        "{\n\t.reg .pred p;\n\tsetp.ne.b32 p, $4, 0;\n\ttcgen05.mma.cta_group::2.kind::mxf8f6f4.block_scale [$0], $1, $2, $3, [$5], [$6], p; \n\t}\n",
+        &.{ tmem_c, desc_a, desc_b, idesc, scale_c, tmem_sfa, tmem_sfb },
+        "r,l,l,r,r,r,r",
+    );
+}
+
+/// `cutlass::arch::umma_arrive_multicast_2x1SM(barrier, cta_mask)`: inside `elect_one_sync`,
+/// `tcgen05.commit` arriving on `barrier` in every CTA of `cta_mask`.
+pub fn ummaArriveMulticast2x1Sm(b: *Builder, bar: Value, cta_mask: u16) void {
+    var elected = b.openIf(electOneSync(b));
+    {
+        asmVoid(
+            b,
+            "{\n\ttcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [$0], $1; \n\t}",
+            &.{ bar, b.constant(.i16, @as(i16, @bitCast(cta_mask))) },
+            "r,h,~{memory}",
+        );
+        elected.close();
+    }
+}
+
+pub fn bits32(v: Value) Value {
+    return if (v.dtype() == .i32) v else v.bitCast(.i32);
+}
+
+pub fn fromBits32(v: Value, dt: DType) Value {
+    return if (dt == .i32) v else v.bitCast(dt);
+}
+
+/// `__shfl_sync(0xffffffff, v, src_lane)` / `ptx::exchange` (32-bit).
+pub fn shflSync(b: *Builder, v: Value, src_lane: anytype) Value {
+    const r = asmValue(b, "shfl.sync.idx.b32 $0, $1, $2, 31, -1;", &.{ bits32(v), liftAs(b, src_lane, .i32) }, .i32, "=r,r,r", true);
+    return fromBits32(r, v.dtype());
+}
+
+/// `__shfl_xor_sync(0xffffffff, v, lane_mask)`.
+pub fn shflXorSync(b: *Builder, v: Value, lane_mask: anytype) Value {
+    const r = asmValue(b, "shfl.sync.bfly.b32 $0, $1, $2, 31, -1;", &.{ bits32(v), liftAs(b, lane_mask, .i32) }, .i32, "=r,r,r", true);
+    return fromBits32(r, v.dtype());
+}
+
+/// `__shfl_up_sync(0xffffffff, v, delta)`.
+pub fn shflUpSync(b: *Builder, v: Value, delta: anytype) Value {
+    const r = asmValue(b, "shfl.sync.up.b32 $0, $1, $2, 0, -1;", &.{ bits32(v), liftAs(b, delta, .i32) }, .i32, "=r,r,r", true);
+    return fromBits32(r, v.dtype());
+}
+
+/// `__reduce_add_sync(0xffffffff, v)` (u32).
+pub fn reduceAddSync(b: *Builder, v: Value) Value {
+    return asmValue(b, "redux.sync.add.u32 $0, $1, $2;", &.{ v, cst32(b, 0xFFFFFFFF) }, .i32, "=r,r,r", true);
+}
+
+/// `__reduce_min_sync(0xffffffff, v)` (u32).
+pub fn reduceMinSync(b: *Builder, v: Value) Value {
+    return asmValue(b, "redux.sync.min.u32 $0, $1, $2;", &.{ v, cst32(b, 0xFFFFFFFF) }, .i32, "=r,r,r", true);
+}
+
+/// `__all_sync(0xffffffff, pred)` (`pred` i1; returns i1).
+pub fn allSync(b: *Builder, pred: Value) Value {
+    const r = asmValue(b, "{ .reg .pred p, q; setp.ne.u32 p, $1, 0; vote.sync.all.pred q, p, $2; selp.u32 $0, 1, 0, q; }", &.{ pred.to(.i32), cst32(b, 0xFFFFFFFF) }, .i32, "=r,r,r", true);
+    return r.ne(0);
+}
+
+pub fn popc(b: *Builder, v: Value) Value {
+    return b.callIntrinsic("llvm.ctpop.i32", &.{v}, DType.i32.toMlir(b.ctx)).?;
+}
+
+/// `__ffs(v)`: 1-based index of the lowest set bit, 0 for 0 (nvcc: `brev` + `bfind.shiftamt`).
+pub fn ffs(b: *Builder, v: Value) Value {
+    return asmValue(b, "{ .reg .b32 r; brev.b32 r, $1; bfind.shiftamt.u32 $0, r; }", &.{v}, .i32, "=r,r", false).add(1);
+}
+
+/// `__fns(mask, base, offset)`: position of the `offset`-th set bit of `mask` from `base`.
+pub fn fns(b: *Builder, mask: Value, base: anytype, offset: Value) Value {
+    return asmValue(b, "fns.b32 $0, $1, $2, $3;", &.{ mask, liftAs(b, base, .i32), offset }, .i32, "=r,r,r,r", false);
+}
+
+/// `fminf(a, b)` (`min.f32`, NaN-ignoring; `kClampAfterSilu`).
+pub fn fminf(b: *Builder, x: Value, y: Value) Value {
+    return asmValue(b, "min.f32 $0, $1, $2;", &.{ x, y }, .f32, "=f,f,f", false);
+}
+
+/// `fabsf(x)` (`abs.f32`).
+pub fn fabsf(b: *Builder, x: Value) Value {
+    return asmValue(b, "abs.f32 $0, $1;", &.{x}, .f32, "=f,f", false);
+}
+
+/// `math::fast_rcp(x)`.
+pub fn fastRcp(b: *Builder, x: Value) Value {
+    return asmValue(b, "rcp.approx.ftz.f32 $0, $1;", &.{x}, .f32, "=f,f", true);
+}
+
+/// `__expf(x)` without `--use_fast_math`: `ex2.approx.f32(x * log2(e))` (non-FTZ).
+pub fn expfFast(b: *Builder, x: Value) Value {
+    return asmValue(b, "{ .reg .f32 t; mul.f32 t, $1, 0f3FB8AA3B; ex2.approx.f32 $0, t; }", &.{x}, .f32, "=f,f", false);
+}
+
+/// `__expf(-x)`: nvcc folds the negation into the constant (`mul.f32 t, x, -log2(e)`).
+pub fn expfFastNeg(b: *Builder, x: Value) Value {
+    return asmValue(b, "{ .reg .f32 t; mul.f32 t, $1, 0fBFB8AA3B; ex2.approx.f32 $0, t; }", &.{x}, .f32, "=f,f", false);
+}
+
+/// `__float22bfloat162_rn({lo, hi})`: bf16x2 word, `lo` in the low half.
+pub fn float22bfloat162Rn(b: *Builder, lo: Value, hi: Value) Value {
+    return asmValue(b, "{ cvt.rn.bf16x2.f32 $0, $2, $1;}\n", &.{ lo, hi }, .i32, "=r,f,f", false);
+}
+
+/// `__hmin2(a, b)` on bf16x2 words.
+pub fn hmin2Bf16(b: *Builder, x: Value, y: Value) Value {
+    return asmValue(b, "{ min.bf16x2 $0,$1,$2;\n}", &.{ x, y }, .i32, "=r,r,r", false);
+}
+
+/// `__hmax2(a, b)` on bf16x2 words.
+pub fn hmax2Bf16(b: *Builder, x: Value, y: Value) Value {
+    return asmValue(b, "{ max.bf16x2 $0,$1,$2;\n}", &.{ x, y }, .i32, "=r,r,r", false);
+}
+
+/// `__bfloat1622float2(word)`: `{low, high}` f32 (exact).
+pub fn bfloat1622float2(b: *Builder, word: Value) [2]Value {
+    return asmValues(b, 2, "{ .reg .b16 l, h; mov.b32 {l, h}, $2; cvt.f32.bf16 $0, l; cvt.f32.bf16 $1, h; }", &.{word}, .f32, "=f,=f,r", false);
+}
+
+/// `ptx::accumulate(float2& a, nv_bfloat162 b)`: `a.x += bf16(b.x)`, `a.y += bf16(b.y)` with
+/// `add.rn.f32.bf16` (one rounding, the bf16 widened exactly).
+pub fn accumulateBf16x2(b: *Builder, acc: [2]Value, bf16x2: Value) [2]Value {
+    const lo = i16Of(b, bf16x2);
+    const hi = i16Of(b, bf16x2.shrLogical(16));
+    return .{
+        asmValue(b, "add.rn.f32.bf16 $0, $1, $0;\n", &.{ lo, acc[0] }, .f32, "=f,h,0", false),
+        asmValue(b, "add.rn.f32.bf16 $0, $1, $0;\n", &.{ hi, acc[1] }, .f32, "=f,h,0", false),
+    };
+}
+/// IEEE operations used when staging quantized inputs; no FTZ or contraction.
+pub fn divRn(b: *Builder, x: Value, y: Value) Value {
+    return asmValue(b, "div.rn.f32 $0, $1, $2;", &.{ x, y }, .f32, "=f,f,f", false);
+}
+pub fn mulRn(b: *Builder, x: Value, y: Value) Value {
+    return asmValue(b, "mul.rn.f32 $0, $1, $2;", &.{ x, y }, .f32, "=f,f,f", false);
+}
+
+test "canonical primitives preserve aligned barriers and runtime transaction counts" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "compatibility_primitives");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const bar = b.constant(.i32, 0);
+    const phase = b.constant(.i32, 0);
+    const bytes = b.threadIdx().x.add(16);
+    b.barrierCtaSyncAligned(1, 32);
+    b.barrierClusterArriveRelaxedAligned();
+    b.barrierClusterWaitAligned();
+    b.mbarrierInit(bar, 1);
+    b.fenceMbarrierInit();
+    b.mbarrierArriveExpectTx(bar, bytes);
+    b.mbarrierArriveExpectTx(bar, 16);
+    b.mbarrierWait(bar, phase, .{ .test_first = false });
+    _ = phase.bitXor(1);
+    b.fenceProxyAsyncShared();
+    b.fenceProxyAsyncShared();
+    b.cpAsyncBulkCommitGroup();
+    b.cpAsyncBulkWaitGroup(0, false);
+    _ = b.voteBallotSync(bytes.ne(0), null);
+    _ = b.fmax(b.constant(.f32, 1), b.constant(.f32, 2), .{});
+    const ir = try b.finish(.{ 32, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "llvm.nvvm.barrier.cta.sync.aligned.count");
+    try expectContains(ir, "barrier.cluster.arrive.relaxed.aligned");
+    try expectContains(ir, "nvvm.mbarrier.arrive.expect_tx");
     const parsed = try mlir.Module.parse(ctx, ir);
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());

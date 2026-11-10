@@ -5,12 +5,16 @@ const platforms = @import("platforms");
 const zml = @import("../../zml.zig");
 const stdx = zml.stdx;
 pub const cute = @import("cute/cute.zig");
-const ExpertsLayout = @import("options.zig").ExpertsLayout;
+pub const ExpertsLayout = @import("options.zig").ExpertsLayout;
 pub const flashinfer_cutlass = @import("flashinfer_cutlass/flashinfer_cutlass.zig");
 pub const fly = @import("fly/fly.zig");
 pub const metal = @import("metal/metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu/mosaic_tpu.zig");
-const Options = @import("options.zig").Options;
+pub const Options = @import("options.zig").Options;
+pub const Activation = @import("options.zig").Activation;
+pub const ActivationKind = @import("options.zig").ActivationKind;
+pub const ProjectionLayout = @import("options.zig").ProjectionLayout;
+pub const RoutingWeightPlacement = @import("options.zig").RoutingWeightPlacement;
 pub const stablehlo = @import("stablehlo/stablehlo.zig");
 pub const tcl = @import("tcl/tcl.zig");
 pub const triton = @import("triton/triton.zig");
@@ -103,13 +107,17 @@ pub const Backend = enum {
     pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
-            .cute => if (scheme == .mxfp4 or scheme == .nvfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
+            .cute => if (scheme) |s| switch (s) {
+                .mxfp4 => .{ .gate_up = .row_interleaved_8, .packing = .mxfp4_interleaved8 },
+                .nvfp4 => .{ .gate_up = .row_interleaved_1, .packing = .swizzled_scales },
+                else => error.UnsupportedQuantization,
+            } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme) |s| switch (s) {
                 .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
-            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
+            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .row_interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
 

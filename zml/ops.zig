@@ -1532,7 +1532,15 @@ pub const CuteOps = struct {
     block: ?[3]i32 = null,
     zeroed_outputs: []const i32 = &.{},
     scalars: []const i64 = &.{},
+    symmetric_workspace: ?SymmetricWorkspace = null,
     output_operand_aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+
+    /// Named per-device workspace shared across CuTe calls and executables.
+    /// Every rank allocates `bytes`; XLA passes peer addresses and the rank.
+    pub const SymmetricWorkspace = struct {
+        name: []const u8,
+        bytes: i64,
+    };
 };
 
 /// A `__gpu$xla.gpu.cute` custom call: XLA compiles `ir` with the CuTe compiler
@@ -1553,7 +1561,7 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
         res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
     }
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 7) = .empty;
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 8) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
         .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
         .named(mlir_ctx, "kernel_type", .string(mlir_ctx, "cute")),
@@ -1577,6 +1585,13 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
         defer allocator.free(scalar_attrs);
         for (opts.scalars, scalar_attrs) |value, *attribute| attribute.* = .int(mlir_ctx, .i64, value);
         attrs.appendAssumeCapacity(.named(mlir_ctx, "scalars", .array(mlir_ctx, scalar_attrs)));
+    }
+    if (opts.symmetric_workspace) |workspace| {
+        stdx.debug.assert(workspace.name.len > 0 and workspace.bytes > 0, "zml.ops.cute({s}): symmetric_workspace needs a name and a positive size", .{opts.name});
+        attrs.appendAssumeCapacity(.named(mlir_ctx, "symmetric_workspace", .dict(mlir_ctx, &.{
+            .named(mlir_ctx, "name", .string(mlir_ctx, workspace.name)),
+            .named(mlir_ctx, "bytes", .int(mlir_ctx, .i64, workspace.bytes)),
+        })));
     }
     const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
 
