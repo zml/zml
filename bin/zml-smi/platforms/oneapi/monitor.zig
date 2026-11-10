@@ -528,7 +528,7 @@ const ParsedFdinfo = struct {
 
 inline fn parseFdinfoFile(io: std.Io, path: []const u8, timestamp_ns: u64) !ParsedFdinfo {
     var read_buf: [8192]u8 = undefined;
-    const data = std.Io.Dir.readFile(.cwd(), io, path, &read_buf) catch return error.FileUnavailable;
+    const data = smi_sysfs.readProcFile(io, path, &read_buf) catch return error.FileUnavailable;
 
     var parsed: ParsedFdinfo = .{};
 

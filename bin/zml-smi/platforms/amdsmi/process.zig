@@ -4,6 +4,7 @@ const AmdSmi = @import("amdsmi.zig");
 const pi = @import("zml-smi/info").process_info;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Collector = @import("zml-smi/collector").Collector;
+const smi_sysfs = @import("zml-smi/sysfs");
 
 const bdf_len = "0000:00:00.0".len;
 
@@ -96,19 +97,14 @@ fn readProcessGpuVram(io: std.Io, pid: u32, pci_slot: *const [bdf_len]u8) u64 {
 }
 
 fn parseFdinfoVram(io: std.Io, path: []const u8, pci_slot: *const [bdf_len]u8) u64 {
-    var file = std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only }) catch return 0;
-    defer file.close(io);
-
     var read_buf: [4096]u8 = undefined;
-    var reader = file.reader(io, &read_buf);
+    const data = smi_sysfs.readProcFile(io, path, &read_buf) catch return 0;
 
     var found_pci = false;
     var vram_kib: ?u64 = null;
 
-    while (true) {
-        const line = reader.interface.takeDelimiterExclusive('\n') catch break;
-        reader.interface.toss(1);
-
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
         if (std.mem.indexOf(u8, line, pci_slot) != null) found_pci = true;
 
         // Support both new and old fdinfo keys (see amdgpu_fdinfo.c)

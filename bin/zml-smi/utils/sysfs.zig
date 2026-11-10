@@ -54,6 +54,34 @@ fn findField(allocator: std.mem.Allocator, io: std.Io, path: []const u8, comptim
     }
 }
 
+/// Reads a procfs file into `buf`, truncated to `buf.len`.
+///
+/// procfs looks the process (and, for fdinfo, the fd) up again on every read,
+/// so a file that opened fine fails to read with ENOENT or ESRCH once its
+/// process exits or closes that fd. zml-smi hits this constantly on its own
+/// fdinfo, whose fds its poller threads open and close. std.Io does not expect
+/// these errnos and prints a stack trace in Debug builds, which garbles the
+/// TUI, so this reads with plain syscalls and returns error.FileNotFound.
+pub fn readProcFile(io: std.Io, path: []const u8, buf: []u8) ![]u8 {
+    const file = try std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    var len: usize = 0;
+    while (len < buf.len) {
+        const rc = std.posix.system.read(file.handle, buf[len..].ptr, buf.len - len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                if (rc == 0) break;
+                len += @intCast(rc);
+            },
+            .INTR => {},
+            .NOENT, .SRCH => return error.FileNotFound,
+            else => return error.Unexpected,
+        }
+    }
+    return buf[0..len];
+}
+
 pub fn readFirstLine(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     var file = try std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only });
     defer file.close(io);
