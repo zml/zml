@@ -8,6 +8,7 @@ pub const GenerationOptions = common.GenerationOptions;
 pub const parseConfig = common.parseConfig;
 pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
+pub const nemotron3_5_transcribe = @import("models/nemotron3_5_transcribe.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
 pub const qwen3_5_moe = @import("models/qwen3_5_moe.zig");
 
@@ -16,6 +17,7 @@ const log = std.log.scoped(.llm);
 pub const ModelType = enum {
     lfm2,
     llama,
+    nemo_speechlm,
     qwen3_5,
     qwen3_5_moe,
 };
@@ -27,6 +29,7 @@ const RawConfig = struct {
 pub const LoadedModel = union(ModelType) {
     lfm2: lfm2.LoadedModel,
     llama: llama.LoadedModel,
+    nemo_speechlm: nemotron3_5_transcribe.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
     qwen3_5_moe: qwen3_5_moe.LoadedModel,
 
@@ -106,6 +109,7 @@ pub const CompiledModel = struct {
     const Inner = union(ModelType) {
         lfm2: lfm2.inference.CompiledModel,
         llama: llama.inference.CompiledModel,
+        nemo_speechlm: nemotron3_5_transcribe.inference.CompiledModel,
         qwen3_5: qwen3_5.inference.CompiledModel,
         qwen3_5_moe: qwen3_5_moe.inference.CompiledModel,
     };
@@ -143,6 +147,7 @@ pub const CompiledModel = struct {
 pub const Buffers = union(ModelType) {
     lfm2: lfm2.Buffers,
     llama: llama.Buffers,
+    nemo_speechlm: nemotron3_5_transcribe.Buffers,
     qwen3_5: qwen3_5.Buffers,
     qwen3_5_moe: qwen3_5_moe.Buffers,
 };
@@ -151,6 +156,7 @@ pub const Session = struct {
     const Inner = union(ModelType) {
         lfm2: lfm2.Session,
         llama: llama.Session,
+        nemo_speechlm: nemotron3_5_transcribe.Session,
         qwen3_5: qwen3_5.Session,
         qwen3_5_moe: qwen3_5_moe.Session,
     };
