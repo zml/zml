@@ -1,8 +1,8 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202610011939.137.1.0d59bb389ee2/zml-oneapi-linux-amd64.tar.zst"
-_PLUGIN_ONEAPI_SHA256 = "9ca5e2c377d938b3d855c46c685d193e90424e44b1c1ea8d0a8e1c924b0d11f1"
+_PLUGIN_ONEAPI_URL = "file:///home/brabier/github/zml/zml-oneapi-plugins/zml-oneapi-linux-amd64-20261111-ctxperdev.tar.zst"
+_PLUGIN_ONEAPI_SHA256 = "5c6dd37e83798b5e93fceeff68eb06dc52d3cf67fb5edde5bfaaf0d2f69bbe23"
 
 ONEAPI_VERSION = "2026.1"
 
@@ -248,6 +248,7 @@ filegroup(
     name = "mkl_core_runtime",
     srcs = [
         "{ONEAPI_MKL_LIB}/libmkl_core.so.3",
+        "{ONEAPI_MKL_LIB}/libmkl_def.so.3",
         "{ONEAPI_MKL_LIB}/libmkl_intel_ilp64.so.3",
         "{ONEAPI_MKL_LIB}/libmkl_sequential.so.3",
     ],
