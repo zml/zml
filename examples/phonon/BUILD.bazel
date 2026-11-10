@@ -1,0 +1,57 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+cc_library(
+    name = "tokenizer_regex",
+    srcs = ["tokenizer_regex.c"],
+    hdrs = ["tokenizer_regex.h"],
+    deps = ["@pcre2"],
+)
+
+zig_binary(
+    name = "phonon",
+    srcs = [
+        "Tokenizer.zig",
+        "eos_head.zig",
+        "flow_head.zig",
+        "flow_head_test_data.zig",
+        "model.zig",
+        "transformer.zig",
+        "transformer_test_data.zig",
+        "util.zig",
+    ],
+    data = [
+        "@phonon_31m_en//:model.safetensors",
+        "@phonon_31m_en//:tokenizer.5.0.0.json",
+        "@phonon_voices//:voices/Tek4tJXiX6_yvXq7.safetensors",
+    ],
+    main = "main.zig",
+    deps = [
+        ":tokenizer_regex",
+        "@zml//zml",
+    ],
+)
+
+zig_test(
+    name = "test",
+    srcs = [
+        "Tokenizer.zig",
+        "eos_head.zig",
+        "flow_head.zig",
+        "flow_head_test_data.zig",
+        "model.zig",
+        "transformer.zig",
+        "transformer_test_data.zig",
+        "util.zig",
+    ],
+    data = glob(["assets/**/*.safetensors"]) + [
+        "@phonon_31m_en//:model.safetensors",
+        "@phonon_31m_en//:tokenizer.5.0.0.json",
+        "@phonon_voices//:voices/Tek4tJXiX6_yvXq7.safetensors",
+    ],
+    main = "main.zig",
+    deps = [
+        ":tokenizer_regex",
+        "@zml//zml",
+    ],
+)

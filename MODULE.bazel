@@ -2,6 +2,29 @@ module(
     name = "zml",
 )
 
+# Phonon assets are fetched by Bazel, never by the running example or its tests.
+phonon_assets = use_extension("//bazel:huggingface.bzl", "huggingface")
+phonon_assets.model(
+    name = "phonon_31m_en",
+    build_file_content = "exports_files([\"model.safetensors\", \"tokenizer.5.0.0.json\"], visibility = [\"//visibility:public\"])",
+    commit = "92741c5b07d085ff840e26fea8ce43110b87852f",
+    files = {
+        "model.safetensors": "8a04cf833cfe69b67c2ec968b2d31244655b9accc84ade9c0ebcc176f2074607",
+        "tokenizer.5.0.0.json": "28161547feed30fa70e9ce6da0b791835db9c9720683d87f17e0327f01687cc5",
+    },
+    model = "gradium/phonon-31m-en",
+)
+phonon_assets.model(
+    name = "phonon_voices",
+    build_file_content = "exports_files([\"voices/Tek4tJXiX6_yvXq7.safetensors\"], visibility = [\"//visibility:public\"])",
+    commit = "0ee17205f254b5abc43b266c8a0f215565c352f7",
+    files = {
+        "voices/Tek4tJXiX6_yvXq7.safetensors": "0106f9a0d53685471695a76827f7912e6c890f21fea10b5e5160379da38ffe5b",
+    },
+    model = "gradium/phonon-voices",
+)
+use_repo(phonon_assets, "phonon_31m_en", "phonon_voices")
+
 bazel_dep(name = "abseil-cpp", version = "20260526.0", repo_name = "com_google_absl")
 
 # Work around abseil-cpp#2071 until the BCR release includes the Clang BMI2 fix.
@@ -51,7 +74,6 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 # repo_name = None prevents rules_swift from eagerly auto-registering toolchains.
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
 bazel_dep(name = "rules_zig", version = "0.17.0")
-
 bazel_dep(name = "tar.bzl", version = "0.10.4")
 bazel_dep(name = "llvm", version = "0.8.24")
 bazel_dep(name = "libxml2", version = "2.15.3")
