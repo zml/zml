@@ -297,7 +297,7 @@ pub fn forwardMoe(
         .global_experts = @intCast(gate_up.weight.dim(.expert)),
     };
     const Logical = zml.Sharding.Partitioning.Logical;
-    var projection_specs: [2]zml.meta.MapRestrict(zml.Tensor, Logical).map(zml.nn.Linear) = undefined;
+    var projection_specs: [2]zml.ops.PartitionSpecs(zml.nn.Linear) = undefined;
     for ([_]zml.nn.Linear{ gate_up, down }, &projection_specs) |linear, *specs| {
         zml.meta.mapAlloc(struct {
             fn spec(ctx: struct { experts: i64, axis: ?zml.Shape.Tag }, tensor: zml.Tensor) Logical {

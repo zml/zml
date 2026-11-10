@@ -14,6 +14,46 @@ const Tensor = @import("../tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/Compiler");
 
+/// Partitioning declarations for the tensors in `T`.
+/// Each `Tensor` becomes a `Sharding.Partitioning.Logical`.
+/// For example, `struct { x: Tensor, bias: ?Tensor, scale: f32 }` becomes
+/// `struct { x: Logical, bias: ?Logical }`.
+///
+/// Initialize individual fields to declare different shardings, or use
+/// `partitionSpecs` to apply one spec to every tensor in a value.
+pub fn PartitionSpecs(comptime T: type) type {
+    return meta.MapRestrict(Tensor, Sharding.Partitioning.Logical).map(T);
+}
+
+/// Declares the same sharding for a group of tensors at a `manualComputation`
+/// boundary.
+///
+/// ```zig
+/// .in_specs = .{
+///     .query = .parse(.{ .h = .model }),
+///     .cache = partitionSpecs(cache, .parse(.{ .h = .model })),
+///     .metadata = partitionSpecs(metadata, .replicated),
+/// }
+/// ```
+///
+/// Requires an active compiler and uses its arena for allocations. Use
+/// `partitionSpecsAlloc` outside graph construction. Use named struct fields
+/// when mixing tensors with non-tensor metadata.
+pub fn partitionSpecs(tensors: anytype, spec: Sharding.Partitioning.Logical) PartitionSpecs(@TypeOf(tensors)) {
+    return partitionSpecsAlloc(Compiler.current().arena.allocator(), tensors, spec) catch @panic("OOM");
+}
+
+/// Builds the same declarations as `partitionSpecs` using an explicit allocator.
+pub fn partitionSpecsAlloc(allocator: std.mem.Allocator, tensors: anytype, spec: Sharding.Partitioning.Logical) std.mem.Allocator.Error!PartitionSpecs(@TypeOf(tensors)) {
+    var specs: PartitionSpecs(@TypeOf(tensors)) = undefined;
+    try meta.mapAlloc(struct {
+        fn assign(spec_: Sharding.Partitioning.Logical, _: Tensor) Sharding.Partitioning.Logical {
+            return spec_;
+        }
+    }.assign, allocator, spec, tensors, &specs);
+    return specs;
+}
+
 /// Describes how the inputs and outputs of `body_fn` are partitioned across a mesh.
 /// Returns the type of the `partitioning` argument to `manualComputation`.
 ///
@@ -43,7 +83,7 @@ pub fn ManualPartitioning(comptime body_fn: anytype) type {
     const Inputs = stdx.meta.FnParam(body_fn, 0);
     const OutputShapes = stdx.meta.FnParam(body_fn, 1);
 
-    const InputSpecs = meta.MapRestrict(Tensor, Logical).map(Inputs);
+    const InputSpecs = PartitionSpecs(Inputs);
     const OutputSpecs = meta.MapRestrict(Shape, Logical).map(OutputShapes);
 
     if (OutputSpecs == void) return struct {
@@ -410,7 +450,7 @@ test "manualComputation composes across logical and physical meshes" {
 
         fn forward(x: Tensor, mesh: *const Sharding.Mesh) Tensor {
             const partitioning: ManualPartitioning(increment) = .{
-                .in_specs = .parse(.{ .x = .model }),
+                .in_specs = partitionSpecs(x, .parse(.{ .x = .model })),
                 .out_specs = .parse(.{ .x = .model }),
             };
 
@@ -462,4 +502,45 @@ test "manualComputation composes across logical and physical meshes" {
             try std.testing.expectEqualDeep(shape.withPartitioning(mesh, .{ .x = .model })._sharding, output.shape()._sharding);
         }
     }
+}
+
+test "partitionSpecs preserves optional tensors and active cache variants" {
+    const zml = @import("../zml.zig");
+    const Logical = Sharding.Partitioning.Logical;
+    const Inputs = struct {
+        layers: []const Tensor,
+        bias: ?Tensor,
+        cache: union(enum) { disabled, values: [2]Tensor },
+        scale: f32,
+    };
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const tensor: Tensor = .fromShape(.init(.{ .h = 8, .d = 16 }, .f32));
+    var inputs: Inputs = .{
+        .layers = &.{ tensor, tensor },
+        .bias = null,
+        .cache = .{ .values = .{ tensor, tensor } },
+        .scale = 2,
+    };
+    const heads: Logical = .parse(.{ .h = .model });
+    const specs = try zml.ops.partitionSpecsAlloc(arena.allocator(), inputs, heads);
+    const expected: zml.ops.PartitionSpecs(Inputs) = .{
+        .layers = &.{ heads, heads },
+        .bias = null,
+        .cache = .{ .values = .{ heads, heads } },
+    };
+    try std.testing.expectEqualDeep(expected, specs);
+
+    inputs.layers = &.{};
+    inputs.bias = tensor;
+    inputs.cache = .disabled;
+    const replicated = try zml.ops.partitionSpecsAlloc(arena.allocator(), inputs, .replicated);
+    const expected_replicated: zml.ops.PartitionSpecs(Inputs) = .{
+        .layers = &.{},
+        .bias = .replicated,
+        .cache = .disabled,
+    };
+    try std.testing.expectEqualDeep(expected_replicated, replicated);
 }

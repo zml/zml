@@ -97,7 +97,6 @@ pub const Options = @import("Options.zig");
 
 pub const Partitioning = struct {
     const Logical = zml.Sharding.Partitioning.Logical;
-    const InputSpecs = @FieldType(zml.ops.ManualPartitioning(Attention.forward), "in_specs");
 
     in_specs: struct {
         q: Logical,
@@ -105,7 +104,7 @@ pub const Partitioning = struct {
         v: Logical,
         token_index: Logical = .replicated,
         /// Omit to replicate backend metadata tensors.
-        metadata: ?@FieldType(InputSpecs, "metadata") = null,
+        metadata: ?zml.ops.PartitionSpecs(Metadata) = null,
     },
     out_specs: Logical,
 
@@ -141,14 +140,7 @@ pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: z
             .k = partitioning.in_specs.k,
             .v = partitioning.in_specs.v,
             .token_index = partitioning.in_specs.token_index,
-            .metadata = partitioning.in_specs.metadata orelse switch (metadata) {
-                .stablehlo => .{ .stablehlo = {} },
-                .flash_attention => |metadata_| .{ .flash_attention = switch (metadata_) {
-                    .cute => .{ .cute = {} },
-                    .nki => .{ .nki = {} },
-                    .metal => .{ .metal = .{ .num_tokens = .replicated } },
-                } },
-            },
+            .metadata = partitioning.in_specs.metadata orelse zml.ops.partitionSpecs(metadata, .replicated),
         },
         .out_specs = partitioning.out_specs,
     });
