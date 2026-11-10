@@ -1837,11 +1837,8 @@ pub const Profiler = struct {
         }
 
         if (args.buffer != null) {
-            var data = args.buffer[0..args.buffer_size_in_bytes];
-            if (data.len > 0 and data[data.len - 1] == 0) {
-                data = data[0 .. data.len - 1];
-            }
-            return allocator.dupe(u8, data);
+            // CollectData returns binary serialized bytes, not a C string.
+            return allocator.dupe(u8, args.buffer[0..args.buffer_size_in_bytes]);
         }
 
         if (args.buffer_size_in_bytes == 0) return &[_]u8{};
@@ -1855,15 +1852,52 @@ pub const Profiler = struct {
             return pjrt_err.getCode(self.pjrt_api).toApiError();
         }
 
-        // Trim trailing null byte logic
-        var data = buffer[0..args.buffer_size_in_bytes];
-        if (data.len > 0 and data[data.len - 1] == 0) {
-            data = data[0 .. data.len - 1];
-        }
-
-        const pb = try allocator.dupe(u8, data);
+        const pb = try allocator.dupe(u8, buffer[0..args.buffer_size_in_bytes]);
         allocator.free(buffer);
 
         return pb;
     }
 };
+
+test "Profiler collectData preserves binary protobuf terminal zero in both API paths" {
+    const Fixture = struct {
+        // A valid XSpace wire message: planes[0] has an explicit int64 id = 0.
+        const protobuf = [_]u8{ 0x0a, 0x02, 0x08, 0x00 };
+
+        fn direct(args: [*c]c.PLUGIN_Profiler_CollectData_Args) callconv(.c) ?*c.PLUGIN_Profiler_Error {
+            args.*.buffer = @constCast(&protobuf);
+            args.*.buffer_size_in_bytes = protobuf.len;
+            return null;
+        }
+
+        fn twoPass(args: [*c]c.PLUGIN_Profiler_CollectData_Args) callconv(.c) ?*c.PLUGIN_Profiler_Error {
+            if (args.*.buffer) |buffer| @memcpy(buffer[0..protobuf.len], &protobuf);
+            args.*.buffer_size_in_bytes = protobuf.len;
+            return null;
+        }
+    };
+    inline for (.{ Fixture.direct, Fixture.twoPass }) |collect| {
+        var api = std.mem.zeroes(c.PLUGIN_Profiler_Api);
+        api.collect_data = &collect;
+        var instance: Profiler = .{ .pjrt_api = undefined, .api = &api, .inner = @ptrFromInt(1) };
+        const data = try instance.collectData(std.testing.allocator);
+        defer std.testing.allocator.free(data);
+        try std.testing.expectEqualSlices(u8, &Fixture.protobuf, data);
+    }
+}
+
+test "Profiler collectData accepts empty serialized output" {
+    const Fixture = struct {
+        fn collect(args: [*c]c.PLUGIN_Profiler_CollectData_Args) callconv(.c) ?*c.PLUGIN_Profiler_Error {
+            args.*.buffer = null;
+            args.*.buffer_size_in_bytes = 0;
+            return null;
+        }
+    };
+    var api = std.mem.zeroes(c.PLUGIN_Profiler_Api);
+    api.collect_data = &Fixture.collect;
+    var instance: Profiler = .{ .pjrt_api = undefined, .api = &api, .inner = @ptrFromInt(1) };
+    const data = try instance.collectData(std.testing.allocator);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqual(@as(usize, 0), data.len);
+}
