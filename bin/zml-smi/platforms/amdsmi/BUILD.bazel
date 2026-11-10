@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "amdsmi",
@@ -19,4 +19,9 @@ zig_library(
         "//stdx",
         "@amdrocm-amdsmi//:amdsmi",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":amdsmi"],
 )
