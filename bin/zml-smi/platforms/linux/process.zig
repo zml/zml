@@ -1,49 +1,49 @@
 const std = @import("std");
 const sysfs = @import("zml-smi/sysfs");
 const pi = @import("zml-smi/info").process_info;
+const Collector = @import("zml-smi/collector").Collector;
 
 const ProcessInfo = pi.ProcessInfo;
+const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(ProcessInfo));
 
-pub const ProcessEnricher = struct {
-    gpa: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
-    prev_ticks: std.AutoHashMapUnmanaged(u32, u64) = .{},
+pub fn start(collector: *Collector) !void {
+    const enricher = try collector.arena.create(ProcessEnricher);
+    enricher.* = .{ .arenas = .{ try collector.createPollArena(), try collector.createPollArena() } };
+    try collector.spawnPoll(pollOnce, .{ enricher, collector.gpa, collector.io, collector.process_lists.items, &collector.processes });
+}
+
+fn pollOnce(enricher: *ProcessEnricher, gpa: std.mem.Allocator, io: std.Io, lists: []const *const ProcessDoubleBuffer, processes: *ProcessDoubleBuffer) void {
+    const arena = enricher.arenas[1 - processes.current.load(.acquire)];
+    _ = arena.reset(.retain_capacity);
+
+    const back = processes.back();
+    back.clearRetainingCapacity();
+    for (lists) |list| {
+        back.appendSlice(gpa, list.front().items) catch break;
+    }
+
+    enricher.enrich(arena.allocator(), io, back.items);
+    processes.swap();
+}
+
+const ProcessEnricher = struct {
+    arenas: [2]*std.heap.ArenaAllocator,
+    prev_ticks: std.AutoHashMapUnmanaged(u32, u64) = .empty,
     prev_total_ticks: u64 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io) !ProcessEnricher {
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        errdefer arena.deinit();
-
-        const prev_total_ticks = readTotalCpuTicks(arena.allocator(), io);
-        var enricher: ProcessEnricher = .{
-            .gpa = gpa,
-            .arena = arena,
-            .prev_total_ticks = prev_total_ticks,
-            .prev_ticks = .{},
-        };
-
-        try enricher.prev_ticks.ensureTotalCapacity(gpa, 64);
-
-        return enricher;
-    }
-
-    pub fn deinit(self: *ProcessEnricher) void {
-        self.prev_ticks.deinit(self.gpa);
-        self.arena.deinit();
-    }
-
-    pub fn enrich(self: *ProcessEnricher, io: std.Io, procs: []ProcessInfo) void {
-        _ = self.arena.reset(.retain_capacity);
-        const alloc = self.arena.allocator();
-
+    fn enrich(self: *ProcessEnricher, alloc: std.mem.Allocator, io: std.Io, procs: []ProcessInfo) void {
         const curr_total = readTotalCpuTicks(alloc, io);
         const delta_total = curr_total -| self.prev_total_ticks;
 
-        var curr_ticks: std.AutoHashMapUnmanaged(u32, u64) = .{};
-        curr_ticks.ensureTotalCapacity(self.gpa, @intCast(procs.len)) catch return;
+        var curr_ticks: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+        curr_ticks.ensureTotalCapacity(alloc, @intCast(procs.len)) catch {};
 
         for (procs) |*info| {
-            if (info.remote) continue;
+            if (info.remote) {
+                info.username = alloc.dupe(u8, info.username) catch "";
+                info.comm = alloc.dupe(u8, info.comm) catch "";
+                continue;
+            }
             // Read Uid, VmRSS from /proc/{pid}/status
             const status_path = std.fmt.allocPrint(alloc, "/proc/{d}/status", .{info.pid}) catch continue;
             const uid: u32 = @intCast(sysfs.readFieldInt(alloc, io, status_path, "Uid") catch 0);
@@ -64,10 +64,9 @@ pub const ProcessEnricher = struct {
                 }
             }
 
-            curr_ticks.getOrPutAssumeCapacity(info.pid).value_ptr.* = ticks;
+            curr_ticks.put(alloc, info.pid, ticks) catch continue;
         }
 
-        self.prev_ticks.deinit(self.gpa);
         self.prev_ticks = curr_ticks;
         self.prev_total_ticks = curr_total;
     }

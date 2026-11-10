@@ -16,7 +16,6 @@ const platform = if (builtin.os.tag == .macos)
     @import("zml-smi/platforms/macos")
 else
     @import("zml-smi/platforms/linux");
-const ProcessEnricher = platform.process.ProcessEnricher;
 const host = platform.metrics;
 const c = @import("c");
 const csv = @import("zml-smi/csv");
@@ -94,9 +93,6 @@ pub fn main(init: std.process.Init) !void {
     var host_info: HostInfo = .{ .values = .{ .{}, .{} } };
     try host.init(&collector, &host_info);
 
-    var enricher: ProcessEnricher = try .init(gpa, io);
-    defer enricher.deinit();
-
     if (args.api) {
         std.log.info("serving api metrics on port {d}", .{args.api_port});
     }
@@ -120,13 +116,14 @@ pub fn main(init: std.process.Init) !void {
         try api.addRemotes(&collector, hosts);
     }
 
+    try platform.process.start(&collector);
+
     var state = try data.SystemState.init(.{
         .devices = collector.device_infos.items,
         .host = &host_info,
         .targets = targets,
         .tui_refresh_rate = args.tui_refresh_rate,
-        .process_lists = collector.process_lists.items,
-        .enricher = &enricher,
+        .processes = &collector.processes,
         .gpa = gpa,
         .arena = arena,
         .io = io,
@@ -138,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.api) {
-        try api_group.concurrent(io, api.Server.run, .{ gpa, io, args.api_port, collector.device_infos.items, collector.process_lists.items, &enricher });
+        try api_group.concurrent(io, api.Server.run, .{ gpa, io, args.api_port, collector.device_infos.items, &collector.processes });
     }
 
     if (args.prometheus_listen != null or args.api) {
@@ -150,17 +147,10 @@ pub fn main(init: std.process.Init) !void {
         try csv.write(&csv_writer.interface, collector.device_infos.items);
         try csv_writer.flush();
     } else if (args.json) {
-        var procs: std.ArrayList(smi_info.process_info.ProcessInfo) = .empty;
-        defer procs.deinit(gpa);
-        for (collector.process_lists.items) |pl| {
-            try procs.appendSlice(gpa, pl.front().items);
-        }
-        enricher.enrich(io, procs.items);
-
         var json_buf: [4096]u8 = undefined;
         var json_writer = std.Io.File.stdout().writer(io, &json_buf);
 
-        try json.write(&json_writer.interface, collector.device_infos.items, procs.items);
+        try json.write(&json_writer.interface, collector.device_infos.items, collector.processes.front().items);
         try json_writer.flush();
     } else if (args.top) {
         try tui.run(gpa, io, init.environ_map, &state);

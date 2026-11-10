@@ -12,6 +12,7 @@ zig_library(
     deps = [
         "//bin/zml-smi/collector",
         "//bin/zml-smi/info",
+        "//bin/zml-smi/utils:double_buffer",
         "//bin/zml-smi/utils:sysfs",
     ],
 )

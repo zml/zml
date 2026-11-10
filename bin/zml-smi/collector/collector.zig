@@ -8,6 +8,7 @@ const Worker = @import("worker.zig").Worker;
 pub const Collector = struct {
     device_infos: std.ArrayList(*DeviceInfo) = .empty,
     process_lists: std.ArrayList(*ProcessDoubleBuffer) = .empty,
+    processes: ProcessDoubleBuffer = .{ .values = .{ .empty, .empty } },
     poll_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
@@ -84,6 +85,8 @@ pub const Collector = struct {
             list.values[1].deinit(self.gpa);
         }
         self.process_lists.deinit(self.arena);
+        self.processes.values[0].deinit(self.gpa);
+        self.processes.values[1].deinit(self.gpa);
 
         for (self.poll_arenas.items) |poll_arena| {
             poll_arena.deinit();

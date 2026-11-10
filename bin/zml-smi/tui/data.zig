@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const smi_info = @import("zml-smi/info");
 const di = smi_info.device_info;
 pub const DeviceInfo = di.DeviceInfo;
@@ -13,10 +12,6 @@ pub const HostInfo = hi.HostInfo;
 pub const HostData = hi.HostData;
 pub const pi = smi_info.process_info;
 pub const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-pub const ProcessEnricher = if (builtin.os.tag == .macos)
-    @import("zml-smi/platforms/macos").process.ProcessEnricher
-else
-    @import("zml-smi/platforms/linux").process.ProcessEnricher;
 
 pub const history_len: usize = 500;
 
@@ -86,8 +81,7 @@ pub const SystemState = struct {
     host: *HostInfo,
     history: HistoryBuffers = .{},
     targets: Targets,
-    process_lists: []*ProcessDoubleBuffer,
-    enricher: *ProcessEnricher,
+    processes: *const ProcessDoubleBuffer,
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     io: std.Io,
@@ -98,8 +92,7 @@ pub const SystemState = struct {
         host: *HostInfo,
         targets: Targets,
         tui_refresh_rate: u16,
-        process_lists: []*ProcessDoubleBuffer,
-        enricher: *ProcessEnricher,
+        processes: *const ProcessDoubleBuffer,
         gpa: std.mem.Allocator,
         arena: std.mem.Allocator,
         io: std.Io,
@@ -112,8 +105,7 @@ pub const SystemState = struct {
             .history = try HistoryBuffers.init(cfg.arena, cfg.devices.len),
             .targets = cfg.targets,
             .tui_refresh_rate = cfg.tui_refresh_rate,
-            .process_lists = cfg.process_lists,
-            .enricher = cfg.enricher,
+            .processes = cfg.processes,
             .gpa = cfg.gpa,
             .arena = cfg.arena,
             .io = cfg.io,
