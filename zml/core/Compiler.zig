@@ -150,6 +150,9 @@ pub const Scope = struct {
 };
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) Compiler {
+    var span = tracer.span_at(@src(), "zml.compiler.init", .{});
+    defer span.end();
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     const mlir_registry = mlirRegistry(io);
     var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
@@ -206,6 +209,9 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
 }
 
 pub fn deinit(self: *Compiler) void {
+    var span = tracer.span_at(@src(), "zml.compiler.deinit", .{});
+    defer span.end();
+
     if (_current == self) _current = null;
     std.debug.assert(self.scopes.len == 0);
     self.mlir_pass_manager.deinit();
@@ -486,12 +492,17 @@ pub fn compileInternal(
         .int(compiler.mlir_ctx, .i32, num_replicas),
     );
 
-    compiler.mlir_pass_manager.runOnOp(compiler.module.operation()) catch |err| switch (err) {
-        error.MlirUnexpected => {
-            compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Failed to canonicalize invalid MLIR");
-            @panic("ZML generated invalid mlir. Please open a bug report");
-        },
-    };
+    {
+        var passes_span = tracer.span_at(@src(), "zml.compiler.mlir_passes", .{});
+        defer passes_span.end();
+
+        compiler.mlir_pass_manager.runOnOp(compiler.module.operation()) catch |err| switch (err) {
+            error.MlirUnexpected => {
+                compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Failed to canonicalize invalid MLIR");
+                @panic("ZML generated invalid mlir. Please open a bug report");
+            },
+        };
+    }
 
     const loaded_executable = compiler.compileModuleToPjrtExecutable(opts) catch |err| {
         compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Pjrt failed to compile the following MLIR");
@@ -500,17 +511,22 @@ pub fn compileInternal(
 
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
-    const exe = try Exe.init(
-        allocator,
-        platform,
-        loaded_executable,
-        num_devices,
-        num_partitions,
-        // This will get copied into exe
-        result.input_info.items(.shape),
-        result.output_info.items(.shape),
-        result.input_info.items(.aliasing_output),
-    );
+    const exe = blk: {
+        var exe_span = tracer.span_at(@src(), "zml.compiler.init_executable", .{});
+        defer exe_span.end();
+
+        break :blk try Exe.init(
+            allocator,
+            platform,
+            loaded_executable,
+            num_devices,
+            num_partitions,
+            // This will get copied into exe
+            result.input_info.items(.shape),
+            result.output_info.items(.shape),
+            result.input_info.items(.aliasing_output),
+        );
+    };
     errdefer exe.deinit();
 
     opts.progress.completeOne();
@@ -519,6 +535,9 @@ pub fn compileInternal(
 
 /// Declare all logical meshes used by this program
 fn addPartitionerOperations(ctx: *Compiler) !void {
+    var span = tracer.span_at(@src(), "zml.compiler.partitioning_setup", .{});
+    defer span.end();
+
     const mlir_ctx = ctx.mlir_ctx;
     const module = ctx.module;
 
@@ -580,6 +599,9 @@ pub const TensorInfo = struct {
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
 fn emitMlir(compiler: *Compiler, comptime func_: anytype, args: std.meta.ArgsTuple(@TypeOf(func_))) !EmitMlirResult {
+    var span = tracer.span_at(@src(), "zml.compiler.emit_mlir", .{});
+    defer span.end();
+
     const module = mlir.Module.init(.unknown(compiler.mlir_ctx));
     errdefer module.deinit();
 
@@ -703,6 +725,9 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutO
 }
 
 fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.MultiArrayList(TensorInfo), output_info: std.MultiArrayList(TensorInfo)) error{OutOfMemory}!EmitMlirResult {
+    var span = tracer.span_at(@src(), "zml.compiler.finalize_mlir", .{});
+    defer span.end();
+
     var arena_state = std.heap.ArenaAllocator.init(compiler.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -876,6 +901,9 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
 }
 
 fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.LoadedExecutable {
+    var span = tracer.span_at(@src(), "zml.compiler.compile_to_pjrt", .{});
+    defer span.end();
+
     const use_shardy_partitioner = switch (compiler.partitioner) {
         .shardy => true,
         .gspmd => false,
@@ -896,6 +924,9 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);
     const options = blk: {
+        var options_span = tracer.span_at(@src(), "zml.compiler.build_compile_options", .{});
+        defer options_span.end();
+
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
         c.xla_CompileOptionsProto_set_executable_build_options(options, executable_build_options_blk: {
             const exec_build_options = try upb.new(c.xla_ExecutableBuildOptionsProto, upb_arena);
@@ -1030,13 +1061,20 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
         break :blk options;
     };
 
+    const serialized_options = blk: {
+        var options_span = tracer.span_at(@src(), "zml.compiler.serialize_compile_options", .{});
+        defer options_span.end();
+
+        break :blk try upb.serialize(options, upb_arena);
+    };
+
     const loaded_executable = try pjrtx.Client.compile(
         platform.pjrt_client,
         platform.pjrt_api,
         compiler.allocator,
         compiler.io,
         compiler.module,
-        try upb.serialize(options, upb_arena),
+        serialized_options,
     );
     errdefer loaded_executable.deinit();
 

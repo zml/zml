@@ -204,6 +204,10 @@ extern "C" bool zml_traceme_enabled(void) {
          MacOsSignpostRangeBackend::IsEnabled();
 }
 
+extern "C" int64_t zml_traceme_new_activity_id(void) {
+  return tsl::profiler::TraceMe::NewActivityId();
+}
+
 extern "C" void zml_traceme_session_start(int level, uint64_t filter_mask,
                                           bool enable_filter) {
   g_local_host_trace_session.start_timestamp_ns =

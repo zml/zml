@@ -242,6 +242,8 @@ fn streamXSpaceToTraceJson(
         try streamPlaneEvents(allocator, writer, &array_writer, plane);
     }
 
+    try streamFlows(allocator, writer, &array_writer, planes.items);
+
     try writer.writeAll("]}");
 }
 
@@ -458,6 +460,152 @@ fn streamEvent(
         try writer.writeByte('}');
     }
 
+    try writer.writeByte('}');
+}
+
+const FlowKey = struct {
+    context_type: u64,
+    context_id: u64,
+};
+
+const FlowEndpoint = struct {
+    key: FlowKey,
+    zml_origin: bool,
+    role: enum { producer, consumer },
+    timestamp_ps: u64,
+    device_id: u32,
+    resource_id: u32,
+    event: *const c.tensorflow_profiler_XEvent,
+
+    fn lessThan(_: void, a: FlowEndpoint, b: FlowEndpoint) bool {
+        if (a.key.context_type != b.key.context_type) return a.key.context_type < b.key.context_type;
+        if (a.key.context_id != b.key.context_id) return a.key.context_id < b.key.context_id;
+        if (a.timestamp_ps != b.timestamp_ps) return a.timestamp_ps < b.timestamp_ps;
+        if (a.role != b.role) return a.role == .producer;
+        if (a.device_id != b.device_id) return a.device_id < b.device_id;
+        return a.resource_id < b.resource_id;
+    }
+};
+
+const FlowContext = struct {
+    zml_origin: bool = false,
+    producer_type: ?u64 = null,
+    producer_id: ?u64 = null,
+    consumer_type: ?u64 = null,
+    consumer_id: ?u64 = null,
+
+    fn readStats(self: *FlowContext, allocator: std.mem.Allocator, plane: *PlaneContext, stats: []const [*c]const c.tensorflow_profiler_XStat) !void {
+        for (stats) |stat_c| {
+            const stat = stat_c orelse continue;
+            const metadata = (try plane.getStatMetadata(allocator, c.tensorflow_profiler_XStat_metadata_id(stat))) orelse continue;
+            const name = stringView(c.tensorflow_profiler_XStatMetadata_name(metadata));
+            if (std.mem.eql(u8, name, "_zml_flow")) {
+                self.zml_origin = switch (c.tensorflow_profiler_XStat_value_case(stat)) {
+                    c.tensorflow_profiler_XStat_value_uint64_value => c.tensorflow_profiler_XStat_uint64_value(stat) != 0,
+                    c.tensorflow_profiler_XStat_value_int64_value => c.tensorflow_profiler_XStat_int64_value(stat) != 0,
+                    else => false,
+                };
+                continue;
+            }
+            const field: *?u64 = if (std.mem.eql(u8, name, "_pt"))
+                &self.producer_type
+            else if (std.mem.eql(u8, name, "_p"))
+                &self.producer_id
+            else if (std.mem.eql(u8, name, "_ct"))
+                &self.consumer_type
+            else if (std.mem.eql(u8, name, "_c"))
+                &self.consumer_id
+            else
+                continue;
+            field.* = switch (c.tensorflow_profiler_XStat_value_case(stat)) {
+                c.tensorflow_profiler_XStat_value_uint64_value => c.tensorflow_profiler_XStat_uint64_value(stat),
+                c.tensorflow_profiler_XStat_value_int64_value => @bitCast(c.tensorflow_profiler_XStat_int64_value(stat)),
+                else => null,
+            };
+        }
+    }
+};
+
+fn streamFlows(allocator: std.mem.Allocator, writer: *std.Io.Writer, array_writer: *JsonArrayWriter, planes: []PlaneContext) !void {
+    // Index only correlation endpoints; the rest of the trace remains streamed.
+    // A second pass makes matching independent of the order of XPlane threads.
+    var endpoints: std.ArrayListUnmanaged(FlowEndpoint) = .empty;
+    defer endpoints.deinit(allocator);
+    for (planes) |*plane| {
+        var line_count: usize = 0;
+        const lines = c.tensorflow_profiler_XPlane_lines(plane.plane, &line_count) orelse continue;
+        for (lines[0..line_count]) |line_c| {
+            const line = line_c orelse continue;
+            if (std.mem.eql(u8, lineDisplayName(line), kXlaAsyncOpLineName)) continue;
+            const resource_id = try lineResourceId(line);
+            var event_count: usize = 0;
+            const events = c.tensorflow_profiler_XLine_events(line, &event_count) orelse continue;
+            for (events[0..event_count]) |event_c| {
+                const event = event_c orelse continue;
+                const metadata_id = c.tensorflow_profiler_XEvent_metadata_id(event);
+                if (try plane.isInternalEvent(allocator, metadata_id)) continue;
+                var context: FlowContext = .{};
+                if (try plane.getEventMetadata(allocator, metadata_id)) |metadata| {
+                    try context.readStats(allocator, plane, metadataStats(metadata));
+                }
+                try context.readStats(allocator, plane, eventStats(event));
+                var endpoint: FlowEndpoint = .{
+                    .key = undefined,
+                    .zml_origin = context.zml_origin,
+                    .role = .producer,
+                    .timestamp_ps = eventTimestampPs(line, event),
+                    .device_id = plane.device_id,
+                    .resource_id = resource_id,
+                    .event = event,
+                };
+                if (context.producer_type) |context_type| {
+                    if (context.producer_id) |context_id| {
+                        endpoint.key = .{ .context_type = context_type, .context_id = context_id };
+                        try endpoints.append(allocator, endpoint);
+                    }
+                }
+                if (context.consumer_type) |context_type| {
+                    if (context.consumer_id) |context_id| {
+                        endpoint.key = .{ .context_type = context_type, .context_id = context_id };
+                        endpoint.role = .consumer;
+                        try endpoints.append(allocator, endpoint);
+                    }
+                }
+            }
+        }
+    }
+    try streamFlowEndpoints(writer, array_writer, endpoints.items);
+}
+
+fn streamFlowEndpoints(writer: *std.Io.Writer, array_writer: *JsonArrayWriter, endpoints: []FlowEndpoint) !void {
+    std.mem.sort(FlowEndpoint, endpoints, {}, FlowEndpoint.lessThan);
+    var producer: ?FlowEndpoint = null;
+    var flow_id: u64 = 0;
+    for (endpoints) |endpoint| {
+        if (producer) |previous| {
+            if (!std.meta.eql(previous.key, endpoint.key)) producer = null;
+        }
+        if (endpoint.role == .producer) {
+            producer = endpoint;
+        } else if (producer) |previous| {
+            if (previous.event == endpoint.event) continue;
+            // A fresh flow per consumer preserves fan-out without inventing
+            // consumer-to-consumer dependencies. Reused IDs select the latest producer.
+            flow_id += 1;
+            // Use one category at both endpoints, including ZML/backend handoffs.
+            const category = if (previous.zml_origin or endpoint.zml_origin) "zml.flow" else "xla.flow";
+            try streamFlowPoint(writer, array_writer, previous, flow_id, 's', category);
+            try streamFlowPoint(writer, array_writer, endpoint, flow_id, 'f', category);
+        }
+    }
+}
+
+fn streamFlowPoint(writer: *std.Io.Writer, array_writer: *JsonArrayWriter, endpoint: FlowEndpoint, flow_id: u64, phase: u8, category: []const u8) !void {
+    try array_writer.nextItem(writer);
+    try writer.print("{{\"ph\":\"{c}\",\"cat\":\"{s}\",\"name\":\"producer_consumer\",\"id\":\"{x}\",\"pid\":{d},\"tid\":{d},\"ts\":", .{ phase, category, flow_id, endpoint.device_id, endpoint.resource_id });
+    var number_buf: [64]u8 = undefined;
+    try writer.writeAll(formatPicosToMicros(&number_buf, endpoint.timestamp_ps));
+    if (phase == 'f') try writer.writeAll(",\"bp\":\"e\"");
     try writer.writeByte('}');
 }
 
@@ -701,6 +849,7 @@ fn classifyStatName(name: []const u8) StatBehavior {
         "_ct",
         "_p",
         "_c",
+        "_zml_flow",
         "_r",
         "flops",
         "program_id",
@@ -709,4 +858,101 @@ fn classifyStatName(name: []const u8) StatBehavior {
         if (std.mem.eql(u8, name, candidate)) return .skip;
     }
     return .emit;
+}
+
+// Deliberately store consumers before producers in XPlane order. Metadata holds
+// the correlation fields, and individual events override the IDs/types.
+test "flows preserve fan-out, namespaces, reused IDs and ZML categories" {
+    const allocator = std.testing.allocator;
+    const arena = c.upb_Arena_New() orelse return error.OutOfMemory;
+    defer c.upb_Arena_Free(arena);
+    const space = try upb.new(c.tensorflow_profiler_XSpace, arena);
+    const plane = c.tensorflow_profiler_XSpace_add_planes(space, arena) orelse return error.OutOfMemory;
+    c.tensorflow_profiler_XPlane_set_name(plane, upb.stringView(kHostThreadsPlaneName));
+    for ([_][]const u8{ "_pt", "_p", "_ct", "_c", "_zml_flow" }, 1..) |name, index| {
+        const metadata = try upb.new(c.tensorflow_profiler_XStatMetadata, arena);
+        c.tensorflow_profiler_XStatMetadata_set_name(metadata, upb.stringView(name));
+        try std.testing.expect(c.tensorflow_profiler_XPlane_stat_metadata_set(plane, @intCast(index), metadata, arena));
+    }
+    const id: u64 = std.math.maxInt(u64);
+    for ([_][]const u8{ "producer", "consumer" }, 1..) |name, index| {
+        const metadata = try upb.new(c.tensorflow_profiler_XEventMetadata, arena);
+        c.tensorflow_profiler_XEventMetadata_set_name(metadata, upb.stringView(name));
+        const context_type = c.tensorflow_profiler_XEventMetadata_add_stats(metadata, arena) orelse return error.OutOfMemory;
+        c.tensorflow_profiler_XStat_set_metadata_id(context_type, if (index == 1) 1 else 3);
+        c.tensorflow_profiler_XStat_set_uint64_value(context_type, 1);
+        const context_id = c.tensorflow_profiler_XEventMetadata_add_stats(metadata, arena) orelse return error.OutOfMemory;
+        c.tensorflow_profiler_XStat_set_metadata_id(context_id, if (index == 1) 2 else 4);
+        c.tensorflow_profiler_XStat_set_uint64_value(context_id, id);
+        try std.testing.expect(c.tensorflow_profiler_XPlane_event_metadata_set(plane, @intCast(index), metadata, arena));
+    }
+    try addFlowTestEvent(plane, arena, 2, 20, null, false); // A -> consumer 1.
+    try addFlowTestEvent(plane, arena, 1, 10, null, false); // Producer A.
+    try addFlowTestEvent(plane, arena, 2, 30, null, false); // A -> consumer 2.
+    try addFlowTestEvent(plane, arena, 1, 15, 2, true); // Same ID, different context.
+    try addFlowTestEvent(plane, arena, 2, 35, 2, false);
+    try addFlowTestEvent(plane, arena, 1, 40, null, false); // Reuse the ID for producer B.
+    try addFlowTestEvent(plane, arena, 2, 50, null, true); // B -> consumer.
+    try addFlowTestEvent(plane, arena, 2, 5, null, false); // Consumer before any producer.
+    try addFlowTestEvent(plane, arena, 2, 70, 3, false); // Unmatched context.
+
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
+    try streamXSpaceToTraceJson(allocator, space, &writer.writer);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, writer.written(), .{});
+    defer parsed.deinit();
+    const events = parsed.value.object.get("traceEvents").?.array.items;
+    var sources: std.StringHashMapUnmanaged(i64) = .empty;
+    defer sources.deinit(allocator);
+    var source_categories: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer source_categories.deinit(allocator);
+    var consumers: usize = 0;
+    for (events) |event| {
+        const fields = event.object;
+        const phase = fields.get("ph").?.string;
+        if (fields.get("args")) |args| try std.testing.expect(!args.object.contains("_zml_flow"));
+        if (std.mem.eql(u8, phase, "s")) {
+            try sources.put(allocator, fields.get("id").?.string, fields.get("ts").?.integer);
+            try source_categories.put(allocator, fields.get("id").?.string, fields.get("cat").?.string);
+        } else if (std.mem.eql(u8, phase, "f")) {
+            const start = sources.get(fields.get("id").?.string).?;
+            const end = fields.get("ts").?.integer;
+            const category = if (end == 35 or end == 50) "zml.flow" else "xla.flow";
+            try std.testing.expectEqualStrings(category, fields.get("cat").?.string);
+            try std.testing.expectEqualStrings(category, source_categories.get(fields.get("id").?.string).?);
+            try std.testing.expectEqual(@as(i64, switch (end) {
+                20, 30 => 10,
+                35 => 15,
+                50 => 40,
+                else => return error.UnexpectedConsumer,
+            }), start);
+            try std.testing.expectEqualStrings("e", fields.get("bp").?.string);
+            consumers += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), sources.count());
+    try std.testing.expectEqual(@as(usize, 4), consumers);
+}
+
+fn addFlowTestEvent(plane: *c.tensorflow_profiler_XPlane, arena: *c.upb_Arena, metadata_id: i64, time_us: i64, context_type: ?u64, zml_origin: bool) !void {
+    const line = c.tensorflow_profiler_XPlane_add_lines(plane, arena) orelse return error.OutOfMemory;
+    c.tensorflow_profiler_XLine_set_id(line, metadata_id);
+    const event = c.tensorflow_profiler_XLine_add_events(line, arena) orelse return error.OutOfMemory;
+    c.tensorflow_profiler_XEvent_set_metadata_id(event, metadata_id);
+    c.tensorflow_profiler_XEvent_set_offset_ps(event, time_us * 1_000_000);
+    c.tensorflow_profiler_XEvent_set_duration_ps(event, 1_000_000);
+    if (zml_origin) {
+        const stat = c.tensorflow_profiler_XEvent_add_stats(event, arena) orelse return error.OutOfMemory;
+        c.tensorflow_profiler_XStat_set_metadata_id(stat, 5);
+        if (metadata_id == 1) {
+            c.tensorflow_profiler_XStat_set_int64_value(stat, 1);
+        } else {
+            c.tensorflow_profiler_XStat_set_uint64_value(stat, 1);
+        }
+    }
+    if (context_type) |value| {
+        const stat = c.tensorflow_profiler_XEvent_add_stats(event, arena) orelse return error.OutOfMemory;
+        c.tensorflow_profiler_XStat_set_metadata_id(stat, if (metadata_id == 1) 1 else 3);
+        c.tensorflow_profiler_XStat_set_uint64_value(stat, value);
+    }
 }

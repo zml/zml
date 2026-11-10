@@ -336,6 +336,14 @@ pub const Loader = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) error{OutOfMemory}!Loader {
+        var span = tracer.span_at(@src(), "zml.io.Loader.init", .{
+            .devices = platform.devices.len,
+            .parallelism = opts.parallelism,
+            .dma_chunks = opts.dma_chunks,
+            .dma_chunk_size = opts.dma_chunk_size,
+        });
+        defer span.end();
+
         const pool_count = platform.devices.len;
         const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
         errdefer allocator.free(dma_allocators);
@@ -363,6 +371,9 @@ pub const Loader = struct {
     }
 
     pub fn deinit(self: *Loader) void {
+        var span = tracer.span_at(@src(), "zml.io.Loader.deinit", .{});
+        defer span.end();
+
         self.delivered.deinit(self.allocator);
         for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
         self.allocator.free(self.pinned_buffer_pools);
@@ -370,6 +381,9 @@ pub const Loader = struct {
     }
 
     pub fn await(self: *Loader, io: std.Io) std.Io.Cancelable!void {
+        var span = tracer.span_at(@src(), "zml.io.Loader.await", .{});
+        defer span.end();
+
         return self.group.await(io);
     }
 
@@ -381,10 +395,15 @@ pub const Loader = struct {
 
     pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, opts: LoadOpts) LoadError!void {
         const tensor_count = meta.count(Tensor, model);
+        const context: tracer.Context = .init(.threadpool_event);
+        var span = tracer.span_at_for(@src(), "zml.io.Loader.load", .{ .tensors = tensor_count }, .{ .producer = context });
+        defer span.end();
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
 
+        var flatten_span = tracer.span_at(@src(), "zml.io.Loader.load.flatten", .{});
+        defer flatten_span.end();
         const flattened_buffers = arena.allocator().alloc(*Buffer, tensor_count) catch @panic("Errors can't be handled in `loadInner`");
         meta.forEachVisit(buffers, *Buffer, struct {
             fn call(i: usize, buffer: *Buffer, flattened_buffers_: []*Buffer) void {
@@ -398,8 +417,11 @@ pub const Loader = struct {
                 flattened_tensors_[i] = tensor;
             }
         }.call, .{flattened_tensors});
+        flatten_span.end();
 
         // Refuse before scheduling anything, so a failure leaves no task in flight.
+        var validate_span = tracer.span_at(@src(), "zml.io.Loader.load.validate", .{});
+        defer validate_span.end();
         var missing: usize = 0;
         for (flattened_tensors) |tensor| {
             const sources = store.getSourcesById(tensor.id) orelse continue;
@@ -414,13 +436,16 @@ pub const Loader = struct {
         if (missing != 0) {
             return error.TransformedTensorNotDelivered;
         }
+        validate_span.end();
 
+        var schedule_span = tracer.span_at(@src(), "zml.io.Loader.load.schedule", .{});
+        defer schedule_span.end();
         for (flattened_tensors, flattened_buffers) |tensor, buffer| {
             if (store.getSourcesById(tensor.id)) |sources| {
                 if (sources.transformed) continue;
             }
 
-            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts });
+            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts, context });
         }
     }
 
@@ -439,10 +464,17 @@ pub const Loader = struct {
     }
 
     pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: *const Tensor, store: *const TensorStore, opts: LoadOpts) void {
-        loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts });
+        const context: tracer.Context = .init(.threadpool_event);
+        var span = tracer.span_at_for(@src(), "zml.io.Loader.loadBuffer", .{ .tensor_id = @backingInt(tensor.id) }, .{ .producer = context });
+        defer span.end();
+
+        loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts, context });
     }
 
-    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts) void {
+    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts, context: tracer.Context) void {
+        var span = tracer.span_at_for(@src(), "zml.io.Loader.defaultCallback", .{ .tensor_id = @backingInt(tensor.id) }, .{ .consumer = context });
+        defer span.end();
+
         const sources = store.getSourcesById(tensor.id) orelse {
             std.log.debug("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
@@ -455,7 +487,10 @@ pub const Loader = struct {
         };
     }
 
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, opts: LoadOpts) void {
+    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, opts: LoadOpts, context: tracer.Context) void {
+        var span = tracer.span_at_for(@src(), "zml.io.Loader.loadSingle", .{ .bytes = shape.byteSize() }, .{ .consumer = context });
+        defer span.end();
+
         self.loadSingleInner(io, source, shape, buffer, .device, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
@@ -473,20 +508,31 @@ pub const Loader = struct {
         memory: Memory.Kind,
         opts: LoadOpts,
     ) !void {
-        var reader = try source.reader(io, &.{}, .{});
+        var span = tracer.span_at(@src(), "zml.io.Loader.loadSingleInner", .{ .bytes = shape.byteSize(), .memory = memory });
+        defer span.end();
+
+        var reader = blk: {
+            var reader_span = tracer.span_at(@src(), "zml.io.Loader.loadSingleInner.open_reader", .{});
+            defer reader_span.end();
+            break :blk try source.reader(io, &.{}, .{});
+        };
         defer reader.deinit();
 
-        var writer = try MemoryWriter.init(
-            self.allocator,
-            io,
-            self.platform,
-            self.pinned_buffer_pools,
-            self.dma_allocators,
-            self.dma_chunk_size,
-            shape,
-            buffer,
-            memory,
-        );
+        var writer = blk: {
+            var writer_span = tracer.span_at(@src(), "zml.io.Loader.loadSingleInner.init_writer", .{});
+            defer writer_span.end();
+            break :blk try MemoryWriter.init(
+                self.allocator,
+                io,
+                self.platform,
+                self.pinned_buffer_pools,
+                self.dma_allocators,
+                self.dma_chunk_size,
+                shape,
+                buffer,
+                memory,
+            );
+        };
         defer writer.deinit(self.allocator);
 
         const scale = 1024;
@@ -497,12 +543,28 @@ pub const Loader = struct {
             writer.setProgress(&node);
             defer writer.setProgress(null);
             var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-            const total = try reader.interface.streamRemaining(&progress_writer.interface);
-            try progress_writer.interface.flush();
+            const total = blk: {
+                var stream_span = tracer.span_at(@src(), "zml.io.Loader.loadSingleInner.stream", .{ .bytes = shape.byteSize() });
+                defer stream_span.end();
+                break :blk try reader.interface.streamRemaining(&progress_writer.interface);
+            };
+            {
+                var flush_span = tracer.span_at(@src(), "zml.io.Loader.loadSingleInner.flush", .{});
+                defer flush_span.end();
+                try progress_writer.interface.flush();
+            }
             _ = self.bytes_loaded.fetchAdd(total, .monotonic);
         } else {
-            const total = try reader.interface.streamRemaining(writer.interface());
-            try writer.interface().flush();
+            const total = blk: {
+                var stream_span = tracer.span_at(@src(), "zml.io.Loader.loadSingleInner.stream", .{ .bytes = shape.byteSize() });
+                defer stream_span.end();
+                break :blk try reader.interface.streamRemaining(writer.interface());
+            };
+            {
+                var flush_span = tracer.span_at(@src(), "zml.io.Loader.loadSingleInner.flush", .{});
+                defer flush_span.end();
+                try writer.interface().flush();
+            }
             _ = self.bytes_loaded.fetchAdd(total, .monotonic);
         }
     }
@@ -517,6 +579,10 @@ pub const Loader = struct {
         exe: *const Exe,
         opts: LoadOpts,
     ) error{ NotFound, OutOfMemory, LoadFailed, Canceled }!void {
+        const context: tracer.Context = .init(.threadpool_event);
+        var span = tracer.span_at_for(@src(), "zml.io.Loader.loadExecute", .{ .tensor_id = @backingInt(tensor.id), .bytes = tensor.shape().byteSize() }, .{ .producer = context });
+        defer span.end();
+
         const sources = (store.getSourcesById(tensor.id) orelse return error.NotFound).tensors;
         const buffers = try arena.alloc(Buffer, sources.len);
         const loaded = try arena.alloc(bool, sources.len);
@@ -535,12 +601,20 @@ pub const Loader = struct {
         } else null;
         defer if (node) |*n| n.end();
 
-        for (sources, 0..) |source, i| {
-            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], .{} });
+        {
+            var schedule_span = tracer.span_at(@src(), "zml.io.Loader.loadExecute.schedule", .{ .sources = sources.len });
+            defer schedule_span.end();
+            for (sources, 0..) |source, i| {
+                self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], .{}, context });
+            }
         }
-        self.group.await(io) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-        };
+        {
+            var await_span = tracer.span_at(@src(), "zml.io.Loader.loadExecute.await", .{});
+            defer await_span.end();
+            self.group.await(io) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+            };
+        }
 
         if (std.mem.findScalar(bool, loaded, false)) |_| {
             return error.LoadFailed;
@@ -550,7 +624,11 @@ pub const Loader = struct {
         var results = try exe.results(arena);
 
         args.set(.{buffers});
-        exe.call(io, args, &results, .{ .wait = true });
+        {
+            var execute_span = tracer.span_at(@src(), "zml.io.Loader.loadExecute.execute", .{});
+            defer execute_span.end();
+            exe.call(io, args, &results, .{ .wait = true });
+        }
 
         buffer.* = results.get(Buffer);
         try self.delivered.put(self.allocator, tensor.id, {});
@@ -755,6 +833,8 @@ pub const BufferedMemoryWriter = struct {
 
     pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *BufferedMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
+        var span = tracer.span_at(@src(), "zml.io.BufferedMemoryWriter.flush", .{ .bytes = self.shape.byteSize() });
+        defer span.end();
 
         self.buffer.* = Buffer.from(
             self.io,
@@ -790,6 +870,9 @@ const DirectShardWriter = struct {
     events_contexts: [2]?EventContext = @splat(null),
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
+        var span = tracer.span_at(@src(), "zml.io.DirectShardWriter.init", .{ .bytes = shape.byteSize() });
+        defer span.end();
+
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
         const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
             memory.platform.pjrt_api,
@@ -803,7 +886,11 @@ const DirectShardWriter = struct {
         const pjrt_buffer = try transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0);
         errdefer pjrt_buffer.deinit(memory.platform.pjrt_api);
 
-        const buf = try pool.get(allocator, io);
+        const buf = blk: {
+            var pool_span = tracer.span_at(@src(), "zml.io.DirectShardWriter.init.acquire_staging", .{});
+            defer pool_span.end();
+            break :blk try pool.get(allocator, io);
+        };
 
         return .{
             .allocator = allocator,
@@ -985,6 +1072,9 @@ const DispatchSpans = struct {
     mirror_writers: []usize,
 
     fn init(allocator: std.mem.Allocator, shape: Shape) !DispatchSpans {
+        var span = tracer.span_at(@src(), "zml.io.DispatchSpans.init", .{ .bytes = shape.byteSize() });
+        defer span.end();
+
         const placement = try Sharding.Placement.init(&shape);
         const ordered_devices = placement.mesh().?.devicesInCanonicalOrder();
 
@@ -1202,6 +1292,9 @@ pub const DirectMemoryWriter = struct {
         buffer: *Buffer,
         memory: Memory.Kind,
     ) !DirectMemoryWriter {
+        var span = tracer.span_at(@src(), "zml.io.DirectMemoryWriter.init", .{ .bytes = shape.byteSize(), .memory = memory });
+        defer span.end();
+
         var placed_shape = shape;
         if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
         const placement = try Sharding.Placement.init(&placed_shape);
@@ -1256,6 +1349,9 @@ pub const DirectMemoryWriter = struct {
     }
 
     pub fn deinit(self: *DirectMemoryWriter) void {
+        var span = tracer.span_at(@src(), "zml.io.DirectMemoryWriter.deinit", .{});
+        defer span.end();
+
         self.setProgress(null);
         for (self.shard_writers) |*writer| {
             writer.deinit();
@@ -1338,6 +1434,8 @@ pub const DirectMemoryWriter = struct {
 
     fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
+        var span = tracer.span_at(@src(), "zml.io.DirectMemoryWriter.flush", .{ .shards = self.shard_writers.len });
+        defer span.end();
 
         // Commit the active public window if one remains
         if (self.span_index < self.dispatch_spans.spans.len) {

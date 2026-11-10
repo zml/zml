@@ -5,6 +5,7 @@ const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
+const tracer = @import("zml/profiling").tracer;
 
 const DataType = @import("dtype.zig").DataType;
 const mem = @import("mem.zig");
@@ -141,6 +142,12 @@ pub const Buffer = struct {
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
+        var span = tracer.span_at(@src(), "zml.buffer.from", .{
+            .wait = opts.wait,
+            .byte_count = data_.len,
+        });
+        defer span.end();
+
         var pjrt_shards: Shards = .empty;
         var packed_shape = shape_.packedShape();
         if (packed_shape._sharding.mesh == null) packed_shape._sharding.mesh = platform.replicated_mesh;
@@ -218,11 +225,21 @@ pub const Buffer = struct {
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
+        var span = tracer.span_at(@src(), "zml.buffer.await", .{
+            .shard_count = self.numShards(),
+        });
+        defer span.end();
+
         try awaitShards(self._shards.constSlice(), self._platform, io);
     }
 
     fn awaitShards(pjrt_shards: []const *pjrt.Buffer, platform: *const Platform, io: std.Io) !void {
-        for (pjrt_shards) |shard| {
+        for (pjrt_shards, 0..) |shard, shard_index| {
+            var span = tracer.span_at(@src(), "zml.buffer.awaitShard", .{
+                .shard_index = shard_index,
+            });
+            defer span.end();
+
             const event = shard.readyEvent(platform.pjrt_api);
             defer event.deinit(platform.pjrt_api);
             try event.await(platform.pjrt_api, io);
@@ -282,6 +299,12 @@ pub const Buffer = struct {
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
     pub fn getValue(self: Buffer, T: type, io: std.Io) !T {
+        var span = tracer.span_at(@src(), "zml.buffer.getValue", .{
+            .byte_count = self._shape.byteSize(),
+            .shard_count = self.numShards(),
+        });
+        defer span.end();
+
         stdx.debug.assert(self._shape.byteSize() == @sizeOf(T), "Buffer {f} has {d} bytes of data, can't load it to a {s} with {d} bytes", .{ self, self._shape.byteSize(), @typeName(T), @sizeOf(T) });
         var res: T = undefined;
 
@@ -292,6 +315,12 @@ pub const Buffer = struct {
 
     /// Copies the content of the Buffer to the provided slice.
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
+        var span = tracer.span_at(@src(), "zml.buffer.toSlice", .{
+            .byte_count = self._shape.byteSize(),
+            .shard_count = self.numShards(),
+        });
+        defer span.end();
+
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
         const placement = placementOrPanic(self._platform, self._shape);
@@ -306,6 +335,11 @@ pub const Buffer = struct {
 
             if (maybe_event) |event| {
                 defer event.deinit(self._platform.pjrt_api);
+                var wait_span = tracer.span_at(@src(), "zml.buffer.toSlice.await", .{
+                    .shard_index = shard_index,
+                });
+                defer wait_span.end();
+
                 try event.await(self._platform.pjrt_api, io);
             }
         }
@@ -314,6 +348,12 @@ pub const Buffer = struct {
     /// Copies the content of the Buffer to the provided slice.
     /// The returned slice owns the memory.
     pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
+        var span = tracer.span_at(@src(), "zml.buffer.toSliceAlloc", .{
+            .byte_count = self._shape.byteSize(),
+            .shard_count = self.numShards(),
+        });
+        defer span.end();
+
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
@@ -327,6 +367,11 @@ pub const Buffer = struct {
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
                 defer event.deinit(self._platform.pjrt_api);
+                var wait_span = tracer.span_at(@src(), "zml.buffer.toSliceAlloc.await", .{
+                    .shard_index = shard_index,
+                });
+                defer wait_span.end();
+
                 try event.await(self._platform.pjrt_api, io);
             }
 

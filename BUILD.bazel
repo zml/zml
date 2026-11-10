@@ -39,6 +39,8 @@ zls_completion(
         "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
+        "//examples/phonon:phonon",
+        # "//examples/phonon:test",
         "//examples/io:playground",
         "//stdx",
         "//zml",

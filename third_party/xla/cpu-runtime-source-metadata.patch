@@ -1,0 +1,202 @@
+diff --git a/xla/backends/cpu/runtime/thunk.h b/xla/backends/cpu/runtime/thunk.h
+--- a/xla/backends/cpu/runtime/thunk.h
++++ b/xla/backends/cpu/runtime/thunk.h
+@@ -109,6 +109,10 @@
+     std::string op_name;
+     std::string module_name;
+     int64_t module_id;
++    // Model source provenance, resolved at compile time and owned by the thunk.
++    std::string source;
++    std::string source_stack;
++    std::string framework_op;
+   };
+ 
+   Thunk(Kind kind, Info info);
+@@ -371,6 +375,7 @@
+ 
+  private:
+   friend class ThunkExecutor;
++  friend class ThunkTestPeer;
+ 
+   // Encodes thunk info into the TraceMe compatible format. Used by
+   // ThunkExecutor to create TraceMe annotations for profiler.
+diff --git a/xla/service/cpu/thunk_emitter.cc b/xla/service/cpu/thunk_emitter.cc
+--- a/xla/service/cpu/thunk_emitter.cc
++++ b/xla/service/cpu/thunk_emitter.cc
+@@ -31,6 +31,7 @@
+ #include "absl/strings/match.h"
+ #include "absl/strings/str_cat.h"
+ #include "absl/strings/str_format.h"
++#include "absl/strings/str_replace.h"
+ #include "absl/strings/string_view.h"
+ #include "absl/types/span.h"
+ #include "llvm/ADT/StringRef.h"
+@@ -204,8 +205,34 @@
+     absl::StrAppend(&op_name, " (", it->second, ")");
+   }
+ 
+-  return Thunk::Info{std::move(op_name), std::move(module_name),
+-                     module->unique_id()};
++  Thunk::Info info{std::move(op_name), std::move(module_name),
++                   module->unique_id()};
++  const OpMetadata& metadata = instruction->metadata();
++  info.framework_op = metadata.op_name();
++  if (!metadata.source_file().empty()) {
++    info.source =
++        absl::StrCat(metadata.source_file(), ":", metadata.source_line());
++  }
++  StackFrameId frame_id{metadata.stack_frame_id()};
++  while (frame_id.valid()) {
++    const HloStackFrame frame = module->get_stack_frame(frame_id);
++    if (frame.empty()) break;
++    if (info.source.empty() && !frame.file_name.empty()) {
++      info.source = absl::StrCat(frame.file_name, ":", frame.line);
++      if (frame.column != 0) absl::StrAppend(&info.source, ":", frame.column);
++    }
++    if (!info.source_stack.empty()) absl::StrAppend(&info.source_stack, " <- ");
++    absl::StrAppendFormat(&info.source_stack, "%v", frame);
++    frame_id = frame.parent_frame_id;
++  }
++  // TraceMe uses '#' and ',' as delimiters. Escape source strings once here,
++  // rather than formatting stack frames on every execution.
++  for (std::string* value :
++       {&info.source, &info.source_stack, &info.framework_op}) {
++    *value =
++        absl::StrReplaceAll(*value, {{"%", "%25"}, {"#", "%23"}, {",", "%2C"}});
++  }
++  return info;
+ }
+ 
+ absl::StatusOr<ThunkSequence> ThunkEmitter::EmitEntryComputation(
+diff --git a/xla/backends/cpu/runtime/thunk.cc b/xla/backends/cpu/runtime/thunk.cc
+--- a/xla/backends/cpu/runtime/thunk.cc
++++ b/xla/backends/cpu/runtime/thunk.cc
+@@ -167,6 +167,18 @@
+ 
+ // Encodes thunk info into the TraceMe compatible format.
+ std::string Thunk::TraceMeEncode(int64_t run_id, int64_t device_ordinal) const {
++  if (!info_.source.empty() || !info_.source_stack.empty() ||
++      !info_.framework_op.empty()) {
++    return tsl::profiler::TraceMeEncode(info_.op_name,
++                                        {{"hlo_op", info_.op_name},
++                                         {"hlo_module", info_.module_name},
++                                         {"program_id", info_.module_id},
++                                         {"run_id", run_id},
++                                         {"device_ordinal", device_ordinal},
++                                         {"source", info_.source},
++                                         {"source_stack", info_.source_stack},
++                                         {"framework_op", info_.framework_op}});
++  }
+   return tsl::profiler::TraceMeEncode(info_.op_name,
+                                       {{"hlo_op", info_.op_name},
+                                        {"hlo_module", info_.module_name},
+diff --git a/xla/backends/cpu/runtime/thunk.proto b/xla/backends/cpu/runtime/thunk.proto
+--- a/xla/backends/cpu/runtime/thunk.proto
++++ b/xla/backends/cpu/runtime/thunk.proto
+@@ -292,6 +292,9 @@
+   string op_name = 1;
+   string module_name = 2;
+   int64 module_id = 3;
++  string source = 4;
++  string source_stack = 5;
++  string framework_op = 6;
+ }
+ 
+ message ThunkProto {
+diff --git a/xla/backends/cpu/runtime/thunk_proto_serdes_utils.cc b/xla/backends/cpu/runtime/thunk_proto_serdes_utils.cc
+--- a/xla/backends/cpu/runtime/thunk_proto_serdes_utils.cc
++++ b/xla/backends/cpu/runtime/thunk_proto_serdes_utils.cc
+@@ -55,6 +55,9 @@
+   proto.set_op_name(info.op_name);
+   proto.set_module_name(info.module_name);
+   proto.set_module_id(info.module_id);
++  proto.set_source(info.source);
++  proto.set_source_stack(info.source_stack);
++  proto.set_framework_op(info.framework_op);
+   return proto;
+ }
+ 
+@@ -63,6 +66,9 @@
+   info.op_name = proto.op_name();
+   info.module_name = proto.module_name();
+   info.module_id = proto.module_id();
++  info.source = proto.source();
++  info.source_stack = proto.source_stack();
++  info.framework_op = proto.framework_op();
+   return info;
+ }
+ 
+diff --git a/xla/backends/cpu/runtime/thunk_test.cc b/xla/backends/cpu/runtime/thunk_test.cc
+--- a/xla/backends/cpu/runtime/thunk_test.cc
++++ b/xla/backends/cpu/runtime/thunk_test.cc
+@@ -24,7 +24,41 @@
+ #include "xla/tsl/platform/test.h"
+ 
+ namespace xla::cpu {
++class ThunkTestPeer {
++ public:
++  static std::string Encode(const Thunk& thunk) {
++    return thunk.TraceMeEncode(25, 0);
++  }
++};
+ namespace {
++
++TEST(ThunkTest, TraceMeIncludesModelSource) {
++  class TracedThunk : public Thunk {
++   public:
++    explicit TracedThunk(Info info) : Thunk(Kind::kKernel, std::move(info)) {}
++    BufferUses buffer_uses() const override { return {}; }
++    tsl::AsyncValueRef<ExecuteEvent> Execute(const ExecuteParams&) override {
++      return OkExecuteEvent();
++    }
++  };
++  Thunk::Info info{"wrapped_convolution.2", "mimi", 12};
++  info.source = "mimi/convolution.zig:99";
++  info.source_stack =
++      "mimi/convolution.zig:99 [ConvTranspose1d] <- "
++      "mimi/seanet.zig:71 [stage[1]]";
++  info.framework_op = "ConvTranspose1d.convolve";
++  const TracedThunk thunk(std::move(info));
++  const std::string trace = ThunkTestPeer::Encode(thunk);
++  EXPECT_NE(trace.find("hlo_op=wrapped_convolution.2"), std::string::npos);
++  EXPECT_NE(trace.find("source=mimi/convolution.zig:99"), std::string::npos);
++  EXPECT_NE(
++      trace.find("source_stack=mimi/convolution.zig:99 [ConvTranspose1d] <- "
++                 "mimi/seanet.zig:71 [stage[1]]"),
++      std::string::npos);
++  EXPECT_NE(trace.find("framework_op=ConvTranspose1d.convolve"),
++            std::string::npos);
++  EXPECT_NE(trace.find("run_id=25"), std::string::npos);
++}
+ 
+ TEST(ThunkTest, OkExecuteEvent) {
+   auto event = Thunk::OkExecuteEvent();
+diff --git a/xla/backends/cpu/runtime/thunk_sequence_serdes_test.cc b/xla/backends/cpu/runtime/thunk_sequence_serdes_test.cc
+--- a/xla/backends/cpu/runtime/thunk_sequence_serdes_test.cc
++++ b/xla/backends/cpu/runtime/thunk_sequence_serdes_test.cc
+@@ -695,8 +695,12 @@
+ 
+   absl::StatusOr<std::unique_ptr<Thunk>> CreateRngSeedThunk() {
+     ABSL_RETURN_IF_ERROR(AddBufferAllocations(1));
++    Thunk::Info info{"rng-seed", "test-module", 1};
++    info.source = "model.zig:42";
++    info.source_stack = "model.zig:42 [sample_noise] <- model.zig:10 [forward]";
++    info.framework_op = "sample_noise";
+     return RngSeedThunk::Create(
+-        Thunk::Info(),
++        std::move(info),
+         CreateBufferAllocationSlice(
+             buffer_allocations_[buffer_allocations_.size() - 1]));
+   }
+@@ -1187,7 +1191,10 @@
+ 
+     if (!(thunk_1.info().op_name == thunk_2.info().op_name &&
+           thunk_1.info().module_name == thunk_2.info().module_name &&
+-          thunk_1.info().module_id == thunk_2.info().module_id)) {
++          thunk_1.info().module_id == thunk_2.info().module_id &&
++          thunk_1.info().source == thunk_2.info().source &&
++          thunk_1.info().source_stack == thunk_2.info().source_stack &&
++          thunk_1.info().framework_op == thunk_2.info().framework_op)) {
+       return false;
+     }
+ 

@@ -1,4 +1,7 @@
+load("@bazel_lib//lib:copy_file.bzl", "copy_file")
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
@@ -18,12 +21,92 @@ config_setting(
     ],
 )
 
+# Opt in when backend instrumentation or runtime changes require a local plugin.
+bool_flag(
+    name = "build_from_source",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "from_source",
+    flag_values = {":build_from_source": "true"},
+)
+
+[
+    copy_file(
+        name = "source_plugin_" + platform,
+        src = "@xla//xla/pjrt/c:pjrt_c_api_cpu_plugin.so",
+        out = "lib/libzml_cpu." + extension,
+        tags = ["manual"],
+    )
+    for platform, extension in [
+        ("darwin", "dylib"),
+        ("linux", "so"),
+    ]
+]
+
+selects.config_setting_group(
+    name = "darwin",
+    match_any = [
+        ":darwin_arm64",
+        ":darwin_amd64",
+    ],
+)
+
+selects.config_setting_group(
+    name = "source_darwin",
+    match_all = [
+        ":from_source",
+        ":darwin",
+    ],
+)
+
+selects.config_setting_group(
+    name = "source_linux",
+    match_all = [
+        ":from_source",
+        "@platforms//os:linux",
+    ],
+)
+
+selects.config_setting_group(
+    name = "prebuilt_darwin_arm64",
+    match_all = [
+        ":darwin_arm64",
+        ":from_prebuilt",
+    ],
+)
+
+selects.config_setting_group(
+    name = "prebuilt_darwin_amd64",
+    match_all = [
+        ":darwin_amd64",
+        ":from_prebuilt",
+    ],
+)
+
+config_setting(
+    name = "from_prebuilt",
+    flag_values = {":build_from_source": "false"},
+)
+
+selects.config_setting_group(
+    name = "prebuilt_linux",
+    match_all = [
+        ":from_prebuilt",
+        "@platforms//os:linux",
+    ],
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = select({
-        ":darwin_arm64": ["@libzml_cpu_darwin_arm64//:libzml_cpu"],
-        ":darwin_amd64": ["@libzml_cpu_darwin_amd64//:libzml_cpu"],
-        "@platforms//os:linux": ["@libzml_cpu_linux_amd64//:libzml_cpu"],
+        ":source_darwin": [":source_plugin_darwin"],
+        ":source_linux": [":source_plugin_linux"],
+        ":prebuilt_darwin_arm64": ["@libzml_cpu_darwin_arm64//:libzml_cpu"],
+        ":prebuilt_darwin_amd64": ["@libzml_cpu_darwin_amd64//:libzml_cpu"],
+        ":prebuilt_linux": ["@libzml_cpu_linux_amd64//:libzml_cpu"],
     }),
     out = "sandbox",
     include_external_repositories = ["**"],

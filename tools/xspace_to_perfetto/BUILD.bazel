@@ -1,17 +1,17 @@
 load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 upb_c_proto_library(
     name = "xplane_upb",
-    deps = ["@tsl//tsl/profiler/protobuf:xplane_proto"],
     tags = ["manual"],
+    deps = ["@tsl//tsl/profiler/protobuf:xplane_proto"],
 )
 
 zig_library(
     name = "xspace_to_perfetto_lib",
-    tags = ["manual"],
     import_name = "tools/xspace_to_perfetto",
     main = "xspace_to_perfetto.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     zigopts = ["-lc"],
     deps = [
@@ -28,5 +28,15 @@ zig_binary(
     deps = [
         ":xspace_to_perfetto_lib",
         "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "xspace_to_perfetto.zig",
+    zigopts = ["-lc"],
+    deps = [
+        ":xplane_upb",
+        "//upb",
     ],
 )

@@ -1097,6 +1097,10 @@ pub const Tensor = struct {
     }
 
     fn convolution(self: Tensor, other: Tensor, opts: stablehlo.ConvolutionOpts) Tensor {
+        const compiler = Compiler.current();
+        compiler.pushLocationFmt(@src(), @typeName(@This()) ++ ".convolution", .{});
+        defer compiler.popLocation();
+
         stdx.debug.assert(self.rank() == other.rank(), "convolution expects tensor ranks to match, got {} and {}", .{ self.rank(), other.rank() });
         const N = self.rank();
         stdx.debug.guard(opts.window_strides.len == N - 2, @src());

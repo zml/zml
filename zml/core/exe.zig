@@ -309,6 +309,13 @@ pub const Exe = struct {
         /// Use the donated buffer's address as its output destination to replace it safely.
         /// Non-donated inputs remain owned by the caller.
         pub fn run(self: *Runner, io: std.Io, input_values: anytype, output_refs: anytype, opts: CallOpts) void {
+            var span = tracer.span_at(@src(), "zml.exe.runner.run", .{
+                .wait = opts.wait,
+                .arg_count = self.args.expected_shapes.len,
+                .result_count = self.results.expected_shapes.len,
+            });
+            defer span.end();
+
             self.args.set(input_values);
             self.exe.call(io, self.args, &self.results, opts);
             self.exe.deinitDonatedInputs(self.args);
@@ -335,11 +342,12 @@ pub const Exe = struct {
     /// Donated input contents cannot be used after the call; output buffers have their own handles.
     /// Use a runner to destroy donated handles automatically and replace buffers through output destinations.
     pub fn call(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
-        var span = tracer.span("zml.exe.call", .{
+        const trace_context: tracer.Context = .init(.pjrt_library_call);
+        var span = tracer.span_at_for(@src(), "zml.exe.call", .{
             .wait = opts.wait,
             .arg_count = arguments.expected_shapes.len,
             .result_count = results_.expected_shapes.len,
-        });
+        }, .{ .producer = trace_context });
         defer span.end();
 
         var events: [Platform.MAX_NUM_DEVICES]?*pjrt.Event = @splat(null);
@@ -358,6 +366,7 @@ pub const Exe = struct {
             // TODO: Set this flag for undonatable buffers.
             .non_donatable_input_indices = &.{},
             .context = self.context,
+            .traceme_context_id = trace_context.id,
         }) catch |err| {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
@@ -388,8 +397,9 @@ pub const Exe = struct {
         }
     }
 
-    pub fn memoryStats(self: *const Exe) pjrt.ApiError!pjrt.CompiledMemoryStats {
+    pub fn memoryStats(self: *const Exe) pjrt.ApiError!pjrt.Executable.CompiledMemoryStats {
         const exe = try self.exe.executable(self.platform.pjrt_api);
+        defer exe.deinit(self.platform.pjrt_api);
         return try exe.getCompiledMemoryStats(self.platform.pjrt_api);
     }
 };
@@ -474,6 +484,13 @@ pub fn FnExe(comptime function_: anytype) type {
 
                 /// Destroys donated input handles before filling outputs; non-donated inputs remain caller-owned.
                 pub fn run(self: *RunnerSelf, io: std.Io, call: Call, opts: Exe.CallOpts) void {
+                    var span = tracer.span_at(@src(), "zml.fn_exe.runner.run", .{
+                        .wait = opts.wait,
+                        .arg_count = self.args.expected_shapes.len,
+                        .result_count = self.results.expected_shapes.len,
+                    });
+                    defer span.end();
+
                     self.args.set(call.inputs);
                     self.exe.call(io, self.args, &self.results, opts);
                     self.exe.deinitDonatedInputs(self.args);

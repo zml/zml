@@ -1,0 +1,65 @@
+diff --git a/xla/service/cpu/conv_canonicalization.cc b/xla/service/cpu/conv_canonicalization.cc
+--- a/xla/service/cpu/conv_canonicalization.cc
++++ b/xla/service/cpu/conv_canonicalization.cc
+@@ -84,6 +84,7 @@
+       HloInstruction* new_input = module->entry_computation()->AddInstruction(
+           HloInstruction::CreateTranspose(new_input_shape, input,
+                                           new_input_dim_order));
++      new_input->set_metadata(hlo->metadata());
+ 
+       HloInstruction* kernel = hlo->mutable_operand(1);
+ 
+@@ -106,6 +107,7 @@
+       HloInstruction* new_kernel = module->entry_computation()->AddInstruction(
+           HloInstruction::CreateTranspose(new_kernel_shape, kernel,
+                                           new_kernel_dim_order));
++      new_kernel->set_metadata(hlo->metadata());
+ 
+       std::vector<int64_t> new_output_dim_order(num_dims);
+       std::vector<int64_t> new_conv_dims(num_dims);
+@@ -144,6 +146,9 @@
+               new_conv_shape, {new_input, new_kernel},
+               hlo->feature_group_count(), hlo->batch_group_count(),
+               hlo->window(), new_dnums, hlo->precision_config()));
++      // Keep source provenance on the convolution itself, not only the final
++      // transpose. Fusion wrapping uses this metadata for runtime attribution.
++      new_conv->set_metadata(hlo->metadata());
+ 
+       // Reshape the output back to the shape of the original convolution.
+       ABSL_RETURN_IF_ERROR(
+diff --git a/xla/service/cpu/conv_canonicalization_test.cc b/xla/service/cpu/conv_canonicalization_test.cc
+--- a/xla/service/cpu/conv_canonicalization_test.cc
++++ b/xla/service/cpu/conv_canonicalization_test.cc
+@@ -92,6 +92,18 @@
+   HloComputation* entry_computation =
+       module->AddEntryComputation(builder.Build());
+ 
++  OpMetadata metadata;
++  metadata.set_op_name("SEANet/stage[1]/ConvTranspose1d");
++  metadata.set_source_file("mimi/convolution.zig");
++  metadata.set_source_line(94);
++  HloStackFrame frame;
++  frame.file_name = metadata.source_file();
++  frame.function_name = metadata.op_name();
++  frame.line = metadata.source_line();
++  metadata.set_stack_frame_id(
++      module->mutable_stack_frames().AddStackFrame(frame).value);
++  entry_computation->root_instruction()->set_metadata(metadata);
++
+   cpu::TargetMachineFeaturesStub target_machine_features(
+       [](int64_t shape_size) {
+         return cpu::TargetMachineFeatures::kEigenExpectedTensorAlignment;
+@@ -107,6 +119,13 @@
+   EXPECT_EQ(HloOpcode::kTranspose, input_reshape->opcode());
+   const HloInstruction* kernel_reshape = canonical_conv->operand(1);
+   EXPECT_EQ(HloOpcode::kTranspose, kernel_reshape->opcode());
++
++  // Every generated operation must retain the original source and stack frame.
++  for (const HloInstruction* instruction :
++       {input_reshape, kernel_reshape, canonical_conv, output_reshape}) {
++    EXPECT_EQ(instruction->metadata().SerializeAsString(),
++              metadata.SerializeAsString());
++  }
+ 
+   // The input is in CNHW order. input_reshape should produce
+   // NHWC for the convolution to hit the Eigen fast path.

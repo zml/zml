@@ -355,8 +355,17 @@ pub const CompareOpts = struct {
 pub fn compareFloats(allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) !CompareOpts.Report {
     var acc: CompareOpts.Accumulator = try .init(allocator, left.len);
     defer acc.deinit(allocator);
-    acc.cmpFloatSlices(true, L, R, left, right, opts);
+    acc.cmpFloatSlices(L, R, left, right, opts);
     return acc.report();
+}
+
+test compareFloats {
+    const report = try compareFloats(std.testing.allocator, f32, f64, &.{ 0, 1 }, &.{ 0, 2 }, .{});
+    try std.testing.expect(!report.nan_or_inf);
+    try std.testing.expectEqual(@as(f32, 1), report.max_absolute_error);
+    try std.testing.expectEqual(@as(f32, 0.5), report.mean_absolute_error);
+    try std.testing.expectApproxEqAbs(@sqrt(@as(f32, 0.5)), report.rmse, 1e-6);
+    try std.testing.expectEqual(@as(f32, 0.5), report.close_fraction);
 }
 
 pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpectedEqual}!void {

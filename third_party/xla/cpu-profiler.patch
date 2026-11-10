@@ -1,0 +1,61 @@
+diff --git a/xla/pjrt/c/pjrt_c_api_cpu_internal.cc b/xla/pjrt/c/pjrt_c_api_cpu_internal.cc
+--- a/xla/pjrt/c/pjrt_c_api_cpu_internal.cc
++++ b/xla/pjrt/c/pjrt_c_api_cpu_internal.cc
+@@ -14,6 +14,10 @@
+ ==============================================================================*/
+ 
+ #include "xla/pjrt/c/pjrt_c_api_cpu_internal.h"
++
++#include "xla/backends/profiler/plugin/plugin_tracer_impl.h"
++#include "xla/backends/profiler/plugin/profiler_error.h"
++#include "xla/pjrt/c/pjrt_c_api_profiler_extension.h"
+ 
+ #include <cstdint>
+ #include <memory>
+@@ -110,9 +114,31 @@
+       absl::UnimplementedError("Topology not supported for CPU compilation."));
+ }
+ 
++PLUGIN_Profiler_Api profiler_api{
++    /*struct_size=*/PLUGIN_Profiler_Api_STRUCT_SIZE,
++    /*priv=*/nullptr,
++    /*error_destroy=*/xla::profiler::PLUGIN_Profiler_Error_Destroy,
++    /*error_message=*/xla::profiler::PLUGIN_Profiler_Error_Message,
++    /*error_get_code=*/xla::profiler::PLUGIN_Profiler_Error_GetCode,
++    /*create=*/xla::profiler::PLUGIN_Profiler_Create,
++    /*destroy=*/xla::profiler::PLUGIN_Profiler_Destroy,
++    /*start=*/xla::profiler::PLUGIN_Profiler_Start,
++    /*stop=*/xla::profiler::PLUGIN_Profiler_Stop,
++    /*collect_data=*/xla::profiler::PLUGIN_Profiler_CollectData,
++};
++
++PJRT_Profiler_Extension profiler_extension{
++    PJRT_Extension_Base{
++        /*struct_size=*/PJRT_Profiler_Extension_STRUCT_SIZE,
++        /*type=*/PJRT_Extension_Type::PJRT_Extension_Type_Profiler,
++        /*next=*/nullptr,
++    },
++    /*profiler_api=*/&profiler_api,
++};
++
+ const PJRT_Api* GetCpuPjrtApi() {
+   static PJRT_Layouts_Extension layouts_extension =
+-      pjrt::CreateLayoutsExtension(nullptr);
++      pjrt::CreateLayoutsExtension(&profiler_extension.base);
+ 
+   static PJRT_MemoryDescriptions_Extension memory_descriptions_extension =
+       pjrt::CreateMemoryDescriptionsExtension(&layouts_extension.base);
+diff --git a/xla/pjrt/c/BUILD b/xla/pjrt/c/BUILD
+--- a/xla/pjrt/c/BUILD
++++ b/xla/pjrt/c/BUILD
+@@ -558,6 +558,10 @@
+     hdrs = ["pjrt_c_api_cpu_internal.h"],
+     visibility = ["//visibility:public"],
+     deps = [
++        ":pjrt_c_api_profiler_extension_hdrs",
++        "//xla/backends/profiler:profiler_backends",
++        "//xla/backends/profiler/plugin:plugin_tracer_impl",
++        "//xla/backends/profiler/plugin:profiler_error",
+         ":pjrt_c_api_ffi_extension_hdrs",
+         ":pjrt_c_api_ffi_internal",
+         ":pjrt_c_api_hdrs",

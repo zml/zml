@@ -128,6 +128,65 @@ defer trace.end();
 Metadata is encoded into the `TraceMe` scope name, so keep it small and
 high-signal.
 
+## Annotate producer/consumer contexts
+
+Both `span_at` and `span_at_for` emit source locations as `_src=file:line:column`,
+matching the backend source-metadata key. `_src` is reserved by these helpers.
+
+Use `span_at_for` to combine source metadata with a typed correlation context:
+
+```zig
+const context: zml.tracer.Context = .init(.generic);
+
+{
+    var span = zml.tracer.span_at_for(@src(), "schedule", .{}, .{
+        .producer = context,
+    });
+    defer span.end();
+    // Pass a copy of context along with the scheduled work.
+}
+
+// In the worker receiving that context:
+{
+    var span = zml.tracer.span_at_for(@src(), "execute", .{}, .{
+        .consumer = context,
+    });
+    defer span.end();
+    // Perform the work.
+}
+```
+
+`Context.init(namespace)` obtains an activity ID from the executable's TraceMe
+generator. `ContextType` mirrors XLA's named namespaces, including `.generic`,
+`.pjrt_library_call`, and `.threadpool_event`. Plugins have separate generators;
+when crossing an API boundary, explicitly pass the same namespace and ID.
+Existing backend contexts can be represented with
+`Context{ .namespace = .pjrt_library_call, .id = backend_id }`.
+
+The last argument is a `SpanContext`: its optional `producer` and `consumer`
+fields can both be set for a span which receives work and schedules new work.
+Use separate contexts for those two handoffs. The helper encodes the required
+integer `_pt`/`_p` and `_ct`/`_c` fields in the same metadata section as `_src` and
+the ordinary metadata. Those four keys are reserved in `span_at_for` metadata.
+Existing `span` and `span_at` calls are unchanged. These annotations describe
+relationships; the caller remains responsible for scheduling and synchronization.
+
+`zml.exe.call` creates a `.pjrt_library_call` producer context and passes its ID
+through the PJRT execution arguments' profiler extension. Supporting XLA plugins
+record a matching `PJRT_LoadedExecutable_Execute` consumer, so the exported trace
+connects the host call to the backend entry point. The extension is only attached
+when the plugin advertises profiler support. With asynchronous execution, this
+arrow still describes the handoff even if backend work outlives the host span;
+waiting and buffer ownership are unaffected.
+
+`zml.compiler.pjrt_compile` uses the same mechanism to connect to the backend's
+`PJRT_Client_Compile` consumer. The correlation ID is passed by value through
+`io.async`, and the profiler extension is constructed on the compilation worker
+for the duration of the C API call.
+JSON flow endpoints bind to the enclosing slice at their timestamp. If a backend
+entry and its nested operation start at exactly the same timestamp, Perfetto can
+attach the arrow to that nested slice instead of the entry slice.
+
 ## Record a ZML profile from code
 
 If you want ZML to collect a backend profile and export `profiling.trace.json`,
@@ -315,6 +374,39 @@ bazel run //tools/neuron:summary-perfetto -- /tmp/zml-neuron-profile/<run>
 Each summary command writes beside the run and prints the output path:
 `summary.json`, `summary.txt`, or `summary.pftrace`.
 
+## CPU backend execution traces
+
+CPU plugins without the PJRT profiler extension only produce ZML's local host
+spans. In particular, model `forward` spans measure graph construction, while
+`zml.exe.call` brackets execution and any requested wait. They cannot reveal
+the work performed inside a separately loaded plugin.
+
+To collect CPU backend events, build the plugin from source with the profiler
+extension enabled by this repository's XLA patch:
+
+```bash
+bazel run //examples/phonon --//platforms/cpu:build_from_source=true -- \
+    --no-play "Bonjour ZML"
+```
+
+The first build compiles the CPU backend and its dependencies and can take a
+long time. The default remains the downloaded plugin; the flag selects the
+source-built plugin through the usual runfiles sandbox.
+The source build follows the selected compilation mode. For performance
+measurements, add `--config=debug` to optimize the C++ backend while retaining
+Zig debug builds; an unoptimized backend is useful for inspection but its
+timings should not be compared directly with the prebuilt plugin.
+Debug YNNPACK builds also log individual kernel calls; add
+`--define=ynn_log_level=warning` when building to suppress that logging while
+keeping profiler events enabled.
+
+The profiler extension starts and collects the recorder inside the plugin.
+ZML's existing profiling session merges that backend XSpace with the local host
+trace and exports both to `profiling.trace.json`. Open that file in Perfetto
+and look for CPU runtime events such as `ThunkExecutor::Execute`, alongside
+the ZML spans. A thunk is a compiled runtime task; compiler fusion means it
+need not correspond to one original tensor operation or model module.
+
 ## macOS Instruments
 
 On macOS, `zml.tracer.scope(...)` emits `os_signpost` intervals. These show up
@@ -353,6 +445,23 @@ Typical flow:
 
 The converter is implemented in Zig and streams JSON directly from `XSpace`,
 which keeps large traces much more manageable than the old in-memory path.
+
+Producer/consumer annotations (`_pt`/`_p` and `_ct`/`_c`) are exported as
+Perfetto flow arrows between the corresponding slices. Select a connected
+slice to inspect its incoming and outgoing flows. These links describe work
+handoffs recorded by the runtime, such as scheduling a task on another thread;
+they do not represent every tensor dependency in the model.
+
+The converter matches both context type and ID, supports multiple consumers
+per producer, and ignores endpoints whose matching producer was not captured.
+It uses the most recent preceding producer if an ID is reused. Existing
+profiles can be converted again without rerunning inference:
+
+```bash
+bazel run //tools/xspace_to_perfetto -- \
+    /tmp/xprof/plugins/profile/profiling/profiling.xplane.pb \
+    /tmp/phonon-with-flows.trace.json
+```
 
 ## Platform summary
 

@@ -15,6 +15,7 @@ const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
+const tracer = @import("zml/profiling").tracer;
 
 const Buffer = @import("../buffer.zig").Buffer;
 const PjrtBufferMetadata = @import("../buffer.zig").PjrtBufferMetadata;
@@ -238,6 +239,11 @@ pub fn init(
     shape_: Shape,
     donation: Buffer.Donation,
 ) !HostAccessible {
+    var span = tracer.span_at(@src(), "zml.buffer.HostAccessible.init", .{
+        .byte_count = shape_.byteSize(),
+    });
+    defer span.end();
+
     const can_share_allocations = switch (platform.target) {
         .cpu, .cuda, .rocm => donation == .undonatable,
         else => false,
@@ -320,6 +326,9 @@ pub fn deinit(self: *const HostAccessible, allocator: std.mem.Allocator) void {
 /// Wait for execution to finish, and read the host pointers of handles that
 /// execution replaced. Take new views to access the output.
 pub fn await(self: *HostAccessible, io: std.Io) !void {
+    var span = tracer.span_at(@src(), "zml.buffer.HostAccessible.await", .{});
+    defer span.end();
+
     try self.buffer.await(io);
     const handles = self.buffer._shards.constSlice();
     const allocations = &self.mapping.allocations;

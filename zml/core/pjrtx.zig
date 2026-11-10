@@ -8,6 +8,7 @@ const stablehlo = @import("mlir/dialects/stablehlo");
 pub const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
+const tracer = @import("zml/profiling").tracer;
 
 const log = std.log.scoped(.@"zml/pjrtx");
 
@@ -22,25 +23,42 @@ pub const Client = opaque {
             break :blk stablehlo.minimumVersion();
         };
 
-        const cloned_op = module.operation().clone();
-        var cloned_module = mlir.Module.fromOperation(cloned_op);
+        var cloned_module = blk: {
+            var span = tracer.span_at(@src(), "zml.compiler.clone_module", .{});
+            defer span.end();
+
+            break :blk mlir.Module.fromOperation(module.operation().clone());
+        };
         defer cloned_module.deinit();
 
         var serialized_buffer: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer serialized_buffer.deinit();
 
-        stablehlo.serializePortableArtifact2(cloned_module, stablehlo_version, &serialized_buffer.writer) catch |err| {
-            log.err("failed to serialize to portable artifact: {}", .{err});
-            return switch (err) {
-                std.Io.Writer.Error.WriteFailed => error.OutOfMemory,
-                else => |e| e,
+        {
+            var span = tracer.span_at(@src(), "zml.compiler.serialize_stablehlo", .{});
+            defer span.end();
+
+            stablehlo.serializePortableArtifact2(cloned_module, stablehlo_version, &serialized_buffer.writer) catch |err| {
+                log.err("failed to serialize to portable artifact: {}", .{err});
+                return switch (err) {
+                    std.Io.Writer.Error.WriteFailed => error.OutOfMemory,
+                    else => |e| e,
+                };
             };
-        };
+        }
+
+        // This boundary measures the backend call; its internal phases belong to PJRT/XLA.
+        const trace_context: tracer.Context = .init(.pjrt_library_call);
+        var span = tracer.span_at_for(@src(), "zml.compiler.pjrt_compile", .{}, .{
+            .producer = trace_context,
+        });
+        defer span.end();
 
         return @ptrCast(try client.compile(api, io, .{
             .bytecode = serialized_buffer.written(),
             .bytecode_format = .mlir,
             .compile_options_pb = compile_options_pb,
+            .traceme_context_id = trace_context.id,
         }));
     }
 };

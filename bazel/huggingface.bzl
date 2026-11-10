@@ -65,6 +65,33 @@ def _huggingface_repository_impl(rctx):
     if token:
         headers["Authorization"] = "Bearer " + token
 
+    # Explicit files avoid repository scans and provide checksums for all assets,
+    # including non-LFS files. Downloads remain in Bazel's repository cache.
+    if rctx.attr.files:
+        if rctx.attr.includes or rctx.attr.excludes:
+            fail("files cannot be combined with includes or excludes")
+        downloads = []
+        for path, sha256 in rctx.attr.files.items():
+            if not sha256:
+                fail("files requires a SHA-256 checksum for " + path)
+            downloads.append(rctx.download(
+                url = LFS_FILE_URL_TEMPLATE.format(
+                    model = rctx.attr.model,
+                    commit = rctx.attr.commit,
+                    path = path,
+                ),
+                output = path,
+                sha256 = sha256,
+                canonical_id = sha256,
+                headers = headers,
+                block = False,
+            ))
+        for download in downloads:
+            download.wait()
+        workspace_and_buildfile(rctx)
+        patch(rctx)
+        return
+
     includes = rctx.attr.includes
     excludes = rctx.attr.excludes
     stack = [""]
@@ -114,6 +141,7 @@ huggingface_repository = repository_rule(
         "commit": attr.string(mandatory = True),
         "includes": attr.string_list(default = []),
         "excludes": attr.string_list(default = []),
+        "files": attr.string_dict(doc = "Exact repository paths mapped to SHA-256 checksums; skips file discovery."),
         "patches": attr.label_list(),
         "patch_tool": attr.string(default = ""),
         "patch_args": attr.string_list(default = ["-p0"]),
@@ -135,6 +163,7 @@ def _huggingface_impl(mctx):
                 commit = model.commit,
                 includes = model.includes,
                 excludes = model.excludes,
+                files = model.files,
                 patches = model.patches,
                 patch_tool = model.patch_tool,
                 patch_args = model.patch_args,
@@ -162,6 +191,7 @@ huggingface = module_extension(
                 "commit": attr.string(mandatory = True),
                 "includes": attr.string_list(default = []),
                 "excludes": attr.string_list(default = []),
+                "files": attr.string_dict(doc = "Exact repository paths mapped to SHA-256 checksums; skips file discovery."),
                 "patches": attr.label_list(),
                 "patch_tool": attr.string(default = ""),
                 "patch_args": attr.string_list(default = ["-p0"]),

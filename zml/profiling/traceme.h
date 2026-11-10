@@ -14,6 +14,7 @@ typedef struct zml_traceme zml_traceme;
 zml_traceme *zml_traceme_start(zig_slice name);
 void zml_traceme_stop(zml_traceme *traceme);
 bool zml_traceme_enabled(void);
+int64_t zml_traceme_new_activity_id(void);
 void zml_traceme_session_start(int level, uint64_t filter_mask,
                                bool enable_filter);
 zig_slice zml_traceme_session_merge(zig_slice xspace);

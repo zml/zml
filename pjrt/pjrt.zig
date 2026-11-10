@@ -466,11 +466,26 @@ pub const Client = opaque {
         bytecode: []const u8,
         bytecode_format: ProgramFormat,
         compile_options_pb: []const u8,
+        /// Correlates the caller's kPjrtLibraryCall producer with the plugin's
+        /// compilation-entry consumer, including when compileRaw runs on a worker.
+        traceme_context_id: ?i64 = null,
     };
 
     pub fn compileRaw(self: *const Client, api: *const Api, args: CompileArgs) ApiError!*LoadedExecutable {
+        // Construct the extension here, on the thread performing the C API call,
+        // rather than passing a pointer to a caller's stack through io.async.
+        var profiler_extension: c.PJRT_Profiler_Extension = .{
+            .base = .{
+                .struct_size = meta.structSize(c.PJRT_Profiler_Extension),
+                .type = c.PJRT_Extension_Type_Profiler,
+                .next = null,
+            },
+            .profiler_api = null,
+            .traceme_context_id = args.traceme_context_id orelse 0,
+        };
         const bytecode_format_ = @tagName(args.bytecode_format);
         const ret = try api.call(.PJRT_Client_Compile, .{
+            .extension_start = if (args.traceme_context_id != null and api.extension(.profiler) != null) &profiler_extension.base else null,
             .program = @ptrCast(&meta.Struct(c.PJRT_Program){
                 .code = @ptrCast(@constCast(args.bytecode)),
                 .code_size = args.bytecode.len,
@@ -1007,15 +1022,30 @@ pub const LoadedExecutable = opaque {
         events: ?[]?*Event,
         non_donatable_input_indices: []const i64 = &.{},
         context: ?*ExecuteContext,
+        /// Correlates the caller's kPjrtLibraryCall producer with the plugin's
+        /// execution-entry consumer. Unrelated to ExecuteContext and launch IDs.
+        traceme_context_id: ?i64 = null,
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
+        // The plugin reads the ID during the C API call; it must not retain
+        // this stack-allocated extension when execution continues asynchronously.
+        var profiler_extension: c.PJRT_Profiler_Extension = .{
+            .base = .{
+                .struct_size = meta.structSize(c.PJRT_Profiler_Extension),
+                .type = c.PJRT_Extension_Type_Profiler,
+                .next = null,
+            },
+            .profiler_api = null,
+            .traceme_context_id = args.traceme_context_id orelse 0,
+        };
         var options: meta.Struct(c.PJRT_ExecuteOptions) = .{
             .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices),
             .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
             .context = @ptrCast(args.context),
         };
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
+            .extension_start = if (args.traceme_context_id != null and api.extension(.profiler) != null) &profiler_extension.base else null,
             .executable = self.inner(),
             .options = @ptrCast(&options),
             .argument_lists = @ptrCast(args.arguments),

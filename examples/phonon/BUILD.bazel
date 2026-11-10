@@ -1,0 +1,96 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+cc_library(
+    name = "phonon_tokenizer_regex",
+    srcs = ["src/phonon/tokenizer_regex.c"],
+    hdrs = ["src/phonon/tokenizer_regex.h"],
+    deps = ["@pcre2"],
+)
+
+cc_library(
+    name = "audio",
+    srcs = ["src/audio.c"],
+    hdrs = ["src/audio.h"],
+    copts = ["-std=c11"],
+    linkopts = select({
+        "@platforms//os:linux": [
+            "-ldl",
+            "-lpthread",
+            "-lm",
+        ],
+        "@platforms//os:macos": [
+            "-framework",
+            "CoreFoundation",
+            "-framework",
+            "CoreAudio",
+            "-framework",
+            "AudioToolbox",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "@miniaudio",
+        "@zml//zml/profiling:profiling_traceme_lib",
+    ],
+)
+
+zig_binary(
+    name = "phonon",
+    srcs = [
+        "src/Audio_Player.zig",
+        "src/mimi/model.zig",
+        "src/mimi/root.zig",
+        "src/phonon/Tokenizer.zig",
+        "src/phonon/model.zig",
+        "src/phonon/root.zig",
+        "src/util.zig",
+    ],
+    data = [
+        "@phonon_31m_en//:model.safetensors",
+        "@phonon_31m_en//:tokenizer.5.0.0.json",
+        "@phonon_mimi//:model.safetensors",
+        "@phonon_voices//:voices/Tek4tJXiX6_yvXq7.safetensors",
+    ],
+    main = "src/main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":audio",
+        ":phonon_tokenizer_regex",
+        "@zml//zml",
+    ],
+)
+
+zig_test(
+    name = "audio_test",
+    main = "src/Audio_Player.zig",
+    deps = [":audio"],
+)
+
+zig_test(
+    name = "test",
+    srcs = [
+        "src/Audio_Player.zig",
+        "src/main.zig",
+        "src/mimi/model.zig",
+        "src/mimi/root.zig",
+        "src/mimi/root_test_data.zig",
+        "src/phonon/Tokenizer.zig",
+        "src/phonon/model.zig",
+        "src/phonon/root.zig",
+        "src/util.zig",
+    ],
+    data = [
+        "@phonon_31m_en//:model.safetensors",
+        "@phonon_31m_en//:tokenizer.5.0.0.json",
+        "@phonon_mimi//:model.safetensors",
+        "@phonon_voices//:voices/Tek4tJXiX6_yvXq7.safetensors",
+    ],
+    main = "src/pipeline_test.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":audio",
+        ":phonon_tokenizer_regex",
+        "@zml//zml",
+    ],
+)

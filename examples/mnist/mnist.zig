@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
     defer store.deinit();
     const mnist_model: Mnist = .init(store.view());
 
-    // // Compile model
+    // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
     var exe = blk: {
         log.info("Compiling model....", .{});
