@@ -7,6 +7,22 @@ const Collector = @import("zml-smi/collector").Collector;
 
 const bdf_len = "0000:00:00.0".len;
 
+/// amdsmi reports the time a process spent on the engines as a running total,
+/// so utilization is how much it grew between two polls.
+const Sample = struct {
+    engine_ns: u64,
+    timestamp_ns: u64,
+
+    fn utilSince(self: Sample, previous: Sample) ?u16 {
+        if (self.timestamp_ns <= previous.timestamp_ns or self.engine_ns < previous.engine_ns) return null;
+        return @intCast(@min(100, (self.engine_ns - previous.engine_ns) * 100 / (self.timestamp_ns - previous.timestamp_ns)));
+    }
+};
+
+/// Last sample of each process on each device.
+const Samples = std.AutoHashMapUnmanaged(Key, Sample);
+const Key = struct { pid: u32, device: u32 };
+
 pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u16) !void {
     const device_count = amdsmi.deviceCount();
     const pci_slots = try collector.arena.alloc(?[bdf_len]u8, device_count);
@@ -23,13 +39,25 @@ pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, amdsmi: *const Am
         });
     }
 
-    try collector.spawnPoll(pollOnce, .{ collector.gpa, collector.io, list, amdsmi, dev_offset, device_count, pci_slots });
+    const samples = try collector.arena.create([2]Samples);
+    samples.* = .{ .empty, .empty };
+
+    const args: std.meta.ArgsTuple(@TypeOf(pollOnce)) = .{ collector.gpa, collector.arena, collector.io, list, amdsmi, dev_offset, device_count, pci_slots, samples };
+    // A one-shot run polls once: sample beforehand so that poll has a utilization to report.
+    if (collector.poll_only) {
+        @call(.auto, pollOnce, args);
+        collector.io.sleep(.fromMilliseconds(collector.worker.poll_interval_ms), .awake) catch {};
+    }
+
+    try collector.spawnPoll(pollOnce, args);
 }
 
-fn pollOnce(allocator: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u16, device_count: u32, pci_slots: []?[bdf_len]u8) void {
+fn pollOnce(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u16, device_count: u32, pci_slots: []?[bdf_len]u8, samples: *[2]Samples) void {
     const back = list.back();
+    const previous, const current = .{ &samples[0], &samples[1] };
 
     back.clearRetainingCapacity();
+    current.clearRetainingCapacity();
 
     for (0..device_count) |dev_idx| {
         const handle = amdsmi.handleByIndex(@intCast(dev_idx)) catch continue;
@@ -58,19 +86,25 @@ fn pollOnce(allocator: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer
                 allocator.free(procs);
             }
         }
+        const timestamp_ns: u64 = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
 
         const pci_slot = if (dev_idx < pci_slots.len) &(pci_slots[dev_idx] orelse continue) else continue;
 
         for (procs) |proc| {
+            const key: Key = .{ .pid = proc.pid, .device = @intCast(dev_idx) };
+            const sample: Sample = .{ .engine_ns = proc.engine_usage.gfx +| proc.engine_usage.enc, .timestamp_ns = timestamp_ns };
+            current.put(arena, key, sample) catch {};
+
             back.append(allocator, .{
                 .pid = proc.pid,
                 .device_idx = @intCast(dev_idx + dev_offset),
-                .dev_util_percent = @intCast(proc.engine_usage.gfx + proc.engine_usage.enc),
+                .dev_util_percent = if (previous.get(key)) |p| sample.utilSince(p) else null,
                 .dev_mem_kib = readProcessGpuVram(io, proc.pid, pci_slot),
             }) catch break;
         }
     }
 
+    std.mem.swap(Samples, previous, current);
     list.swap();
 }
 
@@ -136,4 +170,14 @@ fn formatBdf(bdf_id: u64) [bdf_len]u8 {
     }) catch unreachable;
 
     return buf;
+}
+
+test "utilSince is the engine time growth over the elapsed time" {
+    const previous: Sample = .{ .engine_ns = 100, .timestamp_ns = 1000 };
+
+    try std.testing.expectEqual(50, (Sample{ .engine_ns = 600, .timestamp_ns = 2000 }).utilSince(previous));
+    // gfx and enc can both be busy
+    try std.testing.expectEqual(100, (Sample{ .engine_ns = 2100, .timestamp_ns = 2000 }).utilSince(previous));
+    // the pid went to another process
+    try std.testing.expectEqual(null, (Sample{ .engine_ns = 10, .timestamp_ns = 2000 }).utilSince(previous));
 }

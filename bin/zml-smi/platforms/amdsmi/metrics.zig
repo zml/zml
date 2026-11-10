@@ -149,3 +149,7 @@ const metrics = .{
     .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
     .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
 };
+
+test {
+    _ = process;
+}
