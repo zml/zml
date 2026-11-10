@@ -111,6 +111,7 @@ const Model = struct {
     pub fn draw(self: *Model, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const screen = ctx.max.size();
         const content_w = @max(screen.width, min_width);
+        self.state.history_len = @max(self.state.history_len, 2 * @as(usize, content_w));
 
         if (self.viewing_device != self.prev_viewing_device) {
             self.scroll.reset();
