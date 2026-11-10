@@ -70,7 +70,7 @@ pub fn draw(
 
     const power_limit_mw = gpu.power_limit_mw orelse 0;
     const power_limit_w = power_limit_mw / 1000;
-    const power_raw = try state.history.power[id].sliceLast(ctx.arena, data.history_len);
+    const power_raw = state.history.power[id].items;
     const power_watts = try ctx.arena.alloc(u64, power_raw.len);
     for (power_raw, 0..) |p, j| {
         power_watts[j] = p / 1000;
