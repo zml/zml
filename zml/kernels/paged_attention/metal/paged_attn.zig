@@ -18,25 +18,18 @@ const masked_score = -flt_max / 2.0;
 const max_half = 65504.0;
 const simd_width = 32;
 
-fn pad2(x: i32, n: i32) i32 {
-    return (x + n - 1) & ~(n - 1);
-}
-
-/// fa_vec_paged: decode attention over paged bf16 caches, one threadgroup
-/// of `nsg` simdgroups per (position split, query head, query row).
+/// fa_vec_paged: bf16 decode over paged caches. Simdgroup s takes query head
+/// s % heads of the threadgroup's KV head group and position split s / heads.
 pub const FaVecPaged = struct {
     pub const Cfg = struct {
-        /// The key and value head dimension, DK = DV.
+        /// The key and value head dimension.
         head_dim: i32,
-        /// Simdgroups splitting the KV positions.
-        nsg: i32,
         /// The page size.
         block_size: i32,
         /// The in-page position stride, n_kv * head_dim elements.
         position_stride: i32,
-        /// Position-split threadgroups. Above 1 the kernel writes f32 partials
-        /// for FaVecPagedReduce.
-        nwg: i32,
+        heads: i32,
+        splits: i32,
     };
 
     pub const Args: metal.Struct = .{ .name = "fa_vec_paged_args", .fields = &.{
@@ -66,17 +59,10 @@ pub const FaVecPaged = struct {
         .run = run,
     });
 
-    /// The threadgroup memory of a launch with `nsg` simdgroups.
-    pub fn threadgroupMemory(head_dim: i32, nsg: i32) u64 {
-        const padded = pad2(head_dim, 128);
-        const bytes = (padded + 4 * 32 + 2 * padded) * nsg * 2;
-        return @intCast(@divFloor(bytes + 15, 16) * 16);
-    }
-
     fn run(b: *Builder, cfg: Cfg) metal.FinishError!void {
         switch (cfg.head_dim) {
-            128, 256, 512 => {},
-            else => std.debug.panic("fa_vec_paged: head_dim {d} unsupported (128, 256 or 512)", .{cfg.head_dim}),
+            32, 64, 128, 256, 512 => {},
+            else => std.debug.panic("fa_vec_paged: head_dim {d} unsupported (32, 64, 128, 256 or 512)", .{cfg.head_dim}),
         }
         const char_in: ArgSpec = .{ .buffer = .{ .type = .char, .const_ = true } };
         const int_in: ArgSpec = .{ .buffer = .{ .type = .int, .const_ = true } };
@@ -89,158 +75,90 @@ pub const FaVecPaged = struct {
             .seq_lens = int_in,
             .cu_seqlens_q = int_in,
             .dst = .{ .buffer = .{ .type = .char } },
-            .shmem_f16 = .{ .threadgroup = .half },
             .tgpig = .{ .threadgroup_position_in_grid = .uint3 },
             .tgpg = .{ .threadgroups_per_grid = .uint3 },
             .tiisg = .{ .thread_index_in_simdgroup = .ushort },
             .sgitg = .{ .simdgroup_index_in_threadgroup = .ushort },
+            .nsg = .{ .simdgroups_per_threadgroup = .ushort },
         });
         impl(b, cfg, a);
     }
 
-    /// The attention body.
     fn impl(b: *Builder, cfg: Cfg, a: anytype) void {
-        const DK = cfg.head_dim;
-        const DV = cfg.head_dim;
-        const NE = 1;
-        const C = 32;
-        const NSG = cfg.nsg;
+        const D = cfg.head_dim;
+        const D4 = @divExact(D, 4);
+        // A K/V row spans NL lanes of NI float4s; a simdgroup reads R rows per step.
+        const NL = @min(D4, simd_width);
+        const R = @divExact(simd_width, NL);
+        const NI = @divExact(D4, NL);
+        const C = simd_width;
         const BS = cfg.block_size;
         const PS = cfg.position_stride;
-        const NWG = cfg.nwg;
+        const HG = cfg.heads;
+        const NWG = cfg.splits;
+        const full: metal.LoopOpts = .{ .unroll = .full };
 
+        const num_heads = a.args.field("num_heads");
+        const group = num_heads.div(a.args.field("n_kv"));
+        const groups = group.div(HG);
         const r = a.tgpig.at(2).to(.int);
-        const iq2 = a.tgpig.at(1).to(.ushort);
-        const iwg = a.tgpig.at(0).to(.short);
+        const tg_head = a.tgpig.at(1).to(.int);
+        const ikv = tg_head.div(groups);
+        const iq2 = ikv.mul(group).add(tg_head.rem(groups).mul(HG)).add(a.sgitg.rem(HG).to(.int));
+        const iwg = a.tgpig.at(0).to(.int).mul(a.nsg.div(HG).to(.int)).add(a.sgitg.div(HG).to(.int));
+        const rid = r.to(.long).mul(num_heads.to(.uint)).add(iq2);
+        const nrows = a.tgpg.at(2).to(.long).mul(num_heads.to(.uint));
 
-        const DK4 = @divExact(DK, 4);
-        const DV4 = @divExact(DV, 4);
-
-        const nrows_static = a.tgpg.at(2).to(.long).mul(a.args.field("num_heads").to(.uint));
-
+        // Padding rows: FaVecPagedReduce zeroes them when there are splits.
         var padding = b.openIf(r.ge(a.cu_seqlens_q.load(a.args.field("num_seqs"))));
         {
-            var first = b.openIf(a.sgitg.eq(0));
-            {
-                const rid = r.to(.long).mul(a.args.field("num_heads").to(.uint)).add(iq2);
-                if (NWG == 1) {
-                    const dst4 = a.dst.to(.bfloat4);
-                    var loop = b.openFor(a.tiisg.to(.short), DV4, simd_width);
-                    {
-                        const zero = b.constant(.float4, 0).to(.bfloat4);
-                        dst4.store(rid.mul(DV4).add(loop.iv), zero);
-                        loop.close();
-                    }
-                } else {
-                    const dst4 = a.dst.to(.float4);
-                    const dst1 = a.dst.to(.float).add(nrows_static.mul(DV).mul(NWG));
-                    var loop = b.openFor(a.tiisg.to(.short), DV4, simd_width);
-                    {
-                        dst4.store(rid.mul(DV4).mul(NWG).add(b.lift(NWG).mul(loop.iv)).add(iwg), b.constant(.float4, 0));
-                        loop.close();
-                    }
-                    var lane0 = b.openIf(a.tiisg.eq(0));
-                    {
-                        dst1.store(rid.mul(2 * NWG).add(b.lift(2).mul(iwg)).add(0), 0.0);
-                        dst1.store(rid.mul(2 * NWG).add(b.lift(2).mul(iwg)).add(1), -flt_max / 2.0);
-                        lane0.close();
-                    }
+            if (NWG == 1) {
+                const dst4 = a.dst.to(.bfloat4).add(rid.mul(D4));
+                var loop = b.openFor(a.tiisg.to(.short), D4, simd_width);
+                {
+                    dst4.store(loop.iv, b.constant(.float4, 0).to(.bfloat4));
+                    loop.close();
                 }
-                first.close();
             }
             b.return_();
             padding.close();
         }
 
-        const first_seq = b.local(.int, 0);
-        const last_seq = b.local(.int, a.args.field("num_seqs").sub(1));
-        var search = b.openLoop(.{});
-        {
-            search.body(first_seq.lt(last_seq));
-        }
-        {
-            const mid = first_seq.add(last_seq).add(1).div(2);
-            var half = b.openIfElse(a.cu_seqlens_q.load(mid).le(r), .{});
+        const seq = sequenceOf(b, a, r);
+        const kv_len = seq.kv_len;
+        const kv_lo = seq.kv_lo;
+        const ic0_lo = kv_lo.div(C);
+        const live = if (NWG > 1) liveSplits(b, seq, NWG) else b.lift(@as(i32, 1));
+
+        if (NWG > 1) {
+            var idle = b.openIf(iwg.ge(live));
             {
-                first_seq.assign(mid);
-                half.elseBranch();
+                b.return_();
+                idle.close();
             }
-            {
-                last_seq.assign(mid.sub(1));
-                half.close();
-            }
-            search.close();
         }
-        const seq_idx = first_seq.rvalue();
-        const q_pos = r.sub(a.cu_seqlens_q.load(seq_idx));
-        const query_len = a.cu_seqlens_q.load(seq_idx.add(1)).sub(a.cu_seqlens_q.load(seq_idx));
-        const kv_total = a.seq_lens.load(seq_idx);
-        const kv_len = kv_total.sub(query_len).add(q_pos).add(1);
-        const kv_lo = b.ternary(a.args.field("sliding_window").lt(0), 0, b.max(0, kv_len.sub(a.args.field("sliding_window"))));
 
-        const pt = a.block_tables.add(seq_idx.to(.ulong).mul(a.args.field("max_blocks").to(.uint)));
+        const pt = a.block_tables.add(seq.idx.to(.ulong).mul(a.args.field("max_blocks").to(.uint)));
+        const k_cache = a.k_cache.add(ikv.to(.ulong).mul(D).mul(2));
+        const v_cache = a.v_cache.add(ikv.to(.ulong).mul(D).mul(2));
 
-        const PK = pad2(DK, 128);
-        const PK4 = @divExact(PK, 4);
-        const PV = pad2(DV, 128);
-        const PV4 = @divExact(PV, 4);
-        const NW = simd_width;
-        const NL = @divExact(NW, NE);
-        const SH = 4 * C;
-
-        const shmem = a.shmem_f16;
-        const sq4 = shmem.add(0 * PK).to(.half4);
-        const ss = shmem.add(a.sgitg.mul(SH)).add(NSG * PK).to(.float);
-        const ss4 = shmem.add(a.sgitg.mul(SH)).add(NSG * PK).to(.float4);
-        const sm = shmem.add(a.sgitg.mul(SH)).add(2 * C).add(NSG * PK);
-        const so4 = shmem.add(b.lift(2).mul(a.sgitg).mul(PV)).add(NSG * PK).add(NSG * SH).to(.float4);
-        // This lane's output, until the simdgroups merge theirs.
-        const lane_so4 = so4.add(a.tiisg);
-
-        const q = a.q.add(r.to(.ulong).mul(a.args.field("num_heads").to(.uint)).add(iq2).mul(DK).mul(2));
-        const ikv2 = iq2.div(a.args.field("num_heads").div(a.args.field("n_kv"))).to(.short);
-        const k_cache = a.k_cache.add(ikv2.to(.ulong).mul(DK).mul(2));
-        const v_cache = a.v_cache.add(ikv2.to(.ulong).mul(DK).mul(2));
-
-        const q4 = q.to(.bfloat4);
-        var load_q = b.openFor(a.tiisg.to(.short), PK4, NW);
+        const lane = if (R == 1) a.tiisg else a.tiisg.rem(NL);
+        const sub = a.tiisg.div(NL).to(.int);
+        const q4 = a.q.add(rid.mul(D).mul(2)).to(.bfloat4).add(lane);
+        const qr = b.array(.float4, @intCast(NI));
+        const o = b.array(.float4, @intCast(NI));
+        var init = b.openForOpts(b.constant(.short, 0), NI, 1, full);
         {
-            const i = load_q.iv;
-            var value = b.openIfElse(i.lt(DK4), .{.half4});
-            {
-                value.yieldThen(.{q4.load(i).to(.half4)});
-            }
-            {
-                value.yieldElse(.{b.constant(.half4, 0)});
-            }
-            sq4.store(i, value.results[0]);
-            load_q.close();
-        }
-        var zero_o = b.openFor(b.constant(.short, 0), @divExact(DV4, NL), 1);
-        {
-            lane_so4.store(zero_o.iv.mul(NL), b.constant(.float4, 0));
-            zero_o.close();
-        }
-        var zero_s = b.openFor(a.tiisg.to(.short), SH / 4, NW);
-        {
-            ss4.store(zero_s.iv, b.constant(.float4, 0));
-            zero_s.close();
+            const ii = init.iv;
+            qr.store(ii, q4.load(ii.mul(NL)).to(.float4));
+            o.store(ii, b.constant(.float4, 0));
+            init.close();
         }
 
-        b.threadgroupBarrier(.mem_threadgroup);
-
-        // When DV4/NL is a multiple of NW every lane updates the output, so the
-        // `ty == 0` guard is dropped at comptime.
-        const all_lanes = @rem(@divExact(DV4, NL), NW) == 0;
-        const full: metal.LoopOpts = .{ .unroll = .full };
         const S = b.local(.float, 0.0);
         const M = b.local(.float, -flt_max / 2.0);
 
-        const tx = a.tiisg.rem(NL).to(.short);
-        const ty = a.tiisg.div(NL).to(.short);
-
-        const ic0_lo = kv_lo.div(C);
-        const ic0 = b.local(.int, ic0_lo.add(iwg.mul(NSG)).add(a.sgitg));
+        const ic0 = b.local(.int, ic0_lo.add(iwg));
         var blocks = b.openLoop(.{});
         {
             const ic = ic0.mul(C);
@@ -250,175 +168,103 @@ pub const FaVecPaged = struct {
                 past.close();
             }
 
-            const in_kv = ic.add(a.tiisg).lt(kv_len).bitAnd(ic.add(a.tiisg).ge(kv_lo));
-            sm.store(a.tiisg, b.ternary(in_kv, b.constant(.half, 0), b.constant(.half, -max_half)));
-
-            const pq4 = sq4.add(tx);
-            const mqk = b.zeroedArray(.float, C / NE);
-            var qk = b.openForOpts(b.constant(.short, 0), C / NE, 1, full);
+            const s = b.local(.float, 0.0);
+            var qk = b.openForOpts(b.constant(.short, 0), @divExact(C, R), 1, full);
             {
                 const cc = qk.iv;
-                const p = b.min(ic.add(cc), kv_len.sub(1));
-                const pk4 = pagedRow(b, k_cache, pt, p, BS, PS).to(.bfloat4).add(ty.mul(PS).div(4).add(tx));
-                var dots = b.openForOpts(b.constant(.short, 0), @divExact(DK4, NL), 1, full);
+                const p = b.min(if (R == 1) ic.add(cc) else ic.add(cc.to(.int).mul(R)).add(sub), kv_len.sub(1));
+                const pk4 = pagedRow(b, k_cache, pt, p, BS, PS).to(.bfloat4).add(lane);
+                const d = b.local(.float, 0.0);
+                var dots = b.openForOpts(b.constant(.short, 0), NI, 1, full);
                 {
                     const ii = dots.iv;
-                    const dot = b.dot(pk4.load(ii.mul(NL)).to(.float4), pq4.load(ii.mul(NL)).to(.float4));
-                    mqk.store(cc, mqk.load(cc).add(dot));
+                    d.assign(d.add(b.dot(pk4.load(ii.mul(NL)).to(.float4), qr.load(ii))));
                     dots.close();
                 }
-                mqk.store(cc, b.simdSum(mqk.load(cc)));
+                if (R == 1) {
+                    s.assign(b.ternary(a.tiisg.to(.short).eq(cc), b.simdSum(d.rvalue()), s.rvalue()));
+                } else {
+                    var x = d.rvalue();
+                    var mask: i32 = 1;
+                    while (mask < NL) : (mask *= 2) x = x.add(b.simdShuffleXor(x, b.constant(.ushort, mask)));
+                    const t = b.simdShuffle(x, a.tiisg.rem(R).mul(NL));
+                    s.assign(b.ternary(a.tiisg.div(R).to(.short).eq(cc), t, s.rvalue()));
+                }
                 qk.close();
             }
 
-            const score = b.fma(mqk.load(tx), a.args.field("scale"), sm.load(b.lift(NE).mul(tx).add(ty)).to(.float));
-            ss.store(b.lift(NE).mul(tx).add(ty), score);
-
-            b.simdgroupBarrier(.mem_threadgroup);
+            const pos = ic.add(a.tiisg.to(.int));
+            const in_kv = pos.lt(kv_len).bitAnd(pos.ge(kv_lo));
+            const score = b.ternary(in_kv, s.mul(a.args.field("scale")), b.constant(.float, -max_half));
 
             const m = M.rvalue();
-            const s = ss.load(a.tiisg);
-
-            M.assign(b.simdMax(b.max(M.rvalue(), s)));
-
+            M.assign(b.simdMax(b.max(M.rvalue(), score)));
             const ms = b.exp(m.sub(M));
-            const vs = b.exp(s.sub(M));
-
+            const vs = b.exp(score.sub(M));
             S.assign(S.mul(ms).add(b.simdSum(vs)));
 
-            ss.store(a.tiisg, vs);
-
-            var rescale_lanes = if (all_lanes) null else b.openIf(ty.eq(0));
-            var rescale = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
+            var rescale = b.openForOpts(b.constant(.short, 0), NI, 1, full);
             {
-                const at = rescale.iv.mul(NL);
-                lane_so4.store(at, lane_so4.load(at).mul(ms));
+                o.store(rescale.iv, o.load(rescale.iv).mul(ms));
                 rescale.close();
             }
-            if (rescale_lanes) |*l| l.close();
 
-            b.simdgroupBarrier(.mem_threadgroup);
-
-            const lo = b.array(.float4, @intCast(@divExact(DV4, NL)));
-            var zero_lo = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
-            {
-                lo.store(zero_lo.iv, b.constant(.float4, 0));
-                zero_lo.close();
-            }
-
-            const sst = ss.add(ty);
-
-            var pv = b.openForOpts(b.constant(.short, 0), C / NE, 1, full);
+            var pv = b.openForOpts(b.constant(.short, 0), @divExact(C, R), 1, full);
             {
                 const cc = pv.iv;
-                const p = b.min(ic.add(cc), kv_len.sub(1));
-                const pv4 = pagedRow(b, v_cache, pt, p, BS, PS).to(.bfloat4).add(ty.mul(PS).div(4).add(tx));
-                var dims = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
+                const row = cc.to(.int).mul(R).add(sub);
+                const p = b.min(if (R == 1) ic.add(cc) else ic.add(row), kv_len.sub(1));
+                const pv4 = pagedRow(b, v_cache, pt, p, BS, PS).to(.bfloat4).add(lane);
+                const w = b.vec(.float4, .{if (R == 1) b.simdBroadcast(vs, cc.to(.ushort)) else b.simdShuffle(vs, row)});
+                var dims = b.openForOpts(b.constant(.short, 0), NI, 1, full);
                 {
                     const ii = dims.iv;
-                    const weighted = pv4.load(ii.mul(NL)).to(.float4).mul(b.vec(.float4, .{sst.load(cc.mul(NE))}));
-                    lo.store(ii, lo.load(ii).add(weighted));
+                    o.store(ii, o.load(ii).add(pv4.load(ii.mul(NL)).to(.float4).mul(w)));
                     dims.close();
                 }
                 pv.close();
             }
 
-            var add_lanes = if (all_lanes) null else b.openIf(ty.eq(0));
-            var add_o = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
-            {
-                const ii = add_o.iv;
-                const partial = lo.load(ii);
-                lane_so4.store(ii.mul(NL), lane_so4.load(ii.mul(NL)).add(partial));
-                add_o.close();
-            }
-            if (add_lanes) |*l| l.close();
             blocks.next();
-            ic0.assign(ic0.add(NWG * NSG));
+            ic0.assign(ic0.add(live));
             blocks.close();
         }
 
-        var stats = b.openIf(a.tiisg.eq(0));
-        {
-            ss.store(0, S);
-            ss.store(1, M);
-            stats.close();
-        }
-
-        b.threadgroupBarrier(.mem_threadgroup);
-
-        const rr = b.local(.short, @divFloor(NSG, 2));
-        var halving = b.openLoop(.{});
-        {
-            halving.body(rr.gt(0));
-        }
-        {
-            var group = b.openIf(a.sgitg.lt(rr));
+        var mask: i32 = NL;
+        while (mask < simd_width) : (mask *= 2) {
+            var sum = b.openForOpts(b.constant(.short, 0), NI, 1, full);
             {
-                const S0 = ss.load(0);
-                const S1 = ss.load(rr.mul(@divExact(SH, 2)).add(0));
-
-                const M0 = ss.load(1);
-                const M1 = ss.load(rr.mul(@divExact(SH, 2)).add(1));
-
-                const M_ = b.max(M0, M1);
-
-                const ms0 = b.exp(M0.sub(M_));
-                const ms1 = b.exp(M1.sub(M_));
-
-                const S_ = S0.mul(ms0).add(S1.mul(ms1));
-
-                var lane0 = b.openIf(a.tiisg.eq(0));
-                {
-                    ss.store(0, S_);
-                    ss.store(1, M_);
-                    lane0.close();
-                }
-
-                var merge = b.openFor(a.tiisg.to(.short), DV4, NW);
-                {
-                    const i = merge.iv;
-                    so4.store(i, so4.load(i).mul(ms0).add(so4.load(i.add(rr.mul(PV4))).mul(ms1)));
-                    merge.close();
-                }
-                group.close();
+                o.store(sum.iv, o.load(sum.iv).add(b.simdShuffleXor(o.load(sum.iv), b.constant(.ushort, mask))));
+                sum.close();
             }
-            b.threadgroupBarrier(.mem_threadgroup);
-            rr.assign(rr.shr(1));
-            halving.close();
         }
-
-        var first = b.openIf(a.sgitg.eq(0));
-        {
-            const rid = r.to(.long).mul(a.args.field("num_heads").to(.uint)).add(iq2);
-            if (NWG == 1) {
-                const inv_sum = b.ternary(ss.load(0).eq(0.0), 0.0, b.lift(1.0).div(ss.load(0)));
-                const dst4 = a.dst.to(.bfloat4);
-                var loop = b.openFor(a.tiisg.to(.short), DV4, NW);
-                {
-                    const out = so4.load(loop.iv).mul(inv_sum).to(.bfloat4);
-                    dst4.store(rid.mul(DV4).add(loop.iv), out);
-                    loop.close();
-                }
-            } else {
-                const dst4 = a.dst.to(.float4);
-                const dst1 = a.dst.to(.float).add(nrows_static.mul(DV).mul(NWG));
-                var loop = b.openFor(a.tiisg.to(.short), DV4, NW);
-                {
-                    const part = so4.load(loop.iv);
-                    dst4.store(rid.mul(DV4).mul(NWG).add(b.lift(NWG).mul(loop.iv)).add(iwg), part);
-                    loop.close();
-                }
-                var lane0 = b.openIf(a.tiisg.eq(0));
-                {
-                    const sum = ss.load(0);
-                    dst1.store(rid.mul(2 * NWG).add(b.lift(2).mul(iwg)).add(0), sum);
-                    const max = ss.load(1);
-                    dst1.store(rid.mul(2 * NWG).add(b.lift(2).mul(iwg)).add(1), max);
-                    lane0.close();
-                }
+        var first = if (R > 1) b.openIf(sub.eq(0)) else null;
+        if (NWG == 1) {
+            const inv_sum = b.ternary(S.eq(0.0), 0.0, b.lift(1.0).div(S));
+            const dst4 = a.dst.to(.bfloat4).add(rid.mul(D4)).add(lane);
+            var out = b.openForOpts(b.constant(.short, 0), NI, 1, full);
+            {
+                dst4.store(out.iv.mul(NL), o.load(out.iv).mul(inv_sum).to(.bfloat4));
+                out.close();
             }
-            first.close();
+        } else {
+            // [rows][D4][splits] float4 partials, then [rows][splits] (S, M).
+            const dst4 = a.dst.to(.float4).add(rid.mul(D4).mul(NWG));
+            var out = b.openForOpts(b.constant(.short, 0), NI, 1, full);
+            {
+                const i = lane.to(.int).add(out.iv.to(.int).mul(NL));
+                dst4.store(i.mul(NWG).add(iwg), o.load(out.iv));
+                out.close();
+            }
+            var lane0 = b.openIf(a.tiisg.eq(0));
+            {
+                const dst1 = a.dst.to(.float).add(nrows.mul(D).mul(NWG)).add(rid.mul(2 * NWG));
+                dst1.store(b.lift(2).mul(iwg), S);
+                dst1.store(b.lift(2).mul(iwg).add(1), M);
+                lane0.close();
+            }
         }
+        if (first) |*scope| scope.close();
     }
 
     /// The address of position `p`'s bf16 row in `cache`, through the page
@@ -430,85 +276,144 @@ pub const FaVecPaged = struct {
     }
 };
 
-/// fa_vec_paged_reduce: merges the `nwg` partials of a split-K fa_vec_paged,
-/// one threadgroup per row and head.
+/// The sequence of query row `r` and its causal KV range [kv_lo, kv_len).
+fn sequenceOf(b: *Builder, a: anytype, r: Value) struct { idx: Value, kv_len: Value, kv_lo: Value } {
+    const first_seq = b.local(.int, 0);
+    const last_seq = b.local(.int, a.args.field("num_seqs").sub(1));
+    var search = b.openLoop(.{});
+    {
+        search.body(first_seq.lt(last_seq));
+    }
+    {
+        const mid = first_seq.add(last_seq).add(1).div(2);
+        var half = b.openIfElse(a.cu_seqlens_q.load(mid).le(r), .{});
+        {
+            first_seq.assign(mid);
+            half.elseBranch();
+        }
+        {
+            last_seq.assign(mid.sub(1));
+            half.close();
+        }
+        search.close();
+    }
+    const idx = first_seq.rvalue();
+    const q_pos = r.sub(a.cu_seqlens_q.load(idx));
+    const query_len = a.cu_seqlens_q.load(idx.add(1)).sub(a.cu_seqlens_q.load(idx));
+    const kv_len = a.seq_lens.load(idx).sub(query_len).add(q_pos).add(1);
+    const kv_lo = b.ternary(a.args.field("sliding_window").lt(0), 0, b.max(0, kv_len.sub(a.args.field("sliding_window"))));
+    return .{ .idx = idx, .kv_len = kv_len, .kv_lo = kv_lo };
+}
+
+fn liveSplits(b: *Builder, seq: anytype, splits: i32) Value {
+    const chunks = seq.kv_len.add(simd_width - 1).div(simd_width).sub(seq.kv_lo.div(simd_width));
+    return b.min(splits, chunks);
+}
+
+/// fa_vec_paged_reduce: merges the fa_vec_paged split partials.
 pub const FaVecPagedReduce = struct {
     pub const Cfg = struct {
-        /// The partials to merge, FaVecPaged's `nwg`.
-        nwg: i32,
+        splits: i32,
         /// The head dimension.
         head_dim: i32,
     };
 
-    pub const Args: metal.Struct = .{ .name = "fa_vec_paged_reduce_args", .fields = &.{
-        .{ .name = "nrows", .type = .int },
-    } };
+    pub const simdgroups = 8;
 
     pub const Kernel = metal.Kernel(Cfg, .{
         .name = "fa_vec_paged_reduce",
-        .inputs = &.{"htmp"},
+        .inputs = &.{ "htmp", "seq_lens", "cu_seqlens_q" },
         .outputs = &.{"dst"},
         .constants = &.{"args"},
         .run = run,
     });
 
     fn run(b: *Builder, cfg: Cfg) metal.FinishError!void {
+        const int_in: ArgSpec = .{ .buffer = .{ .type = .int, .const_ = true } };
         const a = try b.declareArgs(.{
-            .args = .{ .constant_struct = Args },
+            .args = .{ .constant_struct = FaVecPaged.Args },
             .htmp = .{ .buffer = .{ .type = .char, .const_ = true } },
+            .seq_lens = int_in,
+            .cu_seqlens_q = int_in,
             .dst = .{ .buffer = .{ .type = .char } },
-            .tgpig = .{ .threadgroup_position_in_grid = .uint },
+            .tgpig = .{ .threadgroup_position_in_grid = .uint2 },
+            .tgpg = .{ .threadgroups_per_grid = .uint2 },
             .tiisg = .{ .thread_index_in_simdgroup = .ushort },
             .sgitg = .{ .simdgroup_index_in_threadgroup = .ushort },
         });
-        const nwg = cfg.nwg;
+        const NWG = cfg.splits;
+        if (NWG > 4 * simd_width) std.debug.panic("fa_vec_paged_reduce: {d} splits, at most {d}", .{ NWG, 4 * simd_width });
+        const NP = @divFloor(NWG + simd_width - 1, simd_width);
         const DV = cfg.head_dim;
-        const rid = a.tgpig.to(.ulong);
-        const iwg = a.tiisg.to(.short);
-        const ss = a.htmp.to(.float).add(a.args.field("nrows").to(.ulong).mul(DV).mul(nwg));
+        const DV4 = @divExact(DV, 4);
+        const full: metal.LoopOpts = .{ .unroll = .full };
 
-        var max = b.openIfElse(iwg.lt(nwg), .{.float});
-        {
-            max.yieldThen(.{ss.load(rid.mul(2 * nwg).add(b.lift(2).mul(iwg)).add(1))});
-        }
-        {
-            max.yieldElse(.{-flt_max / 2.0});
-        }
-        const M = max.results[0];
-        var sum = b.openIfElse(iwg.lt(nwg), .{.float});
-        {
-            sum.yieldThen(.{ss.load(rid.mul(2 * nwg).add(b.lift(2).mul(iwg)).add(0))});
-        }
-        {
-            sum.yieldElse(.{0.0});
-        }
-
-        const m = b.simdMax(M);
-        const ms = b.exp(M.sub(m));
-        const S = b.simdSum(sum.results[0].mul(ms));
-        const inv_sum = b.ternary(S.eq(0.0), 0.0, b.lift(1.0).div(S));
-
-        const DV4 = @divTrunc(DV, 4);
-        const htmp4 = a.htmp.to(.float4).add(rid.mul(DV4).mul(nwg));
+        const rid = a.tgpig.at(0).to(.ulong);
+        const r = a.tgpig.at(0).div(a.args.field("num_heads").to(.uint)).to(.int);
+        const i = a.tgpig.at(1).to(.int).mul(simdgroups).add(a.sgitg.to(.int));
         const dst4 = a.dst.to(.bfloat4).add(rid.mul(DV4));
-        var loop = b.openFor(a.sgitg.to(.int), DV4, nwg);
+
+        const live = b.local(.int, 0);
+        var real = b.openIf(r.lt(a.cu_seqlens_q.load(a.args.field("num_seqs"))));
         {
-            const i = loop.iv;
-            var part_ = b.openIfElse(iwg.lt(nwg), .{.float4});
+            live.assign(liveSplits(b, sequenceOf(b, a, r), NWG));
+            real.close();
+        }
+        var empty = b.openIf(live.le(0));
+        {
+            var lane0 = b.openIf(a.tiisg.eq(0));
             {
-                part_.yieldThen(.{htmp4.load(i.mul(nwg).add(iwg)).mul(ms)});
-            }
-            {
-                part_.yieldElse(.{b.constant(.float4, 0)});
-            }
-            const part = part_.results[0];
-            const v = b.simdSum(part);
-            var lane0 = b.openIf(iwg.eq(0));
-            {
-                dst4.store(i, v.mul(inv_sum).to(.bfloat4));
+                dst4.store(i, b.constant(.float4, 0).to(.bfloat4));
                 lane0.close();
             }
-            loop.close();
+            b.return_();
+            empty.close();
+        }
+
+        const ss = a.htmp.to(.float).add(a.tgpg.at(0).to(.ulong).mul(DV).mul(NWG)).add(rid.mul(2 * NWG));
+        const Mj = b.array(.float, @intCast(NP));
+        const Sj = b.array(.float, @intCast(NP));
+        const mx = b.local(.float, -flt_max / 2.0);
+        var load = b.openForOpts(b.constant(.short, 0), NP, 1, full);
+        {
+            const j = load.iv;
+            const idx = a.tiisg.to(.int).add(j.to(.int).mul(simd_width));
+            const ok = idx.lt(live);
+            Mj.store(j, b.ternary(ok, ss.load(idx.mul(2).add(1)), b.constant(.float, -flt_max / 2.0)));
+            Sj.store(j, b.ternary(ok, ss.load(idx.mul(2)), b.constant(.float, 0)));
+            mx.assign(b.max(mx.rvalue(), Mj.load(j)));
+            load.close();
+        }
+        const m = b.simdMax(mx.rvalue());
+        const sum = b.local(.float, 0.0);
+        var weigh = b.openForOpts(b.constant(.short, 0), NP, 1, full);
+        {
+            const j = weigh.iv;
+            Mj.store(j, b.exp(Mj.load(j).sub(m)));
+            sum.assign(sum.add(Sj.load(j).mul(Mj.load(j))));
+            weigh.close();
+        }
+        const S = b.simdSum(sum.rvalue());
+        const inv_sum = b.ternary(S.eq(0.0), 0.0, b.lift(1.0).div(S));
+
+        const htmp4 = a.htmp.to(.float4).add(rid.mul(DV4).mul(NWG));
+        const acc = b.local(.float4, b.constant(.float4, 0));
+        var parts = b.openForOpts(b.constant(.short, 0), NP, 1, full);
+        {
+            const j = parts.iv;
+            const idx = a.tiisg.to(.int).add(j.to(.int).mul(simd_width));
+            var ok = b.openIf(idx.lt(live));
+            {
+                acc.assign(acc.add(htmp4.load(i.mul(NWG).add(idx)).mul(Mj.load(j))));
+                ok.close();
+            }
+            parts.close();
+        }
+        const v = b.simdSum(acc.rvalue());
+        var lane0 = b.openIf(a.tiisg.eq(0));
+        {
+            dst4.store(i, v.mul(inv_sum).to(.bfloat4));
+            lane0.close();
         }
     }
 };
@@ -984,13 +889,14 @@ pub const PagedAttentionTiled = struct {
 
 test "the paged attention kernels emit verified modules" {
     const allocator = std.testing.allocator;
-    for ([_]i32{ 128, 256, 512 }) |head_dim| {
-        for ([_]i32{ 4, 8, 16 }) |nsg| {
-            allocator.free(try FaVecPaged.Kernel.emit(allocator, .{ .head_dim = head_dim, .nsg = nsg, .block_size = 16, .position_stride = 2 * head_dim, .nwg = 1 }));
+    for ([_]i32{ 32, 64, 128, 256, 512 }) |head_dim| {
+        for ([_][2]i32{ .{ 1, 1 }, .{ 4, 1 }, .{ 2, 8 }, .{ 4, 128 } }) |launch| {
+            allocator.free(try FaVecPaged.Kernel.emit(allocator, .{ .head_dim = head_dim, .block_size = 16, .position_stride = 2 * head_dim, .heads = launch[0], .splits = launch[1] }));
+        }
+        for ([_]i32{ 8, 128 }) |splits| {
+            allocator.free(try FaVecPagedReduce.Kernel.emit(allocator, .{ .splits = splits, .head_dim = head_dim }));
         }
     }
-    allocator.free(try FaVecPaged.Kernel.emit(allocator, .{ .head_dim = 512, .nsg = 8, .block_size = 16, .position_stride = 1024, .nwg = 4 }));
-    allocator.free(try FaVecPagedReduce.Kernel.emit(allocator, .{ .nwg = 4, .head_dim = 512 }));
     for ([_]Type{ .half, .bfloat }) |dtype| {
         allocator.free(try ZeroPaddingRows.Kernel.emit(allocator, .{ .dtype = dtype }));
         for ([_]i32{ 32, 64, 96, 128, 256, 512 }) |head_size| {
