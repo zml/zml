@@ -230,6 +230,9 @@ pub const Profiler = struct {
             try inner.stop();
             break :blk try inner.collectData(self.arena.allocator());
         } else &.{};
+        // Keep the exact backend bytes independently of later parsing/merging.
+        // These .raw artifacts are diagnostics, not normalized profile files.
+        try self.writeRawData("profiling.backend.raw", protobuf);
         const merged_protobuf = c.zml_traceme_session_merge(zffi.ZigSlice.from(protobuf));
         defer if (merged_protobuf.len != 0) {
             c.zml_traceme_str_free(merged_protobuf);
@@ -239,6 +242,7 @@ pub const Profiler = struct {
             return null;
         }
 
+        try self.writeRawData("profiling.merged.raw", final_protobuf);
         const normalized_protobuf = c.zml_traceme_session_postprocess(
             zffi.ZigSlice.from(final_protobuf),
             self.start_timestamp_ns orelse self.stop_timestamp_ns.?,
@@ -271,6 +275,12 @@ pub const Profiler = struct {
             self.profile.perfetto_path,
         });
         return self.profile;
+    }
+
+    fn writeRawData(self: *Profiler, name: []const u8, contents: []const u8) !void {
+        const path = try std.Io.Dir.path.join(self.arena.allocator(), &.{ self.session_dir, name });
+        try self.writeFile(path, contents);
+        log.info("Profiler raw bytes preserved: {s} ({d} bytes)", .{ path, contents.len });
     }
 
     fn writeFile(self: *const Profiler, path: []const u8, contents: []const u8) !void {
