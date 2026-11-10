@@ -24,13 +24,7 @@ pub fn draw(self: *const Image, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surf
         };
     }
 
-    // Compute cell columns from image aspect ratio and terminal cell pixel size
-    const cell_h: u32 = if (ctx.cell_size.height > 0) ctx.cell_size.height else 20;
-    const cell_w: u32 = if (ctx.cell_size.width > 0) ctx.cell_size.width else 10;
-    const height_px = @as(u32, target_rows) * cell_h;
-    const scale_f = @as(f64, @floatFromInt(height_px)) / @as(f64, @floatFromInt(self.image.height));
-    const width_px: u32 = @intFromFloat(@as(f64, @floatFromInt(self.image.width)) * scale_f);
-    const cols: u16 = @intCast((width_px + cell_w - 1) / cell_w);
+    const cols = ui.imageCellSize(self.image, target_rows, ctx.cell_size).cols;
 
     const size: vxfw.Size = .{ .width = cols, .height = target_rows };
     var surf = try vxfw.Surface.init(ctx.arena, ui.widget(self), size);
@@ -77,6 +71,21 @@ test Image {
     const size = cell.image.?.options.size.?;
     try std.testing.expectEqual(@as(?u16, 5), size.rows);
     try std.testing.expectEqual(@as(?u16, 20), size.cols);
+}
+
+test "Image rounds its width to the nearest column" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    vxfw.DrawContext.init(.unicode);
+
+    const img: Image = .{ .image = .{ .id = 1, .width = 64, .height = 64 }, .rows = 1 };
+    const surface = try img.draw(.{
+        .arena = arena.allocator(),
+        .min = .{},
+        .max = .{ .width = 40, .height = 10 },
+        .cell_size = .{ .width = 8, .height = 17 },
+    });
+    try std.testing.expectEqual(@as(u16, 2), surface.size.width);
 }
 
 test "refAllDecls" {
