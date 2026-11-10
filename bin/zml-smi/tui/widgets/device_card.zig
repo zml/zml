@@ -122,10 +122,8 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         .highlighted = self.highlighted,
     };
 
-    const util_hist = try self.state.history.util[i].sliceLast(ctx.arena, data.history_len);
-    const mem_hist = try self.state.history.mem_util[i].sliceLast(ctx.arena, data.history_len);
-    const util_chart_data = try utils.normalizeRange(ctx.arena, util_hist, 0, 100);
-    const mem_chart_data = try utils.normalizeRange(ctx.arena, mem_hist, 0, 100);
+    const util_chart_data = try utils.normalizeRange(ctx.arena, &self.state.history.util[i], 0, 100);
+    const mem_chart_data = try utils.normalizeRange(ctx.arena, &self.state.history.mem_util[i], 0, 100);
 
     const chart_entries = [2]MetricCard.ChartEntry{
         .{ .label = util_label, .value = cf.util_percent, .suffix = dev_suffix, .data = util_chart_data },

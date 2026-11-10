@@ -35,7 +35,7 @@ pub fn historyChart(
 ) std.mem.Allocator.Error!Chart {
     return .{
         .title = opts.title,
-        .data = try utils.normalizeRange(ctx.arena, try history[id].sliceLast(ctx.arena, data.history_len), opts.y_min, opts.y_max),
+        .data = try utils.normalizeRange(ctx.arena, &history[id], opts.y_min, opts.y_max),
         .value_label = opts.value_label,
         .info_line = opts.info_line,
         .y_min = opts.y_min,
