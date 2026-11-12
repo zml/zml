@@ -7,11 +7,12 @@ const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
 const toDType = zml.kernel.triton.from;
-const ExpertsLayout = @import("../options.zig").ExpertsLayout;
-const ProjectionLayout = @import("../options.zig").ProjectionLayout;
-const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
-const Activation = @import("../options.zig").Activation;
-const Options = @import("../options.zig").Options;
+const ExpertsLayout = @import("../api.zig").ExpertsLayout;
+const ProjectionLayout = @import("../api.zig").ProjectionLayout;
+const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
+const Activation = @import("../api.zig").Activation;
+const Options = @import("../api.zig").Options;
+const LocalRouting = @import("../api.zig").LocalRouting;
 const kernels = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/triton");
@@ -38,7 +39,7 @@ test {
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    routing: zml.moe.LocalRouting,
+    routing: LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: Options,
@@ -58,7 +59,7 @@ pub fn fusedExperts(
 
 pub fn fusedExpertsBase(
     hidden_states: Tensor,
-    routing_: zml.moe.LocalRouting,
+    routing_: LocalRouting,
     gate_up_: zml.nn.Linear,
     down_: zml.nn.Linear,
     layout: ProjectionLayout,
@@ -900,7 +901,7 @@ fn validateInputs(
 /// BF16 activations are quantized on the GPU to FP8 with per-32 E8M0 scales.
 pub fn fusedExpertsMxfp4(
     input: zml.Tensor,
-    routing: zml.moe.LocalRouting,
+    routing: LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: Options,

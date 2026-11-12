@@ -4,16 +4,17 @@
 //! rows in route order, and the top-k reduction. MXFP4 applies routing weights
 //! before the down projection, with the reference model's BF16 rounding.
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const zml = @import("../../../../zml.zig");
+const RoutingWeightPlacement = @import("../../api.zig").RoutingWeightPlacement;
+const triton_kernels = @import("../../triton/moe.zig");
 pub const mxfp4 = @import("mxfp4.zig");
 pub const mxfp4_persistent = @import("persistent_mxfp4.zig");
 pub const nvfp4 = @import("nvfp4.zig");
 pub const nvfp4_persistent = @import("persistent_nvfp4.zig");
 const reduce = @import("reduce.zig");
-const RoutingWeightPlacement = @import("../../options.zig").RoutingWeightPlacement;
-const triton_kernels = @import("../../triton/moe.zig");
 
 pub const Mxfp4Inputs = struct {
     /// `[tokens, hidden]` BF16.

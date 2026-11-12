@@ -12,7 +12,7 @@ const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
-const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
+const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
 
 const log = std.log.scoped(.@"zml/moe/triton_kernels");
 

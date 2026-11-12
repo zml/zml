@@ -19,18 +19,18 @@
 const std = @import("std");
 
 const builder = @import("dsl/tcl/builder");
-
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const tcl = zml.kernel.tcl;
-const Options = @import("../options.zig").Options;
+const Options = @import("../api.zig").Options;
+const LocalRouting = @import("../api.zig").LocalRouting;
 
 /// `input` is `{.t, .d}`, `topk_ids` and `topk_weights` `{.t, .topk}`, `gate_up` `{.expert, .dout = 2 * inter (gate then up), .d}`
 /// and `down` `{.expert, .d, .dout = inter}`. Experts are BF16 or block-128 FP8 with BF16/F32 scales.
 /// SwiGLU, routing weights applied after the down projection.
-pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: Options) Tensor {
+pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: Options) Tensor {
     const topk_ids = routing.localIds();
     stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL MoE owns input precision and applies routing weights after the down projection", .{});
     stdx.debug.assert(opts.activation == .swiglu and std.meta.eql(opts.activation.swiglu, .{}), "TCL MoE supports SwiGLU without limit, scale or bias", .{});

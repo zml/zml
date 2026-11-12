@@ -5,10 +5,12 @@ const platforms = @import("platforms");
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
-const GlobalOptions = @import("../options.zig").Options;
-const Activation = @import("../options.zig").Activation;
+const GlobalOptions = @import("../api.zig").Options;
+const Activation = @import("../api.zig").Activation;
+const LocalRouting = @import("../api.zig").LocalRouting;
 const unpackedWeight = @import("../weights.zig").unpackedWeight;
 const contract = @import("contract.zig");
+const Attributes = contract.Attributes;
 const runtime = @import("runtime.zig");
 
 const log = std.log.scoped(.@"zml/moe/flashinfer_cutlass");
@@ -49,8 +51,6 @@ pub fn validateOptions(opts: GlobalOptions) void {
 const Inputs = contract.Inputs(zml.Tensor);
 
 const Outputs = contract.Outputs(zml.Shape);
-
-const Attributes = contract.Attributes;
 
 fn currentRunners() !*runtime.Runners {
     const platform = zml.Compiler.current().platform;
@@ -311,7 +311,7 @@ pub fn fusedExpertsNvfp4(
 
 pub fn fusedExperts(
     input: zml.Tensor,
-    routing: zml.moe.LocalRouting,
+    routing: LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: GlobalOptions,
