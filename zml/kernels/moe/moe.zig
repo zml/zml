@@ -37,8 +37,6 @@ pub const Backend = enum {
     tcl,
 
     pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
-        // Keep the dtype as an argument because non scheme-specific backends may depend on it later
-        _ = dtype;
         return switch (platform.target) {
             .cuda => b: {
                 const s = scheme orelse break :b .triton;
@@ -72,7 +70,13 @@ pub const Backend = enum {
                 };
             },
             .tpu => if (scheme == null) .mosaic_tpu else error.UnsupportedQuantization,
-            .furiosa => if (scheme == null) .tcl else error.UnsupportedQuantization,
+            .furiosa => b: {
+                const s = scheme orelse break :b .tcl;
+                break :b switch (s) {
+                    .fp8_block128 => if (dtype == .f8e4m3fn) .tcl else error.UnsupportedQuantization,
+                    .mxfp4, .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block32 => error.UnsupportedQuantization,
+                };
+            },
             .metal => b: {
                 const s = scheme orelse break :b .metal;
                 break :b switch (s) {
@@ -245,7 +249,7 @@ pub fn forwardMoe(
     }
     const expert_axis = experts.meshAxis();
     const parallel = if (expert_axis) |axis| mesh.grid.axis_sizes[axis] > 1 else false;
-    if (backend == .metal or backend == .tcl) stdx.debug.assert(!parallel, "This MoE backend does not support expert parallelism", .{});
+    if (backend == .metal) stdx.debug.assert(!parallel, "This MoE backend does not support expert parallelism", .{});
 
     const Call = struct {
         input: zml.Tensor,
