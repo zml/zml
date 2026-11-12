@@ -419,9 +419,10 @@ pub const AudioVae = struct {
         errdefer run.allocator.destroy(loaded);
         loaded.* = .{
             .bufs = try zml.mem.bufferize(run.allocator, Decoder, &self.inner),
-            .loader = try .init(run.allocator, run.platform, ops.loader_opts),
+            .loader = null,
         };
         errdefer Decoder.unloadBuffers(&loaded.bufs, run.allocator);
+        loaded.loader = try .init(run.allocator, run.platform, ops.loader_opts);
         errdefer loaded.loader.?.deinit();
         if (loaded.loader) |*loader| {
             try loader.load(run.io, Decoder, &self.inner, &loaded.bufs, store, .{ .progress = run.progress });
