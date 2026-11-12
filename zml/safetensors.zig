@@ -7,6 +7,7 @@ const log = std.log.scoped(.@"zml/safetensors");
 
 // TODO: consider promoting this to the top level struct
 // TODO: Feels like we are missing a mapping file -> tensors that would be helfpful for loading weights
+/// Maps tensor names to their shape and positions in different sub files.
 pub const TensorRegistry = struct {
     arena: std.heap.ArenaAllocator,
 
@@ -14,9 +15,8 @@ pub const TensorRegistry = struct {
 
     /// Metadata found in `__metadata__` field of the safetensors header.
     /// This is rarely use and the information there is not standardized, so we let user code handle it.
+    /// Here we just store the plain bytes, reach out if you need this to be already parsed.
     metadata: []const u8,
-
-    // mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator) TensorRegistry {
         return .{
@@ -94,15 +94,18 @@ pub const TensorRegistry = struct {
     pub fn registerTensor(self: *TensorRegistry, tensor: Tensor) !void {
         const allocator = self.arena.allocator();
 
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
+        const owned_name = try allocator.dupe(u8, tensor.name);
+        errdefer allocator.free(owned_name);
+        const owned_uri = try allocator.dupe(u8, tensor.file_uri);
+        errdefer allocator.free(owned_uri);
 
-        var tensor_copy = tensor;
-
-        tensor_copy.name = try allocator.dupe(u8, tensor.name);
-        tensor_copy.file_uri = try allocator.dupe(u8, tensor.file_uri);
-
-        try self.tensors.put(allocator, tensor_copy.name, tensor_copy);
+        const owned_tensor: Tensor = .{
+            .name = owned_name,
+            .file_uri = owned_uri,
+            .shape = tensor.shape,
+            .offset = tensor.offset,
+        };
+        try self.tensors.put(allocator, owned_name, owned_tensor);
     }
 
     pub fn reader(
