@@ -482,7 +482,7 @@ fn flashAttention(
 }
 
 /// Emit the kernel body into a pre-opened `mtt.Builder`. The factory in
-/// `zml/kernel.zig` opens the builder, calls this `run`, and finalizes the
+/// `zml/kernel/mosaic_tpu/mosaic_tpu.zig` opens the builder, calls this `run`, and finalizes the
 /// IR with `b.finishOpts(&.{}, .{ .canonicalize = true })`.
 pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
     const q_transform: []const mtt.ArgSpec.TransformReturn = &.{

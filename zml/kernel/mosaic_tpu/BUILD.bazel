@@ -1,0 +1,6 @@
+package(default_visibility = ["//zml/kernel:__pkg__"])
+
+filegroup(
+    name = "mosaic_tpu",
+    srcs = ["mosaic_tpu.zig"],
+)

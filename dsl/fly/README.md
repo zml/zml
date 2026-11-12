@@ -81,7 +81,7 @@ const c = VectorAdd.call(.{ .a = a, .b = bt }, .{ .c = a.shape() }, .{
 ```
 
 Complete vector-add and tiled-MMA kernels are the tests in `builder.zig`
-and `zml/kernel.zig`.
+and `zml/kernel/fly/test.zig`.
 
 Model kernels live beside their consumers:
 

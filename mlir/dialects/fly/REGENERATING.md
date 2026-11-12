@@ -71,7 +71,7 @@ dialect today; when one appears, extend the generator and this file.
   `test.zig`.
 - Callers that no longer compile are the point of generating: an operation
   whose signature changed in FlyDSL now fails at the call site. Fix them in
-  the same change (`dsl/fly/builder.zig`, `zml/kernel.zig`, `zml/kernels/*/fly/`,
+  the same change (`dsl/fly/builder.zig`, `zml/kernel/fly/fly.zig`, `zml/kernels/*/fly/`,
   and downstream llmd's `llmd/kernels/*/fly/`).
 - Emit the IR of the fly kernels before and after (for instance
   llmd's `sparse_mla.Main2D.emit` and the `zml/kernels/moe/fly/` kernels with
