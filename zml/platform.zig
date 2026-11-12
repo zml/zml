@@ -1015,12 +1015,15 @@ fn printCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error 
 fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     if (call_frame.registeringHook()) return null;
 
+    const buffers = call_frame.args.buffers();
+    if (buffers.len <= 0) return null;
+
     const pjrt_api: *pjrt.Api = @ptrFromInt(getScalarAttributeAs(u64, call_frame, "pjrt_api").?);
     const pjrt_client: *pjrt.Client = @ptrFromInt(getScalarAttributeAs(u64, call_frame, "pjrt_client").?);
 
     const device_ordinal: usize = @intCast(try call_frame.ctx.getDeviceOrdinal(call_frame.api));
 
-    const buffer = call_frame.args.buffers()[0];
+    const buffer = buffers[0];
     const shape = shapeFromFfiBuffer(buffer);
 
     // NOTE(Corentin): This is a hack. We take the first non device memory, hoping that it's host visible,
@@ -1044,9 +1047,13 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
             },
         },
     });
+    defer pjrt_buffer.deinit(pjrt_api);
 
     pjrt_buffer = try pjrt_buffer.copyToMemory(pjrt_api, first_non_device_memory);
-    try pjrt_buffer.readyEvent(pjrt_api).awaitRaw(pjrt_api);
+
+    const event = try pjrt_buffer.readyEvent(pjrt_api);
+    defer event.deinit(pjrt_api);
+    try event.awaitRaw(pjrt_api);
 
     const host_visible_data: [*]u8 = @ptrCast(@alignCast(try pjrt_buffer.opaqueDeviceMemoryDataPointer(pjrt_api)));
 
