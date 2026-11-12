@@ -70,10 +70,10 @@ const VitAttn = struct {
 
     pub fn forward(self: VitAttn, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
         const heads = .{ .h = self.num_heads, .hd = self.head_dim };
-        const q = zml.nn.applyRotary(zml.nn.rmsNorm(applyLinear(self.q, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
-        const k = zml.nn.applyRotary(zml.nn.rmsNorm(applyLinear(self.k, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
+        const q = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.q, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
+        const k = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.k, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
         const v = applyLinear(self.v, x).splitAxis(.dout, heads);
-        // Portable SDPA (CPU / CUDA / …). DiT uses `attention.dense` for the long packed seq.
+        // Portable SDPA. DiT uses the shared non causal attention API for the long packed sequence.
         return applyLinear(self.out, zml.nn.sdpa(
             q.rename(.{ .s = .q }),
             k.rename(.{ .s = .k }),
@@ -84,10 +84,10 @@ const VitAttn = struct {
 };
 
 const VitBlock = struct {
-    norm1: zml.nn.RmsNorm,
+    norm1: ops.RmsNorm,
     attn: VitAttn,
     scale1: zml.Tensor,
-    norm2: zml.nn.RmsNorm,
+    norm2: ops.RmsNorm,
     ff: VitFf,
     scale2: zml.Tensor,
     pub const Input = struct { layer: VitBlock, hidden: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor };

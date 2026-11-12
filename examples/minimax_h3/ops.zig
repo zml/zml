@@ -1,5 +1,4 @@
-//! Shared generation context, DMA load, and weight constructors.
-//! Model math lives in encoder / pack / dit / vae / audio.
+//! Shared generation context, DMA loading, weight constructors, and model math helpers.
 
 const std = @import("std");
 const zml = @import("zml");
@@ -66,8 +65,39 @@ pub fn linear(
     );
 }
 
-pub fn rms(store: zml.io.TensorStore.View, tagz: anytype, eps: f32) zml.nn.RmsNorm {
+pub fn rms(store: zml.io.TensorStore.View, tagz: anytype, eps: f32) RmsNorm {
     return .{ .weight = store.createTensor("weight", tagz, .replicated, .{}), .eps = eps };
+}
+
+pub const RmsNorm = struct {
+    weight: zml.Tensor,
+    eps: f32,
+
+    pub fn forward(self: RmsNorm, x: zml.Tensor) zml.Tensor {
+        // Weight sole tag selects the axis to normalize over (either .d or .hd)
+        const axis = self.weight.shape().tag(0);
+        return zml.nn.rmsNorm(x, axis, self.eps).mul(
+            self.weight.convert(x.dtype()).broad(x.shape()),
+        );
+    }
+};
+
+// Split half prefix RoPE. x has an even width final .hd axis
+// cos and sin have identical shapes and duplicated coeficcient halfs
+pub fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
+    const rotaryDim = cos.dim(-1);
+    const half = @divExact(rotaryDim, 2);
+
+    // Split the first rotaryDim channel of each head into real and imaginary halfs. Keep the remaining channels unchanged.
+    const xReal, const xImag, const xPass = zml.nn.splitRealImgPass(x, .real_im_pass, @intCast(rotaryDim));
+
+    // cos and sin repeat the same values in both halfs. Keep only the first half.
+    const cosHalf = cos.slice(-1, .{ .end = half }).renameTag(-1, .hd).broad(xReal.shape());
+    const sinHalf = sin.slice(-1, .{ .end = half }).renameTag(-1, .hd).broad(xReal.shape());
+
+    const yReal = xReal.mul(cosHalf).add(xImag.negate().mul(sinHalf));
+    const yImag = xImag.mul(cosHalf).add(xReal.mul(sinHalf));
+    return zml.nn.mergeRealImgPass(yReal, yImag, xPass, .real_im_pass);
 }
 
 pub fn ln(store: zml.io.TensorStore.View, eps: f32) zml.nn.LayerNorm {

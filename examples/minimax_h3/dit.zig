@@ -97,8 +97,8 @@ const Attention = struct {
     k: zml.nn.Linear,
     v: zml.nn.Linear,
     out: zml.nn.Linear,
-    q_norm: zml.nn.RmsNorm,
-    k_norm: zml.nn.RmsNorm,
+    q_norm: ops.RmsNorm,
+    k_norm: ops.RmsNorm,
     num_heads: i64,
     head_dim: i64,
 
@@ -123,15 +123,23 @@ const Attention = struct {
         var k = self.k_norm.forward(self.k.forward(x_qkv, x_qkv.dtype()).splitAxis(.dout, heads).withPartitioning(.model, .{ .h = .model }));
         const v = self.v.forward(x_qkv, x_qkv.dtype()).splitAxis(.dout, heads).withPartitioning(.model, .{ .h = .model });
         if (rotary) |pe| {
-            q = zml.nn.applyRotary(q, pe.cos, pe.sin);
-            k = zml.nn.applyRotary(k, pe.cos, pe.sin);
+            q = ops.applyRotary(q, pe.cos, pe.sin);
+            k = ops.applyRotary(k, pe.cos, pe.sin);
         }
-        const attn = zml.attention.dense(
+
+        const metadata: zml.attention.Metadata = .init(.fromBackend(backend));
+        const parameters: zml.attention.Parameters = .init(.fromBackend(backend));
+        // Diffusion Transformer and text refinement use bidirectional full sequence attention. heads sharded on .model dimension.
+        const attn = zml.attention.attentionOpts(
             q.rename(.{ .s = .q }),
             k.rename(.{ .s = .k }),
             v.rename(.{ .s = .k }),
-            backend,
-            .{ .is_causal = false },
+            zml.Tensor.scalar(0, .u32),
+            metadata,
+            parameters,
+            .{ .causal = false },
+            zml.Compiler.current().mesh(.model),
+            .head(.model),
         ).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
         return self.out.forward(attn, attn.dtype()).rename(.{ .dout = .d }).withPartitioning(.model, .{ .d = .replicated });
     }
@@ -209,9 +217,9 @@ const FinalAdaLn = AdaLn(2, 1);
 // =============================================================================
 
 const Block = struct {
-    norm1: zml.nn.RmsNorm,
+    norm1: ops.RmsNorm,
     attn: Attention,
-    norm2: zml.nn.RmsNorm,
+    norm2: ops.RmsNorm,
     mlp: SwiGlu,
     pub const Input = struct {
         layer: Block,
@@ -269,7 +277,7 @@ const Block = struct {
 const TextPrep = struct {
     condition_proj: zml.nn.Linear,
     blocks: []Block,
-    final_norm: zml.nn.RmsNorm,
+    final_norm: ops.RmsNorm,
     pub const Input = struct { model: TextPrep, text: zml.Tensor, attn_backend: zml.attention.Backend };
     pub const Output = struct { text: zml.Tensor };
 
@@ -315,7 +323,7 @@ const PatchEmbed = struct {
 
 /// Final RMS + time-slot AdaLN, then fp32 video/audio heads on those rows only.
 const Finish = struct {
-    norm: zml.nn.RmsNorm,
+    norm: ops.RmsNorm,
     video_out: zml.nn.Linear,
     audio_out: zml.nn.Linear,
     text_len: i64,
@@ -390,11 +398,11 @@ pub const Dit = struct {
     condition_proj: zml.nn.Linear,
     time_embedder: TimeEmbedder,
     refiner_blocks: []Block,
-    refiner_norm: zml.nn.RmsNorm,
+    refiner_norm: ops.RmsNorm,
     blocks: []Block,
     adalns: []BlockAdaLn,
     final_adaln: FinalAdaLn,
-    final_norm: zml.nn.RmsNorm,
+    final_norm: ops.RmsNorm,
     video_out: zml.nn.Linear,
     audio_out: zml.nn.Linear,
     cfg: DitConfig,
@@ -468,14 +476,22 @@ pub const Dit = struct {
     /// Ten kernels: text, RoPE, patch pack, temb, AdaLN, final AdaLN, one block, finish, Euler video/audio.
     /// Shapes come from `packed_run`.
     pub fn compile(self: *Dit, run: *const Run, geo: config.Geometry, text_len: u32, packed_run: Packed, text_dt: zml.DataType) !void {
-        const attn = zml.attention.Backend.auto(run.platform);
+        const attn: zml.attention.Backend = if (run.platform.target == .cuda)
+            zml.attention.Backend.auto(run.platform)
+        else
+            .{ .stablehlo = {} };
+        const attnName: []const u8 = switch (attn) {
+            .stablehlo => "stablehlo",
+            .flash_attention => |backend| @tagName(backend),
+        };
+
         const layer = self.blocks[0];
         const seq_len: u32 = packed_run.layout.seqLen();
         const steps: u32 = @intCast(packed_run.video.sigmas.len - 1);
         const flat_n: i64 = @intCast(steps * config.timestep_slot_count);
         const temb_dim = self.time_embedder.proj_out.weight.dim(.dout);
         log.info("dit attn={s} seq={d} audio_tokens={d} devices={d}", .{
-            @tagName(attn),
+            attnName,
             seq_len,
             geo.audio_tokens,
             run.platform.devices.len,

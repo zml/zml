@@ -59,8 +59,8 @@ const SelfAttn = struct {
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
     o_proj: zml.nn.Linear,
-    q_norm: zml.nn.RmsNorm,
-    k_norm: zml.nn.RmsNorm,
+    q_norm: ops.RmsNorm,
+    k_norm: ops.RmsNorm,
     num_heads: i64,
     num_kv_heads: i64,
     head_dim: i64,
@@ -83,12 +83,12 @@ const SelfAttn = struct {
         const x_qkv = x.withPartitioning(.model, .{ .d = .replicated });
         const q_heads = .{ .h = self.num_heads, .hd = self.head_dim };
         const kv_heads = .{ .h = self.num_kv_heads, .hd = self.head_dim };
-        const q = zml.nn.applyRotary(
+        const q = ops.applyRotary(
             self.q_norm.forward(self.q_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(.dout, q_heads).withPartitioning(.model, .{ .h = .model })),
             cos,
             sin,
         );
-        const k = zml.nn.applyRotary(
+        const k = ops.applyRotary(
             self.k_norm.forward(self.k_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(.dout, kv_heads).withPartitioning(.model, .{ .h = .model })),
             cos,
             sin,
@@ -112,9 +112,9 @@ const SelfAttn = struct {
 
 /// One Qwen block:  h ← h + Attn(RMS(h));  h ← h + MLP(RMS(h)).
 const TransformerLayer = struct {
-    input_layernorm: zml.nn.RmsNorm,
+    input_layernorm: ops.RmsNorm,
     self_attn: SelfAttn,
-    post_attention_layernorm: zml.nn.RmsNorm,
+    post_attention_layernorm: ops.RmsNorm,
     mlp: Mlp,
     pub const Input = struct { layer: TransformerLayer, hidden: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor };
     pub const Output = struct { hidden: zml.Tensor };
@@ -154,8 +154,8 @@ fn uploadF32(run: *const Run, shape: zml.Shape, values: []const f32) !zml.Buffer
     }
 }
 
-/// Qwen interleaved RoPE: each frequency is written into both halves of the head.
-fn fillInterleavedRope(theta: f32, seq_len: u32, head_dim: u32, cos: []f32, sin: []f32) void {
+/// Qwen split half RoPE: duplicate coefficients across the two head halfs
+fn fillSplitHalfRope(theta: f32, seq_len: u32, head_dim: u32, cos: []f32, sin: []f32) void {
     const hd: usize = head_dim;
     const half = hd / 2;
     for (0..seq_len) |pos| {
@@ -266,7 +266,7 @@ pub const Encoder = struct {
         defer run.allocator.free(cos);
         const sin = try run.allocator.alloc(f32, seq_len * head_dim);
         defer run.allocator.free(sin);
-        fillInterleavedRope(self.cfg.rope_theta, seq_len, head_dim, cos, sin);
+        fillSplitHalfRope(self.cfg.rope_theta, seq_len, head_dim, cos, sin);
         var cos_buf = try uploadF32(run, .init(.{ .s = seq_len, .hd = head_dim }, self.embed_tokens.weight.dtype()), cos);
         defer cos_buf.deinit();
         var sin_buf = try uploadF32(run, .init(.{ .s = seq_len, .hd = head_dim }, self.embed_tokens.weight.dtype()), sin);
