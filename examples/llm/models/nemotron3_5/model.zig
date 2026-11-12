@@ -580,8 +580,6 @@ pub const SelfAttn = struct {
     num_heads: i64,
     num_kv_heads: i64,
     head_dim: i64,
-    rotary_dim: i64,
-    rotary_embed: TextRotaryEmbedding,
     o_proj: zml.nn.Linear,
 
     o_proj_scale: ?zml.Tensor,
@@ -607,8 +605,6 @@ pub const SelfAttn = struct {
             .num_heads = config.llm_config.num_attention_heads,
             .num_kv_heads = config.llm_config.num_key_value_heads,
             .head_dim = config.llm_config.head_dim,
-            .rotary_dim = 0,
-            .rotary_embed = .init(0, 0, undefined),
         };
     }
 
@@ -616,12 +612,8 @@ pub const SelfAttn = struct {
         zml.Buffer.deinitAll(SelfAttn, self);
     }
 
-    fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const q_proj = self.q_proj.forward(x, x.dtype())
-            .splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
-        const q, var gate = q_proj.chunkExact(.hd, 2);
-        gate = gate.merge(.{ .d_out_proj = .{ .h, .hd } });
-        return .{ q, gate };
+    fn projectQ(self: SelfAttn, x: zml.Tensor) zml.Tensor {
+        return self.q_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = self.num_heads, .hd = self.head_dim });
     }
 
     fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
@@ -639,27 +631,15 @@ pub const SelfAttn = struct {
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
         const tp = zml.Compiler.current().mesh(.model);
         const x_qkv = x.withPartitioning(tp, .{ .d = .replicated });
-        var q, var gate = self.projectQAndGate(x_qkv);
+        var q = self.projectQ(x_qkv);
         var k, var v = self.projectKV(x_qkv);
         const kv_head_sharding = tp.shardableDim(k.dim(.h), .model, q.dim(.h));
 
         q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
-        gate = gate.withPartitioning(tp, .{ .s = .replicated, .d_out_proj = .model });
         k = partitionProjectedKv(k, kv_head_sharding);
         v = partitionProjectedKv(v, kv_head_sharding);
 
         const dtype = q.dtype();
-        const position_ids: zml.Tensor = zml.Tensor.arange(.{ .end = x.dim(.s) }, .i64)
-            .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64))
-            .add(token_index.convert(.i64).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64)));
-
-        const cos, const sin = self.rotary_embed.getCosAndSin(position_ids, dtype);
-        q = self.rotary_embed.applyRope(q, cos, sin);
-        k = self.rotary_embed.applyRope(k, cos, sin);
-        q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = partitionProjectedKv(k, kv_head_sharding);
-        v = partitionProjectedKv(v, kv_head_sharding);
-
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
@@ -682,8 +662,7 @@ pub const SelfAttn = struct {
             head_partitioning,
         ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
-        const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype()).rename(.{ .dout = .d }).withPartitioning(tp, .{ .d = .replicated });
+        const projected_output = self.o_proj.forward(attn_output.rename(.{ .d_out_proj = .d }), attn_output.dtype()).rename(.{ .dout = .d }).withPartitioning(tp, .{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -810,7 +789,10 @@ pub const Moe = struct {
         const up = self.stackWeights("up_proj", x.dtype()).gather(.{ .expert = topk_ids }, .{});
         const activated = x.dot(up, .d).relu();
         const hidden = activated.mul(activated).rename(.{ .dout = .ff });
-        const down = self.stackWeights("down_proj", x.dtype()).rename(.{ .dout = .d, .d = .ff }).gather(.{ .expert = topk_ids }, .{});
+        const down = self.stackWeights("down_proj", x.dtype())
+            .rename(.{ .d = .ff })
+            .rename(.{ .dout = .d })
+            .gather(.{ .expert = topk_ids }, .{});
         const projected = hidden.dot(down, .ff);
         const routed = projected.convert(.f32).mul(routing_scores.broad(projected.shape().withDtype(.f32)))
             .sum(.topk).squeeze(.topk).convert(x.dtype());
@@ -825,7 +807,7 @@ pub const Moe = struct {
         for (self.experts, weights) |expert, *weight| {
             weight.* = Mlp.dequantizeWeight(@field(expert, projection), dtype);
         }
-        return zml.Tensor.stack(weights, .first, .expert);
+        return zml.Tensor.stack(weights, 0, .expert);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Moe), allocator: std.mem.Allocator) void {
@@ -833,79 +815,6 @@ pub const Moe = struct {
         allocator.free(self.experts);
         Mlp.unloadBuffers(&self.shared_experts);
         Router.unloadBuffers(&self.router);
-    }
-};
-
-pub const TextRotaryEmbedding = struct {
-    rope_opts: zml.nn.RopeOpts,
-    rotary_dim: i64,
-    mrope_section: [3]i64,
-
-    pub fn init(rotary_dim: i64, theta: f32, mrope_section: [3]i64) TextRotaryEmbedding {
-        return .{
-            .rope_opts = .{
-                .layout = .real_im_pass,
-                .scaling = .{ .default = .{ .rope_theta = theta } },
-            },
-            .rotary_dim = rotary_dim,
-            .mrope_section = mrope_section,
-        };
-    }
-
-    pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } {
-        const inv_freq = zml.nn.invFreq(self.rotary_dim, self.rope_opts).withTags(.{.hd});
-
-        const freqs_t = position_ids.convert(.f32).outer(inv_freq);
-
-        const emb = zml.Tensor.concatenate(&.{ freqs_t, freqs_t }, -1);
-        const cos = emb.cos().convert(dtype);
-        const sin = emb.sin().convert(dtype);
-
-        return .{ cos, sin };
-    }
-
-    pub fn getCosAndSinInterleaved(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } { // To be used later in image extension
-        const stacked_position_ids = zml.Tensor.stack(&.{ position_ids, position_ids, position_ids }, 0, .g).convert(.f32);
-        const inv_freq = zml.nn.InvFreq(self.rotary_dim, self.rope_opts).withTags(.{.hd});
-
-        var freqs = stacked_position_ids.outer(inv_freq);
-        var freqs_t, var freqs_h, var freqs_w = freqs.chunkExact(.g, 3);
-        freqs_t = freqs_t.squeeze(.g);
-        freqs_h = freqs_h.squeeze(.g);
-        freqs_w = freqs_w.squeeze(.g);
-
-        const h_indices = zml.Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[1] }, .i32), .h).scale(3).addConstant(1);
-        const w_indices = zml.Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[2] }, .i32), .h).scale(3).addConstant(2);
-
-        const h_input = freqs_h.gather(.{ .dh = h_indices }, .{ .indices_are_sorted = true });
-        const w_input = freqs_w.gather(.{ .dh = w_indices }, .{ .indices_are_sorted = true });
-        freqs_t = freqs_t.scatterSlices(.{ .dh = h_indices }, h_input, .{ .update_fn = zml.Tensor.ScatterOpts.override });
-        freqs = freqs_t.scatterSlices(.{ .dh = w_indices }, w_input, .{ .update_fn = zml.Tensor.ScatterOpts.override });
-
-        const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
-        const cos = emb.cos().convert(dtype);
-        const sin = emb.sin().convert(dtype);
-
-        return .{ cos, sin };
-    }
-
-    fn rotateHalf(x: zml.Tensor) zml.Tensor {
-        const half_dim = @divExact(x.dim(-1), 2);
-        const x1 = x.slice(-1, .{ .start = 0, .end = half_dim });
-        const x2 = x.slice(-1, .{ .start = half_dim, .end = x.dim(-1) });
-        return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
-    }
-
-    pub fn applyRope(self: TextRotaryEmbedding, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-        const x_rot = x.slice(-1, .{ .start = 0, .end = self.rotary_dim });
-        const x_pass = x.slice(-1, .{ .start = self.rotary_dim, .end = x.dim(-1) });
-
-        const cos_x = cos.insertAxes(.hd, .{.h}).broad(x_rot.shape());
-        const sin_x = sin.insertAxes(.hd, .{.h}).broad(x_rot.shape());
-
-        const rotated = x_rot.mul(cos_x).add(rotateHalf(x_rot).mul(sin_x));
-
-        return zml.Tensor.concatenate(&.{ rotated, x_pass }, -1);
     }
 };
 

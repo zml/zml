@@ -61,9 +61,6 @@ pub const CompiledModel = struct {
         parameters: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        for (mdl.backbone.layers) |layer| {
-            if (layer.mixer == .mamba) return error.Mamba2InferenceNotImplemented;
-        }
         const prefill = try compileKernel(allocator, io, platform, mdl, parameters, parameters.seqlen, "prefill", progress);
         errdefer prefill.deinit();
         const decode = try compileKernel(allocator, io, platform, mdl, parameters, 1, "decode", progress);
