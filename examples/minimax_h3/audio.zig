@@ -376,9 +376,11 @@ pub const Loaded = struct {
 
     pub fn wait(self: *Loaded, io: std.Io) !void {
         if (self.loader) |*loader| {
+            defer {
+                loader.deinit();
+                self.loader = null;
+            }
             try loader.await(io);
-            loader.deinit();
-            self.loader = null;
         }
     }
 
