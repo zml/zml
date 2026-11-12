@@ -22,7 +22,7 @@ const EmbedTokens = struct {
         return .{
             .hidden = input.embedding.embed_tokens.forward(input.tokens.withPartialTags(.{.s}))
                 .withPartialTags(.{.d})
-                .withPartitioning(.model, .{ .d = .replicated }),
+                .replicate(),
         };
     }
 };
@@ -280,14 +280,10 @@ pub const Encoder = struct {
             defer zml.Buffer.deinitAll(TransformerLayer, &layer_bufs);
             var layer_runner = try LayerRunner.init(&compiled.layer, run.allocator, .{ .layer = layer_bufs });
             defer layer_runner.deinit(run.allocator);
-            var next: zml.Buffer = undefined;
-            // Host sync per layer.
             layer_runner.run(run.io, .{
                 .inputs = .{ .hidden = hidden, .cos = cos_buf, .sin = sin_buf },
-                .outputs = .{ .hidden = &next },
+                .outputs = .{ .hidden = &hidden },
             }, .{ .wait = true });
-            hidden.deinit();
-            hidden = next;
         }
         return hidden;
     }

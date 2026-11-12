@@ -63,7 +63,7 @@ fn packedHidden(text: zml.Tensor, audio: zml.Tensor, video: zml.Tensor) zml.Tens
     hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i32) }, text);
     hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len)), .i32) }, audio);
     hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len + audio_len)), .i32) }, video);
-    return hidden.withPartitioning(.model, .{ .d = .replicated });
+    return hidden.replicate();
 }
 
 // =============================================================================
@@ -848,7 +848,6 @@ pub const Dit = struct {
 
             // Host sync per block.
             for (block_runners, tables) |*block_runner, table| {
-                var next: zml.Buffer = undefined;
                 block_runner.run(io, .{
                     .inputs = .{
                         .hidden = hidden,
@@ -858,10 +857,8 @@ pub const Dit = struct {
                         .cos = cos,
                         .sin = sin,
                     },
-                    .outputs = .{ .hidden = &next },
+                    .outputs = .{ .hidden = &hidden },
                 }, .{ .wait = true });
-                hidden.deinit();
-                hidden = next;
             }
 
             var video_out: zml.Buffer = undefined;
@@ -878,21 +875,15 @@ pub const Dit = struct {
             defer video_out.deinit();
             defer audio_out.deinit();
 
-            var next_video: zml.Buffer = undefined;
             apply_v.run(io, .{
                 .inputs = .{ .sample = video_buf, .velocity = video_out, .sigma = sigma_v, .sigma_next = sigma_v_next },
-                .outputs = .{ .sample = &next_video },
+                .outputs = .{ .sample = &video_buf },
             }, .{ .wait = true });
-            video_buf.deinit();
-            video_buf = next_video;
 
-            var next_audio: zml.Buffer = undefined;
             apply_a.run(io, .{
                 .inputs = .{ .sample = audio_buf, .velocity = audio_out, .sigma = sigma_a, .sigma_next = sigma_a_next },
-                .outputs = .{ .sample = &next_audio },
+                .outputs = .{ .sample = &audio_buf },
             }, .{ .wait = true });
-            audio_buf.deinit();
-            audio_buf = next_audio;
 
             log.info("denoise {d}/{d} t_video={d:.4} t_audio={d:.4} [{f}]", .{
                 step_i + 1,
