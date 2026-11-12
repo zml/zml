@@ -11,10 +11,10 @@ const Args = struct {
     positional: struct { model: []const u8 },
 
     pub const help =
-        \\Usage: convert [--output=<file>] <model>
+        \\Usage: [--output=<file>] <model>
         \\
         \\Read safetensors headers and write model.safetensors.full_index.json in the working directory
-        \\Example: bazel run //tools/safetensors:convert -- hf://owner/model --output="model.safetensors.full_index.json"
+        \\Example: bazel run //tools/safetensors -- --output="model.safetensors.full_index.json" hf://deepseek-ai/DeepSeek-V4.1-Flash
     ;
 };
 
@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
     const args = stdx.flags.parse(init.minimal.args, Args);
     const allocator = init.gpa;
 
-    const start = std.Io.Clock.awake.now(init.io);
+    const start = std.Io.Clock.now(.awake, init.io);
     var client: std.http.Client = .{ .allocator = allocator, .io = init.io };
     defer client.deinit();
     try client.initDefaultProxies(allocator, init.environ_map);
@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     const repo = try zml.safetensors.resolveModelRepo(io, input);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
-    const loaded = std.Io.Clock.awake.now(init.io);
+    const loaded = std.Io.Clock.now(.awake, init.io);
 
     const index_json_file = if (args.output) |output|
         try std.Io.Dir.cwd().createFile(io, output, .{})
@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(out_buffer);
     var out_writer = index_json_file.writer(io, out_buffer);
     try registry.saveAsFullIndexJson(io, allocator, repo, &out_writer.interface);
-    const done = std.Io.Clock.awake.now(init.io);
+    const done = std.Io.Clock.now(.awake, init.io);
 
     log.info("Wrote {s}: {d} tensors; load {f}s, write {f}s, total {f}s", .{
         args.output orelse full_index_path,
