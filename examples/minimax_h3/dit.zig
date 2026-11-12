@@ -709,9 +709,10 @@ pub const Dit = struct {
 
         var flat_buf = try zml.Buffer.fromBytes(io, run.platform, .init(.{ .n = flat_n }, .f32), std.mem.sliceAsBytes(flat_t));
         defer flat_buf.deinit();
-        var time_bufs = try load(run, store, TimeEmbedder, &self.time_embedder, null);
         var all_temb: zml.Buffer = undefined;
         {
+            var time_bufs = try load(run, store, TimeEmbedder, &self.time_embedder, null);
+            defer zml.Buffer.deinitAll(TimeEmbedder, &time_bufs);
             var temb_runner = try zml.FnExe(TimeEmbedder.forward).Runner(.{.model}).init(&compiled.prepare_temb, allocator, .{ .model = time_bufs });
             defer temb_runner.deinit(allocator);
             temb_runner.run(io, .{
@@ -720,7 +721,6 @@ pub const Dit = struct {
             }, .{ .wait = true });
         }
         defer all_temb.deinit();
-        zml.Buffer.deinitAll(TimeEmbedder, &time_bufs);
 
         var tables = try allocator.alloc(zml.Buffer, n_blocks);
         var tables_filled: usize = 0;
@@ -754,13 +754,13 @@ pub const Dit = struct {
         var final_table: zml.Buffer = undefined;
         {
             var final_adaln = try load(run, store, FinalAdaLn, &self.final_adaln, null);
+            defer zml.Buffer.deinitAll(FinalAdaLn, &final_adaln);
             var final_runner = try zml.FnExe(FinalAdaLn.prepare).Runner(.{.adaln}).init(&compiled.prepare_final_adaln, allocator, .{ .adaln = final_adaln });
             defer final_runner.deinit(allocator);
             final_runner.run(io, .{
                 .inputs = .{ .temb = all_temb },
                 .outputs = .{ .table = &final_table },
             }, .{ .wait = true });
-            zml.Buffer.deinitAll(FinalAdaLn, &final_adaln);
         }
         defer final_table.deinit();
 
