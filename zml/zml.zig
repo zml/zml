@@ -81,3 +81,9 @@ pub const KiB = 1024;
 pub const MiB = 1024 * KiB;
 pub const GiB = 1024 * MiB;
 pub const TiB = 1024 * GiB;
+
+comptime {
+    // Forces zig to compile `@zml//bazel` module even when users don't depend on it even indirectly.
+    // Otherwise exported functions declared in `bazel` aren't compiled.
+    std.testing.refAllDecls(bazel);
+}
