@@ -208,56 +208,6 @@ pub const Model = struct {
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
         self.backbone.deinit(allocator);
     }
-
-    pub fn load(
-        self: *const Model,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        meshes: []const *const zml.Mesh,
-        progress: *std.Progress.Node,
-    ) !zml.Bufferized(Model) {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-
-        var buffers = try zml.mem.bufferize(allocator, Model, self);
-        errdefer Model.unloadBuffers(&buffers, allocator);
-
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
-        defer loader.deinit();
-
-        loader.load(io, Model, self, &buffers, store, meshes);
-        try loader.await(io);
-
-        const took = now.untilNow(io, .awake);
-        const total_bytes: u64 = loader.bytes_loaded.raw;
-        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-
-        return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        Backbone.unloadBuffers(&self.backbone, allocator);
-    }
-    pub fn forward(
-        self: Model,
-        tokens_: zml.Tensor,
-        token_index: zml.Tensor,
-        active_length: zml.Tensor,
-        kv_cache: KvCache,
-        rng: zml.Tensor.Rng,
-        moe_backend: zml.moe.Backend,
-    ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const tokens = tokens_.withPartialTags(.{.s});
-        const new_tokens, const updated_kv_cache, const new_rng = self.backbone.forward(tokens, token_index, active_length, kv_cache, self.config, rng, moe_backend);
-        return .{ new_tokens, updated_kv_cache, new_rng };
-    }
 };
 
 // Use this intermediate struct to compile sampleTokens without taking the whole Backbone as input
@@ -373,37 +323,6 @@ pub const Backbone = struct {
             .lm_head = self.lm_head,
             .gen_options = self.gen_options,
         };
-    }
-
-    pub fn forward(
-        self: Backbone,
-        tokens: zml.Tensor,
-        token_index: zml.Tensor,
-        active_length: zml.Tensor,
-        kv_cache: KvCache,
-        config: Config,
-        rng: zml.Tensor.Rng,
-        moe_backend: zml.moe.Backend,
-    ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        var hidden_states = EmbedTokens.forward(.{
-            .embedding = self.embed_tokens,
-            .tokens = tokens,
-        }).hidden;
-
-        var updated_kv_cache = kv_cache;
-        for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, active_length, updated_kv_cache.atLayer(i), config, moe_backend);
-        }
-
-        const result = Sampler.sampleTokens(.{
-            .sampler = self.sampler(),
-            .hidden = hidden_states,
-            .tokens = tokens,
-            .active_length = active_length,
-            .rng = rng,
-            .token_index = token_index,
-        });
-        return .{ result.tokens, updated_kv_cache.reuseBuffer(kv_cache), result.rng };
     }
 };
 
@@ -532,57 +451,17 @@ pub const BackboneLayer = struct {
             .hidden = moe_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
         };
     }
-
-    pub fn forward(
-        self: BackboneLayer,
-        x0: zml.Tensor,
-        token_index: zml.Tensor,
-        active_length: zml.Tensor,
-        kv_cache: KvCache.LayerView,
-        config: Config,
-        moe_backend: zml.moe.Backend,
-    ) struct { zml.Tensor, KvCache } {
-        _ = active_length;
-        _ = config;
-        var updated_kv_cache = kv_cache.parent;
-        return switch (self.mixer) {
-            .mamba => stdx.debug.panic("Mamba-2 recurrent cache is not integrated into KvCache yet", .{}),
-            .attn => blk: {
-                const result = forwardSelfAttn(.{
-                    .layer = self,
-                    .hidden = x0,
-                    .token_index = token_index,
-                    .cache = kv_cache.cache.self_attn,
-                });
-                updated_kv_cache.self_attn = result.cache;
-                break :blk .{ result.hidden, updated_kv_cache };
-            },
-            .moe => .{
-                forwardMoe(.{
-                    .layer = self,
-                    .hidden = x0,
-                    .moe_backend = moe_backend,
-                }).hidden,
-                updated_kv_cache,
-            },
-        };
-    }
 };
 
 pub const SelfAttn = struct {
     q_proj: zml.nn.Linear,
-    q_proj_scale: ?zml.Tensor,
     k_proj: zml.nn.Linear,
-    k_proj_scale: ?zml.Tensor,
     v_proj: zml.nn.Linear,
-    v_proj_scale: ?zml.Tensor,
 
     num_heads: i64,
     num_kv_heads: i64,
     head_dim: i64,
     o_proj: zml.nn.Linear,
-
-    o_proj_scale: ?zml.Tensor,
 
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
         return .init(
@@ -595,13 +474,9 @@ pub const SelfAttn = struct {
     pub fn init(store: zml.io.TensorStore.View, config: Config) !SelfAttn {
         return .{
             .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
-            .q_proj_scale = null,
             .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
-            .k_proj_scale = null,
             .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
-            .v_proj_scale = null,
             .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .model }, .{ .dout = .replicated }),
-            .o_proj_scale = null,
             .num_heads = config.llm_config.num_attention_heads,
             .num_kv_heads = config.llm_config.num_key_value_heads,
             .head_dim = config.llm_config.head_dim,
