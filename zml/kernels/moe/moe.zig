@@ -249,7 +249,7 @@ pub fn forwardMoe(
     }
     const expert_axis = experts.meshAxis();
     const parallel = if (expert_axis) |axis| mesh.grid.axis_sizes[axis] > 1 else false;
-    if (backend == .metal or backend == .tcl) stdx.debug.assert(!parallel, "This MoE backend does not support expert parallelism", .{});
+    if (backend == .metal) stdx.debug.assert(!parallel, "This MoE backend does not support expert parallelism", .{});
 
     const Call = struct {
         input: zml.Tensor,
