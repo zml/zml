@@ -446,7 +446,7 @@ pub const Vae = struct {
         };
         blocks_owned = true;
         errdefer Decode.unload(&loaded.decode, run.allocator);
-        errdefer loaded.loader.?.deinit();
+        errdefer loaded.wait(run.io) catch {}; // if a loader.load() fails, earlier tasks may still be running
         if (loaded.loader) |*loader| {
             try loader.load(run.io, EmbedModel, &self.embed, &loaded.decode.embed, store, .{ .progress = run.progress });
             for (self.blocks, loaded.decode.blocks) |*src, *dst| {
