@@ -110,6 +110,7 @@ pub fn ln(store: zml.io.TensorStore.View, eps: f32) zml.nn.LayerNorm {
 
 /// Bufferize `m` and DMA weights from `store`. Pass a shared `loader` when
 /// loading many layers in a loop so DMA stays pipelined.
+/// Types whose bufferized form owns slices must provide an `unload` method to free those slices
 pub fn load(
     run: *const Run,
     store: *zml.io.TensorStore,
@@ -118,6 +119,14 @@ pub fn load(
     loader: ?*zml.io.Loader,
 ) !zml.Bufferized(T) {
     var buffers = try zml.mem.bufferize(run.allocator, T, m);
+    // TODO: better design to require every supported type to have the same cleanup method ?
+    errdefer {
+        if (@hasDecl(T, "unload")) {
+            T.unload(&buffers, run.allocator);
+        } else {
+            zml.Buffer.deinitAll(T, &buffers);
+        }
+    }
     if (loader) |shared| {
         try shared.load(run.io, T, m, &buffers, store, .{ .progress = run.progress });
         try shared.await(run.io);

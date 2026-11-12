@@ -282,7 +282,7 @@ const TextPrep = struct {
     pub const Output = struct { text: zml.Tensor };
 
     /// Nested `blocks` slice is not freed by `Buffer.deinitAll`.
-    fn unload(self: *zml.Bufferized(TextPrep), allocator: std.mem.Allocator) void {
+    pub fn unload(self: *zml.Bufferized(TextPrep), allocator: std.mem.Allocator) void {
         zml.nn.Linear.unloadBuffers(&self.condition_proj);
         for (self.blocks) |*block| zml.Buffer.deinitAll(Block, block);
         allocator.free(self.blocks);
