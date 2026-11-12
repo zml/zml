@@ -7,6 +7,7 @@ We support the following models, automatically detected from the `model_type` in
 - Llama 3.1
 - Qwen 3.5
 - LFM 2.5
+- Nemotron 3.5 transcribe
 
 ## Run
 

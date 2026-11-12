@@ -16,7 +16,7 @@ pub const CompilationParameters = struct {
     xla_dump_to: ?[]const u8,
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, moe_backend: zml.moe.Backend, meshes: common.Meshes) CompilationParameters {
-        const dtype = mdl.text_model.embed_tokens.weight.dtype();
+        const dtype = mdl.backbone.embed_tokens.weight.dtype();
         return .{
             .kv_cache = .init(config, 1, seqlen, dtype, .f32, meshes.model),
             .rng = .init(),
@@ -32,7 +32,7 @@ pub const CompilationOptions = CompilationParameters;
 
 pub const LayerIndexBuffer = union(enum) {
     self_attn: zml.Buffer,
-    linear_attn: zml.Buffer,
+    moe: void,
 };
 
 pub const RunArgs = struct {
@@ -57,13 +57,16 @@ pub const CompiledModel = struct {
         io: std.Io,
         platform: *const zml.Platform,
         loaded_model: *const model.LoadedModel,
-        qwen_model: model.Model,
+        mdl: model.Model,
         parameters: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        const prefill = try compileKernel(allocator, io, platform, qwen_model, parameters, parameters.seqlen, "prefill", progress);
+        for (mdl.backbone.layers) |layer| {
+            if (layer.mixer == .mamba) return error.Mamba2InferenceNotImplemented;
+        }
+        const prefill = try compileKernel(allocator, io, platform, mdl, parameters, parameters.seqlen, "prefill", progress);
         errdefer prefill.deinit();
-        const decode = try compileKernel(allocator, io, platform, qwen_model, parameters, 1, "decode", progress);
+        const decode = try compileKernel(allocator, io, platform, mdl, parameters, 1, "decode", progress);
         return .{
             .loaded_model = loaded_model,
             .prefill = prefill,
@@ -82,21 +85,21 @@ pub const Inference = CompiledModel;
 
 pub const KernelExe = struct {
     embed: zml.FnExe(model.EmbedTokens.forward),
-    full_attention: zml.FnExe(model.TransformerLayer.forwardSelfAttn),
-    linear_attention: zml.FnExe(model.TransformerLayer.forwardLinearAttn),
+    full_attention: zml.FnExe(model.BackboneLayer.forwardSelfAttn),
+    moe: zml.FnExe(model.BackboneLayer.forwardMoe),
     sample: zml.FnExe(model.Sampler.sampleTokens),
 
     pub fn deinit(self: *const KernelExe) void {
         self.embed.deinit();
         self.full_attention.deinit();
-        self.linear_attention.deinit();
+        self.moe.deinit();
         self.sample.deinit();
     }
 };
 
 pub const LayerRunner = union(enum) {
-    full_attention: zml.FnExe(model.TransformerLayer.forwardSelfAttn).Runner(.{.layer}),
-    linear_attention: zml.FnExe(model.TransformerLayer.forwardLinearAttn).Runner(.{.layer}),
+    full_attention: zml.FnExe(model.BackboneLayer.forwardSelfAttn).Runner(.{.layer}),
+    moe: zml.FnExe(model.BackboneLayer.forwardMoe).Runner(.{.layer}),
 
     pub fn deinit(self: *LayerRunner, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -112,23 +115,24 @@ pub const KernelRunner = struct {
 
     pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
         var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&exe.embed, allocator, .{
-            .embedding = buffers.text_model.embed_tokens,
+            .embedding = buffers.backbone.embed_tokens,
         });
         errdefer embed.deinit(allocator);
 
-        const layers = try allocator.alloc(LayerRunner, buffers.text_model.layers.len);
+        const layers = try allocator.alloc(LayerRunner, buffers.backbone.layers.len);
         errdefer allocator.free(layers);
         var initialized_layers: usize = 0;
         errdefer for (layers[0..initialized_layers]) |*layer| layer.deinit(allocator);
-        for (layers, buffers.text_model.layers) |*layer, layer_buffers| {
-            layer.* = switch (layer_buffers.attn) {
-                .self_attn => .{ .full_attention = try zml.FnExe(model.TransformerLayer.forwardSelfAttn).Runner(.{.layer}).init(
+        for (layers, buffers.backbone.layers) |*layer, layer_buffers| {
+            layer.* = switch (layer_buffers.mixer) {
+                .mamba => return error.Mamba2InferenceNotImplemented,
+                .attn => .{ .full_attention = try zml.FnExe(model.BackboneLayer.forwardSelfAttn).Runner(.{.layer}).init(
                     &exe.full_attention,
                     allocator,
                     .{ .layer = layer_buffers },
                 ) },
-                .linear_attn => .{ .linear_attention = try zml.FnExe(model.TransformerLayer.forwardLinearAttn).Runner(.{.layer}).init(
-                    &exe.linear_attention,
+                .moe => .{ .moe = try zml.FnExe(model.BackboneLayer.forwardMoe).Runner(.{.layer}).init(
+                    &exe.moe,
                     allocator,
                     .{ .layer = layer_buffers },
                 ) },
@@ -138,8 +142,8 @@ pub const KernelRunner = struct {
 
         var sample = try zml.FnExe(model.Sampler.sampleTokens).Runner(.{.sampler}).init(&exe.sample, allocator, .{
             .sampler = .{
-                .norm = buffers.text_model.norm,
-                .lm_head = buffers.text_model.lm_head,
+                .norm = buffers.backbone.norm,
+                .lm_head = buffers.backbone.lm_head,
             },
         });
         errdefer sample.deinit(allocator);
@@ -170,7 +174,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
             .full_attention => |*layer| {
                 const index_buffer = switch (layer_index_buffer) {
                     .self_attn => |buffer| buffer,
-                    .linear_attn => unreachable,
+                    .moe => unreachable,
                 };
                 var layer_cache: zml.Bufferized(model.KvCache.SelfAttnCache) = .{
                     .k = args.kv_cache_buffers.self_attn.k,
@@ -189,27 +193,11 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                 args.kv_cache_buffers.self_attn.v = layer_cache.v;
                 layer_cache.layer_index.deinit();
             },
-            .linear_attention => |*layer| {
-                const index_buffer = switch (layer_index_buffer) {
-                    .linear_attn => |buffer| buffer,
-                    .self_attn => unreachable,
-                };
-                var layer_cache: zml.Bufferized(model.KvCache.GatedDeltaNetCache) = .{
-                    .conv_state = args.kv_cache_buffers.gated_delta_net.conv_state,
-                    .recurrent_state = args.kv_cache_buffers.gated_delta_net.recurrent_state,
-                    .layer_index = index_buffer,
-                };
+            .moe => |*layer| {
                 layer.run(args.io, .{
-                    .inputs = .{
-                        .hidden = hidden_buffer,
-                        .active_length = args.active_length_buffer.*,
-                        .cache = layer_cache,
-                    },
-                    .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
+                    .inputs = .{ .hidden = hidden_buffer },
+                    .outputs = .{ .hidden = &hidden_buffer },
                 }, .{});
-                args.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
-                args.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
-                layer_cache.layer_index.deinit();
             },
         }
     }
@@ -240,15 +228,15 @@ fn compileKernel(
     phase: []const u8,
     progress: *std.Progress.Node,
 ) !KernelExe {
-    const full_index = findFirstLayerIndex(mdl.config.text_config.layers_block_type, .full_attention) orelse return error.MissingFullAttentionLayer;
-    const linear_index = findFirstLayerIndex(mdl.config.text_config.layers_block_type, .linear_attention) orelse return error.MissingLinearAttentionLayer;
+    const full_index = findFirstLayerIndex(mdl.backbone.layers, .attn) orelse return error.MissingFullAttentionLayer;
+    const moe_index = findFirstLayerIndex(mdl.backbone.layers, .moe) orelse return error.MissingMoeLayer;
 
     var embed_future = try io.concurrent(compileEmbed, .{ allocator, io, platform, mdl, parameters, seqlen, phase, progress });
     errdefer if (embed_future.cancel(io)) |exe| exe.deinit() else |_| {};
     var full_attention_future = try io.concurrent(compileFullAttention, .{ allocator, io, platform, mdl, parameters, seqlen, full_index, phase, progress });
     errdefer if (full_attention_future.cancel(io)) |exe| exe.deinit() else |_| {};
-    var linear_attention_future = try io.concurrent(compileLinearAttention, .{ allocator, io, platform, mdl, parameters, seqlen, linear_index, phase, progress });
-    errdefer if (linear_attention_future.cancel(io)) |exe| exe.deinit() else |_| {};
+    var moe_future = try io.concurrent(compileMoe, .{ allocator, io, platform, mdl, parameters, seqlen, moe_index, phase, progress });
+    errdefer if (moe_future.cancel(io)) |exe| exe.deinit() else |_| {};
     var sample_future = try io.concurrent(compileSample, .{ allocator, io, platform, mdl, parameters, seqlen, phase, progress });
     errdefer if (sample_future.cancel(io)) |exe| exe.deinit() else |_| {};
 
@@ -256,29 +244,29 @@ fn compileKernel(
     errdefer embed.deinit();
     const full_attention = try full_attention_future.await(io);
     errdefer full_attention.deinit();
-    const linear_attention = try linear_attention_future.await(io);
-    errdefer linear_attention.deinit();
+    const moe = try moe_future.await(io);
+    errdefer moe.deinit();
     const sample = try sample_future.await(io);
     errdefer sample.deinit();
 
     return .{
         .embed = embed,
         .full_attention = full_attention,
-        .linear_attention = linear_attention,
+        .moe = moe,
         .sample = sample,
     };
 }
 
 fn compileEmbed(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.EmbedTokens.forward) {
     return compileExe(allocator, io, platform, model.EmbedTokens.forward, .{.{
-        .embedding = mdl.text_model.embed_tokens,
+        .embedding = mdl.backbone.embed_tokens,
         .tokens = zml.Tensor.init(.{ .b = 1, .s = seqlen }, .u32),
     }}, parameters, progress, phase, "embedding");
 }
 
-fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardSelfAttn) {
-    return compileExe(allocator, io, platform, model.TransformerLayer.forwardSelfAttn, .{.{
-        .layer = mdl.text_model.layers[layer_index],
+fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.BackboneLayer.forwardSelfAttn) {
+    return compileExe(allocator, io, platform, model.BackboneLayer.forwardSelfAttn, .{.{
+        .layer = mdl.backbone.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .token_index = zml.Tensor.init(.{}, .u32),
         .cache = .{
@@ -286,29 +274,20 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
             .v = parameters.kv_cache.self_attn.v,
             .layer_index = zml.Tensor.init(.{}, .u32),
         },
-        .config = mdl.config,
-        .moe_backend = parameters.moe_backend,
     }}, parameters, progress, phase, "full-attention layer");
 }
 
-fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
-    return compileExe(allocator, io, platform, model.TransformerLayer.forwardLinearAttn, .{.{
-        .layer = mdl.text_model.layers[layer_index],
+fn compileMoe(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.BackboneLayer.forwardMoe) {
+    return compileExe(allocator, io, platform, model.BackboneLayer.forwardMoe, .{.{
+        .layer = mdl.backbone.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
-        .active_length = zml.Tensor.init(.{}, .u32),
-        .cache = .{
-            .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
-            .recurrent_state = parameters.kv_cache.gated_delta_net.recurrent_state,
-            .layer_index = zml.Tensor.init(.{}, .u32),
-        },
-        .config = mdl.config,
         .moe_backend = parameters.moe_backend,
-    }}, parameters, progress, phase, "linear-attention layer");
+    }}, parameters, progress, phase, "moe layer");
 }
 
 fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.Sampler.sampleTokens) {
     return compileExe(allocator, io, platform, model.Sampler.sampleTokens, .{.{
-        .sampler = mdl.text_model.sampler(),
+        .sampler = mdl.backbone.sampler(),
         .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .tokens = .init(.{ .b = 1, .s = seqlen }, .u32),
         .active_length = .init(.{}, .u32),
@@ -343,12 +322,12 @@ fn compileExe(
 
 fn hiddenTensor(mdl: model.Model, seqlen: usize, mesh: *const zml.Mesh) zml.Tensor {
     return .fromShape(zml.Shape.init(
-        .{ .b = 1, .s = seqlen, .d = mdl.config.text_config.hidden_size },
-        mdl.text_model.embed_tokens.weight.dtype(),
+        .{ .b = 1, .s = seqlen, .d = mdl.config.llm_config.hidden_size },
+        mdl.backbone.embed_tokens.weight.dtype(),
     ).withPartitioning(mesh, .{ .b = .replicated, .s = .replicated, .d = .replicated }));
 }
 
-fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {
-    for (layer_types, 0..) |layer_type, index| if (layer_type == target) return index;
+fn findFirstLayerIndex(layers: []const model.BackboneLayer, target: std.meta.Tag(@FieldType(model.BackboneLayer, "mixer"))) ?usize {
+    for (layers, 0..) |layer, index| if (std.meta.activeTag(layer.mixer) == target) return index;
     return null;
 }
