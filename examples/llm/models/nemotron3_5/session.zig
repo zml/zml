@@ -38,29 +38,27 @@ pub const Session = struct {
         var rng_buffers = try zml.Tensor.Rng.init().initBuffer(io, platform, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-        const layer_types = compiled_model.loaded_model.inner.config.text_config.layers_block_type;
+        const layer_types = compiled_model.loaded_model.inner.config.llm_config.layers_block_type;
         const layer_index_buffers = try allocator.alloc(inference.LayerIndexBuffer, layer_types.len);
         errdefer allocator.free(layer_index_buffers);
         var initialized_layer_index_buffers: usize = 0;
         errdefer for (layer_index_buffers[0..initialized_layer_index_buffers]) |*layer_index_buffer| {
             switch (layer_index_buffer.*) {
                 .self_attn => |*buffer| buffer.deinit(),
-                .linear_attn => |*buffer| buffer.deinit(),
+                .moe => {},
             }
         };
 
         var self_attn_layer_index: u32 = 0;
-        var linear_attn_layer_index: u32 = 0;
         for (layer_types, layer_index_buffers) |layer_type, *layer_index_buffer| {
             layer_index_buffer.* = switch (layer_type) {
-                .full_attention => b: {
+                .attention, .full_attention => b: {
                     defer self_attn_layer_index += 1;
                     break :b .{ .self_attn = try .scalar(io, platform, self_attn_layer_index, .u32) };
                 },
-                .linear_attention => b: {
-                    defer linear_attn_layer_index += 1;
-                    break :b .{ .linear_attn = try .scalar(io, platform, linear_attn_layer_index, .u32) };
-                },
+                .moe => .{ .moe = {} },
+                .mamba, .linear_attention => return error.Mamba2InferenceNotImplemented,
+                .mlp => return error.MlpNotImplemented,
             };
             initialized_layer_index_buffers += 1;
         }
@@ -100,7 +98,7 @@ pub const Session = struct {
         for (self.layer_index_buffers) |*layer_index_buffer| {
             switch (layer_index_buffer.*) {
                 .self_attn => |*buffer| buffer.deinit(),
-                .linear_attn => |*buffer| buffer.deinit(),
+                .moe => {},
             }
         }
         self.allocator.free(self.layer_index_buffers);

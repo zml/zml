@@ -9,79 +9,54 @@ const inference = @import("inference.zig");
 const log = std.log.scoped(.nemotron3_5_transcribe);
 
 pub const Config = struct {
-    text_config: TextConfig,
+    llm_config: TextConfig,
 };
 
 pub const TextConfig = struct {
     // General
-    model_type: []const u8,
-    dtype: []const u8,
     hidden_size: i64,
     intermediate_size: i64,
     max_position_embeddings: i64,
     vocab_size: i64,
     layers_block_type: []const LayerType,
     layer_norm_epsilon: f32,
-    norm_eps: f32,
-    hidden_dropout: f32,
-    initializer_range: f32,
     tie_word_embeddings: bool,
-    rescale_prenorm_residual: bool,
     residual_in_fp32: bool,
-    use_cache: bool,
     use_bias: bool,
     bos_token_id: u32,
     eos_token_id: u32,
     pad_token_id: u32,
-    num_logits_to_keep: i64,
 
-    // Self attention. Rotary settings are flat in the exported Nemotron config.
+    // Self attention
     head_dim: i64,
     num_attention_heads: i64,
     num_key_value_heads: i64,
     attention_bias: bool,
-    attention_dropout: f32,
-    partial_rotary_factor: f32,
-    rope_theta: f32,
     sliding_window: ?i64,
 
     // Mamba-2
-    chunk_size: i64,
     conv_kernel: i64,
-    expand: i64,
     mamba_head_dim: i64,
     mamba_num_heads: i64,
     mamba_hidden_act: []const u8,
-    mamba_proj_bias: bool,
     mamba_ssm_cache_dtype: []const u8,
     n_groups: i64,
     ssm_state_size: i64,
     use_conv_bias: bool,
-    use_mamba_kernels: bool,
-    time_step_floor: f32,
-    time_step_min: f32,
-    time_step_max: f32,
-    time_step_limit: [2]FloatLimit,
 
-    // MoE. n_group controls routing; n_groups above controls Mamba B/C sharing.
+    // MoE
     n_routed_experts: i64,
     n_shared_experts: i64,
     num_experts_per_tok: u32,
     moe_intermediate_size: i64,
     moe_latent_size: ?i64,
     moe_shared_expert_intermediate_size: i64,
-    moe_shared_expert_overlap: bool,
     mlp_bias: bool,
     mlp_hidden_act: []const u8,
     n_group: i64,
     topk_group: i64,
     norm_topk_prob: bool,
     routed_scaling_factor: f32,
-    output_router_logits: bool = false,
-
-    // Multi-token prediction
-    num_nextn_predict_layers: i64,
-    mtp_layers_block_type: []const LayerType,
 
     pub fn numHiddenLayers(self: TextConfig) usize {
         return self.layers_block_type.len;
@@ -93,36 +68,8 @@ pub const LayerType = enum {
     full_attention,
     moe,
     mlp,
-    // Older NeMo exports use these names for Mamba and attention blocks.
     mamba,
     attention,
-};
-
-/// Transformers serializes non-finite bounds as {"__float__": "Infinity"}.
-pub const FloatLimit = struct {
-    value: f32,
-
-    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!FloatLimit {
-        return jsonParseFromValue(allocator, try std.json.innerParse(std.json.Value, allocator, source, options), options);
-    }
-
-    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!FloatLimit {
-        if (source == .object) {
-            const special = source.object.get("__float__") orelse return error.UnexpectedToken;
-            if (special != .string) return error.UnexpectedToken;
-            if (std.mem.eql(u8, special.string, "Infinity")) return .{ .value = std.math.inf(f32) };
-            if (std.mem.eql(u8, special.string, "-Infinity")) return .{ .value = -std.math.inf(f32) };
-            if (std.mem.eql(u8, special.string, "NaN")) return .{ .value = std.math.nan(f32) };
-            return error.UnexpectedToken;
-        }
-        return .{ .value = try std.json.innerParseFromValue(f32, allocator, source, options) };
-    }
-};
-
-pub const RopeParameters = struct {
-    mrope_section: [3]i64,
-    partial_rotary_factor: f32,
-    rope_theta: f32,
 };
 
 fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
@@ -164,7 +111,7 @@ pub const LoadedModel = struct {
 
         const options: Model.GenOptions = .{
             .sampling_strategy = generation.sampling_strategy,
-            .max_seq_len = parsed_config.value.text_config.max_position_embeddings,
+            .max_seq_len = parsed_config.value.llm_config.max_position_embeddings,
         };
 
         return .{
@@ -212,7 +159,7 @@ pub const LoadedModel = struct {
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
-        TextModel.unloadBuffers(&buffers.text_model, allocator);
+        Backbone.unloadBuffers(&buffers.backbone, allocator);
     }
 
     pub fn compile(
@@ -220,15 +167,12 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.attention.Backend,
+        _: zml.attention.Backend,
         meshes: common.Meshes,
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        _ = backend;
-        const moe_gate_up = self.inner.text_model.layers[0].moe.gate_up_proj;
-        log.info("Moe dtype : {}", .{moe_gate_up.weight.dtype()});
-        const moe_backend = try zml.moe.Backend.auto(platform, moe_gate_up.quantizationScheme(), moe_gate_up.weight.dtype());
+        const moe_backend: zml.moe.Backend = .stablehlo;
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, meshes);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
@@ -245,7 +189,7 @@ pub const Model = struct {
         end_of_text_token_id: u32,
     };
 
-    text_model: TextModel,
+    backbone: Backbone,
 
     config: Config,
     special_tokens: SpecialTokens = .{
@@ -255,15 +199,14 @@ pub const Model = struct {
     },
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, gen_options: GenOptions) !Model {
-        // For some Qwen3.5 versions, the output projection lm_head has a standalone weight tensor, while for others it's the same as the input embedding layer
         return .{
-            .text_model = try .init(allocator, store.withPrefix("model.language_model"), config, gen_options),
+            .backbone = try .init(allocator, store.withPrefix("backbone"), config, gen_options),
             .config = config,
         };
     }
 
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
-        self.text_model.deinit(allocator);
+        self.backbone.deinit(allocator);
     }
 
     pub fn load(
@@ -300,7 +243,7 @@ pub const Model = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        TextModel.unloadBuffers(&self.text_model, allocator);
+        Backbone.unloadBuffers(&self.backbone, allocator);
     }
     pub fn forward(
         self: Model,
@@ -312,14 +255,12 @@ pub const Model = struct {
         moe_backend: zml.moe.Backend,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const new_tokens, const updated_kv_cache, const new_rng = self.text_model.forward(tokens, token_index, active_length, kv_cache, self.config, rng, moe_backend);
+        const new_tokens, const updated_kv_cache, const new_rng = self.backbone.forward(tokens, token_index, active_length, kv_cache, self.config, rng, moe_backend);
         return .{ new_tokens, updated_kv_cache, new_rng };
     }
 };
 
-//========================Text model========================
-
-// Use this intermediate struct to compile sampleTokens without taking the whole TextModel as input
+// Use this intermediate struct to compile sampleTokens without taking the whole Backbone as input
 pub const Sampler = struct {
     norm: RmsNorm,
     lm_head: zml.nn.Linear,
@@ -370,9 +311,9 @@ pub const EmbedTokens = struct {
     }
 };
 
-pub const TextModel = struct {
+pub const Backbone = struct {
     embed_tokens: zml.nn.TokenEmbedding,
-    layers: []TransformerLayer,
+    layers: []BackboneLayer,
     norm: RmsNorm,
     lm_head: zml.nn.Linear,
     gen_options: Model.GenOptions,
@@ -382,10 +323,10 @@ pub const TextModel = struct {
         store: zml.io.TensorStore.View,
         config: Config,
         gen_options: Model.GenOptions,
-    ) !TextModel {
+    ) !Backbone {
         const lm_head_prefix = if (store.root().hasKey("lm_head.weight")) "lm_head" else "model.language_model.embed_tokens";
 
-        const layers = try allocator.alloc(TransformerLayer, config.text_config.numHiddenLayers());
+        const layers = try allocator.alloc(BackboneLayer, config.llm_config.numHiddenLayers());
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
@@ -394,32 +335,39 @@ pub const TextModel = struct {
         }
 
         return .{
-            .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, .model, .{ .voc = .replicated, .d = .model }) },
+            .embed_tokens = .{
+                .weight = store.createTensor(
+                    "embeddings.weight",
+                    .{ .voc, .d },
+                    .model,
+                    .{ .voc = .replicated, .d = .model },
+                ),
+            },
             .layers = layers,
-            .norm = RmsNorm.init(store.withPrefix("norm"), config.text_config.layer_norm_epsilon),
+            .norm = RmsNorm.init(store.withPrefix("norm_f"), config.llm_config.layer_norm_epsilon),
             .lm_head = .init(store.root().withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }), null, .d),
             .gen_options = gen_options,
         };
     }
 
-    pub fn deinit(self: TextModel, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: Backbone, allocator: std.mem.Allocator) void {
         for (self.layers) |layer| {
             layer.deinit(allocator);
         }
         allocator.free(self.layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TextModel), allocator: std.mem.Allocator) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(Backbone), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
         for (self.layers) |*layer| {
-            TransformerLayer.unloadBuffers(layer, allocator);
+            BackboneLayer.unloadBuffers(layer, allocator);
         }
         allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
         zml.nn.Linear.unloadBuffers(&self.lm_head);
     }
 
-    pub fn sampler(self: TextModel) Sampler {
+    pub fn sampler(self: Backbone) Sampler {
         return .{
             .norm = self.norm,
             .lm_head = self.lm_head,
@@ -428,7 +376,7 @@ pub const TextModel = struct {
     }
 
     pub fn forward(
-        self: TextModel,
+        self: Backbone,
         tokens: zml.Tensor,
         token_index: zml.Tensor,
         active_length: zml.Tensor,
@@ -459,24 +407,19 @@ pub const TextModel = struct {
     }
 };
 
-pub const TransformerLayer = struct {
-    const Attn = union(enum) {
-        self_attn: SelfAttn,
-        linear_attn: GatedDeltaNet,
-    };
-
-    input_layernorm: RmsNorm,
-    attn: Attn,
-    moe: Moe,
-    post_attention_layernorm: RmsNorm,
+pub const BackboneLayer = struct {
+    norm: RmsNorm,
+    mixer: union(enum) {
+        attn: SelfAttn,
+        mamba: Mamba2,
+        moe: Moe,
+    },
 
     pub const SelfAttnInput = struct {
-        layer: TransformerLayer,
+        layer: BackboneLayer,
         hidden: zml.Tensor,
         token_index: zml.Tensor,
         cache: KvCache.SelfAttnCache,
-        config: Config,
-        moe_backend: zml.moe.Backend,
     };
 
     pub const SelfAttnOutput = struct {
@@ -484,97 +427,114 @@ pub const TransformerLayer = struct {
         cache: KvCache.SelfAttnCache,
     };
 
-    pub const LinearAttnInput = struct {
-        layer: TransformerLayer,
+    pub const MambaInput = struct {
+        layer: BackboneLayer,
         hidden: zml.Tensor,
+        cache: Mamba2.Cache,
         active_length: zml.Tensor,
-        cache: KvCache.GatedDeltaNetCache,
-        config: Config,
+    };
+
+    pub const MambaOutput = struct {
+        hidden: zml.Tensor,
+        cache: Mamba2.Cache,
+    };
+
+    pub const MoeInput = struct {
+        layer: BackboneLayer,
+        hidden: zml.Tensor,
         moe_backend: zml.moe.Backend,
     };
 
-    pub const LinearAttnOutput = struct {
+    pub const MoeOutput = struct {
         hidden: zml.Tensor,
-        cache: KvCache.GatedDeltaNetCache,
     };
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, layer_index: usize) !TransformerLayer {
-        const is_full_attention = config.text_config.layers_block_type[layer_index] == .full_attention;
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, layer_index: usize) !BackboneLayer {
         return .{
-            .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm"), config.text_config.layer_norm_epsilon),
-            .attn = if (is_full_attention)
-                .{ .self_attn = try .init(store.withPrefix("self_attn"), config) }
-            else
-                .{ .linear_attn = .init(store.withPrefix("linear_attn"), config) },
-            .moe = try .init(allocator, store.withPrefix("mlp"), config),
-            .post_attention_layernorm = RmsNorm.init(store.withPrefix("post_attention_layernorm"), config.text_config.layer_norm_epsilon),
+            .norm = RmsNorm.init(store.withPrefix("norm"), config.llm_config.layer_norm_epsilon),
+            .mixer = switch (config.llm_config.layers_block_type[layer_index]) {
+                .attention, .full_attention => .{
+                    .attn = try SelfAttn.init(store.withPrefix("mixer"), config),
+                },
+                .mamba, .linear_attention => .{
+                    .mamba = Mamba2.init(store.withPrefix("mixer"), config),
+                },
+                .moe => .{
+                    .moe = try Moe.init(allocator, store.withPrefix("mixer"), config),
+                },
+                .mlp => return error.MlpNotImplemented,
+            },
         };
     }
 
-    pub fn deinit(self: TransformerLayer, allocator: std.mem.Allocator) void {
-        self.moe.deinit(allocator);
+    pub fn deinit(self: BackboneLayer, allocator: std.mem.Allocator) void {
+        switch (self.mixer) {
+            .moe => |moe| moe.deinit(allocator),
+            .attn, .mamba => {},
+        }
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer), allocator: std.mem.Allocator) void {
-        RmsNorm.unloadBuffers(&self.input_layernorm);
-        switch (self.attn) {
-            .self_attn => |*self_attn| SelfAttn.unloadBuffers(self_attn),
-            .linear_attn => |*linear_attn| GatedDeltaNet.unloadBuffers(linear_attn),
+    pub fn unloadBuffers(self: *zml.Bufferized(BackboneLayer), allocator: std.mem.Allocator) void {
+        RmsNorm.unloadBuffers(&self.norm);
+        switch (self.mixer) {
+            .attn => |*attn| SelfAttn.unloadBuffers(attn),
+            .mamba => |*mamba| Mamba2.unloadBuffers(mamba),
+            .moe => |*moe| Moe.unloadBuffers(moe, allocator),
         }
-        Moe.unloadBuffers(&self.moe, allocator);
-        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
     }
 
     pub fn forwardSelfAttn(input: SelfAttnInput) SelfAttnOutput {
         const self = input.layer;
         const x0 = input.hidden;
-        _ = input.config;
         const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
-        const normalized_x0 = self.input_layernorm.forward(x0_replicated);
-
-        const self_attn = switch (self.attn) {
-            .self_attn => |self_attn| self_attn,
-            .linear_attn => unreachable,
+        const normalized_x0 = self.norm.forward(x0_replicated);
+        const self_attn = switch (self.mixer) {
+            .attn => |attn| attn,
+            .moe, .mamba => unreachable,
         };
         const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, input.token_index, input.cache);
 
-        const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
-        const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
-        const moe_output = self.moe.forward(normalized_hidden, input.moe_backend);
-
         return .{
-            .hidden = moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
+            .hidden = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
             .cache = updated_kv_cache,
         };
     }
 
-    pub fn forwardLinearAttn(input: LinearAttnInput) LinearAttnOutput {
+    pub fn forwardMamba(input: MambaInput) MambaOutput {
         const self = input.layer;
         const x0 = input.hidden;
-        _ = input.config;
         const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
-        const normalized_x0 = self.input_layernorm.forward(x0_replicated);
-
-        const linear_attn = switch (self.attn) {
-            .linear_attn => |linear_attn| linear_attn,
-            .self_attn => unreachable,
+        const normalized_x0 = self.norm.forward(x0_replicated);
+        const mamba = switch (self.mixer) {
+            .mamba => |mamba| mamba,
+            .attn, .moe => unreachable,
         };
-        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, input.cache, input.active_length);
-
-        const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
-        const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
-        const moe_output = self.moe.forward(normalized_hidden, input.moe_backend);
+        const mamba_output, const updated_cache = mamba.forward(normalized_x0, input.cache, input.active_length);
 
         return .{
-            .hidden = moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
-            .cache = updated_kv_cache,
+            .hidden = mamba_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
+            .cache = updated_cache.reuseBuffer(input.cache),
+        };
+    }
+
+    pub fn forwardMoe(input: MoeInput) MoeOutput {
+        const self = input.layer;
+        const x0 = input.hidden;
+        const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
+        const normalized_x0 = self.norm.forward(x0_replicated);
+        const moe = switch (self.mixer) {
+            .moe => |moe| moe,
+            .attn, .mamba => unreachable,
+        };
+        const moe_output = moe.forward(normalized_x0, input.moe_backend);
+
+        return .{
+            .hidden = moe_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
         };
     }
 
     pub fn forward(
-        self: TransformerLayer,
+        self: BackboneLayer,
         x0: zml.Tensor,
         token_index: zml.Tensor,
         active_length: zml.Tensor,
@@ -582,31 +542,30 @@ pub const TransformerLayer = struct {
         config: Config,
         moe_backend: zml.moe.Backend,
     ) struct { zml.Tensor, KvCache } {
+        _ = active_length;
         _ = config;
-        const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
-        const normalized_x0 = self.input_layernorm.forward(x0_replicated);
-
-        var attention_output: zml.Tensor = undefined;
-        var updated_kv_cache: KvCache = kv_cache.parent;
-        switch (self.attn) {
-            .self_attn => |*self_attn| {
-                const result = self_attn.forward(normalized_x0, token_index, kv_cache.cache.self_attn);
-                attention_output = result[0];
-                updated_kv_cache.self_attn = result[1];
+        var updated_kv_cache = kv_cache.parent;
+        return switch (self.mixer) {
+            .mamba => stdx.debug.panic("Mamba-2 recurrent cache is not integrated into KvCache yet", .{}),
+            .attn => blk: {
+                const result = forwardSelfAttn(.{
+                    .layer = self,
+                    .hidden = x0,
+                    .token_index = token_index,
+                    .cache = kv_cache.cache.self_attn,
+                });
+                updated_kv_cache.self_attn = result.cache;
+                break :blk .{ result.hidden, updated_kv_cache };
             },
-            .linear_attn => |*linear_attn| {
-                const result = linear_attn.forward(normalized_x0, kv_cache.cache.linear_attn, active_length);
-                attention_output = result[0];
-                updated_kv_cache.gated_delta_net = result[1];
+            .moe => .{
+                forwardMoe(.{
+                    .layer = self,
+                    .hidden = x0,
+                    .moe_backend = moe_backend,
+                }).hidden,
+                updated_kv_cache,
             },
-        }
-
-        const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
-        const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
-        const moe_output = self.moe.forward(normalized_hidden, moe_backend);
-
-        return .{ moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }), updated_kv_cache };
+        };
     }
 };
 
@@ -617,9 +576,6 @@ pub const SelfAttn = struct {
     k_proj_scale: ?zml.Tensor,
     v_proj: zml.nn.Linear,
     v_proj_scale: ?zml.Tensor,
-
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
 
     num_heads: i64,
     num_kv_heads: i64,
@@ -639,8 +595,6 @@ pub const SelfAttn = struct {
     }
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) !SelfAttn {
-        const rotary_dim: i64 = @intFromFloat(@as(f32, @floatFromInt(config.text_config.head_dim)) *
-            config.text_config.rope_parameters.partial_rotary_factor);
         return .{
             .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
             .q_proj_scale = null,
@@ -650,13 +604,11 @@ pub const SelfAttn = struct {
             .v_proj_scale = null,
             .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .model }, .{ .dout = .replicated }),
             .o_proj_scale = null,
-            .q_norm = RmsNorm.init(store.withPrefix("q_norm"), config.text_config.layer_norm_epsilon),
-            .k_norm = RmsNorm.init(store.withPrefix("k_norm"), config.text_config.layer_norm_epsilon),
-            .num_heads = config.text_config.num_attention_heads,
-            .num_kv_heads = config.text_config.num_key_value_heads,
-            .head_dim = config.text_config.head_dim,
-            .rotary_dim = rotary_dim,
-            .rotary_embed = .init(rotary_dim, config.text_config.rope_parameters.rope_theta, config.text_config.rope_parameters.mrope_section),
+            .num_heads = config.llm_config.num_attention_heads,
+            .num_kv_heads = config.llm_config.num_key_value_heads,
+            .head_dim = config.llm_config.head_dim,
+            .rotary_dim = 0,
+            .rotary_embed = .init(0, 0, undefined),
         };
     }
 
@@ -674,10 +626,8 @@ pub const SelfAttn = struct {
 
     fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-        const k = self.k_proj.forward(x, x.dtype())
-            .splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
-        const v = self.v_proj.forward(x, x.dtype())
-            .splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
+        const k = self.k_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
+        const v = self.v_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
         return .{ k, v };
     }
 
@@ -697,8 +647,6 @@ pub const SelfAttn = struct {
         gate = gate.withPartitioning(tp, .{ .s = .replicated, .d_out_proj = .model });
         k = partitionProjectedKv(k, kv_head_sharding);
         v = partitionProjectedKv(v, kv_head_sharding);
-        q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-        k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
         const dtype = q.dtype();
         const position_ids: zml.Tensor = zml.Tensor.arange(.{ .end = x.dim(.s) }, .i64)
@@ -743,33 +691,33 @@ pub const SelfAttn = struct {
 
 pub const Mlp = struct {
     up_proj: zml.nn.Linear,
-    up_proj_scale: ?zml.Tensor,
-    gate_proj: zml.nn.Linear,
-    gate_proj_scale: ?zml.Tensor,
     down_proj: zml.nn.Linear,
-    down_proj_scale: ?zml.Tensor,
 
-    pub fn init(store: zml.io.TensorStore.View) Mlp {
+    pub fn init(store: zml.io.TensorStore.View, config: TextConfig) !Mlp {
+        if (config.mlp_bias or !std.mem.eql(u8, config.mlp_hidden_act, "relu2")) return error.UnsupportedMoeConfiguration;
         return .{
-            .up_proj = .init(
-                store.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }),
-                store.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .model, .{ .dout = .model }),
-                .d,
-            ),
-            .up_proj_scale = null,
-            .gate_proj = .init(
-                store.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }),
-                store.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .model, .{ .dout = .model }),
-                .d,
-            ),
-            .gate_proj_scale = null,
-            .down_proj = .init(
-                store.withPrefix("down_proj").createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .replicated, .d = .model }),
-                store.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .model, .{ .d = .replicated }),
-                .d,
-            ),
-            .down_proj_scale = null,
+            .up_proj = try initProjection(store.withPrefix("up_proj")),
+            .down_proj = try initProjection(store.withPrefix("down_proj")),
         };
+    }
+
+    fn initProjection(store: zml.io.TensorStore.View) !zml.nn.Linear {
+        const shape = store.getShape("weight") orelse return error.MissingMoeTensor;
+        if (shape.rank() != 2) return error.InvalidMoeShape;
+        var linear: zml.nn.Linear = .init(store.createReplicatedTensor("weight", .{ .dout, .d }), null, .d);
+        if (shape.dtype().isFloat() and shape.dtype().bitSizeOf() == 8) {
+            const scale_shape = store.getShape("weight_scale") orelse return error.MissingMoeScale;
+            if (scale_shape.count() != 1 or zml.Quantization.Scheme.classify(shape, scale_shape) != .fp8_per_tensor) return error.UnsupportedMoeQuantization;
+            linear.quantization = .{
+                .scheme = .fp8_per_tensor,
+                .scales = store.createReplicatedTensor("weight_scale", null),
+                .input_scale = if (store.getShape("input_scale")) |input_shape| blk: {
+                    if (input_shape.count() != 1) return error.UnsupportedMoeQuantization;
+                    break :blk .{ .value = store.createReplicatedTensor("input_scale", null), .operation = .multiply };
+                } else null,
+            };
+        }
+        return linear;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
@@ -777,27 +725,35 @@ pub const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const up_projed = self.up_proj.forward(x, x.dtype());
-        const gate = self.gate_proj.forward(x, x.dtype());
-        const hidden = gate.silu().mul(up_projed).rename(.{ .dout = .d });
+        const activated = self.up_proj.forward(x, x.dtype()).relu();
+        const hidden = activated.mul(activated).rename(.{ .dout = .d });
+        return self.down_proj.forward(hidden, x.dtype());
+    }
 
-        const output = self.down_proj.forward(hidden, hidden.dtype());
-        return output;
+    fn dequantizeWeight(linear: zml.nn.Linear, dtype: zml.DataType) zml.Tensor {
+        const weight = linear.weight.convert(dtype);
+        const quantization = linear.quantization orelse return weight;
+        return weight.mul(quantization.scales.asScalar().convert(dtype).broad(weight.shape()));
     }
 };
 
 const Router = struct {
     router: zml.nn.Linear,
+    e_score_correction_bias: zml.Tensor,
     num_experts_per_tok: u32,
+    norm_topk_prob: bool,
+    routed_scaling_factor: f32,
 
-    pub fn init(store: zml.io.TensorStore.View, num_experts_per_tok: u32) Router {
+    pub fn init(store: zml.io.TensorStore.View, config: TextConfig) !Router {
+        const weight_shape = store.getShape("weight") orelse return error.MissingMoeTensor;
+        const bias_shape = store.getShape("e_score_correction_bias") orelse return error.MissingMoeTensor;
+        if (weight_shape.rank() != 2 or weight_shape.dim(0) != config.n_routed_experts or weight_shape.dim(1) != config.hidden_size or bias_shape.rank() != 1 or bias_shape.dim(0) != config.n_routed_experts) return error.InvalidMoeShape;
         return .{
-            .router = .init(
-                store.createTensor("weight", .{ .expert, .d }, .replicated, .{ .expert = .replicated, .d = .replicated }),
-                store.maybeCreateTensor("bias", .{.expert}, .replicated, .{ .expert = .replicated }),
-                .d,
-            ),
-            .num_experts_per_tok = num_experts_per_tok,
+            .router = .init(store.createReplicatedTensor("weight", .{ .expert, .d }), null, .d),
+            .e_score_correction_bias = store.createReplicatedTensor("e_score_correction_bias", .{.expert}),
+            .num_experts_per_tok = config.num_experts_per_tok,
+            .norm_topk_prob = config.norm_topk_prob,
+            .routed_scaling_factor = config.routed_scaling_factor,
         };
     }
 
@@ -806,85 +762,77 @@ const Router = struct {
     }
 
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const router_logits = self.router.forward(x, .f32);
-        const routing = router_logits.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{});
-        const topk_ids = routing.indices.convert(.i32);
-        const router_scores = routing.values.softmax(.topk);
-        return .{ router_scores, topk_ids };
+        const scores = self.router.forward(x.convert(.f32), .f32).sigmoid();
+        // The correction bias selects experts; their contribution uses the unbiased scores.
+        const choices = scores.add(self.e_score_correction_bias.convert(.f32).broad(scores.shape()));
+        const topk_ids = choices.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{}).indices.convert(.i32);
+        var weights = scores.gather(.{ .expert = topk_ids }, .{});
+        if (self.norm_topk_prob) weights = weights.div(weights.sum(.topk).addConstant(1e-20).broad(weights.shape()));
+        return .{ weights.scale(self.routed_scaling_factor), topk_ids };
     }
 };
 
 pub const Moe = struct {
-    shared_expert: Mlp,
-    shared_expert_gate: zml.nn.Linear,
-    gate_up_proj: zml.nn.Linear,
-    down_proj: zml.nn.Linear,
+    experts: []Mlp,
+    shared_experts: Mlp,
     router: Router,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Moe {
-        _ = allocator;
+        const cfg = config.llm_config;
+        if (cfg.n_routed_experts <= 0 or cfg.n_shared_experts != 1 or cfg.num_experts_per_tok == 0 or cfg.num_experts_per_tok > cfg.n_routed_experts or cfg.n_group != 1 or cfg.topk_group != 1 or cfg.moe_latent_size != null) return error.UnsupportedMoeConfiguration;
+        const experts = try allocator.alloc(Mlp, @intCast(cfg.n_routed_experts));
+        errdefer allocator.free(experts);
         const experts_store = store.withPrefix("experts");
-        const gate_up_proj_tensor = experts_store.createTensor(
-            "gate_up_proj",
-            .{ .expert, .dout, .d },
-            .experts,
-            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
-        );
-        const down_proj_tensor = experts_store.createTensor(
-            "down_proj",
-            .{ .expert, .d, .dout },
-            .experts,
-            .{ .expert = .experts, .d = .replicated, .dout = .replicated },
-        );
-
+        for (experts, 0..) |*expert, i| {
+            expert.* = try Mlp.init(experts_store.withLayer(i), cfg);
+            try validateExpert(expert.*, cfg.hidden_size, cfg.moe_intermediate_size);
+        }
+        const shared_experts = try Mlp.init(store.withPrefix("shared_experts"), cfg);
+        try validateExpert(shared_experts, cfg.hidden_size, cfg.moe_shared_expert_intermediate_size);
         return .{
-            .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
-            .shared_expert_gate = .init(
-                store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, .replicated, .{ .dout = .replicated, .d = .replicated }),
-                store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, .replicated, .{ .dout = .replicated }),
-                .d,
-            ),
-            .gate_up_proj = .init(gate_up_proj_tensor, null, .d),
-            .down_proj = .init(down_proj_tensor, null, .dout),
-            .router = Router.init(store.withPrefix("gate"), config.text_config.num_experts_per_tok),
+            .experts = experts,
+            .shared_experts = shared_experts,
+            .router = try Router.init(store.withPrefix("gate"), cfg),
         };
     }
 
-    pub fn deinit(self: Moe, allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
+    fn validateExpert(expert: Mlp, hidden_size: i64, intermediate_size: i64) !void {
+        if (expert.up_proj.weight.dim(.d) != hidden_size or expert.up_proj.weight.dim(.dout) != intermediate_size or expert.down_proj.weight.dim(.d) != intermediate_size or expert.down_proj.weight.dim(.dout) != hidden_size) return error.InvalidMoeShape;
     }
 
-    pub fn forward(self: Moe, x: zml.Tensor, moe_backend: zml.moe.Backend) zml.Tensor {
+    pub fn deinit(self: Moe, allocator: std.mem.Allocator) void {
+        allocator.free(self.experts);
+    }
+
+    pub fn forward(self: Moe, x: zml.Tensor, _: zml.moe.Backend) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
+        // Reference path: the shared fused MoE kernels do not support ReLU-squared yet.
+        const up = self.stackWeights("up_proj", x.dtype()).gather(.{ .expert = topk_ids }, .{});
+        const activated = x.dot(up, .d).relu();
+        const hidden = activated.mul(activated).rename(.{ .dout = .ff });
+        const down = self.stackWeights("down_proj", x.dtype()).rename(.{ .dout = .d, .d = .ff }).gather(.{ .expert = topk_ids }, .{});
+        const projected = hidden.dot(down, .ff);
+        const routed = projected.convert(.f32).mul(routing_scores.broad(projected.shape().withDtype(.f32)))
+            .sum(.topk).squeeze(.topk).convert(x.dtype());
+        const shared = self.shared_experts.forward(x).rename(.{ .dout = .d });
+        return routed.add(shared);
+    }
 
-        const moe_output = zml.moe.forwardMoe(
-            x.merge(.{ .t = .{ .b, .s } }),
-            topk_ids.merge(.{ .t = .{ .b, .s } }),
-            routing_scores.merge(.{ .t = .{ .b, .s } }),
-            self.gate_up_proj,
-            self.down_proj,
-            moe_backend,
-            .{
-                .activation = .{ .swiglu = .{} },
-                .quantize_input = false,
-                .routing_weight_placement = .after_down,
-            },
-        ).reshape(x.shape());
-
-        const shared_gate = self.shared_expert_gate.forward(x, x.dtype()).sigmoid().broad(x.shape());
-        const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.model, .{
-            .b = .replicated,
-            .s = .replicated,
-            .d = .replicated,
-        });
-
-        return moe_output.add(shared);
+    fn stackWeights(self: Moe, comptime projection: []const u8, dtype: zml.DataType) zml.Tensor {
+        const allocator = zml.Compiler.current().arena.allocator();
+        const weights = allocator.alloc(zml.Tensor, self.experts.len) catch @panic("OOM");
+        defer allocator.free(weights);
+        for (self.experts, weights) |expert, *weight| {
+            weight.* = Mlp.dequantizeWeight(@field(expert, projection), dtype);
+        }
+        return zml.Tensor.stack(weights, .first, .expert);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Moe), allocator: std.mem.Allocator) void {
-        _ = allocator;
-        zml.Buffer.deinitAll(Moe, self);
+        for (self.experts) |*expert| Mlp.unloadBuffers(expert);
+        allocator.free(self.experts);
+        Mlp.unloadBuffers(&self.shared_experts);
+        Router.unloadBuffers(&self.router);
     }
 };
 
@@ -961,217 +909,6 @@ pub const TextRotaryEmbedding = struct {
     }
 };
 
-pub const GatedDeltaNet = struct {
-    in_proj_qkv: zml.nn.Linear,
-    in_proj_qkv_scale: ?zml.Tensor,
-    in_proj_z: zml.nn.Linear,
-    in_proj_z_scale: ?zml.Tensor,
-    in_proj_b: zml.nn.Linear,
-    in_proj_a: zml.nn.Linear,
-    out_proj: zml.nn.Linear,
-    out_proj_scale: ?zml.Tensor,
-    conv1d_weight: zml.Tensor,
-    dt_bias: zml.Tensor,
-    aLog: zml.Tensor,
-    norm: RmsNormGated,
-
-    num_k_heads: i64,
-    num_v_heads: i64,
-    qk_head_repetition: u32,
-    head_k_dim: i64,
-    head_v_dim: i64,
-    conv_kernel_size: i64,
-
-    fn initProj(store: zml.io.TensorStore.View, partitions: anytype) zml.nn.Linear {
-        return .init(store.createTensor("weight", .{ .dout, .d }, .model, partitions), null, .d);
-    }
-
-    pub fn init(store: zml.io.TensorStore.View, config: Config) GatedDeltaNet {
-        const qk_head_repetition: u32 =
-            @intCast(@divExact(config.text_config.linear_num_value_heads, config.text_config.linear_num_key_heads));
-        return .{
-            .in_proj_qkv = initProj(store.withPrefix("in_proj_qkv"), .{ .dout = .model, .d = .replicated }),
-            .in_proj_qkv_scale = null,
-            .in_proj_z = initProj(store.withPrefix("in_proj_z"), .{ .dout = .model, .d = .replicated }),
-            .in_proj_z_scale = null,
-            .in_proj_b = initProj(store.withPrefix("in_proj_b"), .{ .dout = .model, .d = .replicated }),
-            .in_proj_a = initProj(store.withPrefix("in_proj_a"), .{ .dout = .model, .d = .replicated }),
-            .out_proj = initProj(store.withPrefix("out_proj"), .{ .dout = .replicated, .d = .model }),
-            .out_proj_scale = null,
-            .conv1d_weight = store.withPrefix("conv1d").createTensor("weight", .{ .out, .in, .kernel_size }, .model, .{ .out = .model, .in = .replicated, .kernel_size = .replicated }),
-            .dt_bias = store.createTensor("dt_bias", .{.vh}, .model, .{ .vh = .model }),
-            .aLog = store.createTensor("A_log", .{.vh}, .model, .{ .vh = .model }),
-            .norm = RmsNormGated.init(store.withPrefix("norm"), config.text_config.layer_norm_epsilon),
-            .num_k_heads = config.text_config.linear_num_key_heads,
-            .num_v_heads = config.text_config.linear_num_value_heads,
-            .qk_head_repetition = qk_head_repetition,
-            .head_k_dim = config.text_config.linear_key_head_dim,
-            .head_v_dim = config.text_config.linear_value_head_dim,
-            .conv_kernel_size = config.text_config.linear_conv_kernel_dim,
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(GatedDeltaNet)) void {
-        zml.Buffer.deinitAll(GatedDeltaNet, self);
-    }
-
-    fn recurrentGatedDeltaRule(
-        query: zml.Tensor,
-        key: zml.Tensor,
-        value: zml.Tensor,
-        g: zml.Tensor,
-        beta: zml.Tensor,
-        initial_state: ?zml.Tensor,
-        active_length: zml.Tensor,
-    ) struct { zml.Tensor, zml.Tensor } {
-        const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(query.dim(.khd))));
-        const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
-        const key_norm = zml.nn.normalizeL2(key.rename(.{ .kh = .vh }), 1e-6);
-
-        const query_f32, const key_f32, const value_f32, const alpha_f32, const beta_f32 = .{
-            query_norm.convert(.f32).scale(scale).rename(.{ .vh = .h, .khd = .k }),
-            key_norm.convert(.f32).rename(.{ .vh = .h, .khd = .k }),
-            value.convert(.f32).rename(.{ .vh = .h, .vhd = .v }),
-            g.convert(.f32).exp().rename(.{ .vh = .h }),
-            beta.convert(.f32).rename(.{ .vh = .h }),
-        };
-
-        const initial_recurrent_state = if (initial_state) |state|
-            state.convert(.f32).transpose(.{ .b, .vh, .vhd, .khd }).rename(.{ .vh = .h, .vhd = .v, .khd = .k })
-        else
-            zml.Tensor.constant(zml.DataType.zero(.f32)).broad(zml.Shape.init(.{
-                .b = value.dim(.b),
-                .h = value.dim(.vh),
-                .v = value.dim(.vhd),
-                .k = query.dim(.khd),
-            }, .f32));
-
-        const result = zml.nn.GatedDeltaNet.forward(
-            query_f32,
-            key_f32,
-            value_f32,
-            alpha_f32,
-            beta_f32,
-            .{ .s = initial_recurrent_state },
-            active_length,
-        );
-
-        return .{
-            result.outputs.rename(.{ .h = .vh, .v = .vhd }).convert(query.dtype()),
-            result.state.s.transpose(.{ .b, .h, .k, .v }).rename(.{ .h = .vh, .k = .khd, .v = .vhd }),
-        };
-    }
-
-    fn buildUpdatedConvState(input: zml.Tensor, left_pad: i64) zml.Tensor {
-        const copy_len = @min(input.dim(.s), left_pad);
-        const tail = input.slice(.s, .{ .start = input.dim(.s) - copy_len, .end = input.dim(.s) });
-        if (copy_len == left_pad) return tail;
-
-        const padding_shape = zml.Shape.init(.{ .b = input.dim(.b), .s = left_pad - copy_len, .mix = input.dim(.mix) }, input.dtype());
-        const padding = zml.Tensor.constant(input.dtype().zero()).broad(padding_shape);
-        return zml.Tensor.concatenate(&.{ padding, tail }, .s);
-    }
-
-    fn buildUpdatedConvStateFromPrefix(input: zml.Tensor, left_pad: i64, active_length: zml.Tensor) zml.Tensor {
-        const padding = zml.Tensor.zeroes(input.shape().setDim(.s, left_pad));
-        const padded = zml.Tensor.concatenate(&.{ padding, input }, .s);
-        return padded.slice(.s, .dyn(active_length.convert(.i64), left_pad));
-    }
-
-    pub fn forward(self: GatedDeltaNet, x: zml.Tensor, cache: KvCache.GatedDeltaNetCache, active_length: zml.Tensor) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
-        const key_dim = self.num_k_heads * self.head_k_dim;
-        const value_dim = self.num_v_heads * self.head_v_dim;
-        const conv_dim = 2 * key_dim + value_dim;
-        const left_pad = self.conv_kernel_size - 1;
-
-        const x_in = x.withPartitioning(.model, .{ .d = .replicated });
-        const projected_qkv = self.in_proj_qkv.forward(x_in, x_in.dtype())
-            .rename(.{ .dout = .mix }).withPartitioning(.model, .{ .s = .replicated, .mix = .model });
-        const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
-        const conv_input = if (use_cached_state)
-            zml.Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
-        else
-            projected_qkv;
-
-        const kernel = self.conv1d_weight;
-        var mixed_qkv = zml.Tensor.conv1d(
-            conv_input,
-            kernel,
-            .{
-                .padding = &.{ left_pad, 0 },
-                .input_batch_dimension = 0,
-                .input_feature_dimension = 2,
-                .input_spatial_dimensions = 1,
-                .kernel_output_feature_dimension = 0,
-                .kernel_input_feature_dimension = 1,
-                .kernel_spatial_dimensions = 2,
-                .output_batch_dimension = 0,
-                .output_feature_dimension = 2,
-                .output_spatial_dimensions = 1,
-                .feature_group_count = conv_dim,
-            },
-        )
-            .silu();
-
-        if (use_cached_state) {
-            mixed_qkv = mixed_qkv.slice(.s, .{ .start = mixed_qkv.dim(.s) - 1, .end = mixed_qkv.dim(.s) });
-        }
-        mixed_qkv = mixed_qkv.withPartitioning(.model, .{ .s = .replicated, .mix = .model });
-
-        const z = self.in_proj_z.forward(x_in, x_in.dtype())
-            .splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
-            .withPartitioning(.model, .{ .s = .replicated, .vh = .model, .vhd = .replicated });
-        const b = self.in_proj_b.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.model, .{ .s = .replicated, .vh = .model });
-        const a = self.in_proj_a.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.model, .{ .s = .replicated, .vh = .model });
-
-        const query = mixed_qkv
-            .slice(.mix, .{ .start = 0, .end = key_dim })
-            .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim })
-            .withPartitioning(.model, .{ .s = .replicated, .kh = .model, .khd = .replicated });
-        const key = mixed_qkv
-            .slice(.mix, .{ .start = key_dim, .end = 2 * key_dim })
-            .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim })
-            .withPartitioning(.model, .{ .s = .replicated, .kh = .model, .khd = .replicated });
-        const value = mixed_qkv
-            .slice(.mix, .{ .start = 2 * key_dim, .end = 2 * key_dim + value_dim })
-            .splitAxis(.mix, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
-            .withPartitioning(.model, .{ .s = .replicated, .vh = .model, .vhd = .replicated });
-
-        const beta = b.sigmoid();
-        const aLog_type = self.aLog.dtype();
-        const g = self.aLog.broad(a.shape()).exp().mul(zml.nn.softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())), .{})).negate();
-
-        const query_for_rule = if (self.qk_head_repetition == 1) query else query.stutter1d(query.axis(.kh), self.qk_head_repetition);
-        const key_for_rule = if (self.qk_head_repetition == 1) key else key.stutter1d(key.axis(.kh), self.qk_head_repetition);
-
-        const core_attn_out, const last_recurrent_state = recurrentGatedDeltaRule(
-            query_for_rule,
-            key_for_rule,
-            value,
-            g,
-            beta,
-            if (use_cached_state) cache.recurrentState() else null,
-            active_length,
-        );
-
-        const core_attn_out_normed = self.norm
-            .forward(
-                core_attn_out.rename(.{ .vhd = .d }),
-                z.rename(.{ .vhd = .d }),
-            )
-            .rename(.{ .d = .vhd })
-            .withPartitioning(.model, .{ .s = .replicated, .vh = .model, .vhd = .replicated });
-
-        const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }), core_attn_out_normed.dtype())
-            .rename(.{ .dout = .d }).withPartitioning(.model, .{ .d = .replicated });
-        const updated_cache = cache.update(
-            if (use_cached_state) buildUpdatedConvState(conv_input, left_pad) else buildUpdatedConvStateFromPrefix(projected_qkv, left_pad, active_length),
-            last_recurrent_state,
-        );
-        return .{ output, updated_cache };
-    }
-};
-
 pub const RmsNorm = struct {
     weight: zml.Tensor,
     eps: f32 = 1e-6,
@@ -1193,35 +930,9 @@ pub const RmsNorm = struct {
     }
 };
 
-pub const RmsNormGated = struct {
-    weight: zml.Tensor,
-    eps: f32 = 1e-6,
-
-    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNormGated {
-        return .{ .weight = store.createTensor("weight", .{.d}, .model, .{ .d = .replicated }), .eps = eps };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNormGated)) void {
-        self.weight.deinit();
-    }
-
-    pub fn forward(self: RmsNormGated, x: zml.Tensor, gate: zml.Tensor) zml.Tensor {
-        const x_f32 = x.convert(.f32);
-        const gate_f32 = gate.convert(.f32);
-        const weight_f32 = self.weight.convert(.f32);
-
-        const normalized = zml.nn.rmsNorm(x_f32, .d, self.eps);
-        const output = normalized.mul(weight_f32.broad(x.shape()));
-
-        const gated_output = output.mul(gate_f32.silu());
-        return gated_output.convert(x.dtype());
-    }
-};
-
 pub const KvCache = struct {
     layer_types: []const LayerType,
     self_attn: SelfAttnCache,
-    gated_delta_net: GatedDeltaNetCache,
 
     pub const SelfAttnCache = struct {
         k: zml.Tensor,
@@ -1229,15 +940,14 @@ pub const KvCache = struct {
         layer_index: zml.Tensor,
 
         pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_meshe: *const zml.Mesh) SelfAttnCache {
-            const num_self_attn_layers = countLayers(config.text_config.layers_block_type, .full_attention);
             const kv_shape = zml.Shape.init(.{
                 .b = batch_dim,
-                .layer = num_self_attn_layers,
+                .layer = countAttentionLayers(config.llm_config.layers_block_type),
                 .s = max_seq_len,
-                .h = config.text_config.num_key_value_heads,
-                .hd = config.text_config.head_dim,
+                .h = config.llm_config.num_key_value_heads,
+                .hd = config.llm_config.head_dim,
             }, dtype);
-            const kv_head_sharding = model_meshe.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
+            const kv_head_sharding = model_meshe.shardableDim(kv_shape.dim(.h), .model, config.llm_config.num_attention_heads);
             const sharded_kv_shape = switch (kv_head_sharding) {
                 .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(model_meshe, .{ .h = .model }),
                 .replicated => kv_shape.withPartitioning(model_meshe, .{ .h = .replicated }),
@@ -1320,145 +1030,45 @@ pub const KvCache = struct {
         }
     };
 
-    pub const GatedDeltaNetCache = struct {
-        conv_state: zml.Tensor,
-        recurrent_state: zml.Tensor,
-        layer_index: zml.Tensor,
-
-        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType, model_meshe: *const zml.Mesh) GatedDeltaNetCache {
-            const num_linear_attn_layers = countLayers(config.text_config.layers_block_type, .linear_attention);
-            const conv_dim = 2 * config.text_config.linear_num_key_heads * config.text_config.linear_key_head_dim + config.text_config.linear_num_value_heads * config.text_config.linear_value_head_dim;
-            const conv_state_shape = zml.Shape.init(.{
-                .b = batch_dim,
-                .layer = num_linear_attn_layers,
-                .s = config.text_config.linear_conv_kernel_dim - 1,
-                .mix = conv_dim,
-            }, conv_dtype);
-            const recurrent_state_shape = zml.Shape.init(.{
-                .b = batch_dim,
-                .layer = num_linear_attn_layers,
-                .vh = config.text_config.linear_num_value_heads,
-                .khd = config.text_config.linear_key_head_dim,
-                .vhd = config.text_config.linear_value_head_dim,
-            }, recurrent_dtype);
-            const sharded_conv_state_shape = conv_state_shape.withPartitioning(model_meshe, .{ .mix = .model });
-            const sharded_recurrent_state_shape = recurrent_state_shape.withPartitioning(model_meshe, .{ .vh = .model });
-            return .{
-                .conv_state = zml.Tensor.fromShape(sharded_conv_state_shape),
-                .recurrent_state = zml.Tensor.fromShape(sharded_recurrent_state_shape),
-                .layer_index = .init(.{}, .u32),
-            };
-        }
-
-        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(GatedDeltaNetCache) {
-            return .{
-                .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), .{}),
-                .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), .{}),
-                .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
-            };
-        }
-
-        pub fn deinitBuffer(self: *zml.Bufferized(GatedDeltaNetCache)) void {
-            self.conv_state.deinit();
-            self.recurrent_state.deinit();
-            self.layer_index.deinit();
-        }
-
-        pub fn convState(self: GatedDeltaNetCache) zml.Tensor {
-            return self.conv_state.slice(.layer, .dynSingle(self.layer_index));
-        }
-
-        pub fn recurrentState(self: GatedDeltaNetCache) zml.Tensor {
-            return self.recurrent_state.slice(.layer, .dynSingle(self.layer_index));
-        }
-
-        pub fn update(self: GatedDeltaNetCache, new_conv_state: ?zml.Tensor, new_recurrent_state: ?zml.Tensor) GatedDeltaNetCache {
-            const conv_state = if (new_conv_state) |state|
-                self.conv_state.scatterSlices(
-                    .{ .layer = self.layer_index },
-                    state.convert(self.conv_state.dtype()).transpose(self.conv_state.shape().drop(.layer)),
-                    .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-                ).reuseBuffer(self.conv_state)
-            else
-                self.conv_state;
-
-            const recurrent_state = if (new_recurrent_state) |state|
-                self.recurrent_state.scatterSlices(
-                    .{ .layer = self.layer_index },
-                    state.convert(self.recurrent_state.dtype()).transpose(self.recurrent_state.shape().drop(.layer)),
-                    .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-                ).reuseBuffer(self.recurrent_state)
-            else
-                self.recurrent_state;
-
-            return .{
-                .conv_state = conv_state,
-                .recurrent_state = recurrent_state,
-                .layer_index = self.layer_index,
-            };
-        }
-
-        pub fn atLayer(self: GatedDeltaNetCache, layer_index: usize) GatedDeltaNetCache {
-            return .{
-                .conv_state = self.conv_state,
-                .recurrent_state = self.recurrent_state,
-                .layer_index = zml.Tensor.scalar(layer_index, .u32),
-            };
-        }
-
-        pub fn reuseBuffer(self: GatedDeltaNetCache, other: GatedDeltaNetCache) GatedDeltaNetCache {
-            return .{
-                .conv_state = self.conv_state.reuseBuffer(other.conv_state),
-                .recurrent_state = self.recurrent_state.reuseBuffer(other.recurrent_state),
-                .layer_index = self.layer_index.reuseBuffer(other.layer_index),
-            };
-        }
-    };
-
     pub fn init(
         config: Config,
         batch_dim: i64,
         max_seq_len: i64,
         cache_dtype: zml.DataType,
-        recurrent_dtype: zml.DataType,
+        _: zml.DataType,
         model_meshe: *const zml.Mesh,
     ) KvCache {
         return .{
-            .layer_types = config.text_config.layers_block_type,
+            .layer_types = config.llm_config.layers_block_type,
             .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_meshe),
-            .gated_delta_net = GatedDeltaNetCache.init(config, batch_dim, cache_dtype, recurrent_dtype, model_meshe),
         };
     }
 
     pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{
             .self_attn = try self.self_attn.initBuffer(io, platform),
-            .gated_delta_net = try self.gated_delta_net.initBuffer(io, platform),
         };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(KvCache)) void {
         SelfAttnCache.deinitBuffer(&self.self_attn);
-        GatedDeltaNetCache.deinitBuffer(&self.gated_delta_net);
     }
 
     pub const LayerView = struct {
         parent: KvCache,
         cache: union(enum) {
             self_attn: SelfAttnCache,
-            linear_attn: GatedDeltaNetCache,
+            none,
         },
     };
 
     pub fn atLayer(self: KvCache, layer_index: usize) LayerView {
-        return switch (getDenseIndex(self.layer_types, layer_index)) {
-            .full_attention => |dense_index| .{
-                .parent = self,
-                .cache = .{ .self_attn = self.self_attn.atLayer(dense_index.layer_dense_index) },
-            },
-            .linear_attention => |dense_index| .{
-                .parent = self,
-                .cache = .{ .linear_attn = self.gated_delta_net.atLayer(dense_index.layer_dense_index) },
+        return .{
+            .parent = self,
+            .cache = switch (self.layer_types[layer_index]) {
+                .attention, .full_attention => .{ .self_attn = self.self_attn.atLayer(@intCast(countAttentionLayers(self.layer_types[0..layer_index]))) },
+                .moe, .mlp => .none,
+                .mamba, .linear_attention => stdx.debug.panic("Mamba-2 recurrent cache is not integrated into KvCache yet", .{}),
             },
         };
     }
@@ -1467,33 +1077,332 @@ pub const KvCache = struct {
         return .{
             .layer_types = self.layer_types,
             .self_attn = self.self_attn.reuseBuffer(other.self_attn),
-            .gated_delta_net = self.gated_delta_net.reuseBuffer(other.gated_delta_net),
         };
     }
 
-    fn countLayers(layer_types: []const LayerType, layer_type: LayerType) i64 {
+    fn countAttentionLayers(layer_types: []const LayerType) i64 {
         var count: i64 = 0;
-        for (layer_types) |registered_layer_type| {
-            if (registered_layer_type == layer_type) count += 1;
+        for (layer_types) |layer_type| {
+            switch (layer_type) {
+                .attention, .full_attention => count += 1,
+                else => {},
+            }
         }
         return count;
     }
+};
 
-    fn getDenseIndex(layer_types: []const LayerType, layer_index: usize) union(enum) {
-        full_attention: struct { layer_dense_index: usize },
-        linear_attention: struct { layer_dense_index: usize },
-    } {
-        var self_attn_layer_index: usize = 0;
-        var linear_attn_layer_index: usize = 0;
-        for (layer_types[0..layer_index]) |layer_type| {
-            switch (layer_type) {
-                .full_attention => self_attn_layer_index += 1,
-                .linear_attention => linear_attn_layer_index += 1,
-            }
+pub const GroupedRmsNormGated = struct {
+    weight: zml.Tensor,
+    eps: f32,
+    num_groups: i64,
+
+    pub fn init(store: zml.io.TensorStore.View, eps: f32, num_groups: i64) GroupedRmsNormGated {
+        return .{
+            .weight = store.createReplicatedTensor("weight", .{.d}),
+            .eps = eps,
+            .num_groups = num_groups,
+        };
+    }
+
+    pub fn forward(self: GroupedRmsNormGated, x: zml.Tensor, gate: zml.Tensor) zml.Tensor {
+        stdx.debug.assert(self.num_groups > 0 and @rem(x.dim(.d), self.num_groups) == 0, "Mamba2 normalization groups must divide the inner width", .{});
+        stdx.debug.assert(self.eps > 0 and self.weight.dim(.d) == x.dim(.d), "Invalid Mamba2 normalization parameters", .{});
+        stdx.debug.assert(std.mem.eql(i64, x.dims(), gate.dims()), "Mamba2 gate and normalization input must have matching shapes", .{});
+
+        // Nemotron gates before normalizing; Qwen's RmsNormGated does the reverse.
+        const gated = x.convert(.f32).mul(gate.convert(.f32).silu());
+        const groups = gated.splitAxis(.d, .{ .group = self.num_groups, .element = @divExact(x.dim(.d), self.num_groups) });
+        const normalized = zml.nn.rmsNorm(groups, .element, self.eps)
+            .merge(.{ .d = .{ .group, .element } })
+            .convert(x.dtype());
+        return normalized.mul(self.weight.convert(x.dtype()).broad(normalized.shape()));
+    }
+};
+
+pub const Mamba2 = struct {
+    in_proj: zml.nn.Linear,
+    out_proj: zml.nn.Linear,
+
+    conv1d_weight: zml.Tensor,
+    conv1d_bias: ?zml.Tensor,
+
+    dt_bias: zml.Tensor,
+    aLog: zml.Tensor,
+    d: zml.Tensor,
+
+    norm: GroupedRmsNormGated,
+
+    num_heads: i64,
+    num_groups: i64,
+    head_dim: i64,
+    state_size: i64,
+    conv_kernel_size: i64,
+
+    pub const Cache = struct {
+        conv_state: zml.Tensor,
+        recurrent_state: zml.Tensor,
+
+        pub const Buffers = zml.Bufferized(Cache);
+
+        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType) Cache {
+            const cfg = config.llm_config;
+            validateConfig(cfg);
+            stdx.debug.assert(batch_dim > 0, "Mamba2 batch size must be positive", .{});
+            const conv_dim = cfg.mamba_num_heads * cfg.mamba_head_dim + 2 * cfg.n_groups * cfg.ssm_state_size;
+            return .{
+                .conv_state = .init(.{ .b = batch_dim, .s = cfg.conv_kernel - 1, .mix = conv_dim }, conv_dtype),
+                .recurrent_state = .init(.{ .b = batch_dim, .h = cfg.mamba_num_heads, .p = cfg.mamba_head_dim, .n = cfg.ssm_state_size }, .f32),
+            };
         }
-        return switch (layer_types[layer_index]) {
-            .full_attention => .{ .full_attention = .{ .layer_dense_index = self_attn_layer_index } },
-            .linear_attention => .{ .linear_attention = .{ .layer_dense_index = linear_attn_layer_index } },
+
+        pub fn zeroes(self: Cache) Cache {
+            return .{
+                .conv_state = .zeroes(self.conv_state.shape()),
+                .recurrent_state = .zeroes(self.recurrent_state.shape()),
+            };
+        }
+
+        pub fn initBuffer(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !Cache.Buffers {
+            var conv_state = try zeroBuffer(allocator, io, platform, self.conv_state.shape());
+            errdefer conv_state.deinit();
+            return .{
+                .conv_state = conv_state,
+                .recurrent_state = try zeroBuffer(allocator, io, platform, self.recurrent_state.shape()),
+            };
+        }
+
+        pub fn deinitBuffer(buffers: *Cache.Buffers) void {
+            zml.Buffer.deinitAll(Cache, buffers);
+        }
+
+        pub fn reuseBuffer(self: Cache, other: Cache) Cache {
+            return .{
+                .conv_state = self.conv_state.reuseBuffer(other.conv_state),
+                .recurrent_state = self.recurrent_state.reuseBuffer(other.recurrent_state),
+            };
+        }
+
+        fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
+            const bytes = try allocator.alloc(u8, shape.byteSize());
+            defer allocator.free(bytes);
+            @memset(bytes, 0);
+            return zml.Buffer.fromBytes(io, platform, shape, bytes);
+        }
+    };
+
+    pub const ScanOutput = struct {
+        outputs: zml.Tensor,
+        state: zml.Tensor,
+    };
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config) Mamba2 {
+        const cfg = config.llm_config;
+        validateConfig(cfg);
+        const conv_store = store.withPrefix("conv1d");
+        const result: Mamba2 = .{
+            // The fused [gate | x | B | C | dt] layout cannot be naively flat-sharded
+            .in_proj = initProj(store.withPrefix("in_proj"), cfg.use_bias),
+            .out_proj = initProj(store.withPrefix("out_proj"), cfg.use_bias),
+            .conv1d_weight = conv_store.createReplicatedTensor("weight", .{ .out, .in, .kernel_size }),
+            .conv1d_bias = if (cfg.use_conv_bias) conv_store.createReplicatedTensor("bias", .{.out}) else null,
+            .dt_bias = initStateParameter(store, "dt_bias"),
+            .aLog = initStateParameter(store, "A_log"),
+            .d = initStateParameter(store, "D"),
+            .norm = .init(store.withPrefix("norm"), cfg.layer_norm_epsilon, cfg.n_groups),
+            .num_heads = cfg.mamba_num_heads,
+            .num_groups = cfg.n_groups,
+            .head_dim = cfg.mamba_head_dim,
+            .state_size = cfg.ssm_state_size,
+            .conv_kernel_size = cfg.conv_kernel,
+        };
+        const inner_dim = cfg.mamba_num_heads * cfg.mamba_head_dim;
+        const conv_dim = inner_dim + 2 * cfg.n_groups * cfg.ssm_state_size;
+        stdx.debug.assert(result.in_proj.weight.dim(.d) == cfg.hidden_size and result.in_proj.weight.dim(.dout) == inner_dim + conv_dim + cfg.mamba_num_heads, "Mamba2 input projection shape does not match config", .{});
+        stdx.debug.assert(result.out_proj.weight.dim(.d) == inner_dim and result.out_proj.weight.dim(.dout) == cfg.hidden_size, "Mamba2 output projection shape does not match config", .{});
+        return result;
+    }
+
+    fn validateConfig(cfg: TextConfig) void {
+        stdx.debug.assert(cfg.hidden_size > 0 and cfg.mamba_num_heads > 0 and cfg.mamba_head_dim > 0 and cfg.n_groups > 0 and cfg.ssm_state_size > 0 and cfg.conv_kernel > 0, "Mamba2 dimensions must be positive", .{});
+        stdx.debug.assert(@rem(cfg.mamba_num_heads, cfg.n_groups) == 0, "Mamba2 groups must divide the number of heads", .{});
+        stdx.debug.assert(std.mem.eql(u8, cfg.mamba_hidden_act, "silu"), "Mamba2 only supports the silu activation", .{});
+        stdx.debug.assert(std.mem.eql(u8, cfg.mamba_ssm_cache_dtype, "float32"), "Mamba2 recurrent cache must use float32", .{});
+        stdx.debug.assert(cfg.layer_norm_epsilon > 0, "Mamba2 normalization epsilon must be positive", .{});
+    }
+
+    fn initProj(store: zml.io.TensorStore.View, use_bias: bool) zml.nn.Linear {
+        return .init(
+            store.createReplicatedTensor("weight", .{ .dout, .d }),
+            if (use_bias) store.createReplicatedTensor("bias", .{.dout}) else null,
+            .d,
+        );
+    }
+
+    fn initStateParameter(store: zml.io.TensorStore.View, comptime name: []const u8) zml.Tensor {
+        const key = if (store.getShape("_fp32_params." ++ name) != null) "_fp32_params." ++ name else name;
+        return store.createReplicatedTensor(key, .{.h});
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Mamba2)) void {
+        zml.Buffer.deinitAll(Mamba2, self);
+    }
+
+    /// FP32 reference scan. B/C are already expanded to heads; dt is already positive
+    /// A is already -exp(A_log). Both outputs and final state are FP32
+    pub fn selectiveScan(
+        x: zml.Tensor,
+        b: zml.Tensor,
+        c: zml.Tensor,
+        dt: zml.Tensor,
+        a: zml.Tensor,
+        d: zml.Tensor,
+        initial_state: zml.Tensor,
+        active_length: zml.Tensor,
+    ) ScanOutput {
+        stdx.debug.assert(x.rank() == 4 and x.shape().hasTags(.{ .b, .s, .h, .p }), "Mamba2 scan expects x {{b, s, h, p}}", .{});
+        stdx.debug.assert(b.rank() == 4 and b.shape().hasTags(.{ .b, .s, .h, .n }) and std.mem.eql(i64, b.dims(), c.dims()), "Mamba2 scan expects matching B/C {{b, s, h, n}}", .{});
+        stdx.debug.assert(b.dim(.b) == x.dim(.b) and b.dim(.s) == x.dim(.s) and b.dim(.h) == x.dim(.h), "Mamba2 scan B/C dimensions do not match x", .{});
+        stdx.debug.assert(dt.rank() == 3 and dt.dim(.b) == x.dim(.b) and dt.dim(.s) == x.dim(.s) and dt.dim(.h) == x.dim(.h), "Mamba2 scan dt dimensions do not match x", .{});
+        stdx.debug.assert(a.rank() == 1 and d.rank() == 1 and a.dim(.h) == x.dim(.h) and d.dim(.h) == x.dim(.h), "Mamba2 scan A/D dimensions do not match heads", .{});
+        stdx.debug.assert(initial_state.rank() == 4 and initial_state.dim(.b) == x.dim(.b) and initial_state.dim(.h) == x.dim(.h) and initial_state.dim(.p) == x.dim(.p) and initial_state.dim(.n) == b.dim(.n), "Mamba2 scan initial state must have shape {{b, h, p, n}}", .{});
+
+        const scan: SelectiveScan = .{
+            .x = x.convert(.f32),
+            .b = b.convert(.f32),
+            .c = c.convert(.f32),
+            .dt = dt.convert(.f32),
+            .a = a.convert(.f32),
+            .d = d.convert(.f32),
+            .active_length = clampActiveLength(active_length, x.dim(.s)),
+        };
+        const initial: SelectiveScan.State = .{
+            .ssm = initial_state.convert(.f32),
+            .outputs = .zeroes(x.shape().withDtype(.f32)),
+            .step = .scalar(0, .i64),
+        };
+        if (x.dim(.s) == 0) return .{ .outputs = initial.outputs, .state = initial.ssm };
+        const final = if (x.dim(.s) == 1) blk: {
+            // Avoid the while-loop overhead for token-by-token decoding.
+            const next = scan.body(initial);
+            const run = scan.cond(initial);
+            break :blk SelectiveScan.State{
+                .ssm = run.broad(initial.ssm.shape()).select(next.ssm, initial.ssm),
+                .outputs = run.broad(initial.outputs.shape()).select(next.outputs, initial.outputs),
+                .step = run.select(next.step, initial.step),
+            };
+        } else zml.ops.@"while"(SelectiveScan, scan, initial);
+        return .{ .outputs = final.outputs, .state = final.ssm };
+    }
+
+    pub fn forward(self: Mamba2, x: zml.Tensor, cache: Cache, active_length: zml.Tensor) struct { zml.Tensor, Cache } {
+        stdx.debug.assert(self.num_heads > 0 and self.num_groups > 0 and @rem(self.num_heads, self.num_groups) == 0 and self.head_dim > 0 and self.state_size > 0 and self.conv_kernel_size > 0, "Invalid Mamba2 dimensions", .{});
+        stdx.debug.assert(x.rank() == 3 and x.shape().hasTags(.{ .b, .s, .d }) and x.dim(.s) > 0, "Mamba2 expects a nonempty input {{b, s, d}}", .{});
+
+        const inner_dim = self.num_heads * self.head_dim;
+        const bc_dim = self.num_groups * self.state_size;
+        const conv_dim = inner_dim + 2 * bc_dim;
+        const history = self.conv_kernel_size - 1;
+
+        stdx.debug.assert(cache.conv_state.rank() == 3 and cache.conv_state.dim(.b) == x.dim(.b) and cache.conv_state.dim(.s) == history and cache.conv_state.dim(.mix) == conv_dim, "Mamba2 convolution cache shape does not match config", .{});
+        stdx.debug.assert(cache.recurrent_state.dtype() == .f32, "Mamba2 recurrent cache must be FP32", .{});
+        stdx.debug.assert(self.conv1d_weight.dim(.out) == conv_dim and self.conv1d_weight.dim(.in) == 1 and self.conv1d_weight.dim(.kernel_size) == self.conv_kernel_size, "Mamba2 depthwise convolution shape does not match config", .{});
+        stdx.debug.assert(self.norm.num_groups == self.num_groups, "Mamba2 normalization and B/C groups must match", .{});
+
+        const length = clampActiveLength(active_length, x.dim(.s));
+
+        const projected = self.in_proj.forward(x, x.dtype()).rename(.{ .dout = .mix });
+        const gate = projected.slice(.mix, .{ .end = inner_dim }).rename(.{ .mix = .d });
+        const xbc = projected.slice(.mix, .{ .start = inner_dim, .end = inner_dim + conv_dim });
+        const dt_raw = projected.slice(.mix, .{ .start = inner_dim + conv_dim, .end = inner_dim + conv_dim + self.num_heads }).rename(.{ .mix = .h });
+
+        // A valid convolution over cached history works for decode AND continuation chunks.
+        const conv_input = if (history == 0) xbc else zml.Tensor.concatenate(&.{ cache.conv_state.convert(xbc.dtype()), xbc }, .s);
+        var mixed = zml.Tensor.conv1d(conv_input, self.conv1d_weight.convert(xbc.dtype()), .{
+            .input_batch_dimension = 0,
+            .input_feature_dimension = 2,
+            .input_spatial_dimensions = 1,
+            .kernel_output_feature_dimension = 0,
+            .kernel_input_feature_dimension = 1,
+            .kernel_spatial_dimensions = 2,
+            .output_batch_dimension = 0,
+            .output_feature_dimension = 2,
+            .output_spatial_dimensions = 1,
+            .feature_group_count = conv_dim,
+        });
+
+        if (self.conv1d_bias) |bias|
+            mixed = mixed.add(bias.convert(mixed.dtype()).rename(.{ .out = .mix }).broad(mixed.shape()));
+
+        mixed = mixed.silu();
+
+        const values = mixed.slice(.mix, .{ .end = inner_dim }).splitAxis(.mix, .{ .h = self.num_heads, .p = self.head_dim });
+        const b = self.expandGroups(mixed.slice(.mix, .{ .start = inner_dim, .end = inner_dim + bc_dim }));
+        const c = self.expandGroups(mixed.slice(.mix, .{ .start = inner_dim + bc_dim, .end = conv_dim }));
+        const dt = zml.nn.softplus(dt_raw.convert(.f32).add(self.dt_bias.convert(.f32).broad(dt_raw.shape().withDtype(.f32))), .{});
+        const a = self.aLog.convert(.f32).exp().negate();
+        const scan = selectiveScan(values, b, c, dt, a, self.d, cache.recurrent_state, length);
+        const hidden = scan.outputs.convert(x.dtype()).merge(.{ .d = .{ .h, .p } });
+        const normalized = self.norm.forward(hidden, gate);
+        const projected_output = self.out_proj.forward(normalized, x.dtype()).rename(.{ .dout = .d });
+        const positions = zml.Tensor.iota(zml.Shape.init(.{ .s = x.dim(.s) }, .i32), .s).convert(.i64);
+        const valid = positions.cmp(.LT, length.broad(positions.shape()));
+        const output = valid.broad(projected_output.shape()).select(projected_output, zml.Tensor.zeroes(projected_output.shape()));
+
+        // Select the tail after valid tokens, not the tail of the padded input.
+        const updated_cache: Cache = .{
+            .conv_state = if (history == 0) cache.conv_state else conv_input.slice(.s, .dyn(length, history)).convert(cache.conv_state.dtype()),
+            .recurrent_state = scan.state,
+        };
+
+        return .{ output, updated_cache };
+    }
+
+    fn expandGroups(self: Mamba2, x: zml.Tensor) zml.Tensor {
+        const grouped = x.splitAxis(.mix, .{ .group = self.num_groups, .n = self.state_size });
+        return grouped.stutter1d(grouped.axis(.group), @intCast(@divExact(self.num_heads, self.num_groups)))
+            .rename(.{ .group = .h });
+    }
+};
+
+fn clampActiveLength(active_length: zml.Tensor, seqlen: i64) zml.Tensor {
+    stdx.debug.assert(active_length.rank() == 0 and active_length.dtype().isInteger(), "Mamba2 active_length must be an integer scalar", .{});
+    return active_length.convert(.i64).maximum(.scalar(0, .i64)).minimum(.scalar(seqlen, .i64));
+}
+
+const SelectiveScan = struct {
+    x: zml.Tensor,
+    b: zml.Tensor,
+    c: zml.Tensor,
+    dt: zml.Tensor,
+    a: zml.Tensor,
+    d: zml.Tensor,
+    active_length: zml.Tensor,
+
+    pub const State = struct {
+        ssm: zml.Tensor,
+        outputs: zml.Tensor,
+        step: zml.Tensor,
+    };
+
+    pub fn cond(self: SelectiveScan, state: State) zml.Tensor {
+        return state.step.cmp(.LT, self.active_length);
+    }
+
+    pub fn body(self: SelectiveScan, state: State) State {
+        const x = self.x.slice(.s, .dynSingle(state.step));
+        const b = self.b.slice(.s, .dynSingle(state.step));
+        const c = self.c.slice(.s, .dynSingle(state.step));
+        const dt = self.dt.slice(.s, .dynSingle(state.step));
+        const decay = dt.mul(self.a.broad(dt.shape())).exp();
+        const delta_x = x.mul(dt.broad(x.shape()));
+        const write = delta_x.broad(state.ssm.shape()).mul(b.broad(state.ssm.shape()));
+        const next_state = state.ssm.mul(decay.broad(state.ssm.shape())).add(write);
+        const y = next_state.dot(c, .n).add(x.mul(self.d.broad(x.shape())));
+        return .{
+            .ssm = next_state,
+            .outputs = state.outputs.dynamicUpdateSlice(.{ .s = state.step }, y),
+            .step = state.step.addConstant(1),
         };
     }
 };
