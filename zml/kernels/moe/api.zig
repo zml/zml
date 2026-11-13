@@ -130,3 +130,35 @@ pub const ExpertsLayout = struct {
         mxfp4_interleaved8,
     };
 };
+
+/// Routing for a local token batch and a contiguous range of experts.
+/// IDs retain the model's global expert numbering, while the projection weights
+/// contain only the local experts. Kernels compute those experts contributions and
+/// `forwardMoe` sums them along the expert axis.
+pub const LocalRouting = struct {
+    /// Global expert IDs for local tokens, with shape {.t, .topk}
+    ids: Tensor,
+    weights: Tensor,
+    global_num_experts: u32,
+    local_num_experts: u32,
+    /// Scalar i32 containing the first local expert's global ID.
+    /// Null when all experts are local and global IDs already index the weights.
+    expert_start: ?Tensor = null,
+
+    /// Maps routing IDs to local weight indices, using -1 for nonlocal experts.
+    /// For a shard owning experts 4–7, routing IDs [1, 6] become [-1, 2].
+    pub fn localIds(self: LocalRouting) Tensor {
+        const start = self.expert_start orelse return self.ids;
+        const local = self.ids.cmp(.GE, start).logical(.AND, self.ids.cmp(.LT, start.addConstant(self.local_num_experts)));
+        return local.select(self.ids.sub(start), .scalar(-1, .i32));
+    }
+
+    /// Returns a lookup table from every global expert ID to its local weight
+    /// index or -1 if nonlocal. Returns null when every expert is local.
+    pub fn expertMap(self: LocalRouting) ?Tensor {
+        const start = self.expert_start orelse return null;
+        const ids = Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
+        const local = ids.cmp(.GE, start).logical(.AND, ids.cmp(.LT, start.addConstant(self.local_num_experts)));
+        return local.select(ids.sub(start), .scalar(-1, .i32));
+    }
+};

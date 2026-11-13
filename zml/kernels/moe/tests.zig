@@ -5,10 +5,10 @@ const std = @import("std");
 const zml = @import("../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const ExpertsLayout = @import("options.zig").ExpertsLayout;
-const GlobalOptions = @import("options.zig").Options;
-const Activation = @import("options.zig").Activation;
-const Placement = @import("options.zig").RoutingWeightPlacement;
+const Activation = @import("api.zig").Activation;
+const ExpertsLayout = @import("api.zig").ExpertsLayout;
+const GlobalOptions = @import("api.zig").Options;
+const Placement = @import("api.zig").RoutingWeightPlacement;
 const reference = @import("stablehlo/stablehlo.zig");
 
 const Case = struct {

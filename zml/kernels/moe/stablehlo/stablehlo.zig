@@ -7,9 +7,10 @@ const stdx = @import("stdx");
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const GlobalOptions = @import("../options.zig").Options;
-const Activation = @import("../options.zig").Activation;
-const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
+const GlobalOptions = @import("../api.zig").Options;
+const Activation = @import("../api.zig").Activation;
+const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
+const LocalRouting = @import("../api.zig").LocalRouting;
 
 pub fn activate(x: Tensor, activation: Activation) Tensor {
     return switch (activation) {
@@ -191,7 +192,7 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
         .sum(.topk).squeeze(.topk).convert(input.dtype());
 }
 
-pub fn fusedExperts(input: Tensor, routing: zml.moe.LocalRouting, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: GlobalOptions) Tensor {
+pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: GlobalOptions) Tensor {
     stdx.debug.assert(routing.ids.dim(.topk) > 0 and routing.ids.dim(.topk) <= routing.global_num_experts, "MoE top-k must fit the global expert count", .{});
     return reference(input, routing.localIds(), routing.weights, gate_up, down, .{
         .activation = opts.activation,

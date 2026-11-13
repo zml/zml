@@ -6,11 +6,12 @@ const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
-const ExpertsLayout = @import("../options.zig").ExpertsLayout;
-const ProjectionLayout = @import("../options.zig").ProjectionLayout;
-const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
-const Activation = @import("../options.zig").Activation;
-const Options = @import("../options.zig").Options;
+const ExpertsLayout = @import("../api.zig").ExpertsLayout;
+const ProjectionLayout = @import("../api.zig").ProjectionLayout;
+const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
+const Activation = @import("../api.zig").Activation;
+const Options = @import("../api.zig").Options;
+const LocalRouting = @import("../api.zig").LocalRouting;
 const fly = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/fused_experts");
@@ -21,7 +22,7 @@ test {
 
 pub fn fusedExperts(
     hidden_states: Tensor,
-    routing_: zml.moe.LocalRouting,
+    routing_: LocalRouting,
     gate_up_: zml.nn.Linear,
     down_: zml.nn.Linear,
     opts: Options,
@@ -135,7 +136,7 @@ pub fn fusedExperts(
 }
 
 // TODO(Corentin): unused for now
-pub fn supports(hidden_states: Tensor, routing: zml.moe.LocalRouting, gate_up_: zml.nn.Linear, down_: zml.nn.Linear, opts: Options) bool {
+pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: zml.nn.Linear, down_: zml.nn.Linear, opts: Options) bool {
     if (hidden_states.dtype() != .bf16 or gate_up_.quantizationScheme() != .mxfp4 or
         down_.quantizationScheme() != .mxfp4 or gate_up_.bias != null or down_.bias != null or
         opts.routing_weight_placement != .before_down) return false;

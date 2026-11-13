@@ -3,8 +3,9 @@
 const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
-const Options = @import("../options.zig").Options;
-const RoutingWeightPlacement = @import("../options.zig").RoutingWeightPlacement;
+const Options = @import("../api.zig").Options;
+const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
+const LocalRouting = @import("../api.zig").LocalRouting;
 pub const kernels = @import("sm10x/moe.zig");
 
 // `moe.zig`'s `refAllDecls` reaches this file but not its imports, so the
@@ -41,7 +42,7 @@ pub fn validateOptions(opts: Options) void {
 /// interleave by 8 and its scale atoms are MN-major packed i32 words.
 pub fn fusedExperts(
     input: zml.Tensor,
-    routing: zml.moe.LocalRouting,
+    routing: LocalRouting,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: Options,
