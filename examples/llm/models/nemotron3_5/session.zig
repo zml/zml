@@ -15,11 +15,10 @@ pub const Session = struct {
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     layer_index_buffers: []inference.LayerIndexBuffer,
+    mamba_cache_buffers: []model.Mamba2.Cache.Buffers,
     generated_token_slice: zml.Slice,
     tokenizer: zml.tokenizer.Tokenizer,
     seqlen: u32,
-    eos_token_id: u32,
-    special_tokens: model.Model.SpecialTokens,
     think_start: ?u32,
     think_end: ?u32,
 
@@ -39,17 +38,21 @@ pub const Session = struct {
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
         const layer_types = compiled_model.loaded_model.inner.config.llm_config.layers_block_type;
+
         const layer_index_buffers = try allocator.alloc(inference.LayerIndexBuffer, layer_types.len);
         errdefer allocator.free(layer_index_buffers);
+
         var initialized_layer_index_buffers: usize = 0;
+
         errdefer for (layer_index_buffers[0..initialized_layer_index_buffers]) |*layer_index_buffer| {
             switch (layer_index_buffer.*) {
                 .self_attn => |*buffer| buffer.deinit(),
-                .moe => {},
+                .mamba, .moe => {},
             }
         };
 
         var self_attn_layer_index: u32 = 0;
+        var mamba_layer_index: usize = 0;
         for (layer_types, layer_index_buffers) |layer_type, *layer_index_buffer| {
             layer_index_buffer.* = switch (layer_type) {
                 .attention, .full_attention => b: {
@@ -57,10 +60,30 @@ pub const Session = struct {
                     break :b .{ .self_attn = try .scalar(io, platform, self_attn_layer_index, .u32) };
                 },
                 .moe => .{ .moe = {} },
-                .mamba, .linear_attention => return error.Mamba2InferenceNotImplemented,
+                .mamba, .linear_attention => blk: {
+                    defer mamba_layer_index += 1;
+                    break :blk .{ .mamba = mamba_layer_index };
+                },
                 .mlp => return error.MlpNotImplemented,
             };
             initialized_layer_index_buffers += 1;
+        }
+
+        const mamba_cache_buffers = try allocator.alloc(model.Mamba2.Cache.Buffers, mamba_layer_index);
+        errdefer allocator.free(mamba_cache_buffers);
+        var initialized_mamba_caches: usize = 0;
+        errdefer for (mamba_cache_buffers[0..initialized_mamba_caches]) |*cache| {
+            model.Mamba2.Cache.deinitBuffer(cache);
+        };
+
+        const cache_template = model.Mamba2.Cache.init(
+            compiled_model.loaded_model.inner.config,
+            1,
+            compiled_model.loaded_model.inner.backbone.embed_tokens.weight.dtype(),
+        );
+        for (mamba_cache_buffers) |*cache| {
+            cache.* = try cache_template.initBuffer(allocator, io, platform);
+            initialized_mamba_caches += 1;
         }
 
         const generated_token_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32));
@@ -80,11 +103,10 @@ pub const Session = struct {
             .kv_cache_buffers = kv_cache_buffers,
             .rng_buffers = rng_buffers,
             .layer_index_buffers = layer_index_buffers,
+            .mamba_cache_buffers = mamba_cache_buffers,
             .generated_token_slice = generated_token_slice,
             .tokenizer = tokenizer,
             .seqlen = compiled_model.params.seqlen,
-            .eos_token_id = compiled_model.loaded_model.inner.special_tokens.end_of_text_token_id,
-            .special_tokens = compiled_model.loaded_model.inner.special_tokens,
             .think_start = tokenizer.tokenId("<think>"),
             .think_end = tokenizer.tokenId("</think>"),
         };
@@ -98,19 +120,21 @@ pub const Session = struct {
         for (self.layer_index_buffers) |*layer_index_buffer| {
             switch (layer_index_buffer.*) {
                 .self_attn => |*buffer| buffer.deinit(),
-                .moe => {},
+                .mamba, .moe => {},
             }
         }
         self.allocator.free(self.layer_index_buffers);
+        for (self.mamba_cache_buffers) |*cache| model.Mamba2.Cache.deinitBuffer(cache);
+        self.allocator.free(self.mamba_cache_buffers);
         self.generated_token_slice.free(self.allocator);
     }
 
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
-        return tokenizeChatPrompt(allocator, self.tokenizer, prompt, self.special_tokens, true);
+        return tokenizeChatPrompt(allocator, self.tokenizer, prompt, true);
     }
 
     pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
-        return tokenizeChatPrompt(allocator, self.tokenizer, prompt, self.special_tokens, false);
+        return tokenizeChatPrompt(allocator, self.tokenizer, prompt, false);
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
@@ -126,6 +150,16 @@ pub const Session = struct {
         var active_length_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.len)), .u32);
         defer active_length_buffer.deinit();
 
+        const params = self.compiled_model.params;
+        var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
+            .stablehlo => try params.attention_metadata.initBuffer(self.io, self.platform),
+            .flash_attention => |metadata| .{ .flash_attention = switch (metadata) {
+                .metal => .{ .metal = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
+                else => try metadata.initBuffer(self.io, self.platform),
+            } },
+        };
+        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
         var next_token_buffer: zml.Buffer = undefined;
         inference.run(&self.prefill, .{
             .io = self.io,
@@ -135,7 +169,9 @@ pub const Session = struct {
             .active_length_buffer = &active_length_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
+            .attention_metadata_buffers = &attention_metadata_buffers,
             .layer_index_buffers = self.layer_index_buffers,
+            .mamba_cache_buffers = self.mamba_cache_buffers,
         });
 
         defer next_token_buffer.deinit();
@@ -155,9 +191,13 @@ pub const Session = struct {
         var active_length_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 1), .u32);
         defer active_length_buffer.deinit();
 
+        const params = self.compiled_model.params;
+        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
+        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
-            if (token_id == self.eos_token_id) break :generation;
+            if (self.compiled_model.loaded_model.inner.config.isEosToken(token_id)) break :generation;
 
             const token = try decoder.feedOne(token_id, out_tokens_buffer);
             if (self.think_start) |think_start| if (token_id == think_start) try stdout.writeAll("\x1b[2m");
@@ -176,7 +216,9 @@ pub const Session = struct {
                 .active_length_buffer = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
+                .attention_metadata_buffers = &attention_metadata_buffers,
                 .layer_index_buffers = self.layer_index_buffers,
+                .mamba_cache_buffers = self.mamba_cache_buffers,
             });
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
@@ -186,12 +228,12 @@ pub const Session = struct {
     }
 };
 
-fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, special_tokens: model.Model.SpecialTokens, is_first_turn: bool) ![]const u32 {
+fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, is_first_turn: bool) ![]const u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const im_start = tokenizer.tokenId("<|im_start|>") orelse special_tokens.im_start_token_id;
-    const im_end = tokenizer.tokenId("<|im_end|>") orelse special_tokens.im_end_token_id;
+    const im_start = tokenizer.tokenId("<|im_start|>").?;
+    const im_end = tokenizer.tokenId("<|im_end|>").?;
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len + 32);
     if (!is_first_turn) {
