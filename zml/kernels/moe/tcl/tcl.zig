@@ -3,17 +3,19 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const nn = @import("zml/nn");
+
+const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const tcl = zml.kernel.tcl;
 const kernels = @import("moe.zig");
-const api = @import("../api.zig");
+const api = @import("zml/kernels/moe/api");
 
 /// `input` is `{.t, .d}`, routing IDs and weights are `{.t, .topk}`, `gate_up`
 /// is `{.expert, .dout = 2 * inter (gate then up), .d}`, and `down` is
 /// `{.expert, .d, .dout = inter}`. Experts are BF16 or block-128 FP8 with
 /// BF16/F32 scales. Supports plain SwiGLU and BF16 GEGLU with tanh GELU.
-pub fn fusedExperts(input: Tensor, routing: api.LocalRouting, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: api.Options) Tensor {
+pub fn fusedExperts(input: Tensor, routing: api.LocalRouting, gate_up_linear: nn.Linear, down_linear: nn.Linear, opts: api.Options) Tensor {
     const topk_ids = routing.localIds();
     stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL MoE requires quantize_input=false and routing_weight_placement=after_down", .{});
     stdx.debug.assert(gate_up_linear.bias == null and down_linear.bias == null, "TCL MoE takes experts without bias", .{});
@@ -64,7 +66,7 @@ const Format = union(kernels.Format) {
     fp8_block128: Scales,
 };
 
-fn expertFormat(gate_up: zml.nn.Linear, down: zml.nn.Linear) Format {
+fn expertFormat(gate_up: nn.Linear, down: nn.Linear) Format {
     const scheme = gate_up.quantizationScheme();
     stdx.debug.assert(scheme == down.quantizationScheme(), "TCL MoE projections must have matching quantization schemes", .{});
     return switch (scheme orelse {
@@ -80,7 +82,7 @@ fn expertFormat(gate_up: zml.nn.Linear, down: zml.nn.Linear) Format {
     };
 }
 
-fn fp8Scales(linear: zml.nn.Linear) Tensor {
+fn fp8Scales(linear: nn.Linear) Tensor {
     const q = linear.quantization.?;
     stdx.debug.assert(linear.weight.dtype() == .f8e4m3fn and !q.swizzled_scales and q.global_scale == null and q.input_scale == null, "TCL MoE takes plain E4M3FN block-128 weights", .{});
     stdx.debug.assert(q.scales.dtype() == .bf16 or q.scales.dtype() == .f32, "TCL MoE FP8 scales must be BF16 or F32", .{});
@@ -151,7 +153,7 @@ test "tcl fused experts run on furiosa" {
     try testFusedExperts(.geglu_tanh);
 }
 
-fn testFusedExperts(activation: zml.moe.Activation) !void {
+fn testFusedExperts(activation: api.Activation) !void {
     const platform = zml.testing.env();
     if (platform.target != .furiosa) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -171,8 +173,14 @@ fn testFusedExperts(activation: zml.moe.Activation) !void {
         const gu: Tensor = .init(.{ .expert = e, .dout = 2 * i, .d = d }, .bf16);
         const dn: Tensor = .init(.{ .expert = e, .d = d, .dout = i }, .bf16);
         const Mod = struct {
-            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor, act: zml.moe.Activation) Tensor {
-                return zml.moe.forwardMoe(x_, ids_, w_, .init(gu_, null, .dout), .init(dn_, null, .dout), .tcl, zml.Compiler.current().platform.replicated_mesh, .expert(.replicated), .{
+            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor, act: api.Activation) Tensor {
+                const routing: api.LocalRouting = .{
+                    .ids = ids_,
+                    .weights = w_,
+                    .global_num_experts = @intCast(gu_.dim(.expert)),
+                    .local_num_experts = @intCast(gu_.dim(.expert)),
+                };
+                return fusedExperts(x_, routing, .init(gu_, null, .dout), .init(dn_, null, .dout), .{
                     .activation = act,
                     .quantize_input = false,
                     .routing_weight_placement = .after_down,

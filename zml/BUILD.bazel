@@ -4,19 +4,7 @@ zig_library(
     name = "zml",
     srcs = [
         "attention/attention.zig",
-        "kernels/moe/api.zig",
-        "kernels/moe/moe.zig",
-        "kernels/moe/tests.zig",
-        "kernels/moe/weights.zig",
         "zml.zig",
-        "//zml/kernels/moe/cute",
-        "//zml/kernels/moe/flashinfer_cutlass",
-        "//zml/kernels/moe/fly",
-        "//zml/kernels/moe/metal",
-        "//zml/kernels/moe/mosaic_tpu",
-        "//zml/kernels/moe/stablehlo",
-        "//zml/kernels/moe/tcl",
-        "//zml/kernels/moe/triton",
     ],
     main = "zml.zig",
     tags = ["manual"],
@@ -27,17 +15,13 @@ zig_library(
     ],
     deps = [
         "//bazel",
-        "//dsl/mosaic_tpu:builder",
-        "//dsl/tcl:builder",
-        "//mlir",
-        "//mlir/dialects/nvvm",
         "//pjrt",
-        "//platforms",
         "//stdx",
         "//zml/attention/options",
         "//zml/constants",
         "//zml/core",
         "//zml/kernels/flash_attention",
+        "//zml/kernels/moe",
         "//zml/kernels/paged_attention",
         "//zml/logo",
         "//zml/meta",
@@ -45,12 +29,7 @@ zig_library(
         "//zml/profiling",
         "//zml/quantization",
         "//zml/tokenizer",
-    ] + select({
-        "//platforms:cuda.enabled": [
-            "//platforms/cuda/flashinfer_cutlass_moe",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
 )
 
 zig_test(
