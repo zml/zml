@@ -97,10 +97,33 @@ fn fp8Scales(linear: zml.nn.Linear) Tensor {
 const fp8_small_batch_max_tokens = 64;
 
 fn run(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .per_route).Inputs) Tensor {
-    if (format == .fp8_block128 and cfg.num_tokens <= fp8_small_batch_max_tokens) {
-        return runFp8SmallBatch(cfg, inputs);
-    }
+    const schedule: kernels.Schedule = if (format == .fp8_block128 and cfg.num_tokens <= fp8_small_batch_max_tokens)
+        .small_batch
+    else if (cfg.num_tokens * cfg.top_k <= cfg.local_num_experts)
+        .per_route
+    else
+        .blockwise;
 
+    const call_cfg, const prepared = if (format == .fp8_block128 and schedule == .small_batch)
+        prepareFp8SmallBatch(cfg, inputs)
+    else
+        .{ cfg, prepareRoutedInputs(cfg, inputs) };
+
+    const shape = prepared.x.shape();
+    var y = switch (schedule) {
+        .small_batch => if (format == .fp8_block128)
+            kernels.Kernel(.fp8_block128, .small_batch).call(prepared, .{ .y = shape }, .{ .cfg = call_cfg }).y
+        else
+            unreachable,
+        .per_route => kernels.Kernel(format, .per_route).call(prepared, .{ .y = shape }, .{ .cfg = call_cfg }).y,
+        .blockwise => kernels.Kernel(format, .blockwise).call(prepared, .{ .y = shape }, .{ .cfg = call_cfg }).y,
+    };
+
+    if (schedule == .small_batch) y = y.slice(0, .{ .end = cfg.num_tokens });
+    return y.reshape(inputs.x.shape());
+}
+
+fn prepareRoutedInputs(cfg: kernels.Cfg, inputs: anytype) @TypeOf(inputs) {
     var prepared = inputs;
     prepared.x = inputs.x.reshape(.{ cfg.num_tokens, cfg.hidden_size });
     const ids = inputs.ids.reshape(.{ cfg.num_tokens, cfg.top_k });
@@ -110,16 +133,10 @@ fn run(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel
     const valid = ids.cmp(.GE, Tensor.scalar(0, .i32)).logical(.AND, ids.cmp(.LT, Tensor.scalar(cfg.local_num_experts, .i32)));
     prepared.ids = valid.select(ids, Tensor.scalar(0, .i32));
     prepared.w = valid.select(w, Tensor.scalar(0, .f32));
-
-    const shape = prepared.x.shape();
-    const y = if (cfg.num_tokens * cfg.top_k <= cfg.local_num_experts)
-        kernels.Kernel(format, .per_route).call(prepared, .{ .y = shape }, .{ .cfg = cfg }).y
-    else
-        kernels.Kernel(format, .blockwise).call(prepared, .{ .y = shape }, .{ .cfg = cfg }).y;
-    return y.reshape(inputs.x.shape());
+    return prepared;
 }
 
-fn runFp8SmallBatch(cfg: kernels.Cfg, inputs: kernels.Kernel(.fp8_block128, .small_batch).Inputs) Tensor {
+fn prepareFp8SmallBatch(cfg: kernels.Cfg, inputs: kernels.Kernel(.fp8_block128, .small_batch).Inputs) struct { kernels.Cfg, @TypeOf(inputs) } {
     // WORKAROUND (TCC 2026.5.0b0): a token count other than a power of two
     // panics its adder tree ("Fail to cover valid range", 5 tokens padded
     // to 8): pad with unrouted tokens.
@@ -130,8 +147,7 @@ fn runFp8SmallBatch(cfg: kernels.Cfg, inputs: kernels.Kernel(.fp8_block128, .sma
     prepared.x = inputs.x.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.num_tokens, cfg.hidden_size });
     prepared.ids = inputs.ids.pad(-1, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.num_tokens, cfg.top_k });
     prepared.w = inputs.w.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.num_tokens, cfg.top_k });
-    const y = kernels.Kernel(.fp8_block128, .small_batch).call(prepared, .{ .y = prepared.x.shape() }, .{ .cfg = padded }).y;
-    return y.slice(0, .{ .end = cfg.num_tokens }).reshape(inputs.x.shape());
+    return .{ padded, prepared };
 }
 
 test "tcl fused experts run on furiosa" {
