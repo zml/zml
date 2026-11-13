@@ -1051,7 +1051,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
 
     pjrt_buffer = try pjrt_buffer.copyToMemory(pjrt_api, first_non_device_memory);
 
-    const event = try pjrt_buffer.readyEvent(pjrt_api);
+    const event = pjrt_buffer.readyEvent(pjrt_api);
     defer event.deinit(pjrt_api);
     try event.awaitRaw(pjrt_api);
 
