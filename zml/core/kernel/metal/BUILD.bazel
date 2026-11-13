@@ -1,4 +1,4 @@
-package(default_visibility = ["//zml/kernel:__pkg__"])
+package(default_visibility = ["//zml/core/kernel:__pkg__"])
 
 filegroup(
     name = "metal",

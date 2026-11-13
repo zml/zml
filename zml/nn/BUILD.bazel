@@ -1,0 +1,23 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "nn",
+    import_name = "zml/nn",
+    main = "nn.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects/stablehlo",
+        "//stdx",
+        "//zml/constants",
+        "//zml/core",
+        "//zml/meta",
+        "//zml/quantization",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":nn"],
+)

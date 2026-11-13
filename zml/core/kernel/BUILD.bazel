@@ -1,0 +1,15 @@
+package(default_visibility = ["//zml/core:__pkg__"])
+
+filegroup(
+    name = "kernel",
+    srcs = [
+        "kernel.zig",
+        "//zml/core/kernel/cuda_tile",
+        "//zml/core/kernel/cute",
+        "//zml/core/kernel/fly",
+        "//zml/core/kernel/metal",
+        "//zml/core/kernel/mosaic_tpu",
+        "//zml/core/kernel/tcl",
+        "//zml/core/kernel/triton",
+    ],
+)
