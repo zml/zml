@@ -112,7 +112,7 @@ fn runFp8SmallBatch(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_
     const x = input.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.d });
     const ids = topk_ids.pad(-1, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
     const weights = topk_weights.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
-    const y = kernels.Kernel(.fp8_block128, .fp8_small_batch).call(fp8Inputs(x, ids, weights, gate_up, down, scales), .{ .y = x.shape() }, .{ .cfg = padded }).y;
+    const y = kernels.Kernel(.fp8_block128, .small_batch).call(fp8Inputs(x, ids, weights, gate_up, down, scales), .{ .y = x.shape() }, .{ .cfg = padded }).y;
     return y.slice(0, .{ .end = cfg.t }).reshape(input.shape());
 }
 

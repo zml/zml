@@ -8,7 +8,7 @@ const tcl = zml.kernel.tcl;
 const ActivationKind = @import("../api.zig").ActivationKind;
 
 pub const Format = enum { bf16, fp8_block128 };
-pub const Schedule = enum { per_route, blockwise, fp8_small_batch };
+pub const Schedule = enum { per_route, blockwise, small_batch };
 
 pub const Cfg = struct {
     t: i64,
@@ -24,16 +24,11 @@ const base_inputs: []const [:0]const u8 = &.{ "x", "ids", "w", "gate_up", "down"
 const scale_inputs: []const [:0]const u8 = &.{ "gate_up_scale", "down_scale" };
 
 pub fn Kernel(comptime format: Format, comptime schedule: Schedule) type {
-    if (schedule == .fp8_small_batch and format != .fp8_block128) {
+    if (schedule == .small_batch and format != .fp8_block128) {
         @compileError("TCL MoE FP8 small-batch schedule requires block-128 FP8");
     }
-    const kernel_name = switch (schedule) {
-        .per_route => "moe_per_route",
-        .blockwise => "moe_blockwise",
-        .fp8_small_batch => "moe_expert_stationary",
-    };
     return tcl.Kernel(Cfg, .{
-        .name = kernel_name ++ switch (format) {
+        .name = "moe_" ++ @tagName(schedule) ++ switch (format) {
             .bf16 => "",
             .fp8_block128 => "_fp8",
         },
@@ -50,7 +45,7 @@ pub fn Kernel(comptime format: Format, comptime schedule: Schedule) type {
                 switch (schedule) {
                     .per_route => try perRoute(b, a, in, cfg.activation, format),
                     .blockwise => try blockwise(b, a, in, cfg, format),
-                    .fp8_small_batch => try fp8SmallBatch(b, a, in, cfg),
+                    .small_batch => try fp8SmallBatch(b, a, in, cfg),
                 }
             }
         }.run,
@@ -262,7 +257,7 @@ fn configure(b: *tcl.Builder, comptime schedule: Schedule) void {
                 .tactic_hint = .{ .ForLlmModelComputeBound = 200 },
                 .dma_preference = 1.2,
             },
-            .per_route, .fp8_small_batch => .{
+            .per_route, .small_batch => .{
                 .tactic_hint = .{ .ForLlmModelIOBound = 200 },
                 .num_transaction_simulation_per_pe = 1024,
                 .dma_preference = 0.8,
