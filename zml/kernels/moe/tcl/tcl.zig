@@ -89,10 +89,14 @@ fn runExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Te
     const x = input.reshape(.{ cfg.t, cfg.d });
     const ids = topk_ids.reshape(.{ cfg.t, cfg.k });
     const weights = topk_weights.reshape(.{ cfg.t, cfg.k });
+    // These kernels gather every route, and blockwise also scatters each route
+    // into an expert slot. Give nonlocal routes a valid slot and zero weight.
+    const valid = ids.cmp(.GE, Tensor.scalar(0, .i32)).logical(.AND, ids.cmp(.LT, Tensor.scalar(cfg.e, .i32)));
+    const safe_ids = valid.select(ids, Tensor.scalar(0, .i32));
+    const safe_weights = valid.select(weights, Tensor.scalar(0, .f32));
     const out_shape = x.shape();
     if (scales) |s| {
-        const valid = ids.cmp(.GE, Tensor.scalar(0, .i32)).logical(.AND, ids.cmp(.LT, Tensor.scalar(cfg.e, .i32)));
-        const inputs: ActivationStationaryFp8.Inputs = .{ .x = x, .ids = valid.select(ids, Tensor.scalar(0, .i32)), .w = valid.select(weights, Tensor.scalar(0, .f32)), .gate_up = gate_up, .down = down, .gate_up_scale = s.gate_up, .down_scale = s.down };
+        const inputs: ActivationStationaryFp8.Inputs = .{ .x = x, .ids = safe_ids, .w = safe_weights, .gate_up = gate_up, .down = down, .gate_up_scale = s.gate_up, .down_scale = s.down };
         const y = if (cfg.t * cfg.k <= cfg.e)
             ActivationStationaryFp8.call(inputs, .{ .y = out_shape }, .{ .cfg = cfg }).y
         else
@@ -100,9 +104,9 @@ fn runExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Te
         return y.reshape(input.shape());
     }
     const y = if (cfg.t * cfg.k <= cfg.e)
-        ActivationStationary.call(.{ .x = x, .ids = ids, .w = weights, .gate_up = gate_up, .down = down }, .{ .y = out_shape }, .{ .cfg = cfg }).y
+        ActivationStationary.call(.{ .x = x, .ids = safe_ids, .w = safe_weights, .gate_up = gate_up, .down = down }, .{ .y = out_shape }, .{ .cfg = cfg }).y
     else
-        Blockwise.call(.{ .x = x, .ids = ids, .w = weights, .gate_up = gate_up, .down = down }, .{ .y = out_shape }, .{ .cfg = cfg }).y;
+        Blockwise.call(.{ .x = x, .ids = safe_ids, .w = safe_weights, .gate_up = gate_up, .down = down }, .{ .y = out_shape }, .{ .cfg = cfg }).y;
     return y.reshape(input.shape());
 }
 
