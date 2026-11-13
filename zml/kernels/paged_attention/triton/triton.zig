@@ -2,9 +2,9 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const zml = @import("zml/core");
 const triton = zml.kernel.triton;
-const AttentionOptions = @import("../options.zig").AttentionOptions;
+const AttentionOptions = @import("zml/kernels/paged_attention/options").AttentionOptions;
 const kernels = @import("unified_attention.zig");
 const kernels_oneapi = @import("unified_attention_oneapi.zig");
 const kernels_sparse = @import("sparse_unified_attention.zig");

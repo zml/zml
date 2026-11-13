@@ -1,0 +1,25 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "paged_attention",
+    import_name = "zml/kernels/paged_attention",
+    main = "paged_attention.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/paged_attention/cute",
+        "//zml/kernels/paged_attention/metal",
+        "//zml/kernels/paged_attention/mosaic_tpu",
+        "//zml/kernels/paged_attention/options",
+        "//zml/kernels/paged_attention/stablehlo",
+        "//zml/kernels/paged_attention/tcl",
+        "//zml/kernels/paged_attention/triton",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":paged_attention"],
+)

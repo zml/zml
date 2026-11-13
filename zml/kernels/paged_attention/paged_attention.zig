@@ -2,20 +2,19 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../zml.zig");
-pub const AttentionMask = @import("options.zig").AttentionMask;
-pub const AttentionOptions = @import("options.zig").AttentionOptions;
-pub const cute = @import("cute/cute.zig");
-const metal = @import("metal/metal.zig");
-const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
-const stablehlo = @import("stablehlo/stablehlo.zig");
-pub const tcl = @import("tcl/tcl.zig");
-const triton = @import("triton/triton.zig");
+const zml = @import("zml/core");
+pub const AttentionMask = @import("zml/kernels/paged_attention/options").AttentionMask;
+pub const AttentionOptions = @import("zml/kernels/paged_attention/options").AttentionOptions;
+pub const cute = @import("zml/kernels/paged_attention/cute");
+const metal = @import("zml/kernels/paged_attention/metal");
+const tpu = @import("zml/kernels/paged_attention/mosaic_tpu");
+const stablehlo = @import("zml/kernels/paged_attention/stablehlo");
+pub const tcl = @import("zml/kernels/paged_attention/tcl");
+const triton = @import("zml/kernels/paged_attention/triton");
 
 const PagedAttention = @This();
 
 test {
-    _ = tcl;
     std.testing.refAllDecls(Backend);
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
@@ -63,7 +62,7 @@ pub const Options = union(Backend) {
     triton: triton.paged.Options,
     mosaic_tpu: tpu.mosaic_tpu.Options,
     metal: metal.Options,
-    stablehlo: triton.paged.Options,
+    stablehlo: stablehlo.Options,
     tcl: tcl.paged.Options,
 
     const Args = struct {
@@ -122,7 +121,7 @@ pub const Parameters = union(Backend) {
     triton: triton.paged.Parameters,
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
     metal: metal.Parameters,
-    stablehlo: triton.paged.Parameters,
+    stablehlo: stablehlo.Parameters,
     tcl: tcl.paged.Parameters,
 
     pub fn init(options_: Options) Parameters {
