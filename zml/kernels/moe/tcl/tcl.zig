@@ -44,8 +44,8 @@ pub fn fusedExperts(input: Tensor, routing: api.LocalRouting, gate_up_linear: zm
         .fp8_block128 => topk_ids.cmp(.GE, .scalar(0, .i32)).select(weights, .scalar(0, .f32)),
     };
     return switch (format) {
-        .bf16 => run(.bf16, cfg, .{ .x = input, .ids = topk_ids, .w = local_weights, .gate_up = gate_up, .down = down }),
-        .fp8_block128 => |s| run(.fp8_block128, cfg, .{
+        .bf16 => selectScheduleAndRun(.bf16, cfg, .{ .x = input, .ids = topk_ids, .w = local_weights, .gate_up = gate_up, .down = down }),
+        .fp8_block128 => |s| selectScheduleAndRun(.fp8_block128, cfg, .{
             .x = input,
             .ids = topk_ids,
             .w = local_weights,
@@ -96,28 +96,24 @@ fn fp8Scales(linear: zml.nn.Linear) Tensor {
 // Larger batches fall back to per-route or blockwise dispatch.
 const fp8_small_batch_max_tokens = 64;
 
-fn run(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .per_route).Inputs) Tensor {
-    const schedule: kernels.Schedule = if (format == .fp8_block128 and cfg.num_tokens <= fp8_small_batch_max_tokens)
-        .small_batch
-    else if (cfg.num_tokens * cfg.top_k <= cfg.local_num_experts)
-        .per_route
-    else
-        .blockwise;
+fn selectScheduleAndRun(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .per_route).Inputs) Tensor {
+    if (format == .fp8_block128 and cfg.num_tokens <= fp8_small_batch_max_tokens) {
+        return run(format, .small_batch, cfg, inputs);
+    }
+    if (cfg.num_tokens * cfg.top_k <= cfg.local_num_experts) {
+        return run(format, .per_route, cfg, inputs);
+    }
+    return run(format, .blockwise, cfg, inputs);
+}
 
-    const call_cfg, const prepared = if (format == .fp8_block128 and schedule == .small_batch)
+fn run(comptime format: kernels.Format, comptime schedule: kernels.Schedule, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .per_route).Inputs) Tensor {
+    const call_cfg, const prepared = if (schedule == .small_batch)
         prepareFp8SmallBatch(cfg, inputs)
     else
         .{ cfg, prepareRoutedInputs(cfg, inputs) };
 
     const shape = prepared.x.shape();
-    var y = switch (schedule) {
-        .small_batch => if (format == .fp8_block128)
-            kernels.Kernel(.fp8_block128, .small_batch).call(prepared, .{ .y = shape }, .{ .cfg = call_cfg }).y
-        else
-            unreachable,
-        .per_route => kernels.Kernel(format, .per_route).call(prepared, .{ .y = shape }, .{ .cfg = call_cfg }).y,
-        .blockwise => kernels.Kernel(format, .blockwise).call(prepared, .{ .y = shape }, .{ .cfg = call_cfg }).y,
-    };
+    var y = kernels.Kernel(format, schedule).call(prepared, .{ .y = shape }, .{ .cfg = call_cfg }).y;
 
     if (schedule == .small_batch) y = y.slice(0, .{ .end = cfg.num_tokens });
     return y.reshape(inputs.x.shape());
