@@ -7,7 +7,7 @@ We support the following models, automatically detected from the `model_type` in
 - Llama 3.1
 - Qwen 3.5
 - LFM 2.5
-- Nemotron 3.5 transcribe
+- Nemotron 3.5 Transcribe
 
 ## Run
 
@@ -38,5 +38,6 @@ bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/
 
 - `--model=<path>`: Required. Model repository to load. This can be a local path or a huggingface/S3 URI such as `hf://...` or `s3://...`.
 - `--prompt=<string>`: Optional. Runs a single prompt instead of opening the interactive chat loop.
+- `--input-file=<path>`: Optional. Reads a text prompt file for text models, or WAV audio for Nemotron. Cannot be combined with `--prompt`.
 - `--seqlen=<number>`: Optional. Maximum sequence length. Defaults to `2048`.
 - `--backend=<stablehlo|cute|nki|metal>`: Optional. Attention backend. `cute` uses CuTe flash attention on CUDA GPUs with compute capability 8.0 or newer. If omitted, the program auto-selects one for the current platform, including `cute` on supported CUDA GPUs.

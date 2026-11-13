@@ -1,3 +1,6 @@
+pub const audio = @import("nemotron3_5/audio.zig");
+pub const DecodedAudio = audio.DecodedAudio;
+pub const frontend = @import("nemotron3_5/frontend.zig");
 pub const inference = @import("nemotron3_5/inference.zig");
 pub const CompilationParameters = inference.CompilationParameters;
 pub const CompilationOptions = inference.CompilationParameters;

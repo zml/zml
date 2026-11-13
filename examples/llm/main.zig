@@ -16,6 +16,7 @@ const log = std.log.scoped(.llm);
 const Args = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
+    input_file: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
     backend: ?enum { stablehlo, cute, nki, metal } = null,
@@ -27,12 +28,13 @@ const Args = struct {
         \\ Run text generation with a model selected from `model_type` in the `config.json`.
         \\
         \\ Options:
-        \\   --model=<path>      Path to the model repository (required)
-        \\   --prompt=<string>   Prompt to use for generation (default: none)
-        \\   --seqlen=<number>   Sequence length (default: 2048)
-        \\   --topk=<number>     Top-k sampling cutoff (default: 4)
-        \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
-        \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
+        \\   --model=<path>       Path to the model repository (required)
+        \\   --prompt=<string>    Prompt to use for generation (default: none)
+        \\   --input-file=<path>  Text prompt file or WAV audio for Nemotron (default: none)
+        \\   --seqlen=<number>    Sequence length (default: 2048)
+        \\   --topk=<number>      Top-k sampling cutoff (default: 4)
+        \\   --backend=<text>     Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
+        \\   --profile            Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
 };
@@ -49,6 +51,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+    if (args.prompt != null and args.input_file != null) {
+        log.err("Use either --prompt or --input-file, not both", .{});
+        return error.ConflictingPromptOptions;
+    }
 
     //
     // Virtual File Systems
@@ -119,6 +125,43 @@ pub fn main(init: std.process.Init) !void {
     var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
     defer model.deinit(allocator);
 
+    switch (model) {
+        .nemotron => |nemotron| {
+            if (args.input_file) |path| {
+                const audio = models.nemotron3_5.audio;
+                const frontend = models.nemotron3_5.frontend;
+                const perception_config = nemotron.parsed_config.value.perception orelse {
+                    log.err("Nemotron config.json is missing perception.preprocessor", .{});
+                    return error.MissingAudioPreprocessorConfig;
+                };
+                const bytes = try readInputFile(allocator, io, path);
+                defer allocator.free(bytes);
+
+                const decoded = audio.decode(allocator, bytes) catch |err| {
+                    log.err("Failed to decode WAV input '{s}': {}", .{ path, err });
+                    return err;
+                };
+                defer decoded.deinit(allocator);
+
+                const prepared = audio.prepare(allocator, decoded) catch |err| {
+                    log.err("Failed to prepare audio input '{s}': {}", .{ path, err });
+                    return err;
+                };
+                defer prepared.deinit(allocator);
+
+                log.info("Prepared audio: {d} frames at {d} Hz (mono)", .{ prepared.frameCount(), prepared.sample_rate });
+
+                const features = frontend.compute(allocator, prepared, perception_config.preprocessor) catch |err| {
+                    log.err("Failed to compute log-mel features for '{s}': {}", .{ path, err });
+                    return err;
+                };
+                defer features.deinit(allocator);
+                log.info("Computed log-mel features: {d} valid frames, {d} mel bins ({d} padded frames)", .{ features.validFrameCount, features.binCount, features.frameCount - features.validFrameCount });
+            }
+        },
+        else => {},
+    }
+
     //
     // Load the model and compile it
     //
@@ -144,9 +187,11 @@ pub fn main(init: std.process.Init) !void {
     //
     try printZmlLogo(io, init.environ_map);
 
-    const interactive = args.prompt == null;
+    const interactive = args.prompt == null and args.input_file == null;
     const prompt = if (args.prompt) |prompt_arg| b: {
         break :b try allocator.dupe(u8, prompt_arg);
+    } else if (args.input_file) |path| b: {
+        break :b try readInputFile(allocator, io, path);
     } else b: {
         chat.initHistory();
         const line = c.linenoise(chat.prompt_prefix) orelse return;
@@ -173,6 +218,18 @@ pub fn main(init: std.process.Init) !void {
             .profile = args.profile,
         });
     }
+}
+
+fn readInputFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
+        log.err("Failed to open input file '{s}': {}", .{ path, err });
+        return err;
+    };
+    defer file.close(io);
+
+    var buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    return try reader.interface.readAlloc(allocator, try file.length(io));
 }
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {

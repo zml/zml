@@ -8,7 +8,7 @@ pub const GenerationOptions = common.GenerationOptions;
 pub const parseConfig = common.parseConfig;
 pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
-pub const nemotron3_5_transcribe = @import("models/nemotron3_5_transcribe.zig");
+pub const nemotron3_5 = @import("models/nemotron3_5.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
 pub const qwen3_5_moe = @import("models/qwen3_5_moe.zig");
 
@@ -17,7 +17,7 @@ const log = std.log.scoped(.llm);
 pub const ModelType = enum {
     lfm2,
     llama,
-    nemo_speechlm,
+    nemotron,
     qwen3_5,
     qwen3_5_moe,
 };
@@ -29,7 +29,7 @@ const RawConfig = struct {
 pub const LoadedModel = union(ModelType) {
     lfm2: lfm2.LoadedModel,
     llama: llama.LoadedModel,
-    nemo_speechlm: nemotron3_5_transcribe.LoadedModel,
+    nemotron: nemotron3_5.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
     qwen3_5_moe: qwen3_5_moe.LoadedModel,
 
@@ -109,7 +109,7 @@ pub const CompiledModel = struct {
     const Inner = union(ModelType) {
         lfm2: lfm2.inference.CompiledModel,
         llama: llama.inference.CompiledModel,
-        nemo_speechlm: nemotron3_5_transcribe.inference.CompiledModel,
+        nemotron: nemotron3_5.inference.CompiledModel,
         qwen3_5: qwen3_5.inference.CompiledModel,
         qwen3_5_moe: qwen3_5_moe.inference.CompiledModel,
     };
@@ -147,7 +147,7 @@ pub const CompiledModel = struct {
 pub const Buffers = union(ModelType) {
     lfm2: lfm2.Buffers,
     llama: llama.Buffers,
-    nemo_speechlm: nemotron3_5_transcribe.Buffers,
+    nemotron: nemotron3_5.Buffers,
     qwen3_5: qwen3_5.Buffers,
     qwen3_5_moe: qwen3_5_moe.Buffers,
 };
@@ -156,7 +156,7 @@ pub const Session = struct {
     const Inner = union(ModelType) {
         lfm2: lfm2.Session,
         llama: llama.Session,
-        nemo_speechlm: nemotron3_5_transcribe.Session,
+        nemotron: nemotron3_5.Session,
         qwen3_5: qwen3_5.Session,
         qwen3_5_moe: qwen3_5_moe.Session,
     };
@@ -202,6 +202,13 @@ pub const Session = struct {
 pub fn detectModelType(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !ModelType {
     const parsed = try parseConfig(RawConfig, allocator, io, repo);
     defer parsed.deinit();
-    if (std.meta.stringToEnum(ModelType, parsed.value.model_type)) |model_type| return model_type;
+    const modelType = parsed.value.model_type;
+
+    // To support multiple Nemotron models
+    if (std.mem.eql(u8, modelType, "nemotron_h") or std.mem.eql(u8, modelType, "nemo_speechlm")) return .nemotron;
+
+    if (std.meta.stringToEnum(ModelType, modelType)) |model_type| return model_type;
+
+    log.err("Unknown model type: {s}", .{modelType});
     return error.UnknownModelType;
 }
