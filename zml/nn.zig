@@ -15,7 +15,7 @@ pub const Quantization = quantization.Quantization;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
-const zml = @import("zml.zig");
+const zml = @import("core.zig");
 
 const log = std.log.scoped(.@"zml/nn");
 

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const Tensor = @import("../../tensor.zig").Tensor;
+const Tensor = @import("zml/core").Tensor;
 
 const log = std.log.scoped(.@"zml/moe");
 

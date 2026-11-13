@@ -3249,7 +3249,7 @@ test "GSPMD attributes preserve folded logical axis order" {
 test "GSPMD executes a reduction across a folded logical axis" {
     if (comptime !Target.cpu.isEnabled()) return error.SkipZigTest;
 
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 

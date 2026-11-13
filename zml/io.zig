@@ -7,7 +7,7 @@ const tracer = @import("zml/profiling").tracer;
 pub const VFS = @import("vfs");
 
 const Buffer = @import("buffer.zig").Buffer;
-const Bufferized = @import("zml.zig").Bufferized;
+const Bufferized = @import("core.zig").Bufferized;
 const CreateOptions = @import("platform.zig").CreateOptions;
 const Exe = @import("exe.zig").Exe;
 const mem = @import("mem.zig");

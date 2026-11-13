@@ -3,7 +3,7 @@ const std = @import("std");
 const fly_builder = @import("dsl/fly/builder");
 
 const fly = @import("fly.zig");
-const zml = @import("../../zml.zig");
+const zml = @import("../../core.zig");
 
 /// C = A + B over (M, N) f32, 128-bit vectorized and predicated on the
 /// ragged edge.
