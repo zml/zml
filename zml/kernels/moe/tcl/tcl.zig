@@ -27,22 +27,26 @@ const tcl = zml.kernel.tcl;
 const Options = @import("../api.zig").Options;
 const LocalRouting = @import("../api.zig").LocalRouting;
 
+const Activation = enum { swiglu, geglu_tanh };
+
 /// `input` is `{.t, .d}`, `topk_ids` and `topk_weights` `{.t, .topk}`, `gate_up` `{.expert, .dout = 2 * inter (gate then up), .d}`
 /// and `down` `{.expert, .d, .dout = inter}`. Experts are BF16 or block-128 FP8 with BF16/F32 scales.
-/// SwiGLU, routing weights applied after the down projection.
+/// Supports plain SwiGLU and, for BF16 experts, GEGLU with tanh GELU.
 pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up_linear: zml.nn.Linear, down_linear: zml.nn.Linear, opts: Options) Tensor {
     const topk_ids = routing.localIds();
     stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL MoE owns input precision and applies routing weights after the down projection", .{});
-    stdx.debug.assert(opts.activation == .swiglu and std.meta.eql(opts.activation.swiglu, .{}), "TCL MoE supports SwiGLU without limit, scale or bias", .{});
     stdx.debug.assert(gate_up_linear.bias == null and down_linear.bias == null, "TCL MoE takes experts without bias", .{});
     const gate_up = gate_up_linear.weight;
     const down = down_linear.weight;
     const quantized = gate_up_linear.quantization != null or down_linear.quantization != null;
+    const swiglu = opts.activation == .swiglu and std.meta.eql(opts.activation.swiglu, .{});
+    stdx.debug.assert(swiglu or (!quantized and opts.activation == .geglu_tanh), "TCL MoE supports plain SwiGLU or GEGLU-tanh with BF16 experts, got {s}", .{@tagName(opts.activation)});
+    const activation: Activation = if (swiglu) .swiglu else .geglu_tanh;
     const scales: ?Scales = if (quantized) .{ .gate_up = fp8Scales(gate_up_linear), .down = fp8Scales(down_linear) } else null;
     stdx.debug.assert(input.dtype() == .bf16 and topk_ids.dtype() == .i32 and (quantized or (gate_up.dtype() == .bf16 and down.dtype() == .bf16)), "TCL MoE takes BF16 activations, BF16/block-128 FP8 experts and i32 ids", .{});
     const weights = routing.weights.convert(.f32);
     const local_weights = if (scales != null) topk_ids.cmp(.GE, .scalar(0, .i32)).select(weights, .scalar(0, .f32)) else weights;
-    return runExperts(input, topk_ids, local_weights, gate_up, down, scales);
+    return runExperts(input, topk_ids, local_weights, gate_up, down, scales, activation);
 }
 
 const Scales = struct { gate_up: Tensor, down: Tensor };
@@ -60,13 +64,14 @@ fn fp8Scales(linear: zml.nn.Linear) Tensor {
 /// Tokens up to which a device runs its experts stationary.
 pub const expert_stationary_tokens = 64;
 
-fn runExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, scales: ?Scales) Tensor {
+fn runExperts(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, scales: ?Scales, activation: Activation) Tensor {
     var cfg: Cfg = .{
         .t = input.dim(.t),
         .k = topk_ids.dim(.topk),
         .e = gate_up.dim(.expert),
         .d = input.dim(.d),
         .i = down.dim(.dout),
+        .activation = activation,
     };
     stdx.debug.assert(gate_up.dim(.dout) == 2 * cfg.i and down.dim(.d) == cfg.d and gate_up.dim(.d) == cfg.d, "TCL MoE: mismatched expert shapes", .{});
     if (scales) |s| {
@@ -115,7 +120,15 @@ fn scaleDtype(scales: Scales) tcl.DType {
     return if (scales.gate_up.dtype() == .bf16) .bf16 else .f32;
 }
 
-pub const Cfg = struct { t: i64, k: i64, e: i64, d: i64, i: i64, scale_dtype: tcl.DType = .bf16 };
+pub const Cfg = struct {
+    t: i64,
+    k: i64,
+    e: i64,
+    d: i64,
+    i: i64,
+    scale_dtype: tcl.DType = .bf16,
+    activation: Activation = .swiglu,
+};
 
 const Axes = struct {
     T: tcl.Axis,
@@ -246,7 +259,7 @@ fn project(b: *tcl.Builder, x: builder.Tensor, weight: builder.Tensor, scale: ?b
 
 /// `silu(gate) * up` or `gelu_tanh(gate) * up` of `h = [batch..., S2, I]`
 /// (gate first), times `weights` (`[batch...]`) unless null.
-fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, weights: ?builder.Tensor, comptime fp8: bool) tcl.FinishError!builder.Tensor {
+fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, weights: ?builder.Tensor, activation: Activation, comptime fp8: bool) tcl.FinishError!builder.Tensor {
     var sliced: [4]tcl.Axis = undefined;
     var flat: [3]tcl.Axis = undefined;
     @memcpy(sliced[0..batch.len], batch);
@@ -258,7 +271,7 @@ fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, w
     const f = flat[0 .. batch.len + 1];
     const gate = try b.reshape(try b.slice(h, a.S2, 0, s, .{}), f, .{});
     const up = try b.reshape(try b.slice(h, a.S2, 1, s, .{}), f, .{});
-    // Interleaving requires one binary instruction; SwiGLU chains several.
+    // Interleaving requires one binary instruction; these activations chain several.
     var op = b.tensorOperation(.{ .tactic = .elementwise });
     const g = op.fetch(gate, .{});
     const activated = if (fp8) blk: {
@@ -273,10 +286,19 @@ fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, w
         const silu = try op.commit(rounded, .{ .dtype = .bf16 });
         op = b.tensorOperation(.{ .tactic = .elementwise });
         break :blk op.fetch(silu, .{});
-    } else g.sigmoid().mulf(g);
+    } else switch (activation) {
+        .swiglu => g.sigmoid().mulf(g),
+        .geglu_tanh => geluTanh(g),
+    };
     var v = activated.mulf(op.fetch(up, .{}));
     if (weights) |w| v = v.mulf(op.fetch(w, .{}));
     return op.commit(v, .{ .dtype = .bf16 });
+}
+
+fn geluTanh(g: builder.Value) builder.Value {
+    const cube = g.mulf(g).mulf(g);
+    const inner = g.addf(cube.mulf(0.044715)).mulf(@sqrt(2.0 / std.math.pi));
+    return inner.tanh().addf(1.0).mulf(g).mulf(0.5);
 }
 
 /// Furiosa's compiler configuration for MoE kernels (`qwen3_moe/config.py`):
@@ -335,7 +357,7 @@ fn activationStationaryKernel(comptime fp8: bool) type {
 
                 const scales = try gatherScales(b, a, in, in.ids, &.{ a.T, a.K });
                 const h = try project(b, in.x, gu, scales.gate_up, a.D, a.I, &.{ a.T, a.K, a.S2, a.I }, if (fp8) .bf16 else null);
-                const act = try gated(b, a, h, &.{ a.T, a.K }, if (fp8) null else in.w, fp8);
+                const act = try gated(b, a, h, &.{ a.T, a.K }, if (fp8) null else in.w, cfg.activation, fp8);
                 if (fp8) {
                     const y = try project(b, act, dn, scales.down, a.I, a.D, &.{ a.T, a.K, a.D }, .f32);
                     const op = b.tensorOperation(.{});
@@ -423,7 +445,7 @@ fn blockwiseKernel(comptime fp8: bool) type {
                     const dn = try b.gather(in.down, ids, E, &.{ BGi, D, I }, .{});
                     const scales = try gatherScales(b, a, in, ids, &.{BGi});
                     const h = try project(b, chunk, gu, scales.gate_up, D, I, &.{ BGi, BB, a.S2, I }, if (fp8) .bf16 else null);
-                    const act = try gated(b, a, h, &.{ BGi, BB }, null, fp8);
+                    const act = try gated(b, a, h, &.{ BGi, BB }, null, cfg.activation, fp8);
                     const y = try project(b, act, dn, scales.down, I, D, &.{ BGi, BB, D }, if (fp8) .f32 else .bf16);
                     try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, y)});
                 }
@@ -506,7 +528,7 @@ pub const ExpertStationaryFp8 = tcl.Kernel(Cfg, .{
                 const dn = try b.gather(in.down, ids, E, &.{ C, D, I }, .{});
                 const scales = try gatherScales(b, a, in, ids, &.{C});
                 const h = try project(b, in.x, gu, scales.gate_up, D, I, &.{ C, T, a.S2, I }, .bf16);
-                const act = try gated(b, a, h, &.{ C, T }, null, true);
+                const act = try gated(b, a, h, &.{ C, T }, null, .swiglu, true);
                 const per_expert = try project(b, act, dn, scales.down, I, D, &.{ C, T, D }, .f32);
                 op = b.tensorOperation(.{});
                 const y = try op.commit(op.fetch(per_expert, .{}).mulf(op.fetch(weights, .{})).reduce(&.{C}, .addf), .{ .dtype = .f32 });
@@ -519,6 +541,11 @@ pub const ExpertStationaryFp8 = tcl.Kernel(Cfg, .{
 });
 
 test "tcl fused experts run on furiosa" {
+    try testFusedExperts(.{ .swiglu = .{} });
+    try testFusedExperts(.geglu_tanh);
+}
+
+fn testFusedExperts(activation: zml.moe.Activation) !void {
     const platform = zml.testing.env();
     if (platform.target != .furiosa) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -537,15 +564,15 @@ test "tcl fused experts run on furiosa" {
         const gu: Tensor = .init(.{ .expert = e, .dout = 2 * i, .d = d }, .bf16);
         const dn: Tensor = .init(.{ .expert = e, .d = d, .dout = i }, .bf16);
         const Mod = struct {
-            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor) Tensor {
+            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor, act: zml.moe.Activation) Tensor {
                 return zml.moe.forwardMoe(x_, ids_, w_, .init(gu_, null, .dout), .init(dn_, null, .dout), .tcl, zml.Compiler.current().platform.replicated_mesh, .expert(.replicated), .{
-                    .activation = .{ .swiglu = .{} },
+                    .activation = act,
                     .quantize_input = false,
                     .routing_weight_placement = .after_down,
                 });
             }
         };
-        var exe = try platform.compileFn(allocator, io, Mod.forward, .{ x, ids, w, gu, dn }, .{});
+        var exe = try platform.compileFn(allocator, io, Mod.forward, .{ x, ids, w, gu, dn, activation }, .{});
         defer exe.deinit();
 
         var prng: std.Random.DefaultPrng = .init(@intCast(t));
@@ -597,7 +624,12 @@ test "tcl fused experts run on furiosa" {
                         g += xv * hgu[(ex * 2 * i + n) * d + m].toF32();
                         u += xv * hgu[(ex * 2 * i + i + n) * d + m].toF32();
                     }
-                    act[n] = g / (1 + @exp(-g)) * u;
+                    const gate = switch (activation) {
+                        .swiglu => g / (1 + @exp(-g)),
+                        .geglu_tanh => 0.5 * g * (1 + std.math.tanh(@sqrt(2.0 / std.math.pi) * (g + 0.044715 * g * g * g))),
+                        else => unreachable,
+                    };
+                    act[n] = gate * u;
                 }
                 for (0..d) |m| {
                     var y: f32 = 0;
