@@ -12,27 +12,23 @@ pub const CompilationParameters = struct {
     rng: zml.Tensor.Rng,
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
-    moe_backend: zml.moe.Backend,
     seqlen: u32,
     meshes: common.Meshes,
     xla_dump_to: ?[]const u8,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, moe_backend: zml.moe.Backend, meshes: common.Meshes) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes) CompilationParameters {
         const dtype = mdl.backbone.embed_tokens.weight.dtype();
         return .{
-            .kv_cache = .init(config, 1, seqlen, dtype, .f32, meshes.model),
+            .kv_cache = .init(config, 1, seqlen, dtype, meshes.model),
             .rng = .init(),
             .attention_metadata = .init(.fromBackend(backend)),
             .attention_parameters = .init(.fromBackend(backend)),
-            .moe_backend = moe_backend,
             .seqlen = seqlen,
             .meshes = meshes,
             .xla_dump_to = "/home/ubuntu/xla_dump",
         };
     }
 };
-
-pub const CompilationOptions = CompilationParameters;
 
 pub const LayerIndexBuffer = union(enum) {
     self_attn: zml.Buffer,
@@ -84,8 +80,6 @@ pub const CompiledModel = struct {
         self.decode.deinit();
     }
 };
-
-pub const Inference = CompiledModel;
 
 pub const KernelExe = struct {
     embed: zml.FnExe(model.EmbedTokens.forward),
@@ -336,7 +330,6 @@ fn compileMoe(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pla
     return compileExe(allocator, io, platform, model.BackboneLayer.forwardMoe, .{.{
         .layer = mdl.backbone.layers[layer_index],
         .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
-        .moe_backend = parameters.moe_backend,
     }}, parameters, progress, phase, "moe layer");
 }
 

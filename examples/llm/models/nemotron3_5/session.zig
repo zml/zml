@@ -55,12 +55,12 @@ pub const Session = struct {
         var mamba_layer_index: usize = 0;
         for (layer_types, layer_index_buffers) |layer_type, *layer_index_buffer| {
             layer_index_buffer.* = switch (layer_type) {
-                .attention, .full_attention => b: {
+                .attention => b: {
                     defer self_attn_layer_index += 1;
                     break :b .{ .self_attn = try .scalar(io, platform, self_attn_layer_index, .u32) };
                 },
                 .moe => .{ .moe = {} },
-                .mamba, .linear_attention => blk: {
+                .mamba => blk: {
                     defer mamba_layer_index += 1;
                     break :blk .{ .mamba = mamba_layer_index };
                 },

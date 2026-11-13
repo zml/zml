@@ -102,8 +102,6 @@ pub const TextConfig = struct {
 };
 
 pub const LayerType = enum {
-    linear_attention,
-    full_attention,
     moe,
     mlp,
     mamba,
@@ -199,7 +197,6 @@ pub const LoadedModel = struct {
 
         const options: Model.GenOptions = .{
             .sampling_strategy = generation.sampling_strategy,
-            .max_seq_len = parsed_config.value.llm_config.max_position_embeddings,
         };
 
         return .{
@@ -280,9 +277,7 @@ pub const LoadedModel = struct {
             log.err("Attention backend {} is not available on {}", .{ backend, platform.target });
             return error.UnsupportedAttentionBackend;
         }
-        // The fused MoE backends currently require SwiGLU, not Nemotron's ReLU-squared.
-        const moe_backend: zml.moe.Backend = .stablehlo;
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, moe_backend, meshes);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, meshes);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
@@ -290,7 +285,7 @@ pub const LoadedModel = struct {
 pub const Buffers = zml.Bufferized(Model);
 
 pub const Model = struct {
-    pub const GenOptions = struct { sampling_strategy: zml.nn.SamplingStrategy = .{}, max_seq_len: i64 };
+    pub const GenOptions = struct { sampling_strategy: zml.nn.SamplingStrategy = .{} };
 
     backbone: Backbone,
 
@@ -402,7 +397,7 @@ pub const Backbone = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(Backbone), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
         for (self.layers) |*layer| {
-            BackboneLayer.unloadBuffers(layer, allocator);
+            BackboneLayer.unloadBuffers(layer);
         }
         allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
@@ -455,7 +450,6 @@ pub const BackboneLayer = struct {
     pub const MoeInput = struct {
         layer: BackboneLayer,
         hidden: zml.Tensor,
-        moe_backend: zml.moe.Backend,
     };
 
     pub const MoeOutput = struct {
@@ -466,10 +460,10 @@ pub const BackboneLayer = struct {
         return .{
             .norm = RmsNorm.init(store.withPrefix("norm"), config.llm_config.layer_norm_epsilon),
             .mixer = switch (config.llm_config.layers_block_type[layer_index]) {
-                .attention, .full_attention => .{
+                .attention => .{
                     .attn = try SelfAttn.init(store.withPrefix("mixer"), config),
                 },
-                .mamba, .linear_attention => .{
+                .mamba => .{
                     .mamba = try Mamba2.init(store.withPrefix("mixer"), config),
                 },
                 .moe => .{
@@ -480,7 +474,7 @@ pub const BackboneLayer = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(BackboneLayer), _: std.mem.Allocator) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(BackboneLayer)) void {
         RmsNorm.unloadBuffers(&self.norm);
         switch (self.mixer) {
             .attn => |*attn| SelfAttn.unloadBuffers(attn),
@@ -532,7 +526,7 @@ pub const BackboneLayer = struct {
             .moe => |moe| moe,
             .attn, .mamba => unreachable,
         };
-        const moe_output = moe.forward(normalized_x0, input.moe_backend);
+        const moe_output = moe.forward(normalized_x0);
 
         return .{
             .hidden = moe_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
@@ -665,10 +659,6 @@ pub const Mlp = struct {
         return withProjectionQuantization(store, .init(store.createReplicatedTensor("weight", .{ .dout, .d }), null, .d));
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        zml.Buffer.deinitAll(Mlp, self);
-    }
-
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         const activated = self.up_proj.forward(x, x.dtype()).relu();
         const hidden = activated.mul(activated).rename(.{ .dout = .d });
@@ -694,10 +684,6 @@ const Router = struct {
             .norm_topk_prob = config.norm_topk_prob,
             .routed_scaling_factor = config.routed_scaling_factor,
         };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Router)) void {
-        zml.Buffer.deinitAll(Router, self);
     }
 
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
@@ -824,7 +810,7 @@ pub const Moe = struct {
         if (expert.up_proj.weight.dim(.d) != hidden_size or expert.up_proj.weight.dim(.dout) != intermediate_size or expert.down_proj.weight.dim(.d) != intermediate_size or expert.down_proj.weight.dim(.dout) != hidden_size) return error.InvalidMoeShape;
     }
 
-    pub fn forward(self: Moe, x: zml.Tensor, _: zml.moe.Backend) zml.Tensor {
+    pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
         // The shared fused MoE kernels do not support ReLU-squared yet.
         const up = self.up_proj.gather(topk_ids, x.dtype());
@@ -867,7 +853,6 @@ pub const RmsNorm = struct {
 };
 
 pub const KvCache = struct {
-    layer_types: []const LayerType,
     self_attn: SelfAttnCache,
 
     pub const SelfAttnCache = struct {
@@ -948,22 +933,6 @@ pub const KvCache = struct {
                 .layer_index = self.layer_index,
             };
         }
-
-        pub fn atLayer(self: SelfAttnCache, layer_index: usize) SelfAttnCache {
-            return .{
-                .k = self.k,
-                .v = self.v,
-                .layer_index = zml.Tensor.scalar(layer_index, .u32),
-            };
-        }
-
-        pub fn reuseBuffer(self: SelfAttnCache, other: SelfAttnCache) SelfAttnCache {
-            return .{
-                .k = self.k.reuseBuffer(other.k),
-                .v = self.v.reuseBuffer(other.v),
-                .layer_index = self.layer_index.reuseBuffer(other.layer_index),
-            };
-        }
     };
 
     pub fn init(
@@ -971,11 +940,9 @@ pub const KvCache = struct {
         batch_dim: i64,
         max_seq_len: i64,
         cache_dtype: zml.DataType,
-        _: zml.DataType,
         model_meshe: *const zml.Mesh,
     ) KvCache {
         return .{
-            .layer_types = config.llm_config.layers_block_type,
             .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_meshe),
         };
     }
@@ -990,37 +957,11 @@ pub const KvCache = struct {
         SelfAttnCache.deinitBuffer(&self.self_attn);
     }
 
-    pub const LayerView = struct {
-        parent: KvCache,
-        cache: union(enum) {
-            self_attn: SelfAttnCache,
-            none,
-        },
-    };
-
-    pub fn atLayer(self: KvCache, layer_index: usize) LayerView {
-        return .{
-            .parent = self,
-            .cache = switch (self.layer_types[layer_index]) {
-                .attention, .full_attention => .{ .self_attn = self.self_attn.atLayer(@intCast(countAttentionLayers(self.layer_types[0..layer_index]))) },
-                .moe, .mlp => .none,
-                .mamba, .linear_attention => stdx.debug.panic("Mamba-2 recurrent cache is not integrated into KvCache yet", .{}),
-            },
-        };
-    }
-
-    pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
-        return .{
-            .layer_types = self.layer_types,
-            .self_attn = self.self_attn.reuseBuffer(other.self_attn),
-        };
-    }
-
     fn countAttentionLayers(layer_types: []const LayerType) i64 {
         var count: i64 = 0;
         for (layer_types) |layer_type| {
             switch (layer_type) {
-                .attention, .full_attention => count += 1,
+                .attention => count += 1,
                 else => {},
             }
         }
@@ -1089,13 +1030,6 @@ pub const Mamba2 = struct {
             return .{
                 .conv_state = .init(.{ .b = batch_dim, .s = cfg.conv_kernel - 1, .mix = conv_dim }, conv_dtype),
                 .recurrent_state = .init(.{ .b = batch_dim, .h = cfg.mamba_num_heads, .p = cfg.mamba_head_dim, .n = cfg.ssm_state_size }, .f32),
-            };
-        }
-
-        pub fn zeroes(self: Cache) Cache {
-            return .{
-                .conv_state = .zeroes(self.conv_state.shape()),
-                .recurrent_state = .zeroes(self.recurrent_state.shape()),
             };
         }
 
