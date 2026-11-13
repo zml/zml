@@ -6,7 +6,7 @@ const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
 const Compiler = @import("../Compiler.zig");
-const meta = @import("../meta.zig");
+const meta = @import("zml/meta");
 const mlirx = @import("../mlirx.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");

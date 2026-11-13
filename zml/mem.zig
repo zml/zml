@@ -3,12 +3,12 @@ const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 const assert = std.debug.assert;
 
+const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
 
 const Buffer = @import("buffer.zig").Buffer;
 const Device = @import("platform.zig").Device;
 const Memory = @import("platform.zig").Memory;
-const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
 const Tensor = @import("tensor.zig").Tensor;
 

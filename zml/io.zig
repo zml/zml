@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 pub const VFS = @import("vfs");
@@ -10,7 +11,6 @@ const CreateOptions = @import("platform.zig").CreateOptions;
 const Exe = @import("exe.zig").Exe;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
-const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");

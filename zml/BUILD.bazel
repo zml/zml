@@ -74,6 +74,21 @@ zig_library(
 )
 
 zig_library(
+    name = "meta",
+    import_name = "zml/meta",
+    main = "meta.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//stdx"],
+)
+
+zig_library(
+    name = "constants",
+    import_name = "zml/constants",
+    main = "constants.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_library(
     name = "zml",
     srcs = [
         "Compiler.zig",
@@ -82,7 +97,6 @@ zig_library(
         "attention/attention.zig",
         "buffer.zig",
         "buffer/HostAccessible.zig",
-        "constants.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",
@@ -97,7 +111,6 @@ zig_library(
         "kernels/paged_attention/paged_attention.zig",
         "logo.zig",
         "mem.zig",
-        "meta.zig",
         "mlirx.zig",
         "nn.zig",
         "ops.zig",
@@ -146,6 +159,8 @@ zig_library(
         "-freference-trace=20",
     ],
     deps = [
+        ":constants",
+        ":meta",
         ":posix",
         ":profiler_options",
         ":profiling_traceme_lib",

@@ -1,7 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const constants = @import("zml/constants");
 const func = @import("mlir/dialects/func");
+const meta = @import("zml/meta");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const platforms = @import("platforms");
@@ -11,10 +13,8 @@ const stdx = @import("stdx");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("mem.zig").Bufferized;
 const Compiler = @import("Compiler.zig");
-const constants = @import("constants.zig");
 const CustomCallBuffer = @import("pjrtx.zig").CustomCallBuffer;
 const DataType = @import("dtype.zig").DataType;
-const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const manual_computation = @import("ops/manual_computation.zig");
 pub const manualComputation = manual_computation.manualComputation;
