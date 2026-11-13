@@ -1,0 +1,33 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "smi",
+    srcs = [
+        "collector.zig",
+        "counter.zig",
+        "double_buffer.zig",
+        "dynlib.zig",
+        "fdinfo.zig",
+        "host/linux.zig",
+        "host/macos.zig",
+        "hwmon.zig",
+        "model.zig",
+        "pci.zig",
+        "proc.zig",
+        "remote.zig",
+        "sandbox.zig",
+        "sysfs.zig",
+        "units.zig",
+    ],
+    import_name = "zml-smi",
+    main = "smi.zig",
+    visibility = ["//bin/zml-smi:__subpackages__"],
+    deps = ["@rules_zig//zig/runfiles"],
+)
+
+zig_test(
+    name = "test",
+    # The sandbox test looks the directory up through the runfiles.
+    data = ["//bin/zml-smi:sandbox"],
+    deps = [":smi"],
+)
