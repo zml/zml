@@ -14,6 +14,7 @@ pub const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 pub const stdx = @import("stdx");
 pub const tokenizer = @import("zml/tokenizer");
+pub const tracer = @import("zml/profiling").tracer;
 
 pub const attention = @import("attention/attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
@@ -40,7 +41,6 @@ pub const platform = @import("platform.zig");
 pub const Memory = platform.Memory;
 pub const Platform = platform.Platform;
 pub const Target = platform.Target;
-pub const tracer = @import("profiling/tracer.zig");
 pub const quantization = @import("quantization.zig");
 pub const Quantization = quantization.Quantization;
 pub const safetensors = @import("safetensors.zig");

@@ -4,12 +4,12 @@ const builtin = @import("builtin");
 const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
+const tracer = @import("zml/profiling").tracer;
 
 const Buffer = @import("buffer.zig").Buffer;
 const Compiler = @import("Compiler.zig");
 const mem = @import("mem.zig");
 const Platform = @import("platform.zig").Platform;
-const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
