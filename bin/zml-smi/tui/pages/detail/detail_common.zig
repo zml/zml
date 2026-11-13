@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const smi = @import("zml-smi");
 const data = @import("../../data.zig");
 const theme = @import("../../theme.zig");
 const utils = @import("../../lib/utils.zig");
@@ -9,9 +10,9 @@ const compose = @import("../../lib/compose.zig");
 const Chart = @import("../../widgets/chart.zig");
 const ColumnLayout = @import("../../widgets/column_layout.zig");
 
-pub fn headerText(arena: std.mem.Allocator, id: u16, name: []const u8) std.mem.Allocator.Error!vxfw.Text {
+pub fn headerText(arena: std.mem.Allocator, id: u16, device: smi.Device) std.mem.Allocator.Error!vxfw.Text {
     return .{
-        .text = try std.fmt.allocPrint(arena, "Device {d}: {s}", .{ id, name }),
+        .text = try std.fmt.allocPrint(arena, "Device {d}: {s}{s}", .{ id, device.name orelse "Unknown", try utils.versions(arena, device, .all) }),
         .style = theme.header_style,
         .softwrap = false,
         .overflow = .clip,

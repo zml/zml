@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const smi = @import("zml-smi");
 const data = @import("../../data.zig");
 const utils = @import("../../lib/utils.zig");
 const ui = @import("../../lib/ui.zig");
@@ -14,11 +15,12 @@ pub fn draw(
     ctx: vxfw.DrawContext,
     w: u16,
     id: u16,
-    tp: data.TpuInfo,
+    device: smi.Device,
+    tp: smi.Tpu,
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {
     // ── Header ──────────────────────────────────────────────
-    const header = try common.headerText(ctx.arena, id, tp.name orelse "Unknown");
+    const header = try common.headerText(ctx.arena, id, device);
 
     // ── Utilization + Memory charts ─────────────────────────
     const util_chart = try common.historyChart(ctx, state, id, state.history.util, .{

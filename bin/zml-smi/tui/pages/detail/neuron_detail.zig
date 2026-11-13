@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const smi = @import("zml-smi");
 const data = @import("../../data.zig");
 const utils = @import("../../lib/utils.zig");
 const ui = @import("../../lib/ui.zig");
@@ -15,15 +16,12 @@ pub fn draw(
     ctx: vxfw.DrawContext,
     w: u16,
     id: u16,
-    nc: data.NeuronInfo,
+    device: smi.Device,
+    nc: smi.Neuron,
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {
     // ── Header ──────────────────────────────────────────────
-    const name_suffix: []const u8 = if (nc.driver_version) |v|
-        try std.fmt.allocPrint(ctx.arena, " ({s})", .{v})
-    else
-        "";
-    const header = try common.headerText(ctx.arena, id, try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ nc.name orelse "Unknown", name_suffix }));
+    const header = try common.headerText(ctx.arena, id, device);
 
     // ── Utilization + Memory charts ─────────────────────────
     const util_chart = try common.historyChart(ctx, state, id, state.history.util, .{

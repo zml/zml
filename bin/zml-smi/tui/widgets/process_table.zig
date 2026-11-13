@@ -7,8 +7,7 @@ const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const TitledBorder = @import("titled_border.zig");
 const ColumnLayout = @import("column_layout.zig");
-const pi = @import("zml-smi/info").process_info;
-const ProcessInfo = pi.ProcessInfo;
+const ProcessInfo = @import("zml-smi").ProcessInfo;
 
 const RichText = vxfw.RichText;
 const Segment = vaxis.Cell.Segment;
@@ -30,17 +29,22 @@ pub fn deinit(self: *ProcessTable, allocator: std.mem.Allocator) void {
     self.processes.deinit(allocator);
 }
 
-pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16) void {
+pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16, frame: std.mem.Allocator) void {
     self.scroll_bars.scroll_view.children.builder.userdata = self;
     self.processes.clearRetainingCapacity();
 
-    for (state.processes.front().items) |entry| {
+    const merged = state.collector.processes.lock(state.io);
+    defer state.collector.processes.unlock(state.io);
+    for (merged.rows.items) |entry| {
         if (device_id) |did| {
             if (entry.device_idx != did) {
                 continue;
             }
         }
-        self.processes.append(state.gpa, entry) catch break;
+        var row = entry;
+        row.username = frame.dupe(u8, entry.username) catch "";
+        row.comm = frame.dupe(u8, entry.comm) catch "";
+        self.processes.append(state.gpa, row) catch break;
     }
 
     // Sort by dev_mem descending

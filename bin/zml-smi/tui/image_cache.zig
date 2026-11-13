@@ -1,37 +1,34 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const smi = @import("zml-smi");
 
 const ImageCache = @This();
 
 pub var global: ImageCache = .{};
 
-map: std.StringHashMapUnmanaged(vaxis.Image) = .empty,
+const logos: std.EnumMap(smi.Target, []const u8) = .init(.{
+    .cuda = @embedFile("assets/nvidia.png"),
+    .rocm = @embedFile("assets/amd.png"),
+    .oneapi = @embedFile("assets/intel.png"),
+    .neuron = @embedFile("assets/neuron.png"),
+    .tpu = @embedFile("assets/tpu.png"),
+});
 
-pub fn deinit(self: *ImageCache, allocator: std.mem.Allocator) void {
-    self.map.deinit(allocator);
-}
+zml: ?vaxis.Image = null,
+targets: std.EnumMap(smi.Target, vaxis.Image) = .{},
 
-pub fn load(
-    self: *ImageCache,
-    vx: *vaxis.Vaxis,
-    allocator: std.mem.Allocator,
-    writer: *std.Io.Writer,
-    key: []const u8,
-    data: []const u8,
-) void {
-    const image = vx.loadImage(allocator, writer, .{ .mem = data }) catch return;
-    self.map.put(allocator, key, image) catch return;
+pub fn deinit(self: *ImageCache) void {
+    self.* = .{};
 }
 
 pub fn loadAll(self: *ImageCache, vx: *vaxis.Vaxis, allocator: std.mem.Allocator, writer: *std.Io.Writer) void {
-    self.load(vx, allocator, writer, "logo", @embedFile("assets/logo.png"));
-    self.load(vx, allocator, writer, "gpu_cuda", @embedFile("assets/nvidia.png"));
-    self.load(vx, allocator, writer, "gpu_rocm", @embedFile("assets/amd.png"));
-    self.load(vx, allocator, writer, "gpu_oneapi", @embedFile("assets/intel.png"));
-    self.load(vx, allocator, writer, "gpu_neuron", @embedFile("assets/neuron.png"));
-    self.load(vx, allocator, writer, "gpu_tpu", @embedFile("assets/tpu.png"));
+    self.zml = vx.loadImage(allocator, writer, .{ .mem = @embedFile("assets/logo.png") }) catch null;
+    for (std.enums.values(smi.Target)) |target| {
+        const png = logos.get(target) orelse continue;
+        self.targets.put(target, vx.loadImage(allocator, writer, .{ .mem = png }) catch continue);
+    }
 }
 
-pub fn get(self: *const ImageCache, key: []const u8) ?vaxis.Image {
-    return self.map.get(key);
+pub fn get(self: *const ImageCache, target: smi.Target) ?vaxis.Image {
+    return self.targets.get(target);
 }
