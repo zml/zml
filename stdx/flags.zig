@@ -643,3 +643,109 @@ pub fn defaultValue(comptime FieldType: type, default_value_ptr: ?*const anyopaq
     const dp: *const FieldType = @ptrCast(@alignCast(default_value_ptr orelse return null));
     return dp.*;
 }
+
+/// Builds a real args iterator over `args` (POSIX only, where `Args` is a plain argv vector).
+fn testArgsIterator(args: []const [*:0]const u8) std.process.Args.Iterator {
+    const process_args: std.process.Args = .{ .vector = args };
+    return process_args.iterate();
+}
+
+fn testParseFlags(comptime Flags: type, args: []const [*:0]const u8) Flags {
+    var it = testArgsIterator(args);
+    const result = parse_flags(&it, Flags);
+    std.debug.assert(it.next() == null);
+    return result;
+}
+
+const TestFlags = struct {
+    model: []const u8,
+    boolean_flag: bool = false,
+    count: u32 = 1,
+    ratio: f32 = 0.5,
+    mode: enum { fast, slow } = .fast,
+    seed: ?i64 = null,
+};
+
+test "parse_flags: --flag=value syntax" {
+    const flags = testParseFlags(TestFlags, &.{ "--model=AA", "--count=3", "--ratio=0.25", "--mode=slow", "--seed=-7" });
+    try std.testing.expectEqualStrings("AA", flags.model);
+    try std.testing.expectEqual(false, flags.boolean_flag);
+    try std.testing.expectEqual(3, flags.count);
+    try std.testing.expectEqual(0.25, flags.ratio);
+    try std.testing.expectEqual(.slow, flags.mode);
+    try std.testing.expectEqual(-7, flags.seed);
+}
+
+test "parse_flags: --flag value syntax" {
+    const flags = testParseFlags(TestFlags, &.{ "--model", "AA", "--count", "3", "--ratio", "0.25", "--mode", "slow", "--seed", "-7" });
+    try std.testing.expectEqualStrings("AA", flags.model);
+    try std.testing.expectEqual(3, flags.count);
+    try std.testing.expectEqual(0.25, flags.ratio);
+    try std.testing.expectEqual(.slow, flags.mode);
+    try std.testing.expectEqual(-7, flags.seed);
+}
+
+test "parse_flags: bool flag after spaced value is not consumed as a value" {
+    const flags = testParseFlags(TestFlags, &.{ "--model", "AA", "--boolean-flag" });
+    try std.testing.expectEqualStrings("AA", flags.model);
+    try std.testing.expectEqual(true, flags.boolean_flag);
+}
+
+test "parse_flags: bool flag before spaced value" {
+    const flags = testParseFlags(TestFlags, &.{ "--boolean-flag", "--model", "AA" });
+    try std.testing.expectEqualStrings("AA", flags.model);
+    try std.testing.expectEqual(true, flags.boolean_flag);
+}
+
+test "parse_flags: mixed syntaxes and defaults" {
+    const flags = testParseFlags(TestFlags, &.{ "--count=2", "--model", "hf://org/repo", "--boolean-flag" });
+    try std.testing.expectEqualStrings("hf://org/repo", flags.model);
+    try std.testing.expectEqual(true, flags.boolean_flag);
+    try std.testing.expectEqual(2, flags.count);
+    try std.testing.expectEqual(0.5, flags.ratio);
+    try std.testing.expectEqual(.fast, flags.mode);
+    try std.testing.expectEqual(null, flags.seed);
+}
+
+test "parse_flags: --flag=value allows values starting with --" {
+    const flags = testParseFlags(TestFlags, &.{"--model=--AA"});
+    try std.testing.expectEqualStrings("--AA", flags.model);
+}
+
+test "parse_flags: spaced value containing '='" {
+    const flags = testParseFlags(TestFlags, &.{ "--model", "a=b" });
+    try std.testing.expectEqualStrings("a=b", flags.model);
+}
+
+test "parse_flags: longer flag names are not confused with prefixes" {
+    const Flags = struct {
+        model: []const u8 = "",
+        model_path: []const u8 = "",
+    };
+    const flags = testParseFlags(Flags, &.{ "--model-path", "P", "--model", "M" });
+    try std.testing.expectEqualStrings("M", flags.model);
+    try std.testing.expectEqualStrings("P", flags.model_path);
+}
+
+test "parse_flags: spaced value followed by positional" {
+    const Flags = struct {
+        model: []const u8,
+        positional: struct {
+            path: []const u8,
+        },
+    };
+    const flags = testParseFlags(Flags, &.{ "--model", "AA", "some/path" });
+    try std.testing.expectEqualStrings("AA", flags.model);
+    try std.testing.expectEqualStrings("some/path", flags.positional.path);
+}
+
+test "parse_commands: subcommand with spaced value" {
+    const Commands = union(enum) {
+        run: struct { model: []const u8, verbose: bool = false },
+        list: void,
+    };
+    var it = testArgsIterator(&.{ "run", "--model", "AA", "--verbose" });
+    const cmd = parse_commands(&it, Commands);
+    try std.testing.expectEqualStrings("AA", cmd.run.model);
+    try std.testing.expectEqual(true, cmd.run.verbose);
+}
