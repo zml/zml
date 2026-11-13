@@ -1,16 +1,16 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
+const nn = @import("zml/nn");
 
-pub const cute = @import("cute/cute.zig");
-pub const metal = @import("metal/metal.zig");
-pub const nki = @import("nki/nki.zig");
-const zml = @import("../../zml.zig");
-const Options = @import("../../attention/Options.zig");
+pub const cute = @import("zml/kernels/flash_attention/cute");
+pub const metal = @import("zml/kernels/flash_attention/metal");
+pub const nki = @import("zml/kernels/flash_attention/nki");
+const zml = @import("zml/core");
+const Options = @import("zml/attention/options");
 
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("tests.zig");
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
@@ -129,11 +129,11 @@ pub const Metadata = union(Backend) {
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: Options) zml.Tensor {
-    zml.stdx.debug.assert(zml.Compiler.current().manual_computation_depth > 0, "Attention kernels require an explicit manualComputation boundary", .{});
+    stdx.debug.assert(zml.Compiler.current().manual_computation_depth > 0, "Attention kernels require an explicit manualComputation boundary", .{});
     return switch (parameters) {
         .cute => cute.attention(q, k, v, token_index, opts.causal),
         // The NKI and Metal kernels are causal only.
-        .nki => if (opts.causal) nki.attention(q, k, v, token_index, parameters.nki) else zml.nn.sdpa(q, k, v, .{}),
-        .metal => if (opts.causal) metal.attention(q, k, v, token_index, metadata.metal) else zml.nn.sdpa(q, k, v, .{}),
+        .nki => if (opts.causal) nki.attention(q, k, v, token_index, parameters.nki) else nn.sdpa(q, k, v, .{}),
+        .metal => if (opts.causal) metal.attention(q, k, v, token_index, metadata.metal) else nn.sdpa(q, k, v, .{}),
     };
 }

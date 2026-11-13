@@ -1,9 +1,19 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-filegroup(
+zig_library(
     name = "metal",
-    srcs = [
-        "flash_attn.zig",
-        "metal.zig",
+    srcs = ["flash_attn.zig"],
+    import_name = "zml/kernels/flash_attention/metal",
+    main = "metal.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml/core",
+        "//zml/nn",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":metal"],
 )

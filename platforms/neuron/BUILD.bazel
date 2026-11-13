@@ -135,8 +135,8 @@ zig_library(
     main = "nki_kernel.zig",
     tags = ["manual"],
     visibility = [
-        "//zml:__pkg__",
         "//zml/core:__pkg__",
+        "//zml/kernels/flash_attention/nki:__pkg__",
     ],
     deps = [
         ":neuron",
