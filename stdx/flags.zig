@@ -591,25 +591,19 @@ fn fields_to_comma_list(comptime E: type) []const u8 {
     }
 }
 
+/// Maps a field name to its CLI flag, e.g. `model_path` to `--model-path`.
 pub fn flag_name(comptime field_name: []const u8) []const u8 {
-    // TODO(Zig): Cleanup when this is fixed after Zig 0.11.
-    // Without comptime blk, the compiler thinks the result is a runtime slice returning a UAF.
-    return comptime blk: {
-        assert(!std.mem.eql(u8, field_name, "positional"));
-
-        var result: []const u8 = "--";
-        var index = 0;
-        while (std.mem.indexOf(u8, field_name[index..], "_")) |i| {
-            result = result ++ field_name[index..][0..i] ++ "-";
-            index = index + i + 1;
-        }
-        result = result ++ field_name[index..];
-        break :blk result;
-    };
+    comptime assert(!std.mem.eql(u8, field_name, "positional"));
+    comptime var name = field_name[0..field_name.len].*;
+    comptime std.mem.replaceScalar(u8, &name, '_', '-');
+    const dashed = name;
+    return "--" ++ dashed;
 }
 
 test flag_name {
-    try std.testing.expectEqualStrings(flag_name("statsd"), "--statsd");
+    try std.testing.expectEqualStrings("--statsd", flag_name("statsd"));
+    try std.testing.expectEqualStrings("--model-path", flag_name("model_path"));
+    try std.testing.expectEqualStrings("--a-b-c", flag_name("a_b_c"));
 }
 
 fn flag_name_positional(comptime field_name: []const u8) []const u8 {
