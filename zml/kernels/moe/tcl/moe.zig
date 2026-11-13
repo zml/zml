@@ -8,15 +8,25 @@ const tcl = zml.kernel.tcl;
 const ActivationKind = @import("../api.zig").ActivationKind;
 
 pub const Format = enum { bf16, fp8_block128 };
+
+/// Dispatch in `tcl.zig` uses the first matching schedule.
+///
+/// - `.small_batch` for FP8 up to 64 tokens before padding. Run each selected
+///   expert on the whole batch to reuse its weights, with zero routing weight
+///   for unrouted pairs.
+/// - `.per_route` when `num_tokens * top_k <= local_num_experts`. Gather
+///   weights for each route to avoid the overhead of grouping routes.
+/// - `.blockwise` otherwise. Pack routed tokens into blocks by expert to
+///   reuse weights within each block, then gather results back by route.
 pub const Schedule = enum { per_route, blockwise, small_batch };
 
 pub const Cfg = struct {
-    t: i64,
-    k: i64,
-    e: i64,
-    d: i64,
-    i: i64,
-    scale_dtype: tcl.DType = .bf16,
+    num_tokens: i64,
+    top_k: i64,
+    local_num_experts: i64,
+    hidden_size: i64,
+    expert_intermediate_size: i64,
+    weight_scale_dtype: tcl.DType = .bf16,
     activation: ActivationKind = .swiglu,
 };
 
@@ -64,12 +74,12 @@ const Axes = struct {
 
     fn init(b: *tcl.Builder, cfg: Cfg) Axes {
         return .{
-            .T = b.axis("T", cfg.t),
-            .K = b.axis("K", cfg.k),
-            .E = b.axis("E", cfg.e),
-            .D = b.axis("D", cfg.d),
-            .I = b.axis("I", cfg.i),
-            .I2 = b.axis("I2", 2 * cfg.i),
+            .T = b.axis("T", cfg.num_tokens),
+            .K = b.axis("K", cfg.top_k),
+            .E = b.axis("E", cfg.local_num_experts),
+            .D = b.axis("D", cfg.hidden_size),
+            .I = b.axis("I", cfg.expert_intermediate_size),
+            .I2 = b.axis("I2", 2 * cfg.expert_intermediate_size),
             .S2 = b.axis("S2", 2),
             .S1 = b.axis("S1", 1),
         };
@@ -92,17 +102,17 @@ fn args(b: *tcl.Builder, a: Axes, cfg: Cfg, comptime format: Format) tcl.FinishE
         const t = try b.declareArgs(spec);
         return .{ .x = t.x, .ids = t.ids, .w = t.w, .gate_up = t.gate_up, .down = t.down };
     }
-    const IG = b.axis("IG", @divExact(cfg.i, 128));
-    const DG = b.axis("DG", @divExact(cfg.d, 128));
-    const I2G = b.axis("I2G", 2 * @divExact(cfg.i, 128));
+    const IG = b.axis("IG", @divExact(cfg.expert_intermediate_size, 128));
+    const DG = b.axis("DG", @divExact(cfg.hidden_size, 128));
+    const I2G = b.axis("I2G", 2 * @divExact(cfg.expert_intermediate_size, 128));
     const t = try b.declareArgs(.{
         .x = spec.x,
         .ids = spec.ids,
         .w = spec.w,
         .gate_up = spec.gate_up,
         .down = spec.down,
-        .gate_up_scale = .{ .dtype = cfg.scale_dtype, .axes = &.{ a.E, I2G, DG } },
-        .down_scale = .{ .dtype = cfg.scale_dtype, .axes = &.{ a.E, DG, IG } },
+        .gate_up_scale = .{ .dtype = cfg.weight_scale_dtype, .axes = &.{ a.E, I2G, DG } },
+        .down_scale = .{ .dtype = cfg.weight_scale_dtype, .axes = &.{ a.E, DG, IG } },
     });
     return .{ .x = t.x, .ids = t.ids, .w = t.w, .gate_up = t.gate_up, .down = t.down, .gate_up_scale = t.gate_up_scale, .down_scale = t.down_scale };
 }
@@ -303,7 +313,7 @@ fn perRoute(b: *tcl.Builder, a: Axes, in: Args, activation: ActivationKind, comp
 
 /// Rows per expert block: the next power of two of the routes per expert.
 fn blockRows(cfg: Cfg) i64 {
-    const per_expert = std.math.divCeil(i64, cfg.t * cfg.k, cfg.e) catch unreachable;
+    const per_expert = std.math.divCeil(i64, cfg.num_tokens * cfg.top_k, cfg.local_num_experts) catch unreachable;
     return @intCast(std.math.ceilPowerOfTwo(u64, @intCast(@max(per_expert, 4))) catch unreachable);
 }
 
@@ -314,8 +324,8 @@ const blocks_per_chunk = 32;
 fn blockwise(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg, comptime format: Format) tcl.FinishError!void {
     const bb = blockRows(cfg);
     // One block per expert at least, then enough for every route.
-    const max_blocks = std.math.divCeil(i64, @max(cfg.t * cfg.k - cfg.e, 0), bb) catch unreachable;
-    const chunks = std.math.divCeil(i64, max_blocks + cfg.e, blocks_per_chunk) catch unreachable;
+    const max_blocks = std.math.divCeil(i64, @max(cfg.num_tokens * cfg.top_k - cfg.local_num_experts, 0), bb) catch unreachable;
+    const chunks = std.math.divCeil(i64, max_blocks + cfg.local_num_experts, blocks_per_chunk) catch unreachable;
     const BB = b.axis("BB", bb);
     const BGi = b.axis("BGi", blocks_per_chunk);
     const Go = b.axis("Go", chunks);
@@ -324,7 +334,7 @@ fn blockwise(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg, comptime format: Form
     const T, const K, const E, const D, const I = .{ a.T, a.K, a.E, a.D, a.I };
 
     // Routing: route (t, k) goes to row `slot` of block `start[e] + rank`.
-    const experts = try b.arange(cfg.e, .i32, &.{E}, .{});
+    const experts = try b.arange(cfg.local_num_experts, .i32, &.{E}, .{});
     var op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
     const dist = try op.commit(op.fetch(in.ids, .{}).subi(op.fetch(experts, .{})), .{});
     op = b.tensorOperation(.{});
@@ -348,7 +358,7 @@ fn blockwise(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg, comptime format: Form
     const ended = try op.commit(op.where(ends, .le, 0, 1, 0), .{});
     op = b.tensorOperation(.{});
     // Padding blocks past the last expert reuse the last one.
-    const block_expert = try op.commit(op.fetch(ended, .{}).reduce(&.{E}, .addi).binary(.mini, cfg.e - 1), .{});
+    const block_expert = try op.commit(op.fetch(ended, .{}).reduce(&.{E}, .addi).binary(.mini, cfg.local_num_experts - 1), .{});
     const used = try b.symExpr(.div, try b.symExpr(.add, try b.reduceMaxI32(block_end), blocks_per_chunk - 1), blocks_per_chunk);
 
     // Rows of unused slots are never read back.
@@ -376,9 +386,9 @@ fn blockwise(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg, comptime format: Form
 }
 
 /// Number of experts processed per device-loop iteration, based on the
-/// batch's route count (`cfg.t * cfg.k`).
+/// batch's route count (`cfg.num_tokens * cfg.top_k`).
 fn expertsPerChunk(cfg: Cfg) i64 {
-    const routes: u64 = @intCast(std.math.divCeil(i64, cfg.t * cfg.k, 16) catch unreachable);
+    const routes: u64 = @intCast(std.math.divCeil(i64, cfg.num_tokens * cfg.top_k, 16) catch unreachable);
     return @intCast(std.math.clamp(std.math.ceilPowerOfTwo(u64, routes) catch unreachable, 2, 16));
 }
 
@@ -387,14 +397,14 @@ fn expertsPerChunk(cfg: Cfg) i64 {
 /// scale the F32 down-projection results before summing the experts and steps.
 fn fp8SmallBatch(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg) tcl.FinishError!void {
     const chunk = expertsPerChunk(cfg);
-    const steps = std.math.divCeil(i64, @min(cfg.e, cfg.t * cfg.k), chunk) catch unreachable;
+    const steps = std.math.divCeil(i64, @min(cfg.local_num_experts, cfg.num_tokens * cfg.top_k), chunk) catch unreachable;
     const C = b.axis("C", chunk);
     const Go = b.axis("Go", steps);
     const J = b.axis("J", steps * chunk);
     const T, const K, const E, const D, const I = .{ a.T, a.K, a.E, a.D, a.I };
 
     // Each token's routing weight per expert, and the used experts.
-    const experts = try b.arange(cfg.e, .i32, &.{E}, .{});
+    const experts = try b.arange(cfg.local_num_experts, .i32, &.{E}, .{});
     var op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
     const dist = try op.commit(op.fetch(in.ids, .{}).subi(op.fetch(experts, .{})), .{});
     op = b.tensorOperation(.{});

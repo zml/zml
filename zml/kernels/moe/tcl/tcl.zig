@@ -25,40 +25,40 @@ pub fn fusedExperts(input: Tensor, routing: api.LocalRouting, gate_up_linear: zm
     const gate_up = gate_up_linear.weight;
     const down = down_linear.weight;
     const cfg: kernels.Cfg = .{
-        .t = input.dim(.t),
-        .k = topk_ids.dim(.topk),
-        .e = gate_up.dim(.expert),
-        .d = input.dim(.d),
-        .i = down.dim(.dout),
-        .scale_dtype = switch (format) {
+        .num_tokens = input.dim(.t),
+        .top_k = topk_ids.dim(.topk),
+        .local_num_experts = gate_up.dim(.expert),
+        .hidden_size = input.dim(.d),
+        .expert_intermediate_size = down.dim(.dout),
+        .weight_scale_dtype = switch (format) {
             .bf16 => .bf16,
             .fp8_block128 => |s| tcl.from(s.gate_up.dtype()),
         },
         .activation = std.meta.activeTag(opts.activation),
     };
-    stdx.debug.assert(gate_up.dim(.dout) == 2 * cfg.i and down.dim(.d) == cfg.d and gate_up.dim(.d) == cfg.d, "TCL MoE: mismatched expert shapes", .{});
+    stdx.debug.assert(gate_up.dim(.dout) == 2 * cfg.expert_intermediate_size and down.dim(.d) == cfg.hidden_size and gate_up.dim(.d) == cfg.hidden_size, "TCL MoE: mismatched expert shapes", .{});
 
     const weights = routing.weights.convert(.f32);
     const local_weights = switch (format) {
         .bf16 => weights,
         .fp8_block128 => topk_ids.cmp(.GE, .scalar(0, .i32)).select(weights, .scalar(0, .f32)),
     };
-    if (format == .fp8_block128 and cfg.t <= fp8_small_batch_max_tokens) {
+    if (format == .fp8_block128 and cfg.num_tokens <= fp8_small_batch_max_tokens) {
         return runFp8SmallBatch(input, topk_ids, local_weights, gate_up, down, format.fp8_block128, cfg);
     }
 
-    const x = input.reshape(.{ cfg.t, cfg.d });
-    const ids = topk_ids.reshape(.{ cfg.t, cfg.k });
-    const w = local_weights.reshape(.{ cfg.t, cfg.k });
+    const x = input.reshape(.{ cfg.num_tokens, cfg.hidden_size });
+    const ids = topk_ids.reshape(.{ cfg.num_tokens, cfg.top_k });
+    const w = local_weights.reshape(.{ cfg.num_tokens, cfg.top_k });
     // These kernels gather every route, and blockwise also scatters each route
     // into an expert slot. Give nonlocal routes a valid slot and zero weight.
-    const valid = ids.cmp(.GE, Tensor.scalar(0, .i32)).logical(.AND, ids.cmp(.LT, Tensor.scalar(cfg.e, .i32)));
+    const valid = ids.cmp(.GE, Tensor.scalar(0, .i32)).logical(.AND, ids.cmp(.LT, Tensor.scalar(cfg.local_num_experts, .i32)));
     const safe_ids = valid.select(ids, Tensor.scalar(0, .i32));
     const safe_weights = valid.select(w, Tensor.scalar(0, .f32));
 
     const y = switch (format) {
-        .bf16 => runGathered(.bf16, cfg, .{ .x = x, .ids = safe_ids, .w = safe_weights, .gate_up = gate_up, .down = down }),
-        .fp8_block128 => |s| runGathered(.fp8_block128, cfg, fp8Inputs(x, safe_ids, safe_weights, gate_up, down, s)),
+        .bf16 => run(.bf16, cfg, .{ .x = x, .ids = safe_ids, .w = safe_weights, .gate_up = gate_up, .down = down }),
+        .fp8_block128 => |s| run(.fp8_block128, cfg, fp8Inputs(x, safe_ids, safe_weights, gate_up, down, s)),
     };
     return y.reshape(input.shape());
 }
@@ -96,10 +96,6 @@ fn fp8Scales(linear: zml.nn.Linear) Tensor {
     return scale;
 }
 
-// Maximum total input tokens per MoE call before padding for the FP8
-// small-batch schedule. It loads each used expert's weights once and reuses
-// them across the batch.
-// Larger batches fall back to per-route or blockwise dispatch.
 const fp8_small_batch_max_tokens = 64;
 
 fn runFp8SmallBatch(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, scales: Scales, cfg: kernels.Cfg) Tensor {
@@ -107,22 +103,22 @@ fn runFp8SmallBatch(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_
     // panics its adder tree ("Fail to cover valid range", 5 tokens padded
     // to 8): pad with unrouted tokens.
     var padded = cfg;
-    padded.t = @intCast(std.math.ceilPowerOfTwo(u64, @intCast(cfg.t)) catch unreachable);
-    const pad = padded.t - cfg.t;
-    const x = input.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.d });
-    const ids = topk_ids.pad(-1, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
-    const weights = topk_weights.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
+    padded.num_tokens = @intCast(std.math.ceilPowerOfTwo(u64, @intCast(cfg.num_tokens)) catch unreachable);
+    const pad = padded.num_tokens - cfg.num_tokens;
+    const x = input.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.num_tokens, cfg.hidden_size });
+    const ids = topk_ids.pad(-1, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.num_tokens, cfg.top_k });
+    const weights = topk_weights.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.num_tokens, cfg.top_k });
     const y = kernels.Kernel(.fp8_block128, .small_batch).call(fp8Inputs(x, ids, weights, gate_up, down, scales), .{ .y = x.shape() }, .{ .cfg = padded }).y;
-    return y.slice(0, .{ .end = cfg.t }).reshape(input.shape());
+    return y.slice(0, .{ .end = cfg.num_tokens }).reshape(input.shape());
 }
 
 fn fp8Inputs(x: Tensor, ids: Tensor, weights: Tensor, gate_up: Tensor, down: Tensor, scales: Scales) kernels.Kernel(.fp8_block128, .per_route).Inputs {
     return .{ .x = x, .ids = ids, .w = weights, .gate_up = gate_up, .down = down, .gate_up_scale = scales.gate_up, .down_scale = scales.down };
 }
 
-fn runGathered(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .per_route).Inputs) Tensor {
+fn run(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .per_route).Inputs) Tensor {
     const shape = inputs.x.shape();
-    if (cfg.t * cfg.k <= cfg.e) return kernels.Kernel(format, .per_route).call(inputs, .{ .y = shape }, .{ .cfg = cfg }).y;
+    if (cfg.num_tokens * cfg.top_k <= cfg.local_num_experts) return kernels.Kernel(format, .per_route).call(inputs, .{ .y = shape }, .{ .cfg = cfg }).y;
     return kernels.Kernel(format, .blockwise).call(inputs, .{ .y = shape }, .{ .cfg = cfg }).y;
 }
 
