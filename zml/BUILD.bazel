@@ -3,10 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 zig_library(
     name = "zml",
     srcs = [
-        "attention/Options.zig",
         "attention/attention.zig",
-        "kernels/flash_attention/flash_attention.zig",
-        "kernels/flash_attention/tests.zig",
         "kernels/moe/api.zig",
         "kernels/moe/moe.zig",
         "kernels/moe/tests.zig",
@@ -14,9 +11,6 @@ zig_library(
         "kernels/paged_attention/options.zig",
         "kernels/paged_attention/paged_attention.zig",
         "zml.zig",
-        "//zml/kernels/flash_attention/cute",
-        "//zml/kernels/flash_attention/metal",
-        "//zml/kernels/flash_attention/nki",
         "//zml/kernels/moe/cute",
         "//zml/kernels/moe/flashinfer_cutlass",
         "//zml/kernels/moe/fly",
@@ -32,12 +26,6 @@ zig_library(
         "//zml/kernels/paged_attention/tcl",
         "//zml/kernels/paged_attention/triton",
     ],
-    data = select({
-        "//platforms:neuron.enabled": [
-            "//zml/kernels/flash_attention/nki:attention_kernel",
-        ],
-        "//conditions:default": [],
-    }),
     main = "zml.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
@@ -58,8 +46,10 @@ zig_library(
         "//platforms",
         "//platforms/tpu:ragged_paged",
         "//stdx",
+        "//zml/attention/options",
         "//zml/constants",
         "//zml/core",
+        "//zml/kernels/flash_attention",
         "//zml/logo",
         "//zml/meta",
         "//zml/nn",
@@ -67,11 +57,6 @@ zig_library(
         "//zml/quantization",
         "//zml/tokenizer",
     ] + select({
-        "//platforms:neuron.enabled": [
-            "//platforms/neuron:nki_kernel",
-        ],
-        "//conditions:default": [],
-    }) + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda/flashinfer_cutlass_moe",
         ],

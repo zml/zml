@@ -1,15 +1,29 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
-
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 filegroup(
     name = "attention_kernel",
     srcs = ["attention.py"],
 )
 
-filegroup(
+zig_library(
     name = "nki",
-    srcs = ["nki.zig"],
+    data = select({
+        "//platforms:neuron.enabled": [":attention_kernel"],
+        "//conditions:default": [],
+    }),
+    import_name = "zml/kernels/flash_attention/nki",
+    main = "nki.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//platforms",
+        "//stdx",
+        "//zml/core",
+    ] + select({
+        "//platforms:neuron.enabled": ["//platforms/neuron:nki_kernel"],
+        "//conditions:default": [],
+    }),
 )
 
 py_binary(
