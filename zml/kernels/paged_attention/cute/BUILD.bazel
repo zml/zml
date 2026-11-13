@@ -1,15 +1,31 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 package(default_visibility = ["//zml:__pkg__"])
 
-filegroup(
+zig_library(
     name = "cute",
     srcs = [
         "attention.zig",
-        "cute.zig",
         "//zml/kernels/paged_attention/cute/sm10x",
         "//zml/kernels/paged_attention/cute/sm120",
     ],
+    import_name = "zml/kernels/paged_attention/cute",
+    main = "cute.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects/llvm",
+        "//mlir/dialects/vector",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/paged_attention/options",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":cute"],
 )
 
 zig_test(

@@ -1,6 +1,13 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
-filegroup(
+zig_library(
     name = "stablehlo",
-    srcs = ["stablehlo.zig"],
+    import_name = "zml/kernels/paged_attention/stablehlo",
+    main = "stablehlo.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml/core",
+        "//zml/kernels/paged_attention/options",
+    ],
 )

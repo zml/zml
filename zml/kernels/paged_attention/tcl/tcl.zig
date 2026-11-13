@@ -6,11 +6,10 @@ const std = @import("std");
 const builder = @import("dsl/tcl/builder");
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const tcl = zml.kernel.tcl;
-const AttentionOptions = @import("../options.zig").AttentionOptions;
-const triton = @import("../triton/triton.zig");
+const AttentionOptions = @import("zml/kernels/paged_attention/options").AttentionOptions;
 
 /// WORKAROUND (TCC 2026.5.0b0): flash decode with 8192-key chunks fails to
 /// lower, so decode chunks hold 4096 keys. Repro: repro_flash_decode_8k_chunks.py.
@@ -44,8 +43,50 @@ pub const Plan = struct {
 pub var calibration_plan: ?Plan = null;
 
 pub const paged = struct {
-    pub const Options = triton.paged.Options;
-    pub const Parameters = triton.paged.Parameters;
+    pub const Options = struct {
+        batch_size: usize,
+        max_num_pages: usize,
+        max_seqlen_q: usize,
+        is_prefill: bool,
+
+        pub fn isPrefill(self: Options) bool {
+            return self.is_prefill;
+        }
+
+        pub fn maxNumPages(self: Options) usize {
+            return self.max_num_pages;
+        }
+    };
+
+    pub const Parameters = struct {
+        block_table: Tensor,
+        seq_lens: Tensor,
+        query_start_len: Tensor,
+        options_: Options,
+
+        pub fn init(options_: Options) Parameters {
+            return .{
+                .block_table = .init(.{ .b = options_.batch_size, .p = options_.max_num_pages }, .i32),
+                .seq_lens = .init(.{ .b = options_.batch_size }, .i32),
+                .query_start_len = .init(.{ .b = options_.batch_size + 1 }, .i32),
+                .options_ = options_,
+            };
+        }
+
+        pub fn allocationSize(self: Parameters) usize {
+            var allocation_size: usize = 0;
+
+            allocation_size += self.block_table.byteSize();
+            allocation_size += self.seq_lens.byteSize();
+            allocation_size += self.query_start_len.byteSize();
+
+            return allocation_size;
+        }
+
+        pub fn options(self: Parameters) Options {
+            return self.options_;
+        }
+    };
 
     /// `q` is `{.b = tokens, .hkv, .hg, .hd}`, the caches `{.page, .k_chunk, .hkv, .hd}`.
     /// Sinks are one logit per query head.
