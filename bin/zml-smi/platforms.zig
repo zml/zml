@@ -1,0 +1,18 @@
+const builtin = @import("builtin");
+
+pub const all = switch (builtin.os.tag) {
+    .linux => switch (builtin.cpu.arch) {
+        .x86_64 => .{
+            @import("zml-smi/platforms/nvml"),
+            @import("zml-smi/platforms/amdsmi"),
+            @import("zml-smi/platforms/oneapi"),
+            @import("zml-smi/platforms/neuron"),
+            @import("zml-smi/platforms/tpu"),
+        },
+        .aarch64 => .{
+            @import("zml-smi/platforms/nvml"),
+        },
+        else => .{},
+    },
+    else => .{},
+};
