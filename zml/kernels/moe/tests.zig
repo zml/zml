@@ -2,14 +2,14 @@
 //! supported cases are explicit, and errors in those cases must fail the test.
 const std = @import("std");
 
-const zml = @import("../../zml.zig");
+const zml = @import("zml");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const Activation = @import("api.zig").Activation;
-const ExpertsLayout = @import("api.zig").ExpertsLayout;
-const GlobalOptions = @import("api.zig").Options;
-const Placement = @import("api.zig").RoutingWeightPlacement;
-const reference = @import("stablehlo/stablehlo.zig");
+const Activation = @import("zml/kernels/moe/api").Activation;
+const ExpertsLayout = @import("zml/kernels/moe/api").ExpertsLayout;
+const GlobalOptions = @import("zml/kernels/moe/api").Options;
+const Placement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const reference = @import("zml/kernels/moe/stablehlo");
 
 const Case = struct {
     backend: zml.moe.Backend,

@@ -2,7 +2,7 @@
 //! `persistent_mxfp4.zig`: routed MXFP8 input quantization.
 const std = @import("std");
 
-const zml = @import("../../../../zml.zig");
+const zml = @import("zml/core");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const launchBoundary = @import("common.zig").launchBoundary;

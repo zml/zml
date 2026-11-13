@@ -2,12 +2,14 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const nn = @import("zml/nn");
+
+const zml = @import("zml/core");
 const Tensor = zml.Tensor;
-const Activation = @import("../api.zig").Activation;
-const GlobalOptions = @import("../api.zig").Options;
-const LocalRouting = @import("../api.zig").LocalRouting;
-const unpackedWeight = @import("../weights.zig").unpackedWeight;
+const Activation = @import("zml/kernels/moe/api").Activation;
+const GlobalOptions = @import("zml/kernels/moe/api").Options;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const unpackedWeight = @import("zml/kernels/moe/weights").unpackedWeight;
 
 const log = std.log.scoped(.@"zml/moe/metal");
 
@@ -70,8 +72,8 @@ fn applyDownGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tenso
 pub fn fusedExperts(
     hidden_states: zml.Tensor,
     routing: LocalRouting,
-    gate_up_: zml.nn.Linear,
-    down_: zml.nn.Linear,
+    gate_up_: nn.Linear,
+    down_: nn.Linear,
     opts: GlobalOptions,
 ) zml.Tensor {
     validateOptions(opts);

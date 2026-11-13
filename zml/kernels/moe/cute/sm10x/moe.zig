@@ -7,9 +7,9 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../../zml.zig");
-const RoutingWeightPlacement = @import("../../api.zig").RoutingWeightPlacement;
-const triton_kernels = @import("../../triton/moe.zig");
+const zml = @import("zml/core");
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const triton_kernels = @import("zml/kernels/moe/triton").kernels;
 pub const mxfp4 = @import("mxfp4.zig");
 pub const mxfp4_persistent = @import("persistent_mxfp4.zig");
 pub const nvfp4 = @import("nvfp4.zig");

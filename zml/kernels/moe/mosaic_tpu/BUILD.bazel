@@ -1,9 +1,18 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
-filegroup(
+zig_library(
     name = "mosaic_tpu",
     srcs = [
         "gmm_ep.zig",
-        "mosaic_tpu.zig",
+    ],
+    import_name = "zml/kernels/moe/mosaic_tpu",
+    main = "mosaic_tpu.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dsl/mosaic_tpu:builder",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/moe/api",
+        "//zml/nn",
     ],
 )

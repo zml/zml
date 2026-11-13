@@ -1,8 +1,19 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-filegroup(
+zig_library(
     name = "stablehlo",
-    srcs = [
-        "stablehlo.zig",
+    import_name = "zml/kernels/moe/stablehlo",
+    main = "stablehlo.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/moe/api",
+        "//zml/nn",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":stablehlo"],
 )

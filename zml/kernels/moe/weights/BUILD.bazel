@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "weights",
+    import_name = "zml/kernels/moe/weights",
+    main = "weights.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml/core",
+        "//zml/nn",
+    ],
+)

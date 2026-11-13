@@ -2,16 +2,19 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const nn = @import("zml/nn");
+const Quantization = @import("zml/quantization").Quantization;
+
+const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
-const ExpertsLayout = @import("../api.zig").ExpertsLayout;
-const ProjectionLayout = @import("../api.zig").ProjectionLayout;
-const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
-const Activation = @import("../api.zig").Activation;
-const Options = @import("../api.zig").Options;
-const LocalRouting = @import("../api.zig").LocalRouting;
+const ExpertsLayout = @import("zml/kernels/moe/api").ExpertsLayout;
+const ProjectionLayout = @import("zml/kernels/moe/api").ProjectionLayout;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const Activation = @import("zml/kernels/moe/api").Activation;
+const Options = @import("zml/kernels/moe/api").Options;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const fly = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/fused_experts");
@@ -23,8 +26,8 @@ test {
 pub fn fusedExperts(
     hidden_states: Tensor,
     routing_: LocalRouting,
-    gate_up_: zml.nn.Linear,
-    down_: zml.nn.Linear,
+    gate_up_: nn.Linear,
+    down_: nn.Linear,
     opts: Options,
 ) Tensor {
     const expert_map_ = routing_.expertMap();
@@ -136,7 +139,7 @@ pub fn fusedExperts(
 }
 
 // TODO(Corentin): unused for now
-pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: zml.nn.Linear, down_: zml.nn.Linear, opts: Options) bool {
+pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linear, down_: nn.Linear, opts: Options) bool {
     if (hidden_states.dtype() != .bf16 or gate_up_.quantizationScheme() != .mxfp4 or
         down_.quantizationScheme() != .mxfp4 or gate_up_.bias != null or down_.bias != null or
         opts.routing_weight_placement != .before_down) return false;
@@ -170,7 +173,7 @@ pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: zml.nn.L
     return routes > 0 and routes <= @divTrunc(std.math.maxInt(i32), max_width);
 }
 
-pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, _: zml.DataType, _: bool) struct { Tensor, ?Tensor } {
+pub fn prepareInput(x: Tensor, scheme: ?Quantization.Scheme, _: zml.DataType, _: bool) struct { Tensor, ?Tensor } {
     std.debug.assert(scheme == .mxfp4);
     return .{ x.convert(.bf16), null };
 }
@@ -185,13 +188,13 @@ pub const GemmOptions = struct {
     routing: Routing,
     expert_ids: Tensor,
     launch_config: LaunchConfig,
-    quant_scheme: ?zml.Quantization.Scheme = null,
+    quant_scheme: ?Quantization.Scheme = null,
     top_k: usize,
     output_shape: Shape,
 };
 
 pub fn gemm(opts: GemmOptions) zml.Tensor {
-    zml.stdx.debug.assert(opts.quant_scheme == .mxfp4 and opts.bias == null and opts.routing_weights == null and opts.input_scale == null, "Fly MoE requires MXFP4 weights, BF16 activations and routing weights before the down projection", .{});
+    stdx.debug.assert(opts.quant_scheme == .mxfp4 and opts.bias == null and opts.routing_weights == null and opts.input_scale == null, "Fly MoE requires MXFP4 weights, BF16 activations and routing weights before the down projection", .{});
     const weight = if (opts.weight.dtype() == .f4e2m1)
         opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8)
     else

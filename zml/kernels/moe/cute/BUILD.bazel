@@ -1,9 +1,26 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-filegroup(
+zig_library(
     name = "cute",
     srcs = [
-        "cute.zig",
         "//zml/kernels/moe/cute/sm10x",
     ],
+    import_name = "zml/kernels/moe/cute",
+    main = "cute.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects/nvvm",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/moe/api",
+        "//zml/kernels/moe/triton",
+        "//zml/nn",
+        "//zml/quantization",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":cute"],
 )
