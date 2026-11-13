@@ -7,15 +7,16 @@ const mlir = @import("mlir");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
-const DataType = @import("dtype.zig").DataType;
-const mlirx = @import("mlirx.zig");
-const ops = @import("ops.zig");
-const quantization = @import("quantization.zig");
+const zml = @import("zml/core");
+const quantization = @import("zml/quantization");
+
+const DataType = zml.DataType;
+const mlirx = zml.mlir;
+const ops = zml.ops;
 pub const Quantization = quantization.Quantization;
-const Shape = @import("shape.zig").Shape;
-const Slice = @import("slice.zig").Slice;
-const Tensor = @import("tensor.zig").Tensor;
-const zml = @import("core.zig");
+const Shape = zml.Shape;
+const Slice = zml.Slice;
+const Tensor = zml.Tensor;
 
 const log = std.log.scoped(.@"zml/nn");
 
@@ -229,7 +230,7 @@ test "block128 scaled dot layouts" {
     const platform = zml.testing.env();
     // FIXME: Add rocm when we have a PJRT plugin with native fp8 dot support (by the end of Sept 2026)
     if (platform.target != .cuda and platform.target != .furiosa) return error.SkipZigTest;
-    const dtype: DataType = if (platform.target == .rocm and @import("platform.zig").rocm.computeCapability(platform) == .gfx942) .f8e4m3fnuz else .f8e4m3fn;
+    const dtype: DataType = if (platform.target == .rocm and zml.platform.rocm.computeCapability(platform) == .gfx942) .f8e4m3fnuz else .f8e4m3fn;
     const Local = struct {
         const Outputs = struct { actual: Tensor, expected: Tensor, linear: Tensor, linear_expected: Tensor };
 
@@ -631,7 +632,7 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const rotary_dim: u32 = opts.scaling.partialRotaryDim(head_dim);
     stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
 
-    const x_real, const x_imag, const x_pass = zml.nn.splitRealImgPass(x, opts.layout, rotary_dim);
+    const x_real, const x_imag, const x_pass = splitRealImgPass(x, opts.layout, rotary_dim);
     const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
 
     // compute sin and cos in f32 before downcasting to x type.
@@ -644,7 +645,7 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
     const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
 
-    return zml.nn.mergeRealImgPass(y_real, y_imag, x_pass, opts.layout);
+    return mergeRealImgPass(y_real, y_imag, x_pass, opts.layout);
 }
 
 pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
