@@ -1,4 +1,4 @@
-const nn = @import("zml/core").nn;
+const nn = @import("zml/nn");
 const Tensor = @import("zml/core").Tensor;
 
 pub fn unpackedWeight(linear: nn.Linear) Tensor {

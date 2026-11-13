@@ -125,12 +125,10 @@ zig_library(
         "//zml/kernel",
         "mem.zig",
         "mlirx.zig",
-        "nn.zig",
         "ops.zig",
         "ops/manual_computation.zig",
         "pjrtx.zig",
         "platform.zig",
-        "quantization.zig",
         "safetensors.zig",
         "shape.zig",
         "slice.zig",
@@ -188,6 +186,35 @@ zig_library(
 )
 
 zig_library(
+    name = "quantization",
+    import_name = "zml/quantization",
+    main = "quantization.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":core",
+        "//stdx",
+    ],
+)
+
+zig_library(
+    name = "nn",
+    import_name = "zml/nn",
+    main = "nn.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":constants",
+        ":core",
+        ":meta",
+        ":quantization",
+        "//mlir",
+        "//mlir/dialects/stablehlo",
+        "//stdx",
+    ],
+)
+
+zig_library(
     name = "zml",
     srcs = [
         "attention/Options.zig",
@@ -235,6 +262,8 @@ zig_library(
     deps = [
         ":core",
         ":logo",
+        ":nn",
+        ":quantization",
         "//dsl/mosaic_tpu:builder",
         "//dsl/tcl:builder",
         "//mlir",
