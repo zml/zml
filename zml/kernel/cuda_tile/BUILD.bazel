@@ -1,0 +1,9 @@
+package(default_visibility = ["//zml/kernel:__pkg__"])
+
+filegroup(
+    name = "cuda_tile",
+    srcs = [
+        "cuda_tile.zig",
+        "test.zig",
+    ],
+)

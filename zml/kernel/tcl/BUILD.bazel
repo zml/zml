@@ -1,0 +1,9 @@
+package(default_visibility = ["//zml/kernel:__pkg__"])
+
+filegroup(
+    name = "tcl",
+    srcs = [
+        "tcl.zig",
+        "test.zig",
+    ],
+)

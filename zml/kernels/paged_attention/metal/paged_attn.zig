@@ -3,9 +3,8 @@
 
 const std = @import("std");
 
-const kernel = @import("../../../kernel.zig");
+const metal = @import("../../../kernel/kernel.zig").metal;
 
-const metal = kernel.metal;
 const ArgSpec = metal.ArgSpec;
 const Builder = metal.Builder;
 const Type = metal.Type;
