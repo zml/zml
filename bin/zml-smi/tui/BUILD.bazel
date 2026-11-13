@@ -43,8 +43,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/stamp:zig",
-        "//bin/zml-smi/info",
-        "//bin/zml-smi/utils:double_buffer",
+        "//bin/zml-smi/smi",
         "//zml:logo",
         "@libvaxis//:vaxis",
     ],

@@ -17,12 +17,12 @@ process_table: *ProcessTable = undefined,
 pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const w = ctx.max.width orelse 80;
     const id = self.device_id;
-    const dev = self.state.devices[id];
+    const device = self.state.device(id);
     const wgt = ui.widget(self);
 
-    return switch (dev.*) {
-        .cuda, .rocm, .oneapi => |*sv| try gpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
-        .neuron => |*sv| try neuron_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
-        .tpu => |*sv| try tpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
+    return switch (self.state.sample(id)) {
+        .cuda, .rocm, .oneapi => |gpu| try gpu_detail.draw(self.state, self.process_table, ctx, w, id, device, gpu, wgt),
+        .neuron => |core| try neuron_detail.draw(self.state, self.process_table, ctx, w, id, device, core, wgt),
+        .tpu => |chip| try tpu_detail.draw(self.state, self.process_table, ctx, w, id, device, chip, wgt),
     };
 }
