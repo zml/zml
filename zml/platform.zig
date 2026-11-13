@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const c = @import("c");
 const constants = @import("zml/constants");
 const pjrt = @import("pjrt");
+const profiler_ = @import("zml/profiling").profiler;
 const stdx = @import("stdx");
 pub const Target = @import("platforms").Platform;
 
@@ -11,7 +12,6 @@ const Exe = @import("exe.zig").Exe;
 const flashinfer_cutlass_contract = @import("kernels/moe/flashinfer_cutlass/contract.zig");
 const flashinfer_cutlass_runtime = @import("kernels/moe/flashinfer_cutlass/runtime.zig");
 const pjrtx = @import("pjrtx.zig");
-const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
 
