@@ -216,7 +216,7 @@
 			"name": "libigc2",
 			"sha256": "c3e5f181eecd40dc8b656c3ff5b7e3d4f690e93181255726516416e61ade1d1f",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigc2_2.41.15-1~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20261029T000000Z/pool/main/i/intel-graphics-compiler/libigc2_2.41.15-1~24.04_amd64.deb"
 			],
 			"version": "2.41.15-1~24.04"
 		},
@@ -227,7 +227,7 @@
 			"name": "libigdfcl2",
 			"sha256": "8a2058fd9f5e7d0a4b05001ff861780d2f72529135fa70fb7fbba0f0ff8cd74f",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigdfcl2_2.41.15-1~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20261029T000000Z/pool/main/i/intel-graphics-compiler/libigdfcl2_2.41.15-1~24.04_amd64.deb"
 			],
 			"version": "2.41.15-1~24.04"
 		},
@@ -249,7 +249,7 @@
 			"name": "libze1",
 			"sha256": "d4001dc474d3cb74ded50a449b9f646cfdfbb31e69e70b8af38f2d18273dfce1",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/l/level-zero-loader/libze1_1.32.0-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20261029T000000Z/pool/main/l/level-zero-loader/libze1_1.32.0-1~24.04~ppa1_amd64.deb"
 			],
 			"version": "1.32.0-1~24.04~ppa1"
 		},
