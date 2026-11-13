@@ -1,7 +1,7 @@
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
-pub const AttentionOptions = @import("../options.zig").AttentionOptions;
+const zml = @import("zml/core");
+pub const AttentionOptions = @import("zml/kernels/paged_attention/options").AttentionOptions;
 const kernel = @import("attention.zig");
 const sm10x = @import("sm10x/sm10x.zig");
 const sm120 = @import("sm120/sm120.zig");

@@ -1,9 +1,53 @@
-const zml = @import("../../../zml.zig");
-const AttentionOptions = @import("../options.zig").AttentionOptions;
-const triton = @import("../triton/triton.zig");
+const zml = @import("zml/core");
+const AttentionOptions = @import("zml/kernels/paged_attention/options").AttentionOptions;
+
+pub const Options = struct {
+    batch_size: usize,
+    max_num_pages: usize,
+    max_seqlen_q: usize,
+    is_prefill: bool,
+
+    pub fn isPrefill(self: Options) bool {
+        return self.is_prefill;
+    }
+
+    pub fn maxNumPages(self: Options) usize {
+        return self.max_num_pages;
+    }
+};
+
+pub const Parameters = struct {
+    block_table: zml.Tensor,
+    seq_lens: zml.Tensor,
+    query_start_len: zml.Tensor,
+    options_: Options,
+
+    pub fn init(options_: Options) Parameters {
+        return .{
+            .block_table = .init(.{ .b = options_.batch_size, .p = options_.max_num_pages }, .i32),
+            .seq_lens = .init(.{ .b = options_.batch_size }, .i32),
+            .query_start_len = .init(.{ .b = options_.batch_size + 1 }, .i32),
+            .options_ = options_,
+        };
+    }
+
+    pub fn allocationSize(self: Parameters) usize {
+        var allocation_size: usize = 0;
+
+        allocation_size += self.block_table.byteSize();
+        allocation_size += self.seq_lens.byteSize();
+        allocation_size += self.query_start_len.byteSize();
+
+        return allocation_size;
+    }
+
+    pub fn options(self: Parameters) Options {
+        return self.options_;
+    }
+};
 
 pub fn pagedAttention(
-    parameters: triton.paged.Parameters,
+    parameters: Parameters,
     q: zml.Tensor,
     k: zml.Tensor,
     v: zml.Tensor,
@@ -21,7 +65,6 @@ pub fn pagedAttention(
         AttentionLoop,
         .{ .q = padded_q, .k = k, .v = v, .parameters = parameters, .opts = opts },
         .{
-            // i32 to match triton conventions
             .slot_id = .scalar(0, .i32),
             .seq_id = .scalar(0, .i32),
             .q_page_idx = .scalar(0, .i32),
@@ -40,7 +83,7 @@ const AttentionLoop = struct {
     q: zml.Tensor,
     k: zml.Tensor,
     v: zml.Tensor,
-    parameters: triton.paged.Parameters,
+    parameters: Parameters,
     opts: AttentionOptions,
 
     const While = @This();

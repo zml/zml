@@ -2,7 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir");
 const llvm = @import("mlir/dialects/llvm");
 
-const cute = @import("../../../../zml.zig").kernel.cute;
+const cute = @import("zml/core").kernel.cute;
 
 pub const Scores = struct {
     values: [64]cute.Value,
