@@ -2,7 +2,7 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const zml = @import("zml/core");
 const kernel = @import("attention.zig");
 
 test {

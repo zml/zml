@@ -1,0 +1,27 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "flash_attention",
+    import_name = "zml/kernels/flash_attention",
+    main = "flash_attention.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml/attention/options",
+        "//zml/core",
+        "//zml/kernels/flash_attention/cute",
+        "//zml/kernels/flash_attention/metal",
+        "//zml/kernels/flash_attention/nki",
+        "//zml/nn",
+    ],
+)
+
+zig_test(
+    name = "integration_test",
+    main = "tests.zig",
+    deps = [
+        ":flash_attention",
+        "//zml",
+    ],
+)

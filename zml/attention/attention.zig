@@ -1,7 +1,9 @@
 const std = @import("std");
 
+const flash_attention = @import("zml/kernels/flash_attention");
+pub const Options = @import("zml/attention/options");
+
 const zml = @import("../zml.zig");
-const flash_attention = @import("../kernels/flash_attention/flash_attention.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -92,8 +94,6 @@ pub const Metadata = union(BackendType) {
         }
     }
 };
-
-pub const Options = @import("Options.zig");
 
 pub const Partitioning = struct {
     const Logical = zml.Sharding.Partitioning.Logical;

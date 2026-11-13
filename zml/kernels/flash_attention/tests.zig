@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const zml = @import("../../zml.zig");
-const flash_attention = @import("flash_attention.zig");
+const zml = @import("zml");
+const flash_attention = @import("zml/kernels/flash_attention");
 
 test "attention: q=1,qh=64,kh=8" {
     try testAttention(
