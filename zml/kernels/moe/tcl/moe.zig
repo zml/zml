@@ -8,7 +8,7 @@ const tcl = zml.kernel.tcl;
 const ActivationKind = @import("../api.zig").ActivationKind;
 
 pub const Format = enum { bf16, fp8_block128 };
-pub const Schedule = enum { activation_stationary, blockwise, expert_stationary };
+pub const Schedule = enum { per_route, blockwise, fp8_small_batch };
 
 pub const Cfg = struct {
     t: i64,
@@ -24,11 +24,16 @@ const base_inputs: []const [:0]const u8 = &.{ "x", "ids", "w", "gate_up", "down"
 const scale_inputs: []const [:0]const u8 = &.{ "gate_up_scale", "down_scale" };
 
 pub fn Kernel(comptime format: Format, comptime schedule: Schedule) type {
-    if (schedule == .expert_stationary and format != .fp8_block128) {
-        @compileError("TCL MoE expert stationary requires block-128 FP8");
+    if (schedule == .fp8_small_batch and format != .fp8_block128) {
+        @compileError("TCL MoE FP8 small-batch schedule requires block-128 FP8");
     }
+    const kernel_name = switch (schedule) {
+        .per_route => "moe_per_route",
+        .blockwise => "moe_blockwise",
+        .fp8_small_batch => "moe_expert_stationary",
+    };
     return tcl.Kernel(Cfg, .{
-        .name = "moe_" ++ @tagName(schedule) ++ switch (format) {
+        .name = kernel_name ++ switch (format) {
             .bf16 => "",
             .fp8_block128 => "_fp8",
         },
@@ -43,9 +48,9 @@ pub fn Kernel(comptime format: Format, comptime schedule: Schedule) type {
                 const a: Axes = .init(b, cfg);
                 const in = try args(b, a, cfg, format);
                 switch (schedule) {
-                    .activation_stationary => try activationStationary(b, a, in, cfg.activation, format),
+                    .per_route => try perRoute(b, a, in, cfg.activation, format),
                     .blockwise => try blockwise(b, a, in, cfg, format),
-                    .expert_stationary => try expertStationary(b, a, in, cfg),
+                    .fp8_small_batch => try fp8SmallBatch(b, a, in, cfg),
                 }
             }
         }.run,
@@ -233,7 +238,8 @@ fn geluTanh(g: builder.Value) builder.Value {
 }
 
 /// Furiosa's compiler configuration for MoE kernels (`qwen3_moe/config.py`):
-/// IO-bound tactics for stationary schedules, compute-bound for blockwise.
+/// Use IO-bound tactics for per-route and FP8 small-batch schedules and
+/// compute-bound tactics for blockwise.
 /// Keep the compiler's default lowering mode and omit the adaptive-einsum and
 /// half-VRF settings removed in TCC 2026.5.
 fn configure(b: *tcl.Builder, comptime schedule: Schedule) void {
@@ -256,7 +262,7 @@ fn configure(b: *tcl.Builder, comptime schedule: Schedule) void {
                 .tactic_hint = .{ .ForLlmModelComputeBound = 200 },
                 .dma_preference = 1.2,
             },
-            .activation_stationary, .expert_stationary => .{
+            .per_route, .fp8_small_batch => .{
                 .tactic_hint = .{ .ForLlmModelIOBound = 200 },
                 .num_transaction_simulation_per_pe = 1024,
                 .dma_preference = 0.8,
@@ -281,7 +287,7 @@ fn configure(b: *tcl.Builder, comptime schedule: Schedule) void {
 }
 
 /// Gather the selected experts for every token.
-fn activationStationary(b: *tcl.Builder, a: Axes, in: Args, activation: ActivationKind, comptime format: Format) tcl.FinishError!void {
+fn perRoute(b: *tcl.Builder, a: Axes, in: Args, activation: ActivationKind, comptime format: Format) tcl.FinishError!void {
     const gate_up = try b.reshape(in.gate_up, &.{ a.E, a.S2, a.I, a.D }, .{});
     const gu = try b.gather(gate_up, in.ids, a.E, &.{ a.T, a.K, a.S2, a.I, a.D }, .{});
     const dn = try b.gather(in.down, in.ids, a.E, &.{ a.T, a.K, a.D, a.I }, .{});
@@ -374,17 +380,18 @@ fn blockwise(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg, comptime format: Form
     b.ret(&.{try op.commit(op.fetch(per_route, .{ .typecast_to = .f32 }).mulf(op.fetch(in.w, .{})).reduce(&.{K}, .addf), .{ .dtype = .bf16 })});
 }
 
-/// Experts per loop step, increasing with the number of routes.
-fn stationaryChunk(cfg: Cfg) i64 {
+/// Number of experts processed per device-loop iteration, based on the
+/// batch's route count (`cfg.t * cfg.k`).
+fn expertsPerChunk(cfg: Cfg) i64 {
     const routes: u64 = @intCast(std.math.divCeil(i64, cfg.t * cfg.k, 16) catch unreachable);
     return @intCast(std.math.clamp(std.math.ceilPowerOfTwo(u64, routes) catch unreachable, 2, 16));
 }
 
-/// The experts that `ids` use (-1 for none), `stationaryChunk` at a time in a
-/// device loop: each is read once and runs for every token. Routing weights
+/// Process the FP8 experts selected by the batch in groups sized by `expertsPerChunk`.
+/// Load each selected expert once and run it for every token. Routing weights
 /// scale the F32 down-projection results before summing the experts and steps.
-fn expertStationary(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg) tcl.FinishError!void {
-    const chunk = stationaryChunk(cfg);
+fn fp8SmallBatch(b: *tcl.Builder, a: Axes, in: Args, cfg: Cfg) tcl.FinishError!void {
+    const chunk = expertsPerChunk(cfg);
     const steps = std.math.divCeil(i64, @min(cfg.e, cfg.t * cfg.k), chunk) catch unreachable;
     const C = b.axis("C", chunk);
     const Go = b.axis("Go", steps);

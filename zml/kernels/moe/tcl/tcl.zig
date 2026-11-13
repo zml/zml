@@ -43,8 +43,8 @@ pub fn fusedExperts(input: Tensor, routing: api.LocalRouting, gate_up_linear: zm
         .bf16 => weights,
         .fp8_block128 => topk_ids.cmp(.GE, .scalar(0, .i32)).select(weights, .scalar(0, .f32)),
     };
-    if (format == .fp8_block128 and cfg.t <= expert_stationary_tokens) {
-        return runExpertStationary(input, topk_ids, local_weights, gate_up, down, format.fp8_block128, cfg);
+    if (format == .fp8_block128 and cfg.t <= fp8_small_batch_max_tokens) {
+        return runFp8SmallBatch(input, topk_ids, local_weights, gate_up, down, format.fp8_block128, cfg);
     }
 
     const x = input.reshape(.{ cfg.t, cfg.d });
@@ -96,9 +96,13 @@ fn fp8Scales(linear: zml.nn.Linear) Tensor {
     return scale;
 }
 
-const expert_stationary_tokens = 64;
+// Maximum total input tokens per MoE call before padding for the FP8
+// small-batch schedule. It loads each used expert's weights once and reuses
+// them across the batch.
+// Larger batches fall back to per-route or blockwise dispatch.
+const fp8_small_batch_max_tokens = 64;
 
-fn runExpertStationary(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, scales: Scales, cfg: kernels.Cfg) Tensor {
+fn runFp8SmallBatch(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, scales: Scales, cfg: kernels.Cfg) Tensor {
     // WORKAROUND (TCC 2026.5.0b0): a token count other than a power of two
     // panics its adder tree ("Fail to cover valid range", 5 tokens padded
     // to 8): pad with unrouted tokens.
@@ -108,17 +112,17 @@ fn runExpertStationary(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, ga
     const x = input.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.d });
     const ids = topk_ids.pad(-1, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
     const weights = topk_weights.pad(0, .{ .t = Tensor.Pad{ .high = pad } }).reshape(.{ padded.t, cfg.k });
-    const y = kernels.Kernel(.fp8_block128, .expert_stationary).call(fp8Inputs(x, ids, weights, gate_up, down, scales), .{ .y = x.shape() }, .{ .cfg = padded }).y;
+    const y = kernels.Kernel(.fp8_block128, .fp8_small_batch).call(fp8Inputs(x, ids, weights, gate_up, down, scales), .{ .y = x.shape() }, .{ .cfg = padded }).y;
     return y.slice(0, .{ .end = cfg.t }).reshape(input.shape());
 }
 
-fn fp8Inputs(x: Tensor, ids: Tensor, weights: Tensor, gate_up: Tensor, down: Tensor, scales: Scales) kernels.Kernel(.fp8_block128, .activation_stationary).Inputs {
+fn fp8Inputs(x: Tensor, ids: Tensor, weights: Tensor, gate_up: Tensor, down: Tensor, scales: Scales) kernels.Kernel(.fp8_block128, .per_route).Inputs {
     return .{ .x = x, .ids = ids, .w = weights, .gate_up = gate_up, .down = down, .gate_up_scale = scales.gate_up, .down_scale = scales.down };
 }
 
-fn runGathered(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .activation_stationary).Inputs) Tensor {
+fn runGathered(comptime format: kernels.Format, cfg: kernels.Cfg, inputs: kernels.Kernel(format, .per_route).Inputs) Tensor {
     const shape = inputs.x.shape();
-    if (cfg.t * cfg.k <= cfg.e) return kernels.Kernel(format, .activation_stationary).call(inputs, .{ .y = shape }, .{ .cfg = cfg }).y;
+    if (cfg.t * cfg.k <= cfg.e) return kernels.Kernel(format, .per_route).call(inputs, .{ .y = shape }, .{ .cfg = cfg }).y;
     return kernels.Kernel(format, .blockwise).call(inputs, .{ .y = shape }, .{ .cfg = cfg }).y;
 }
 
@@ -134,7 +138,8 @@ fn testFusedExperts(activation: zml.moe.Activation) !void {
     const io = std.testing.io;
     const bf16 = zml.floats.BFloat16;
 
-    // 2 * 4 <= 8 experts is activation stationary, 16 tokens is blockwise.
+    // With two routes per token and eight experts, four tokens use per-route
+    // dispatch and sixteen use blockwise dispatch.
     for ([_]i64{ 4, 16 }) |t| {
         const k = 2;
         const e = 8;
