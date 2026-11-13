@@ -7,12 +7,14 @@
 
 const std = @import("std");
 
-const zml = @import("../../../zml.zig");
+const Quantization = @import("zml/quantization").Quantization;
+
+const zml = @import("zml/core");
 const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
-const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 
 const log = std.log.scoped(.@"zml/moe/triton_kernels");
 
@@ -34,7 +36,7 @@ pub const PerTokenGroupQuantFp8 = struct {
         output_dtype: DType,
         scale_dtype: DType,
         block: usize,
-        quant_scheme: zml.Quantization.Scheme,
+        quant_scheme: Quantization.Scheme,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "per_token_group_quant_fp8",
@@ -206,7 +208,7 @@ pub const FusedMoe = struct {
         top_k: usize,
         naive_block_assignment: bool,
         compute_type: DType,
-        quant_scheme: ?zml.Quantization.Scheme,
+        quant_scheme: ?Quantization.Scheme,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "fused_moe_kernel",
@@ -573,7 +575,7 @@ pub const FusedMoe = struct {
 };
 
 test "FP8 activation quantization emits float and E8M0 scales" {
-    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 }) |scheme| {
+    for ([_]Quantization.Scheme{ .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 }) |scheme| {
         for ([_]DType{ .bf16, .f32 }) |input_dtype| {
             const ir = try PerTokenGroupQuantFp8.Kernel.emit(std.testing.allocator, .{
                 .input_dtype = input_dtype,
@@ -592,7 +594,7 @@ test "FP8 activation quantization emits float and E8M0 scales" {
 
 test "FusedMoe emits each FP8 and MXFP4 scaling path" {
     const allocator = std.testing.allocator;
-    const schemes = [_]?zml.Quantization.Scheme{ null, .mxfp4, .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128, .fp8_block32 };
+    const schemes = [_]?Quantization.Scheme{ null, .mxfp4, .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128, .fp8_block32 };
     for (schemes) |scheme| {
         for ([_]DType{ .f8e4m3fn, .f8e4m3fnuz }) |fp8_dtype| {
             if ((scheme == .mxfp4 or scheme == .mxfp8) and fp8_dtype == .f8e4m3fnuz) continue;

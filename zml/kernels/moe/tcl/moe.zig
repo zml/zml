@@ -3,9 +3,9 @@ const std = @import("std");
 
 const builder = @import("dsl/tcl/builder");
 
-const zml = @import("../../../zml.zig");
+const zml = @import("zml/core");
 const tcl = zml.kernel.tcl;
-const ActivationKind = @import("../api.zig").ActivationKind;
+const ActivationKind = @import("zml/kernels/moe/api").ActivationKind;
 
 pub const Format = enum { bf16, fp8_block128 };
 

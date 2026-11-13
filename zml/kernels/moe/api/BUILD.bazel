@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "api",
+    import_name = "zml/kernels/moe/api",
+    main = "api.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml/core",
+    ],
+)

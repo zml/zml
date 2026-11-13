@@ -2,10 +2,13 @@
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
-const Options = @import("../api.zig").Options;
-const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
-const LocalRouting = @import("../api.zig").LocalRouting;
+const nn = @import("zml/nn");
+const Quantization = @import("zml/quantization").Quantization;
+
+const zml = @import("zml/core");
+const Options = @import("zml/kernels/moe/api").Options;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 pub const kernels = @import("sm10x/moe.zig");
 
 // `moe.zig`'s `refAllDecls` reaches this file but not its imports, so the
@@ -43,8 +46,8 @@ pub fn validateOptions(opts: Options) void {
 pub fn fusedExperts(
     input: zml.Tensor,
     routing: LocalRouting,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
+    gate_up: nn.Linear,
+    down: nn.Linear,
     options: Options,
 ) zml.Tensor {
     validateOptions(options);
@@ -72,7 +75,7 @@ pub fn fusedExperts(
             stdx.debug.assert(gq.swizzled_scales and dq.swizzled_scales, "cute NVFP4 backend expects swizzled block scales", .{});
             stdx.debug.assert(gate_up.weight.dtype() == .u8 and down.weight.dtype() == .u8, "cute NVFP4 backend expects packed u8 weights, got {} and {}", .{ gate_up.weight.dtype(), down.weight.dtype() });
             const scale = struct {
-                fn f(global: ?zml.Quantization.GlobalScale) zml.Tensor {
+                fn f(global: ?Quantization.GlobalScale) zml.Tensor {
                     return (global orelse @panic("cute NVFP4 backend requires global and input scales")).asMultiplier();
                 }
             }.f;

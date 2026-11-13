@@ -1,8 +1,15 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
-filegroup(
+zig_library(
     name = "metal",
-    srcs = [
-        "metal.zig",
+    import_name = "zml/kernels/moe/metal",
+    main = "metal.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/moe/api",
+        "//zml/kernels/moe/weights",
+        "//zml/nn",
     ],
 )

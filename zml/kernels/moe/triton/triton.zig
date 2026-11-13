@@ -2,18 +2,21 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const nn = @import("zml/nn");
+const Quantization = @import("zml/quantization").Quantization;
+
+const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
 const toDType = zml.kernel.triton.from;
-const ExpertsLayout = @import("../api.zig").ExpertsLayout;
-const ProjectionLayout = @import("../api.zig").ProjectionLayout;
-const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
-const Activation = @import("../api.zig").Activation;
-const Options = @import("../api.zig").Options;
-const LocalRouting = @import("../api.zig").LocalRouting;
-const kernels = @import("moe.zig");
+const ExpertsLayout = @import("zml/kernels/moe/api").ExpertsLayout;
+const ProjectionLayout = @import("zml/kernels/moe/api").ProjectionLayout;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const Activation = @import("zml/kernels/moe/api").Activation;
+const Options = @import("zml/kernels/moe/api").Options;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+pub const kernels = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/triton");
 
@@ -40,8 +43,8 @@ test {
 pub fn fusedExperts(
     input: zml.Tensor,
     routing: LocalRouting,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
+    gate_up: nn.Linear,
+    down: nn.Linear,
     options: Options,
 ) zml.Tensor {
     // HACK(Corentin): only rely on the scheme of gate_up for now.
@@ -60,8 +63,8 @@ pub fn fusedExperts(
 pub fn fusedExpertsBase(
     hidden_states: Tensor,
     routing_: LocalRouting,
-    gate_up_: zml.nn.Linear,
-    down_: zml.nn.Linear,
+    gate_up_: nn.Linear,
+    down_: nn.Linear,
     layout: ProjectionLayout,
     opts: Options,
 ) Tensor {
@@ -182,7 +185,7 @@ pub const GemmOptions = struct {
     routing: Routing,
     expert_ids: Tensor,
     launch_config: LaunchConfig,
-    quant_scheme: ?zml.Quantization.Scheme = null,
+    quant_scheme: ?Quantization.Scheme = null,
     top_k: usize,
     output_shape: Shape,
 };
@@ -436,7 +439,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
 }
 
-pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, output_dtype: zml.DataType, quantize: bool) struct { Tensor, ?Tensor } {
+pub fn prepareInput(x: Tensor, scheme: ?Quantization.Scheme, output_dtype: zml.DataType, quantize: bool) struct { Tensor, ?Tensor } {
     if (quantize) {
         if (scheme) |scheme_| {
             if (scheme_ != .mxfp4) {
@@ -448,7 +451,7 @@ pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, output_dtype: z
     return .{ x.convert(.bf16), null };
 }
 
-fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: DataType) struct { Tensor, Tensor } {
+fn quantizeFp8Input(x: Tensor, scheme: Quantization.Scheme, output_dtype: DataType) struct { Tensor, Tensor } {
     const group_size: i64, const scale_dtype: DataType, const absmax_epsilon: f32 = switch (scheme) {
         .mxfp8 => .{ 32, .u8, 1e-10 },
         .fp8_per_channel, .fp8_per_tensor => .{ x.dim(1), .f32, 1e-10 },
@@ -548,7 +551,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
             return expanded.withTags(shape.tags());
         }
 
-        fn forward(x: Tensor, w: Tensor, scales: Tensor, ids: Tensor, weights: Tensor, bias: Tensor, scheme: zml.Quantization.Scheme, mx_native: bool, quantize_input: bool) Outputs {
+        fn forward(x: Tensor, w: Tensor, scales: Tensor, ids: Tensor, weights: Tensor, bias: Tensor, scheme: Quantization.Scheme, mx_native: bool, quantize_input: bool) Outputs {
             const weight = w.convert(.f8e4m3fn);
             var input = x;
             var input_scale: ?Tensor = null;
@@ -592,7 +595,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
         }
     };
 
-    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 }) |scheme| {
+    for ([_]Quantization.Scheme{ .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 }) |scheme| {
         for ([_]bool{ false, true }) |quantize_input| {
             for ([_]i64{ 1, 17 }) |tokens| {
                 const n: i64 = if (scheme == .fp8_block128) 256 else 48;
@@ -674,7 +677,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
             const gate_value = if (fp4) Tensor.scalar(0x11, .u8) else Tensor.scalar(0.5, .bf16);
             const up_value = if (fp4) Tensor.scalar(0x33, .u8) else Tensor.scalar(1.5, .bf16);
             const gate_up_values = is_gate.select(gate_value, up_value);
-            var gate_up: zml.nn.Linear = .{
+            var gate_up: nn.Linear = .{
                 .weight = gate_up_values.broad(Shape.init(.{ .expert = 8, .dout = 256, .d = @as(i64, if (fp4) 64 else 128) }, dtype)),
                 .tag = Shape.toTag(.d),
                 .quantization = if (fp4) .{
@@ -682,7 +685,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                     .scales = Tensor.scalar(127, .u8).broad(Shape.init(.{ .expert = 8, .dout = 256, .d = 4 }, .u8)),
                 } else null,
             };
-            var down: zml.nn.Linear = .{
+            var down: nn.Linear = .{
                 .weight = (if (fp4) Tensor.scalar(0x22, .u8) else Tensor.scalar(1, .bf16)).broad(Shape.init(.{ .expert = 8, .d = 128, .dout = @as(i64, if (fp4) 64 else 128) }, dtype)),
                 .bias = Tensor.scalar(2, .bf16).broad(Shape.init(.{ .expert = 8, .d = 128 }, .bf16)),
                 .tag = Shape.toTag(.dout),
@@ -902,8 +905,8 @@ fn validateInputs(
 pub fn fusedExpertsMxfp4(
     input: zml.Tensor,
     routing: LocalRouting,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
+    gate_up: nn.Linear,
+    down: nn.Linear,
     options: Options,
 ) zml.Tensor {
     validateOptions(options);
