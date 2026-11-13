@@ -104,8 +104,7 @@ def softmax_kernel(B: Axis = 2, D: Axis = 1024, S: Axis = 16, v0: [B, S, D]/bf16
   across the partitions; other kernels stay per chip. Its arguments and
   results are DRAM tensors: `Dram{ .chip = &.{.{ .axis = C }} }` splits axis
   `C`, sized to the chip count, across chips (each partition holds its share),
-  the default `.broadcast` keeps a copy per chip. Call it inside
-  `zml.ops.manualComputation` so it sees each partition's shards.
+  the default `.broadcast` keeps a copy per chip.
 * **Convolutions** pad and slide the input in its read: a slide replaces its
   axis by `window_axis, frame_axis`, then `contract` with the filter. On its
   own (without a slide) the padding is dropped.

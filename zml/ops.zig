@@ -18,9 +18,10 @@ const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const manual_computation = @import("ops/manual_computation.zig");
 pub const manualComputation = manual_computation.manualComputation;
-const manual_computation2 = @import("ops/manual_computation2.zig");
-pub const manualComputation2 = manual_computation2.manualComputation2;
-pub const ManualPartitioning = manual_computation2.ManualPartitioning;
+pub const ManualPartitioning = manual_computation.ManualPartitioning;
+pub const PartitionSpecs = manual_computation.PartitionSpecs;
+pub const partitionSpecs = manual_computation.partitionSpecs;
+pub const partitionSpecsAlloc = manual_computation.partitionSpecsAlloc;
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
@@ -30,7 +31,6 @@ const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
 test {
     _ = manual_computation;
-    _ = manual_computation2;
 }
 
 const log = std.log.scoped(.@"zml/Compiler");
@@ -89,7 +89,7 @@ pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@
 /// ```
 ///
 /// Each expert shard now has the complete output for its data shard. To expose
-/// this result through `manualComputation2`, an output spec such as
+/// this result through `manualComputation`, an output spec such as
 /// `.parse(.{ .t = .data })` keeps tokens split across `.data` and declares the
 /// result replicated along `.experts`.
 pub fn allReduceOnAxis(inputs: anytype, comptime func_: anytype, mesh: *const Sharding.Mesh, axis: anytype) AllReduceReturnType(@TypeOf(inputs)) {
@@ -2760,11 +2760,6 @@ pub fn CustomCall(
     comptime params: struct {
         /// Name of the custom call, must be unique.
         name: [:0]const u8,
-        /// Custom call will see the data of a single device. So for a sharded buffer, it will only see a single partition. This applies
-        /// for both the input and output buffers. By default, the partitioning algorithm will assume nothing on the custom call input/output,
-        /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
-        /// sharding, this setting will avoid the shuffling of the buffer's data.
-        sharding_aware: bool,
         /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
         has_side_effect: bool,
         /// Similar to reuseBuffer on tensors, tells XLA that the custom call re-uses an input buffer for its output.
@@ -2798,23 +2793,7 @@ pub fn CustomCall(
                 .output_operand_aliases = comptime customCallOutputOperandAliases(I, O, params.output_operand_aliases),
                 .compute_on_host = params.compute_on_host,
             };
-            if (params.sharding_aware) {
-                return shardingAwareTypedCustomCall(
-                    params.name,
-                    opts,
-                    input_tensors,
-                    output_shapes,
-                    attributes,
-                );
-            } else {
-                return typedCustomCall(
-                    params.name,
-                    opts,
-                    input_tensors,
-                    output_shapes,
-                    attributes,
-                );
-            }
+            return typedCustomCall(params.name, opts, input_tensors, output_shapes, attributes);
         }
 
         fn handler(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
@@ -2842,44 +2821,6 @@ pub fn CustomCallOutputOperandAliases(I: type, O: type) type {
     );
 }
 
-pub fn shardingAwareTypedCustomCall(
-    comptime target_name: [:0]const u8,
-    comptime opts: CustomCallOptions,
-    input: anytype,
-    output: anytype,
-    attributes: anytype,
-) ShapeToTensor(@TypeOf(output)) {
-    const Input = @TypeOf(input);
-    const Output = @TypeOf(output);
-    const Attributes = @TypeOf(attributes);
-
-    var output_shapes: [@typeInfo(Output).@"struct".field_names.len]Shape = undefined;
-    inline for (@typeInfo(Output).@"struct".field_names, 0..) |field_name, i| {
-        output_shapes[i] = @field(output, field_name);
-    }
-
-    const Handler = struct {
-        input: Input,
-        attributes: Attributes,
-
-        fn body(self: @This(), sharded_output_shapes: []const Shape) []const Tensor {
-            return typedCustomCall(target_name, opts, self.input, sharded_output_shapes, self.attributes);
-        }
-    };
-    const output_tensors = manualComputation(
-        Handler.body,
-        .{ .input = input, .attributes = attributes },
-        @as([]const Shape, &output_shapes),
-    );
-
-    // Convert the slice back to a struct
-    var out: ShapeToTensor(Output) = undefined;
-    inline for (@typeInfo(Output).@"struct".field_names, 0..) |field_name, i| {
-        @field(out, field_name) = output_tensors[i];
-    }
-    return out;
-}
-
 pub fn typedCustomCall(
     target_name: [:0]const u8,
     opts: CustomCallOptions,
@@ -2894,7 +2835,7 @@ pub fn typedCustomCall(
     const ctx = Compiler.current();
     const allocator = ctx.arena.allocator();
 
-    stdx.debug.assert(!opts.has_side_effect or ctx.manual_computation_depth > 0, "side-effect customCall '{s}' must be emitted inside manualComputation", .{target_name});
+    stdx.debug.assert(ctx.manual_computation_depth > 0, "customCall '{s}' must be emitted inside manualComputation", .{target_name});
 
     const input_tensors: []const Tensor = switch (@typeInfo(Input)) {
         .@"struct" => |struct_info| b: {
@@ -2904,7 +2845,6 @@ pub fn typedCustomCall(
             }
             break :b &input_tensors;
         },
-        // Extra case to support []const Tensor from mesheAwareTypedCustomCall
         .pointer => |pointer_info| b: {
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             break :b input;
@@ -2920,7 +2860,6 @@ pub fn typedCustomCall(
             }
             break :b &output_shapes;
         },
-        // Extra case to support []const Shape from mesheAwareTypedCustomCall
         .pointer => |pointer_info| b: {
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             break :b output;
@@ -2985,7 +2924,7 @@ pub fn typedCustomCall(
         ctx.location,
     ).appendTo(ctx.currentScope().block);
 
-    if (ctx.manual_computation_depth > 0 and ctx.partitioner == .gspmd) {
+    if (ctx.partitioner == .gspmd) {
         op.setAttributeByName("mhlo.sharding", .string(ctx.mlir_ctx, "{manual}"));
     }
 
@@ -2997,7 +2936,6 @@ pub fn typedCustomCall(
             }
             return out;
         },
-        // Extra case to support []const Shape from mesheAwareTypedCustomCall
         .pointer => |pointer_info| {
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             var out: []Tensor = allocator.alloc(Tensor, output_shapes.len) catch unreachable;
@@ -3050,7 +2988,7 @@ test customCall {
     const platform = zml.testing.env();
     const tp = zml.testing.tpMesh();
 
-    var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
+    var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{ .meshes = &.{tp} });
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -3061,9 +2999,17 @@ test customCall {
 
     const shape = zml.Shape.init(.{128}, .bf16).withPartitioning(tp, .{ ._0 = .model });
     const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(shape);
-    const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
-        .has_side_effect = false,
-        .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
+    const Local = struct {
+        fn body(x: Tensor, output_shape: Shape) Tensor {
+            return customCall("my_custom_call", .{x}, .{output_shape}, .{}, .{
+                .has_side_effect = false,
+                .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
+            });
+        }
+    };
+    const output = manualComputation(Local.body, input, shape, tp, .{
+        .in_specs = .parse(.{ ._0 = .model }),
+        .out_specs = .parse(.{ ._0 = .model }),
     });
 
     try zml.testing.expectEqualShapes(input.shape(), output.shape());

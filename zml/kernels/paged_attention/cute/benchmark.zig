@@ -125,7 +125,7 @@ fn forward(inputs: Inputs, c: cases.Case, mesh: *const zml.Mesh) zml.Tensor {
         }
     };
     const heads: zml.Sharding.Partitioning.Logical = .parse(.{ .hkv = .model });
-    return zml.ops.manualComputation2(Call.local, .{ .inputs = inputs, .case = c }, inputs.q.shape(), mesh, .{
+    return zml.ops.manualComputation(Call.local, .{ .inputs = inputs, .case = c }, inputs.q.shape(), mesh, .{
         .in_specs = .{ .inputs = .{
             .q = heads,
             .k = heads,

@@ -4813,7 +4813,7 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation2((struct {
+                ops.manualComputation((struct {
                     input: Tensor,
                     name: []const u8,
 

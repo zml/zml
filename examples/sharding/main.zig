@@ -42,7 +42,7 @@ const DemoModel = struct {
 
         const spec: zml.Sharding.Partitioning.Logical = .parse(.{ .batch = .data, .hidden = .model });
 
-        return zml.ops.manualComputation2(
+        return zml.ops.manualComputation(
             (struct {
                 y: zml.Tensor,
                 gate: zml.Tensor,
@@ -70,7 +70,7 @@ fn usage() void {
         \\Simple sharding demo:
         \\  - explicit partitioning on data/model axes
         \\  - tensor print
-        \\  - manualComputation2 with multiple inputs and one output
+        \\  - manualComputation with multiple inputs and one output
         \\
         \\Mesh modes:
         \\  - auto: physical_mesh=auto, inferred cpu device_count=2

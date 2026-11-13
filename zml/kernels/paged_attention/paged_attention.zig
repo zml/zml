@@ -207,7 +207,7 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     _ = k;
     _ = v;
     const args: Attention = .{ .parameters = parameters, .q = q, .kv_cache = kv_cache, .opts = opts };
-    return zml.ops.manualComputation2(Attention.forward, args, q.shape(), mesh, partitioning);
+    return zml.ops.manualComputation(Attention.forward, args, q.shape(), mesh, partitioning);
 }
 
 const Attention = struct {
@@ -435,12 +435,9 @@ test pagedAttention {
             const parameters: Parameters = .init(.fromBackend(backend_options_args));
 
             const head_spec: zml.Sharding.Partitioning.Logical = .parse(.{ .hkv = .model });
-            const ParameterSpecs = zml.meta.MapRestrict(zml.Tensor, zml.Sharding.Partitioning.Logical).map(Parameters);
             const partitioning: Partitioning = .{
                 .in_specs = .{
-                    .parameters = switch (parameters) {
-                        inline else => |_, tag| @unionInit(ParameterSpecs, @tagName(tag), .{ .block_table = .replicated, .seq_lens = .replicated, .query_start_len = .replicated }),
-                    },
+                    .parameters = try zml.ops.partitionSpecsAlloc(arena, parameters, .replicated),
                     .q = head_spec,
                     .kv_cache = .{ .split = .{ .k = head_spec, .v = head_spec } },
                     .opts = .{ .mask = .{ .standard = {} }, .sink = null },
