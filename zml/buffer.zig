@@ -376,7 +376,7 @@ pub const Buffer = struct {
 };
 
 test "device round-trip" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const platform = zml.testing.env();

@@ -316,7 +316,7 @@ pub const Tensor = struct {
     }
 
     test toMemory {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const io = std.testing.io;
 
@@ -473,7 +473,7 @@ pub const Tensor = struct {
     }
 
     test reuseBuffer {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const io = std.testing.io;
 
@@ -611,7 +611,7 @@ pub const Tensor = struct {
     }
 
     test fmod {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const inputs: [2][6]f32 = .{ .{ -3.0, -2, -1, 1, 2, 3 }, .{ 1, 2, 3, 4, 5, -5 } };
@@ -793,7 +793,7 @@ pub const Tensor = struct {
     }
 
     test "Tensor.fft IRFFT restores RFFT last dimension" {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const rfft_input_len: i64 = 10;
 
@@ -903,7 +903,7 @@ pub const Tensor = struct {
         }
 
         test uniform {
-            const zml = @import("zml.zig");
+            const zml = @import("core.zig");
             const Stats = struct {
                 const Stats = @This();
 
@@ -1001,7 +1001,7 @@ pub const Tensor = struct {
         }
 
         test gumbel {
-            const zml = @import("zml.zig");
+            const zml = @import("core.zig");
             const Stats = struct {
                 const Stats = @This();
 
@@ -1376,7 +1376,7 @@ pub const Tensor = struct {
 
     test "convert f32 -> f4e2m1" {
         const floats = @import("floats.zig");
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const x_f32 = [_]f32{ 0.0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6 };
         var x_f4: [x_f32.len / 2]floats.Float4E2M1.Packed = undefined;
@@ -1409,7 +1409,7 @@ pub const Tensor = struct {
     }
 
     test "convert f32 -> f8e3m4" {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const x = [_]f32{ 1.1 / 4.0, 1.1 / 8.0, 1.1 / 16.0, 1.1 / 32.0, 1.1 / 64.0, 1.1 / 128.0 };
@@ -1440,7 +1440,7 @@ pub const Tensor = struct {
     }
 
     test "convert u2 -> u8" {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const x_u2: [2]stdx.Packed(u2) = .{ .pack(0, 1, 2, 3), .pack(3, 2, 1, 0) };
         comptime std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
@@ -1470,7 +1470,7 @@ pub const Tensor = struct {
 
     test "convert f4e2m1 -> f32" {
         const floats = @import("floats.zig");
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const x_f4_packed = [_]floats.Float4E2M1.Packed{ .fromF32(0, 0.5), .fromF32(1, 1.5), .fromF32(2, 3), .fromF32(4, 6) };
 
@@ -1564,7 +1564,7 @@ pub const Tensor = struct {
     }
 
     test dot {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         inline for (.{
@@ -1713,7 +1713,7 @@ pub const Tensor = struct {
     }
 
     test leakyReLU {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const input: Tensor = .init(.{2}, .f32);
@@ -1751,7 +1751,7 @@ pub const Tensor = struct {
     }
 
     test swiglu {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const input: Tensor = .init(.{ .d = 4 }, .f32);
@@ -2024,7 +2024,7 @@ pub const Tensor = struct {
     }
 
     test cumulativeSum {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -2332,7 +2332,7 @@ pub const Tensor = struct {
     }
 
     test slice {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const x: Tensor = .init(.{ 2, 5 }, .f32);
@@ -2372,7 +2372,7 @@ pub const Tensor = struct {
     }
 
     test "dynamic slices" {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -2492,7 +2492,7 @@ pub const Tensor = struct {
     }
 
     test repeat1d {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -2555,7 +2555,7 @@ pub const Tensor = struct {
     }
 
     test stutter1d {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -2678,7 +2678,7 @@ pub const Tensor = struct {
     }
 
     test arange {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const exe = try zml.module.compile(
@@ -2764,7 +2764,7 @@ pub const Tensor = struct {
     }
 
     test scalar {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -3057,7 +3057,7 @@ pub const Tensor = struct {
     }
 
     test gather {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -3211,7 +3211,7 @@ pub const Tensor = struct {
     }
 
     test gatherSlices {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -3420,7 +3420,7 @@ pub const Tensor = struct {
     }
 
     test scatterSlices {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -3642,7 +3642,7 @@ pub const Tensor = struct {
     }
 
     test argMax {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const allocator = std.testing.allocator;
         const ArgMaxTest = struct {
@@ -3714,7 +3714,7 @@ pub const Tensor = struct {
     }
 
     test argsort {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -3985,7 +3985,7 @@ pub const Tensor = struct {
     }
 
     test chunkExact {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         // Only test shapes
@@ -4038,7 +4038,7 @@ pub const Tensor = struct {
     }
 
     test chunkAllowTrailing {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         // Only test shapes
@@ -4096,7 +4096,7 @@ pub const Tensor = struct {
     }
 
     test split {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -4230,7 +4230,7 @@ pub const Tensor = struct {
     }
 
     test dynamicUpdateSlice {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         {
@@ -4426,7 +4426,7 @@ pub const Tensor = struct {
     }
 
     test toDiagonal {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -4479,7 +4479,7 @@ pub const Tensor = struct {
     }
 
     test triangular {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const Local = struct {
@@ -4657,7 +4657,7 @@ pub const Tensor = struct {
     }
 
     test cartesianProduct {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
 
         const x: Tensor = .init(.{6}, .i32);
@@ -4735,7 +4735,7 @@ pub const Tensor = struct {
     }
 
     test cartesianProductStacked {
-        const zml = @import("zml.zig");
+        const zml = @import("core.zig");
         const platform = zml.testing.env();
         const x: Tensor = .init(.{6}, .i32);
         const y: Tensor = .init(.{4}, .i32);
@@ -4881,7 +4881,7 @@ fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const stablehlo.Compa
 }
 
 test "Tensor.maxPool1d" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     const MaxPool = struct {
@@ -4923,7 +4923,7 @@ test "Tensor.maxPool1d" {
 }
 
 test "Tensor.maxPool2d" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     const MaxPool = struct {
@@ -5032,7 +5032,7 @@ test transposeIsJustAReshape {
 }
 
 test "unused tensor" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     const Local = struct {

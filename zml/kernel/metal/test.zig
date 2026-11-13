@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const metal = @import("metal.zig");
-const zml = @import("../../zml.zig");
+const zml = @import("../../core.zig");
 
 /// `out[i] = a[i] * scale + b[i]` over `n` floats.
 const MetalAxpy = struct {

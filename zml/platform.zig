@@ -13,7 +13,7 @@ const flashinfer_cutlass_contract = @import("kernels/moe/flashinfer_cutlass/cont
 const flashinfer_cutlass_runtime = @import("kernels/moe/flashinfer_cutlass/runtime.zig");
 const pjrtx = @import("pjrtx.zig");
 const Sharding = @import("Sharding.zig");
-const zml = @import("zml.zig");
+const zml = @import("core.zig");
 
 const log = std.log.scoped(.zml);
 

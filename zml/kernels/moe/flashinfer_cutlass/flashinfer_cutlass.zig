@@ -9,9 +9,9 @@ const GlobalOptions = @import("../api.zig").Options;
 const Activation = @import("../api.zig").Activation;
 const LocalRouting = @import("../api.zig").LocalRouting;
 const unpackedWeight = @import("../weights.zig").unpackedWeight;
-const contract = @import("contract.zig");
+const contract = @import("zml/core").flashinfer_cutlass.contract;
 const Attributes = contract.Attributes;
-const runtime = @import("runtime.zig");
+const runtime = @import("zml/core").flashinfer_cutlass.runtime;
 
 const log = std.log.scoped(.@"zml/moe/flashinfer_cutlass");
 

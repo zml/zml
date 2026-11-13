@@ -1,0 +1,82 @@
+const std = @import("std");
+
+pub const bazel = @import("bazel");
+pub const constants = @import("zml/constants");
+pub const meta = @import("zml/meta");
+pub const pjrt = @import("pjrt");
+pub const stdx = @import("stdx");
+pub const tracer = @import("zml/profiling").tracer;
+
+pub const Buffer = @import("buffer.zig").Buffer;
+pub const Compiler = @import("Compiler.zig");
+pub const dtype = @import("dtype.zig");
+pub const Data = dtype.Data;
+pub const DataType = dtype.DataType;
+pub const exe = @import("exe.zig");
+pub const Exe = exe.Exe;
+pub const FnExe = exe.FnExe;
+pub const floats = @import("floats.zig");
+pub const io = @import("io.zig");
+pub const kernel = @import("kernel/kernel.zig");
+pub const mem = @import("mem.zig");
+pub const Bufferized = mem.Bufferized;
+pub const mlir = @import("mlirx.zig");
+pub const nn = @import("nn.zig");
+pub const ops = @import("ops.zig");
+pub const pjrtx = @import("pjrtx.zig");
+pub const platform = @import("platform.zig");
+pub const Memory = platform.Memory;
+pub const Platform = platform.Platform;
+pub const Target = platform.Target;
+pub const quantization = @import("quantization.zig");
+pub const Quantization = quantization.Quantization;
+pub const safetensors = @import("safetensors.zig");
+pub const shape = @import("shape.zig");
+pub const Shape = shape.Shape;
+pub const Sharding = @import("Sharding.zig");
+pub const Mesh = Sharding.Mesh;
+pub const slice = @import("slice.zig");
+pub const Slice = slice.Slice;
+pub const tensor = @import("tensor.zig");
+pub const Tensor = tensor.Tensor;
+pub const testing = @import("testing.zig");
+
+// Platform owns registration and runner lifetime until these are separated from core.
+pub const flashinfer_cutlass = struct {
+    pub const contract = @import("kernels/moe/flashinfer_cutlass/contract.zig");
+    pub const runtime = @import("kernels/moe/flashinfer_cutlass/runtime.zig");
+};
+
+/// Deprecated, use `zml.Compiler` instead
+pub const module = struct {
+    pub const CompilationContext = Compiler;
+    pub const CompileError = Compiler.Error;
+    pub const CompilationOptions = Compiler.Options;
+
+    /// Deprecated, use `platform.compileFn` or `zml.Compiler.compile`
+    pub fn compile(
+        allocator: std.mem.Allocator,
+        io_: std.Io,
+        comptime func: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(func)),
+        platform_: *const Platform,
+        opts: Compiler.Options,
+    ) Compiler.Error!Exe {
+        return Compiler.compile(allocator, io_, platform_, func, args, opts);
+    }
+};
+
+test "core" {
+    std.testing.refAllDecls(@This());
+}
+
+pub const KiB = 1024;
+pub const MiB = 1024 * KiB;
+pub const GiB = 1024 * MiB;
+pub const TiB = 1024 * GiB;
+
+comptime {
+    // Forces zig to compile `@zml//bazel` module even when users don't depend on it even indirectly.
+    // Otherwise exported functions declared in `bazel` aren't compiled.
+    std.testing.refAllDecls(bazel);
+}

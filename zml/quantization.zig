@@ -3,7 +3,7 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("zml.zig");
+const zml = @import("core.zig");
 
 const DataType = @import("dtype.zig").DataType;
 const platform_mod = @import("platform.zig");

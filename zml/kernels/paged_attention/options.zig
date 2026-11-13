@@ -1,4 +1,4 @@
-const Tensor = @import("../../tensor.zig").Tensor;
+const Tensor = @import("zml/core").Tensor;
 
 pub const AttentionMask = union(enum) {
     standard: struct {
