@@ -998,7 +998,11 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_collective_permute_connected_components", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLASLT,CUSTOM_CALL,FUSION", upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
+                // CONCURRENT orders buffer assignment by data dependencies only, so every
+                // dequantized FP8 weight (oneAPI has no scaled dot) gets its own buffer:
+                // 22.7 GiB of temps for Qwen3.8-27B-FP8 prefill. CONCURRENT_REGIONS
+                // follows the schedule and keeps concurrency for small kernels only.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT_REGIONS", upb_arena);
 
                 // Grouped GEMM still needs a oneDNN lowering.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_ragged_dot_grouped_gemm", false, upb_arena);

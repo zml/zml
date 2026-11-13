@@ -68,11 +68,48 @@ pub const Linear = struct {
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
         const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
-        const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{ .rhs_scale_swizzled = q.swizzled_scales });
+        const acc = if (lhs_scale == null and !q.swizzled_scales and dequantizesBlockFp8InGraph(q.scheme, weight, scales))
+            lhs.dot(dequantizeBlockFp8(weight, scales), self.tag).convert(output_dtype)
+        else
+            scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{ .rhs_scale_swizzled = q.swizzled_scales });
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 };
+
+/// oneAPI has no scaled dot: XLA would dequantize block FP8 weights with a generic f8e4m3fn
+/// conversion that is slow on Intel GPUs (Qwen3.8-27B-FP8 decoded at 18 tok/s on two B70s,
+/// 32 tok/s with `dequantizeBlockFp8`).
+fn dequantizesBlockFp8InGraph(scheme: Quantization.Scheme, weight: Tensor, scales: Tensor) bool {
+    if (zml.Compiler.current().platform.target != .oneapi) return false;
+    if (scheme != .fp8_block128 and scheme != .fp8_block32) return false;
+    if (weight.dtype() != .f8e4m3fn or weight.rank() != 2 or scales.rank() != 2) return false;
+    if (scales.dtype() != .bf16 and scales.dtype() != .f32) return false;
+    for (0..2) |axis| {
+        if (@mod(weight.dim(axis), scales.dim(axis)) != 0) return false;
+    }
+    return true;
+}
+
+/// Dequantizes block FP8 to bf16 with integer ops. Moving the E4M3FN bits into an f16
+/// (s eeee mmm -> s 0eeee mmm0000000) gives exactly value / 256, subnormals included, and
+/// f16 -> f32 is a hardware conversion. 0x7f and 0xff, NaN in E4M3FN, become +-480.
+fn dequantizeBlockFp8(values: Tensor, scales: Tensor) Tensor {
+    const bits = values.bitCast(.u8).convert(.u16);
+    const sign = bits.logical(.AND, .scalar(0x80, .u16)).shiftLeft(.scalar(8, .u16));
+    const magnitude = bits.logical(.AND, .scalar(0x7f, .u16)).shiftLeft(.scalar(7, .u16));
+    const unscaled = sign.logical(.OR, magnitude).bitCast(.f16).convert(.f32);
+
+    // Scales are positional ([out / block, k / block]); loaders may tag them differently.
+    var expanded = scales.withTags(values.shape()).convert(.f32).scale(256.0);
+    for (0..values.rank()) |axis| {
+        const block = @divExact(values.dim(axis), scales.dim(axis));
+        const shape = expanded.shape().insert(axis + 1, .{block});
+        const axes = Shape.range(shape.rank(), .i64).remove(axis + 1);
+        expanded = expanded.broadcast(shape, axes.dims()).reshape(expanded.shape().setDim(axis, values.dim(axis)));
+    }
+    return unscaled.mul(expanded).convert(.bf16);
+}
 
 pub fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
     return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
