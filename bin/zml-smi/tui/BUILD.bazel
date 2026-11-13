@@ -2,8 +2,6 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "tui",
-    import_name = "zml-smi/tui",
-    main = "tui.zig",
     srcs = [
         "data.zig",
         "image_cache.zig",
@@ -40,12 +38,14 @@ zig_library(
         "assets/nvidia.png",
         "assets/tpu.png",
     ],
+    import_name = "zml-smi/tui",
+    main = "tui.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/stamp:zig",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",
-        "//zml:logo",
+        "//zml/logo",
         "@libvaxis//:vaxis",
     ] + select({
         "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],

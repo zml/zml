@@ -1,0 +1,77 @@
+load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+upb_c_proto_library(
+    name = "profiler_options",
+    tags = ["manual"],
+    deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
+)
+
+cc_library(
+    name = "profiling_traceme_lib",
+    srcs = ["traceme_lib.cc"],
+    hdrs = ["traceme.h"],
+    defines = select({
+        "//platforms:cuda.enabled": ["ZML_RUNTIME_CUDA"],
+        "//conditions:default": [],
+    }) + select({
+        "//platforms:rocm.enabled": ["ZML_RUNTIME_ROCM"],
+        "//conditions:default": [],
+    }),
+    linkopts = select({
+        "//platforms:rocm.enabled": ["-ldl"],
+        "//conditions:default": [],
+    }),
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ffi:cc",
+        "@tsl//tsl/profiler/lib:traceme",
+        "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@xla//xla/tsl/profiler/backends/cpu:host_tracer_utils",
+        "@xla//xla/tsl/profiler/backends/cpu:traceme_recorder",
+        "@xla//xla/tsl/profiler/convert:post_process_single_host_xplane",
+        "@xla//xla/tsl/profiler/utils:time_utils",
+        "@xla//xla/tsl/profiler/utils:xplane_utils",
+    ] + select({
+        "//platforms:cuda.enabled": [
+            "//platforms/cuda:cuda_nvtx_headers",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//platforms:rocm.enabled": [
+            "@amdrocm-profiler-base//:roctx_headers",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+zig_library(
+    name = "profiling",
+    srcs = [
+        "profiler.zig",
+        "tracer.zig",
+    ],
+    import_name = "zml/profiling",
+    main = "profiling.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    zigopts = ["-lc"],
+    deps = [
+        ":profiler_options",
+        ":profiling_traceme_lib",
+        "//bazel",
+        "//ffi:zig",
+        "//pjrt",
+        "//platforms",
+        "//stdx",
+        "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",
+        "//upb",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":profiling"],
+)

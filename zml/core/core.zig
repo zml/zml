@@ -40,8 +40,8 @@ pub const testing = @import("testing.zig");
 
 // Platform owns registration and runner lifetime until these are separated from core.
 pub const flashinfer_cutlass = struct {
-    pub const contract = @import("kernels/moe/flashinfer_cutlass/contract.zig");
-    pub const runtime = @import("kernels/moe/flashinfer_cutlass/runtime.zig");
+    pub const contract = @import("flashinfer_cutlass/contract.zig");
+    pub const runtime = @import("flashinfer_cutlass/runtime.zig");
 };
 
 /// Deprecated, use `zml.Compiler` instead

@@ -1,0 +1,101 @@
+load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+upb_c_proto_library(
+    name = "xla_data_upb",
+    tags = ["manual"],
+    deps = ["@xla//xla:xla_data_proto"],
+)
+
+upb_c_proto_library(
+    name = "xla_compile_options_upb",
+    tags = ["manual"],
+    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
+)
+
+cc_library(
+    name = "posix",
+    hdrs = ["posix.h"],
+    tags = ["manual"],
+)
+
+zig_library(
+    name = "core",
+    srcs = [
+        "Compiler.zig",
+        "Sharding.zig",
+        "buffer.zig",
+        "buffer/HostAccessible.zig",
+        "dtype.zig",
+        "exe.zig",
+        "flashinfer_cutlass/contract.zig",
+        "flashinfer_cutlass/runtime.zig",
+        "floats.zig",
+        "io.zig",
+        "mem.zig",
+        "mlirx.zig",
+        "ops.zig",
+        "ops/manual_computation.zig",
+        "pjrtx.zig",
+        "platform.zig",
+        "safetensors.zig",
+        "shape.zig",
+        "slice.zig",
+        "tensor.zig",
+        "testing.zig",
+        "//zml/core/kernel",
+    ],
+    import_name = "zml/core",
+    main = "core.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    zigopts = [
+        "-lc",
+        "-freference-trace=20",
+    ],
+    deps = [
+        ":posix",
+        ":xla_compile_options_upb",
+        ":xla_data_upb",
+        "//bazel",
+        "//dsl/cuda_tile:builder",
+        "//dsl/cute:builder",
+        "//dsl/fly:builder",
+        "//dsl/metal:builder",
+        "//dsl/mosaic_tpu:builder",
+        "//dsl/tcl:builder",
+        "//dsl/triton:builder",
+        "//ffi:zig",
+        "//mlir",
+        "//mlir/dialects/func",
+        "//mlir/dialects/mosaic_tpu",
+        "//mlir/dialects/shardy",
+        "//mlir/dialects/stablehlo",
+        "//pjrt",
+        "//platforms",
+        "//stdx",
+        "//upb",
+        "//vfs",
+        "//zml/constants",
+        "//zml/meta",
+        "//zml/profiling",
+        "@zio",
+    ] + select({
+        "//platforms:neuron.enabled": [
+            "//platforms/neuron:nki_kernel",
+            "//platforms/neuron:topology",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//platforms:cuda.enabled": [
+            "//platforms/cuda/flashinfer_cutlass_moe",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+zig_test(
+    name = "test",
+    deps = [":core"],
+)
