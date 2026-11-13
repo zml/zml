@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const stdx = @import("stdx");
+const meta = @import("zml/meta");
 
 const Platform = @import("platform.zig").Platform;
 const Sharding = @import("Sharding.zig");
@@ -366,7 +367,7 @@ pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpec
 }
 
 fn BufferizedWithArgs(comptime T: type) type {
-    return zml.meta.MapType(zml.Tensor, zml.Buffer).map(T);
+    return meta.MapType(zml.Tensor, zml.Buffer).map(T);
 }
 
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
@@ -418,7 +419,7 @@ pub fn testLayer(
     };
 
     const input_name = try std.fmt.allocPrint(arena.allocator(), "{s}.in", .{name});
-    const input_count = zml.meta.count(zml.Tensor, &args);
+    const input_count = meta.count(zml.Tensor, &args);
     const expected_input_count = countWithPrefix(activation_store, input_name);
     if (input_count != expected_input_count) {
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ expected_input_count, input_count });
@@ -426,7 +427,7 @@ pub fn testLayer(
 
     const store_input = activation_store.withPrefix(input_name);
     var ctx = LocalContext{ .activation_store = store_input };
-    try zml.meta.visit(struct {
+    try meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *zml.Tensor) !void {
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
@@ -454,7 +455,7 @@ pub fn testLayer(
     defer exe_results.deinit(allocator);
 
     var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
-    defer zml.meta.visit(struct {
+    defer meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
         }

@@ -1041,7 +1041,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
         .device = device,
         .layout = .{
             .tiled = .{
-                .minor_to_major = zml.constants.minorToMajor(shape.rank()),
+                .minor_to_major = constants.minorToMajor(shape.rank()),
                 .tile_dims = &.{},
                 .tile_dims_sizes = &.{},
             },

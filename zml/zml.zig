@@ -7,13 +7,13 @@
 const std = @import("std");
 const core = @import("zml/core");
 
-pub const bazel = core.bazel;
-pub const constants = core.constants;
-pub const meta = core.meta;
-pub const pjrt = core.pjrt;
-pub const stdx = core.stdx;
+pub const bazel = @import("bazel");
+pub const constants = @import("zml/constants");
+pub const meta = @import("zml/meta");
+pub const pjrt = @import("pjrt");
+pub const stdx = @import("stdx");
 pub const tokenizer = @import("zml/tokenizer");
-pub const tracer = core.tracer;
+pub const tracer = @import("zml/profiling").tracer;
 
 pub const attention = @import("attention/attention.zig");
 pub const Buffer = core.Buffer;

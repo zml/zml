@@ -1,11 +1,6 @@
 const std = @import("std");
 
-pub const bazel = @import("bazel");
-pub const constants = @import("zml/constants");
-pub const meta = @import("zml/meta");
-pub const pjrt = @import("pjrt");
-pub const stdx = @import("stdx");
-pub const tracer = @import("zml/profiling").tracer;
+const bazel = @import("bazel");
 
 pub const Buffer = @import("buffer.zig").Buffer;
 pub const Compiler = @import("Compiler.zig");
