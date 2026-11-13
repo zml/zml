@@ -9,8 +9,8 @@ const stdx = @import("stdx");
 pub const Target = @import("platforms").Platform;
 
 const Exe = @import("exe.zig").Exe;
-const flashinfer_cutlass_contract = @import("kernels/moe/flashinfer_cutlass/contract.zig");
-const flashinfer_cutlass_runtime = @import("kernels/moe/flashinfer_cutlass/runtime.zig");
+const flashinfer_cutlass_contract = @import("flashinfer_cutlass/contract.zig");
+const flashinfer_cutlass_runtime = @import("flashinfer_cutlass/runtime.zig");
 const pjrtx = @import("pjrtx.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("core.zig");
@@ -1041,7 +1041,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
         .device = device,
         .layout = .{
             .tiled = .{
-                .minor_to_major = zml.constants.minorToMajor(shape.rank()),
+                .minor_to_major = constants.minorToMajor(shape.rank()),
                 .tile_dims = &.{},
                 .tile_dims_sizes = &.{},
             },

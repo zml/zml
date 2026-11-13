@@ -1,218 +1,4 @@
-load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
-
-upb_c_proto_library(
-    name = "xla_data_upb",
-    tags = ["manual"],
-    deps = ["@xla//xla:xla_data_proto"],
-)
-
-upb_c_proto_library(
-    name = "xla_compile_options_upb",
-    tags = ["manual"],
-    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
-)
-
-upb_c_proto_library(
-    name = "profiler_options",
-    tags = ["manual"],
-    deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
-)
-
-cc_library(
-    name = "posix",
-    hdrs = ["posix.h"],
-    tags = ["manual"],
-)
-
-cc_library(
-    name = "profiling_traceme_lib",
-    srcs = ["profiling/traceme_lib.cc"],
-    hdrs = ["profiling/traceme.h"],
-    defines = select({
-        "//platforms:cuda.enabled": ["ZML_RUNTIME_CUDA"],
-        "//conditions:default": [],
-    }) + select({
-        "//platforms:rocm.enabled": ["ZML_RUNTIME_ROCM"],
-        "//conditions:default": [],
-    }),
-    linkopts = select({
-        "//platforms:rocm.enabled": ["-ldl"],
-        "//conditions:default": [],
-    }),
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//ffi:cc",
-        "@tsl//tsl/profiler/lib:traceme",
-        "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
-        "@xla//xla/tsl/profiler/backends/cpu:host_tracer_utils",
-        "@xla//xla/tsl/profiler/backends/cpu:traceme_recorder",
-        "@xla//xla/tsl/profiler/convert:post_process_single_host_xplane",
-        "@xla//xla/tsl/profiler/utils:time_utils",
-        "@xla//xla/tsl/profiler/utils:xplane_utils",
-    ] + select({
-        "//platforms:cuda.enabled": [
-            "//platforms/cuda:cuda_nvtx_headers",
-        ],
-        "//conditions:default": [],
-    }) + select({
-        "//platforms:rocm.enabled": [
-            "@amdrocm-profiler-base//:roctx_headers",
-        ],
-        "//conditions:default": [],
-    }),
-)
-
-zig_library(
-    name = "logo",
-    srcs = ["logo.zig"],
-    import_name = "zml/logo",
-    main = "logo.zig",
-    visibility = ["//visibility:public"],
-)
-
-zig_library(
-    name = "meta",
-    import_name = "zml/meta",
-    main = "meta.zig",
-    visibility = ["//visibility:public"],
-    deps = ["//stdx"],
-)
-
-zig_library(
-    name = "constants",
-    import_name = "zml/constants",
-    main = "constants.zig",
-    visibility = ["//visibility:public"],
-)
-
-zig_library(
-    name = "profiling",
-    srcs = [
-        "profiling/profiler.zig",
-        "profiling/tracer.zig",
-    ],
-    import_name = "zml/profiling",
-    main = "profiling/profiling.zig",
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    zigopts = ["-lc"],
-    deps = [
-        ":profiler_options",
-        ":profiling_traceme_lib",
-        "//ffi:zig",
-        "//pjrt",
-        "//platforms",
-        "//stdx",
-        "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",
-        "//upb",
-    ],
-)
-
-zig_library(
-    name = "core",
-    srcs = [
-        "Compiler.zig",
-        "Sharding.zig",
-        "buffer.zig",
-        "buffer/HostAccessible.zig",
-        "dtype.zig",
-        "exe.zig",
-        "floats.zig",
-        "io.zig",
-        "//zml/kernel",
-        "mem.zig",
-        "mlirx.zig",
-        "ops.zig",
-        "ops/manual_computation.zig",
-        "pjrtx.zig",
-        "platform.zig",
-        "safetensors.zig",
-        "shape.zig",
-        "slice.zig",
-        "tensor.zig",
-        "testing.zig",
-        "//zml/kernels/moe/flashinfer_cutlass:runtime_srcs",
-    ],
-    import_name = "zml/core",
-    main = "core.zig",
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    zigopts = [
-        "-lc",
-        "-freference-trace=20",
-    ],
-    deps = [
-        ":constants",
-        ":meta",
-        ":posix",
-        ":profiling",
-        ":xla_compile_options_upb",
-        ":xla_data_upb",
-        "//bazel",
-        "//dsl/cuda_tile:builder",
-        "//dsl/cute:builder",
-        "//dsl/fly:builder",
-        "//dsl/metal:builder",
-        "//dsl/mosaic_tpu:builder",
-        "//dsl/tcl:builder",
-        "//dsl/triton:builder",
-        "//ffi:zig",
-        "//mlir",
-        "//mlir/dialects/func",
-        "//mlir/dialects/mosaic_tpu",
-        "//mlir/dialects/shardy",
-        "//mlir/dialects/stablehlo",
-        "//pjrt",
-        "//platforms",
-        "//stdx",
-        "//upb",
-        "//vfs",
-        "@zio",
-    ] + select({
-        "//platforms:neuron.enabled": [
-            "//platforms/neuron:nki_kernel",
-            "//platforms/neuron:topology",
-        ],
-        "//conditions:default": [],
-    }) + select({
-        "//platforms:cuda.enabled": [
-            "//platforms/cuda/flashinfer_cutlass_moe",
-        ],
-        "//conditions:default": [],
-    }),
-)
-
-zig_library(
-    name = "quantization",
-    import_name = "zml/quantization",
-    main = "quantization.zig",
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":core",
-        "//stdx",
-    ],
-)
-
-zig_library(
-    name = "nn",
-    import_name = "zml/nn",
-    main = "nn.zig",
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":constants",
-        ":core",
-        ":meta",
-        ":quantization",
-        "//mlir",
-        "//mlir/dialects/stablehlo",
-        "//stdx",
-    ],
-)
 
 zig_library(
     name = "zml",
@@ -260,10 +46,7 @@ zig_library(
         "-freference-trace=20",
     ],
     deps = [
-        ":core",
-        ":logo",
-        ":nn",
-        ":quantization",
+        "//bazel",
         "//dsl/mosaic_tpu:builder",
         "//dsl/tcl:builder",
         "//mlir",
@@ -271,9 +54,17 @@ zig_library(
         "//mlir/dialects/nvvm",
         "//mlir/dialects/ttir",
         "//mlir/dialects/vector",
+        "//pjrt",
         "//platforms",
         "//platforms/tpu:ragged_paged",
         "//stdx",
+        "//zml/constants",
+        "//zml/core",
+        "//zml/logo",
+        "//zml/meta",
+        "//zml/nn",
+        "//zml/profiling",
+        "//zml/quantization",
         "//zml/tokenizer",
     ] + select({
         "//platforms:neuron.enabled": [
@@ -290,5 +81,5 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = ["//zml"],
+    deps = [":zml"],
 )

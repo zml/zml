@@ -4,11 +4,3 @@ filegroup(
     name = "flashinfer_cutlass",
     srcs = ["flashinfer_cutlass.zig"],
 )
-
-filegroup(
-    name = "runtime_srcs",
-    srcs = [
-        "contract.zig",
-        "runtime.zig",
-    ],
-)
