@@ -1,11 +1,11 @@
 const std = @import("std");
 
+const meta = @import("zml/meta");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const stablehlo = @import("mlir/dialects/stablehlo");
 
 pub const DataType = @import("dtype.zig").DataType;
-const meta = @import("meta.zig");
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 

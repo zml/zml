@@ -1,13 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
 const Compiler = @import("Compiler.zig");
 const mem = @import("mem.zig");
-const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
