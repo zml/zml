@@ -96,6 +96,10 @@ fn fp8Scales(linear: zml.nn.Linear) Tensor {
     return scale;
 }
 
+// Maximum total input tokens per MoE call before padding for the FP8
+// small-batch schedule. It loads each used expert's weights once and reuses
+// them across the batch.
+// Larger batches fall back to per-route or blockwise dispatch.
 const fp8_small_batch_max_tokens = 64;
 
 fn runFp8SmallBatch(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: Tensor, down: Tensor, scales: Scales, cfg: kernels.Cfg) Tensor {
