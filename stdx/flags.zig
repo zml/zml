@@ -12,8 +12,9 @@
 //!    - In particular, check that no options are repeated.
 //!    - Use only long options (`--addresses`).
 //!    - Exception: `-h/--help` is allowed.
-//!    - Use `--key=value` syntax for an option with an argument.
-//!      Don't use `--key value`, as that can be ambiguous (e.g., `--key --verbose`).
+//!    - Use `--key=value` or `--key value` syntax for an option with an argument.
+//!      With `--key value`, a value starting with `--` is rejected to avoid ambiguity
+//!      (e.g., `--key --verbose`); use `--key=--value` for such values.
 //!    - Use subcommand syntax when appropriate.
 //!    - Use positional arguments when appropriate.
 //!
@@ -94,7 +95,7 @@ pub fn parseProcessArgs(init_: std.process.Init.Minimal, comptime CliArgs: type)
 
 fn parse_commands(args: *std.process.Args.Iterator, comptime Commands: type) Commands {
     comptime assert(@typeInfo(Commands) == .@"union");
-    const field_names = std.meta.fieldNames(Commands);
+    const field_names = comptime std.meta.fieldNames(Commands);
     comptime assert(field_names.len >= 2);
 
     const first_arg = args.next() orelse fatal(
@@ -110,7 +111,7 @@ fn parse_commands(args: *std.process.Args.Iterator, comptime Commands: type) Com
         }
     }
 
-    inline for (field_names, std.meta.fieldTypes(Commands)) |field_name, FieldType| {
+    inline for (field_names, comptime std.meta.fieldTypes(Commands)) |field_name, FieldType| {
         comptime assert(std.mem.indexOf(u8, field_name, "_") == null);
         if (std.mem.eql(u8, first_arg, field_name)) {
             return @unionInit(Commands, field_name, parse_flags(args, FieldType));
@@ -246,8 +247,15 @@ fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
                 }
 
                 @field(counts, field_name) += 1;
-                const flag_value = parse_flag(FieldType, flag, arg);
-                @field(result, field_name) = flag_value;
+                // `--flag=value` carries its value inline; a bare non-bool `--flag` takes
+                // the next argument as its value.
+                const value: ?[:0]const u8 = if (arg.len > flag.len)
+                    parse_flag_split_value(flag, arg)
+                else if (FieldType == bool)
+                    null
+                else
+                    parse_flag_next_value(flag, args);
+                @field(result, field_name) = parse_flag(FieldType, flag, value);
                 continue :next_arg;
             }
         }
@@ -331,20 +339,34 @@ fn assert_valid_value_type(comptime T: type) void {
     }
 }
 
-/// Parse, e.g., `--cluster=123` into `123` integer
-fn parse_flag(comptime T: type, flag: []const u8, arg: [:0]const u8) T {
+/// Parse the value of a matched flag into `T`, e.g. `123` for `--cluster=123` or `--cluster 123`.
+///
+/// - `flag`: the flag name with its leading dashes, e.g. `--cluster`.
+/// - `value`: the flag's value with the separator stripped, e.g. `123`, or `null` if the flag was
+///   given without a value (only valid for `bool` flags, where presence means `true`).
+fn parse_flag(comptime T: type, flag: []const u8, value: ?[:0]const u8) T {
     assert(flag[0] == '-' and flag[1] == '-');
 
     if (T == bool) {
-        if (!std.mem.eql(u8, arg, flag)) {
-            fatal("{s}: argument does not require a value in '{s}'", .{ flag, arg });
+        if (value) |v| {
+            fatal("{s}: argument does not require a value, but found '{s}'", .{ flag, v });
         }
         return true;
     }
 
-    const value = parse_flag_split_value(flag, arg);
-    assert(value.len > 0);
-    return parse_value(T, flag, value);
+    // The caller always resolves a value for non-bool flags (or exits).
+    assert(value.?.len > 0);
+    return parse_value(T, flag, value.?);
+}
+
+/// Takes the value from the next argument for `--flag value` syntax.
+fn parse_flag_next_value(flag: []const u8, args: *std.process.Args.Iterator) [:0]const u8 {
+    const value = args.next() orelse fatal("{s}: argument requires a value", .{flag});
+    if (value.len == 0) fatal("{s}: argument requires a value", .{flag});
+    if (std.mem.startsWith(u8, value, "--")) {
+        fatal("{s}: argument requires a value, but found '{s}' (use {s}=<value>)", .{ flag, value, flag });
+    }
+    return value;
 }
 
 /// Splits the value part from a `--arg=value` syntax.
