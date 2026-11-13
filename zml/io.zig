@@ -3,6 +3,7 @@ const std = @import("std");
 const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
+const tracer = @import("zml/profiling").tracer;
 pub const VFS = @import("vfs");
 
 const Buffer = @import("buffer.zig").Buffer;
@@ -13,7 +14,6 @@ const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
-const tracer = @import("profiling/tracer.zig");
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
