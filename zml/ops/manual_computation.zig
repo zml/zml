@@ -376,7 +376,7 @@ const gspmd = struct {
 };
 
 test manualComputation {
-    const zml = @import("../zml.zig");
+    const zml = @import("../core.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
@@ -436,7 +436,7 @@ test manualComputation {
 }
 
 test "manualComputation composes across logical and physical meshes" {
-    const zml = @import("../zml.zig");
+    const zml = @import("../core.zig");
     if (comptime !zml.Target.cpu.isEnabled()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -505,7 +505,7 @@ test "manualComputation composes across logical and physical meshes" {
 }
 
 test "partitionSpecs preserves optional tensors and active cache variants" {
-    const zml = @import("../zml.zig");
+    const zml = @import("../core.zig");
     const Logical = Sharding.Partitioning.Logical;
     const Inputs = struct {
         layers: []const Tensor,

@@ -1,5 +1,5 @@
-const nn = @import("../../nn.zig");
-const Tensor = @import("../../tensor.zig").Tensor;
+const nn = @import("zml/core").nn;
+const Tensor = @import("zml/core").Tensor;
 
 pub fn unpackedWeight(linear: nn.Linear) Tensor {
     const quantization = linear.quantization orelse return linear.weight;

@@ -6,7 +6,7 @@ const stdx = @import("stdx");
 const Platform = @import("platform.zig").Platform;
 const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
-const zml = @import("zml.zig");
+const zml = @import("core.zig");
 
 const log = std.log.scoped(.@"zml/testing");
 

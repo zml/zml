@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const zml = @import("../../zml.zig");
+const zml = @import("../../core.zig");
 const tcl = @import("tcl.zig");
 
 /// `furiosa.tcl.examples.softmax` over f32.
