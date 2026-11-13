@@ -15,9 +15,11 @@ sources:
   - channel: noble main
     url: https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z
 
-  # IGC 2.41.15 is newer than the graphics snapshot above.
+  # IGC 2.41.15 is newer than the graphics snapshot above; the other graphics
+  # packages are pinned below to keep their versions from it. Use snapshots,
+  # not the live PPA: the PPA deletes superseded packages from its pool.
   - channel: noble main
-    url: https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu
+    url: https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20261029T000000Z
 
 archs:
   - "amd64"
@@ -43,9 +45,9 @@ packages:
   - "libnl-genl-3-200"
   - "libnl-route-3-200"
   - "libnuma1"
-  - "libigdgmm12"
+  - "libigdgmm12 (= 22.10.1-1~24.04~ppa1)"
   - "libigc2 (= 2.41.15-1~24.04)"
   - "libigdfcl2 (= 2.41.15-1~24.04)"
-  - "libze-intel-gpu1"
+  - "libze-intel-gpu1 (= 26.31.39395.14-1~24.04~ppa1)"
   - "libze1"
   - "zlib1g"
