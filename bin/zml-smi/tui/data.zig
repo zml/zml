@@ -123,6 +123,11 @@ pub const SystemState = struct {
                     self.record(&self.history.temp[i], chip.temperature orelse 0);
                     self.record(&self.history.power[i], chip.power_mw orelse 0);
                 },
+                .metal => |gpu| {
+                    self.recordUsage(i, gpu.util_percent, gpu.mem_used_bytes, gpu.mem_total_bytes);
+                    self.record(&self.history.temp[i], gpu.temperature orelse 0);
+                    self.record(&self.history.power[i], gpu.power_mw orelse 0);
+                },
             }
         }
     }

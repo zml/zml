@@ -1,0 +1,19 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "metal",
+    srcs = [
+        "Smc.zig",
+        "iokit.zig",
+    ],
+    import_name = "zml-smi/platforms/metal",
+    main = "Metal.zig",
+    target_compatible_with = ["@platforms//os:macos"],
+    visibility = ["//bin/zml-smi:__subpackages__"],
+    deps = ["//bin/zml-smi/smi"],
+)
+
+zig_test(
+    name = "test",
+    deps = [":metal"],
+)

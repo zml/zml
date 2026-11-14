@@ -25,7 +25,7 @@ pub const json = @import("json.zig");
 pub const prometheus = @import("prometheus.zig");
 pub const http = @import("http.zig");
 
-pub const Target = enum { cuda, rocm, oneapi, neuron, tpu, furiosa };
+pub const Target = enum { cuda, rocm, oneapi, neuron, tpu, furiosa, metal };
 
 pub const Device = struct {
     target: Target,
@@ -49,6 +49,7 @@ pub const Sample = union(Target) {
     neuron: Neuron,
     tpu: Tpu,
     furiosa: Furiosa,
+    metal: Metal,
 
     pub fn init(target: Target) Sample {
         return switch (target) {
@@ -145,6 +146,26 @@ pub const Sample = union(Target) {
         pub const Governor = enum(u64) { performance, powersave };
         pub const Liveness = enum(u64) { unknown, alive };
         pub const ThrottleReason = enum(u6) { idle, thermal_slowdown, app_power_cap, app_clock_cap, hw_clock_cap, hw_bus_limit, hw_power_cap, gov_clock_cap, other };
+    };
+
+    pub const Metal = struct {
+        // Utilization & memory
+        util_percent: ?u64 = null,
+        mem_used_bytes: ?u64 = null,
+        mem_total_bytes: ?u64 = null,
+
+        // Power & thermal
+        power_mw: ?u64 = null,
+        ane_power_mw: ?u64 = null,
+        cpu_power_mw: ?u64 = null,
+        system_power_mw: ?u64 = null,
+        /// Degrees Celsius, of the hottest GPU sensor.
+        temperature: ?u64 = null,
+        fan_speed_percent: ?u64 = null,
+
+        // Clocks
+        clock_graphics_mhz: ?u64 = null,
+        clock_graphics_max_mhz: ?u64 = null,
     };
 };
 
