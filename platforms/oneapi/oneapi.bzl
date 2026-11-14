@@ -1,9 +1,9 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-# Local XLA e726db5f6e build with oneAPI FP8 collective fixes.
-_PLUGIN_ONEAPI_URL = "file:///home/steeve/.cache/zml/plugins/zml-oneapi-fp8-bytes.tar.zst"
-_PLUGIN_ONEAPI_SHA256 = "1e725316a22d48caefe6c8fd9a628f753c165df2450f0b65d9f0746259292484"
+# Local XLA a3911011a4 build: Intel runtime fixes plus FP8 collective fixes.
+_PLUGIN_ONEAPI_URL = "file:///home/steeve/.cache/zml/plugins/zml-oneapi-a3911011a4.tar.zst"
+_PLUGIN_ONEAPI_SHA256 = "b3066b9b58d583eddd95f952a3065da2623b1e640824db782952f0b3709c7545"
 
 ONEAPI_VERSION = "2026.1"
 
