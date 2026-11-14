@@ -75,6 +75,18 @@ const furiosa: Metrics(smi.Furiosa) = .{
     .throttle_reasons = .{ .name = "zml_device_throttle_reasons", .help = "Active throttle reasons as a bitmask" },
 };
 
+const metal: Metrics(smi.Metal) = .{
+    .util_percent = utilization,
+    .mem_used_bytes = memory_used,
+    .mem_total_bytes = memory_total,
+    .power_mw = gpu.power_mw,
+    .temperature = gpu.temperature,
+    .fan_speed_percent = gpu.fan_speed_percent,
+    .clock_graphics_mhz = gpu.clock_graphics_mhz,
+    .clock_graphics_max_mhz = null,
+    .ane_power_mw = .{ .name = "zml_device_ane_power_watts", .help = "Neural Engine power draw in watts", .decimals = 3 },
+};
+
 const host: Metrics(smi.HostData) = .{
     .hostname = null,
     .kernel = null,
@@ -96,6 +108,7 @@ fn metricsOf(comptime T: type) Metrics(T) {
         smi.Neuron => neuron,
         smi.Tpu => tpu,
         smi.Furiosa => furiosa,
+        smi.Metal => metal,
         else => @compileError("no metrics for " ++ @typeName(T)),
     };
 }
@@ -105,7 +118,7 @@ fn metricsOf(comptime T: type) Metrics(T) {
 const families: []const Metric = families: {
     @setEvalBranchQuota(10_000);
     var list: []const Metric = &.{};
-    for (.{ smi.Tpu, smi.Gpu, smi.Neuron, smi.Furiosa }) |T| {
+    for (.{ smi.Tpu, smi.Gpu, smi.Neuron, smi.Furiosa, smi.Metal }) |T| {
         const metrics = metricsOf(T);
         next: for (@typeInfo(T).@"struct".field_names) |field| {
             const metric = @field(metrics, field) orelse continue;
@@ -124,7 +137,8 @@ const families: []const Metric = families: {
 
 /// The field of `T` written as `family`, or null.
 fn fieldOf(comptime T: type, comptime family: Metric) ?[]const u8 {
-    @setEvalBranchQuota(10_000);
+    // Every call made while `write` is analyzed counts against one quota.
+    @setEvalBranchQuota(100_000);
     const metrics = metricsOf(T);
     for (@typeInfo(T).@"struct".field_names) |field| {
         const metric = @field(metrics, field) orelse continue;

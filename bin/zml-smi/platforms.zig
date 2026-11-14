@@ -16,5 +16,11 @@ pub const all = switch (builtin.os.tag) {
         },
         else => .{},
     },
+    .macos => switch (builtin.cpu.arch) {
+        .aarch64 => .{
+            @import("zml-smi/platforms/metal"),
+        },
+        else => .{},
+    },
     else => .{},
 };

@@ -10,6 +10,7 @@ pub const Gpu = model.Gpu;
 pub const Neuron = model.Neuron;
 pub const Tpu = model.Tpu;
 pub const Furiosa = model.Furiosa;
+pub const Metal = model.Metal;
 pub const ProcessInfo = model.ProcessInfo;
 pub const HostData = model.HostData;
 pub const Platform = model.Platform;

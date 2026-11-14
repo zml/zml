@@ -95,6 +95,9 @@ zig_binary(
         "@llvm//platforms/config:linux_aarch64": [
             "//bin/zml-smi/platforms/nvml",
         ],
+        "@llvm//platforms/config:macos_aarch64": [
+            "//bin/zml-smi/platforms/metal",
+        ],
         "//conditions:default": [],
     }),
 )
