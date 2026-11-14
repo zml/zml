@@ -45,3 +45,19 @@ zig_binary(
     }),
     deps = ["//zml"],
 )
+
+zig_binary(
+    name = "sparse_benchmark",
+    srcs = [
+        "benchmark.zig",
+        "cases.zig",
+        "fixtures.zig",
+    ],
+    main = "sparse_benchmark.zig",
+    tags = ["manual"],
+    target_compatible_with = select({
+        "//platforms:cuda.enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//zml"],
+)

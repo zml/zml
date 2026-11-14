@@ -10,7 +10,7 @@ pub fn row(c: cases.Case, f: fixtures.Fixture, seq: usize, token: usize, head: u
     const start: usize = @intCast(f.starts[seq]);
     const qlen: usize = @intCast(f.starts[seq + 1] - f.starts[seq]);
     const position = len - qlen + token - start;
-    const count = if (c.mask == .indices) cases.topk else len;
+    const count = if (c.mask == .indices) c.selection_count else len;
     const scale = c.scale orelse 1 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
     const q = f.q[(token * c.heads() + head) * c.head_dim ..][0..c.head_dim];
     var maximum: f32 = if (c.sink) f.sinks[head] else -std.math.inf(f32);
@@ -44,7 +44,7 @@ pub fn row(c: cases.Case, f: fixtures.Fixture, seq: usize, token: usize, head: u
 }
 
 fn keyAt(c: cases.Case, f: fixtures.Fixture, token: usize, j: usize) i64 {
-    return if (c.mask == .indices) f.indices[token * cases.topk + j] else @intCast(j);
+    return if (c.mask == .indices) f.indices[token * c.selection_count + j] else @intCast(j);
 }
 
 pub fn check(a: std.mem.Allocator, c: cases.Case, f: fixtures.Fixture, actual: []const zml.floats.BFloat16) !f32 {
@@ -52,7 +52,12 @@ pub fn check(a: std.mem.Allocator, c: cases.Case, f: fixtures.Fixture, actual: [
     for (actual[0 .. active_tokens * c.heads() * c.head_dim]) |v| {
         if (!std.math.isFinite(v.toF32())) return error.NonFiniteOutput;
     }
-    const scores = try a.alloc(f32, @max(c.kv_len, cases.topk));
+    if (c.mask == .indices) {
+        for (actual[active_tokens * c.heads() * c.head_dim ..]) |v| {
+            if (v.toF32() != 0) return error.NonzeroQueryPadding;
+        }
+    }
+    const scores = try a.alloc(f32, @max(c.kv_len, c.selection_count));
     defer a.free(scores);
     const expected = try a.alloc(f32, c.head_dim);
     defer a.free(expected);

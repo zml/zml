@@ -19,12 +19,20 @@ pub const Config = struct {
     page_size: i64,
     max_query: i64,
     dtype: cute.DType,
+    // Transposed tensor-core tile; sparse prefill also uses it per query.
     decode: bool,
     causal: bool,
     window: i64,
     scale: f32,
     sink: bool,
     splits: i64 = 1,
+    indexed: bool = false,
+    topk: i64 = 0,
+    compact: bool = false,
+
+    pub fn selectionTiles(c: Config) i64 {
+        return @divTrunc(c.topk + c.keys() - 1, c.keys());
+    }
 
     pub fn rows(c: Config) i64 {
         return if (c.decode) (if (c.group <= 8) 8 else 16) else 64;
@@ -79,13 +87,33 @@ pub const Config = struct {
 pub const block: [3]i32 = .{ 256, 1, 1 };
 pub const Attention = cute.Kernel(Config, .{
     .name = "paged_attention_cute",
-    .inputs = &.{ "q", "k", "v", "table", "lengths", "starts", "sink" },
+    .inputs = &.{ "q", "k", "v", "table", "lengths", "starts", "sink", "indices", "tiles" },
     .outputs = &.{"out"},
     .run = attention,
 });
 
 fn loadInt(b: *B, pointer: V, index: V) V {
     return b.loadWords(1, pointer.add(index.to(.i64).mul(4)), .global, .{})[0];
+}
+
+// Coalesced starts-table loads and a warp reduction replace a dependent
+// per-sequence scan. All lanes participate after the masked load reconverges.
+fn findSequence(b: *B, c: Config, starts: V, token: V) V {
+    const lane = b.threadIdx().x.rem(32);
+    var batches = b.openFor(0, c.batch, 32, .{b.constant(.i32, 0)});
+    {
+        const candidate = batches.iv.add(lane);
+        var entry = b.openIfElse(candidate.lt(c.batch), .{b.constant(.i32, 0)});
+        {
+            const owns = token.ge(loadInt(b, starts, candidate)).bitAnd(token.lt(loadInt(b, starts, candidate.add(1))));
+            entry.yieldThen(.{b.select(owns, candidate, b.constant(.i32, 0))});
+        }
+        {
+            entry.yieldElse(.{b.constant(.i32, 0)});
+        }
+        batches.yield(.{batches.carried[0].maximum(b.warpMaxNonNegative(entry.results[0]))});
+    }
+    return batches.results[0];
 }
 
 // Each 64-feature plane uses a 128-byte XOR swizzle. The descriptor and
@@ -112,7 +140,8 @@ const Range = struct { first: V, count: V };
 
 // Used by both attention and merge: every output row must merge exactly the
 // partitions produced for its query tile, including causal/window boundaries.
-fn keyRange(b: *B, c: Config, first_row: V, qlen: V, klen: V) Range {
+fn keyRange(b: *B, c: Config, first_row: V, qlen: V, klen: V, selected_tiles: V) Range {
+    if (c.indexed) return .{ .first = b.constant(.i32, 0), .count = if (c.compact) selected_tiles else b.constant(.i32, c.selectionTiles()) };
     const first_pos = klen.sub(qlen).add(first_row.div(c.group));
     const last_pos = klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
     const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
@@ -122,7 +151,8 @@ fn keyRange(b: *B, c: Config, first_row: V, qlen: V, klen: V) Range {
 }
 
 fn liveSplits(c: Config, tiles: V) V {
-    return tiles.add(1).div(2).maximum(1).minimum(c.splits);
+    const min_tiles: i64 = if (c.indexed) 1 else 2;
+    return tiles.add(min_tiles - 1).div(min_tiles).maximum(1).minimum(c.splits);
 }
 
 const Tile = struct {
@@ -132,6 +162,8 @@ const Tile = struct {
     k: V,
     v: V,
     table: V,
+    indices: V,
+    tile_map: V,
     sink: V,
     out: V,
     shared: V,
@@ -158,9 +190,33 @@ const Tile = struct {
     fn phase(t: Tile, id: V) V {
         return id.div(t.c.buffers()).rem(2);
     }
+    fn keyTile(t: Tile, compact_index: V) V {
+        if (!t.c.compact) return compact_index;
+        const token = t.start.add(t.first_row.div(t.c.group));
+        return loadInt(t.b, t.tile_map, token.mul(t.c.selectionTiles() + 1).add(compact_index).add(1));
+    }
+    // Each sparse tile owns one query and reuses its selection across GQA
+    // heads. Keep duplicates as independent entries; never dereference a
+    // selection-list tail or use an invalid index to load the page table.
+    fn logicalKey(t: Tile, slot: V) V {
+        if (!t.c.indexed) return slot;
+        const b = t.b;
+        var selected = b.openIfElse(slot.lt(t.c.topk), .{b.constant(.i32, 0)});
+        {
+            selected.yieldThen(.{loadInt(b, t.indices, t.start.add(t.first_row.div(t.c.group)).mul(t.c.topk).add(slot))});
+        }
+        {
+            selected.yieldElse(.{b.constant(.i32, -1)});
+        }
+        return selected.results[0];
+    }
+    fn validRow(t: Tile, row: V) V {
+        const active = row.lt(t.qlen.mul(t.c.group));
+        return if (t.c.indexed) active.bitAnd(row.div(t.c.group).eq(t.first_row.div(t.c.group))) else active;
+    }
     fn valid(t: Tile, row: V, key: V) V {
         const pos = t.klen.sub(t.qlen).add(row.div(t.c.group));
-        var result = row.lt(t.qlen.mul(t.c.group)).bitAnd(key.lt(t.klen));
+        var result = t.validRow(row).bitAnd(key.ge(0)).bitAnd(key.lt(t.klen));
         if (t.c.causal) result = result.bitAnd(key.le(pos));
         if (t.c.window > 0) result = result.bitAnd(key.gt(pos.sub(t.c.window)));
         return result;
@@ -199,19 +255,48 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
         .lengths = .{ .ptr = cute.DType.i32 },
         .starts = .{ .ptr = cute.DType.i32 },
         .sink = .{ .ptr = cute.DType.f32 },
+        .indices = .{ .ptr = cute.DType.i32 },
+        .tiles = .{ .ptr = cute.DType.i32 },
         .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else c.dtype },
     });
     std.debug.assert(c.sharedBytes() <= 227 * 1024);
     b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
-    const seq = b.blockIdx().x.div(c.queryTiles());
-    const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(c.rows());
     const starts = b.ptrToInt(a.starts, .i64);
+    const packed_queries = c.indexed;
+    const head_tiles = @divTrunc(c.group + c.rows() - 1, c.rows());
+    const packed_token = b.blockIdx().x.div(head_tiles);
+    // Sparse attention flattens packed queries instead of launching max_query
+    // tiles for every sequence. Each tile belongs to exactly one query.
+    const seq = if (packed_queries) findSequence(b, c, starts, packed_token) else b.blockIdx().x.div(c.queryTiles());
     const start = loadInt(b, starts, seq);
+    const first_row = if (packed_queries) packed_token.sub(start).mul(c.group).add(b.blockIdx().x.rem(head_tiles).mul(c.rows())) else b.blockIdx().x.rem(c.queryTiles()).mul(c.rows());
     const qlen = loadInt(b, starts, seq.add(1)).sub(start);
     const klen = loadInt(b, b.ptrToInt(a.lengths, .i64), seq);
-    const range = keyRange(b, c, first_row, qlen, klen);
+    const tile_map = b.ptrToInt(a.tiles, .i64);
+    const selected_tiles = if (c.compact) loadInt(b, tile_map, packed_token.mul(c.selectionTiles() + 1)) else b.constant(.i32, 0);
+    const range = keyRange(b, c, first_row, qlen, klen, selected_tiles);
     const splits = liveSplits(c, range.count);
     const split = b.blockIdx().z;
+    const output = b.ptrToInt(a.out, .i64);
+    if (c.indexed and c.splits == 1) {
+        // Define unused query capacity just as the generic sparse kernel does.
+        // Active and padded rows are disjoint, including holes in sequences.
+        var unused = b.openIf(packed_token.ge(loadInt(b, starts, b.constant(.i32, c.batch))));
+        {
+            var dims = b.openFor(b.threadIdx().x, c.rows() * c.head_dim, 256, .{});
+            {
+                const head = b.blockIdx().x.rem(head_tiles).mul(c.rows()).add(dims.iv.div(c.head_dim));
+                var owns = b.openIf(head.lt(c.group));
+                {
+                    const index = packed_token.to(.i64).mul(c.kv_heads).add(b.blockIdx().y.to(.i64)).mul(c.group).add(head.to(.i64)).mul(c.head_dim).add(dims.iv.rem(c.head_dim).to(.i64));
+                    b.storeHalf(output.add(index.mul(2)), .global, b.constant(.i32, 0));
+                    owns.close();
+                }
+                dims.close();
+            }
+            unused.close();
+        }
+    }
     var active = b.openIf(first_row.lt(qlen.mul(c.group)).bitAnd(split.lt(splits)));
     {
         const tid = b.threadIdx().x;
@@ -225,8 +310,10 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             .k = b.ptrToInt(a.k, .i64),
             .v = b.ptrToInt(a.v, .i64),
             .table = b.ptrToInt(a.table, .i64),
+            .indices = b.ptrToInt(a.indices, .i64),
+            .tile_map = tile_map,
             .sink = b.ptrToInt(a.sink, .i64),
-            .out = b.ptrToInt(a.out, .i64),
+            .out = output,
             .shared = shared,
             .tmem = undefined,
             .tid = tid,
@@ -263,7 +350,7 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             const row = queries.iv.div(@divExact(c.paddedDim(), 8));
             const col = queries.iv.rem(@divExact(c.paddedDim(), 8)).mul(8);
             const packed_row = first_row.add(row);
-            const valid = packed_row.lt(qlen.mul(c.group)).bitAnd(col.lt(c.head_dim));
+            const valid = t.validRow(packed_row).bitAnd(col.lt(c.head_dim));
             const token = start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
             const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(c.head_dim).add(col.to(.i64));
             b.cpAsync16(shared.add(c.qBase()).add(swizzle(row, col, c.rows())), t.q.add(offset.mul(2)), valid);
@@ -304,13 +391,24 @@ fn produce(t: Tile) void {
     var tiles = b.openFor(0, t.tiles, 1, .{});
     {
         // Paged offsets are shared by K/V and every 128-feature stage.
+        const key_tile = t.keyTile(t.first_key_tile.add(tiles.iv));
         var offsets: [16]V = undefined;
         var valid: [16]V = undefined;
         for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
-            const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(row0).add(i * 8);
-            valid[i] = key.lt(t.klen).bitAnd(col.lt(c.head_dim));
-            const safe = b.select(key.lt(t.klen), key, b.constant(.i32, 0));
-            const page = loadInt(b, t.table, t.seq.mul(c.pages_per_seq).add(safe.div(c.page_size)));
+            const key = t.logicalKey(key_tile.mul(c.keys()).add(row0).add(i * 8));
+            const live = key.ge(0).bitAnd(key.lt(t.klen));
+            valid[i] = live.bitAnd(col.lt(c.head_dim));
+            const safe = b.select(live, key, b.constant(.i32, 0));
+            const page = if (c.indexed) blk: {
+                var lookup = b.openIfElse(live, .{b.constant(.i32, 0)});
+                {
+                    lookup.yieldThen(.{loadInt(b, t.table, t.seq.mul(c.pages_per_seq).add(safe.div(c.page_size)))});
+                }
+                {
+                    lookup.yieldElse(.{b.constant(.i32, 0)});
+                }
+                break :blk lookup.results[0];
+            } else loadInt(b, t.table, t.seq.mul(c.pages_per_seq).add(safe.div(c.page_size)));
             offsets[i] = page.to(.i64).mul(c.page_size).add(safe.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64)).mul(2);
         }
         for (0..@as(usize, @intCast(c.features() * 2))) |stage| {
@@ -384,9 +482,14 @@ fn reduceRow(comptime n: usize, values: [n]V, comptime maximum: bool) V {
 
 fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximum: bool) [heads]V {
     const b = t.b;
-    for (values, 0..) |value, h| {
+    const active_heads: usize = @intCast(@min(t.c.group, heads));
+    for (values[0..active_heads], 0..) |value, h| {
         var reduced = value;
-        inline for (.{ 16, 8, 4, 2, 1 }) |step| reduced = if (maximum) reduced.maximum(b.shuffleXor(reduced, step)) else reduced.add(b.shuffleXor(reduced, step));
+        if (maximum) {
+            reduced = b.warpMaxF32(reduced);
+        } else {
+            inline for (.{ 16, 8, 4, 2, 1 }) |step| reduced = reduced.add(b.shuffleXor(reduced, step));
+        }
         var leader = b.openIf(t.lane.eq(0));
         {
             b.storeWords(1, t.shared.add(t.c.reductions()).add(t.warp.mul(64)).add(h * 4), .shared, .{reduced.bitCast(.i32)});
@@ -394,8 +497,8 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
         }
     }
     b.barrierCtaSyncAligned(1, 128);
-    var result: [heads]V = undefined;
-    for (0..heads) |h| {
+    var result: [heads]V = @splat(b.constant(.f32, if (maximum) -std.math.inf(f32) else 0));
+    for (0..active_heads) |h| {
         var value = b.loadWords(1, t.shared.add(t.c.reductions() + @as(i64, @intCast(h * 4))), .shared, .{})[0].bitCast(.f32);
         for (1..4) |w| {
             const next = b.loadWords(1, t.shared.add(t.c.reductions() + @as(i64, @intCast(w * 64 + h * 4))), .shared, .{})[0].bitCast(.f32);
@@ -410,6 +513,7 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
 fn decode(t: Tile, comptime heads: usize) void {
     const b = t.b;
     const c = t.c;
+    const active_heads: usize = @intCast(@min(c.group, heads));
     const address = t.tmem.add(t.warp.mul(32).shl(16));
     const key_row = t.warp.mul(32).add(t.lane);
     const zero = b.constant(.f32, 0);
@@ -424,32 +528,32 @@ fn decode(t: Tile, comptime heads: usize) void {
         multiply(t, tiles.iv, true);
         const raw = b.tmemLoad32x32b(heads, address.add(c.scoreColumn()));
         b.fenceTmemLoad();
-        const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(key_row);
-        var scores: [heads]V = undefined;
-        for (0..heads) |h| scores[h] = b.select(t.valid(t.first_row.add(h), key), raw[h].bitCast(.f32).mul(c.scale * std.math.log2e), neg_inf);
+        const key = t.logicalKey(t.keyTile(t.first_key_tile.add(tiles.iv)).mul(c.keys()).add(key_row));
+        var scores: [heads]V = @splat(neg_inf);
+        for (0..active_heads) |h| scores[h] = b.select(t.valid(t.first_row.add(h), key), raw[h].bitCast(.f32).mul(c.scale * std.math.log2e), neg_inf);
         const maxima = reduceHeads(t, heads, scores, true);
-        var next: [2 * heads]V = undefined;
-        var alpha: [heads]V = undefined;
-        var probabilities: [heads]V = undefined;
-        for (0..heads) |h| {
+        var next = initial;
+        var alpha: [heads]V = @splat(zero);
+        var probabilities: [heads]V = @splat(zero);
+        for (0..active_heads) |h| {
             next[h] = tiles.carried[h].maximum(maxima[h]);
             const reference = next[h].maximum(-std.math.floatMax(f32));
             alpha[h] = b.exp2Approx(tiles.carried[h].sub(reference));
             probabilities[h] = b.exp2Approx(scores[h].sub(reference));
         }
         const sums = reduceHeads(t, heads, probabilities, false);
-        for (0..heads) |h| {
+        for (0..active_heads) |h| {
             next[heads + h] = tiles.carried[heads + h].mul(alpha[h]).add(sums[h]);
             t.putProbability(b.constant(.i32, h), key_row, probabilities[h]);
         }
-        for (heads..@as(usize, @intCast(c.rows()))) |h| t.putProbability(b.constant(.i32, h), key_row, zero);
+        for (active_heads..@as(usize, @intCast(c.rows()))) |h| t.putProbability(b.constant(.i32, h), key_row, zero);
         var rescale = b.openIf(tiles.iv.gt(0));
         {
             for (0..@as(usize, @intCast(c.features()))) |part| {
                 const addr = address.add(@as(i64, @intCast(part)) * c.rows());
                 var out = b.tmemLoad32x32b(heads, addr);
                 b.fenceTmemLoad();
-                for (0..heads) |h| out[h] = out[h].bitCast(.f32).mul(alpha[h]).bitCast(.i32);
+                for (0..active_heads) |h| out[h] = out[h].bitCast(.f32).mul(alpha[h]).bitCast(.i32);
                 b.tmemStore32x32b(heads, addr, out);
             }
             b.fenceTmemStore();
@@ -463,9 +567,9 @@ fn decode(t: Tile, comptime heads: usize) void {
         const out = b.tmemLoad32x32b(heads, address.add(@as(i64, @intCast(part)) * c.rows()));
         b.fenceTmemLoad();
         const dim = key_row.add(part * 128);
-        for (0..heads) |h| {
+        for (0..active_heads) |h| {
             const row = t.first_row.add(h);
-            var valid = b.openIf(row.lt(t.qlen.mul(c.group)));
+            var valid = b.openIf(t.validRow(row));
             {
                 var feature = b.openIf(dim.lt(c.head_dim));
                 {
@@ -599,7 +703,7 @@ fn prefill(t: Tile) void {
 
 pub const Merge = cute.Kernel(Config, .{
     .name = "paged_attention_cute_merge",
-    .inputs = &.{ "partials", "lengths", "starts", "sink" },
+    .inputs = &.{ "partials", "lengths", "starts", "sink", "tiles" },
     .outputs = &.{"out"},
     .run = merge,
 });
@@ -610,22 +714,32 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
         .lengths = .{ .tensor = .{ .dtype = .i32, .shape = &.{c.batch} } },
         .starts = .{ .tensor = .{ .dtype = .i32, .shape = &.{c.batch + 1} } },
         .sink = .{ .tensor = .{ .dtype = .f32, .shape = &.{if (c.sink) c.kv_heads * c.group else 1} } },
+        .tiles = .{ .ptr = cute.DType.i32 },
         .out = .{ .tensor = .{ .dtype = c.dtype, .shape = &.{ c.tokens, c.kv_heads * c.group, c.head_dim } } },
     });
     const token = b.blockIdx().x;
     const head = b.blockIdx().y;
-    var active = b.openIf(token.lt(a.starts.get(.{c.batch})));
-    {
-        var find = b.openFor(0, c.batch, 1, .{b.constant(.i32, 0)});
+    const total = a.starts.get(.{c.batch});
+    if (c.indexed) {
+        var unused = b.openIf(token.ge(total));
         {
-            const owns = token.ge(a.starts.get(.{find.iv})).bitAnd(token.lt(a.starts.get(.{find.iv.add(1)})));
-            find.yield(.{b.select(owns, find.iv, find.carried[0])});
+            var dims = b.openFor(b.threadIdx().x, c.head_dim, 128, .{});
+            {
+                a.out.set(.{ token, head, dims.iv }, b.constant(.f32, 0).to(c.dtype));
+                dims.close();
+            }
+            unused.close();
         }
-        const seq = find.results[0];
+    }
+    var active = b.openIf(token.lt(total));
+    {
+        const starts = b.ptrToInt(b.getIter(a.starts, b.ptrTy(.i32, .gmem, 16) catch unreachable), .i64);
+        const seq = findSequence(b, c, starts, token);
         const start = a.starts.get(.{seq});
         const qlen = a.starts.get(.{seq.add(1)}).sub(start);
         const row = token.sub(start).mul(c.group).add(head.rem(c.group));
-        const range = keyRange(b, c, row.div(c.rows()).mul(c.rows()), qlen, a.lengths.get(.{seq}));
+        const selected_tiles = if (c.compact) loadInt(b, b.ptrToInt(a.tiles, .i64), token.mul(c.selectionTiles() + 1)) else b.constant(.i32, 0);
+        const range = keyRange(b, c, row.div(c.rows()).mul(c.rows()), qlen, a.lengths.get(.{seq}), selected_tiles);
         const splits = liveSplits(c, range.count);
         const zero = b.constant(.f32, 0);
         const sink = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.constant(.f32, -std.math.inf(f32));
@@ -664,4 +778,88 @@ test "SM10x layouts and instruction feature gates" {
         const merge_ir = try Merge.emit(std.testing.allocator, c, .{ 128, 1, 1 });
         defer std.testing.allocator.free(merge_ir);
     };
+}
+
+// Compact nonempty selection tiles once per query, reusing the map across
+// KV heads and split CTAs. Positions within each tile retain their order.
+pub const TileMap = cute.Kernel(Config, .{
+    .name = "paged_attention_cute_tile_map",
+    .inputs = &.{ "indices", "lengths", "starts" },
+    .outputs = &.{"tiles"},
+    .run = tileMap,
+});
+
+fn tileMap(b: *B, c: Config) cute.FinishError!void {
+    const a = try b.declareArgs(.{
+        .indices = .{ .ptr = cute.DType.i32 },
+        .lengths = .{ .ptr = cute.DType.i32 },
+        .starts = .{ .ptr = cute.DType.i32 },
+        .tiles = .{ .tensor = .{ .dtype = .i32, .shape = &.{ c.tokens, c.selectionTiles() + 1 } } },
+    });
+    const token = b.blockIdx().x;
+    const tid = b.threadIdx().x;
+    const lane = tid.rem(32);
+    const starts = b.ptrToInt(a.starts, .i64);
+    var leader = b.openIf(tid.eq(0));
+    a.tiles.set(.{ token, 0 }, b.constant(.i32, 0));
+    leader.close();
+    var active = b.openIf(token.lt(loadInt(b, starts, b.constant(.i32, c.batch))));
+    {
+        const seq = findSequence(b, c, starts, token);
+        const len = loadInt(b, b.ptrToInt(a.lengths, .i64), seq);
+        // Long contexts usually fill the list. Identity is always correct,
+        // including invalid entries, whose loads the attention kernel masks.
+        var identity = b.openIf(len.ge(c.topk));
+        {
+            var entries = b.openFor(tid, c.selectionTiles(), 128, .{});
+            a.tiles.set(.{ token, entries.iv.add(1) }, entries.iv);
+            entries.close();
+            var first = b.openIf(tid.eq(0));
+            a.tiles.set(.{ token, 0 }, b.constant(.i32, c.selectionTiles()));
+            first.close();
+            identity.close();
+        }
+        var sparse = b.openIf(len.lt(c.topk));
+        {
+            const flags = b.ptrToInt(b.allocSmem(.i32, @max(1, c.selectionTiles()), 16), .i32);
+            const indices = b.ptrToInt(a.indices, .i64);
+            var tiles = b.openFor(tid.div(32), c.selectionTiles(), 4, .{});
+            {
+                var valid = b.constant(.i32, 0);
+                for (0..4) |part| {
+                    const slot = tiles.iv.mul(c.keys()).add(lane).add(part * 32);
+                    var entry = b.openIfElse(slot.lt(c.topk), .{b.constant(.i32, 0)});
+                    {
+                        const key = loadInt(b, indices, token.mul(c.topk).add(slot));
+                        entry.yieldThen(.{key.ge(0).bitAnd(key.lt(len)).to(.i32)});
+                    }
+                    {
+                        entry.yieldElse(.{b.constant(.i32, 0)});
+                    }
+                    valid = valid.bitOr(entry.results[0]);
+                }
+                const any = b.warpMaxNonNegative(valid);
+                var first = b.openIf(lane.eq(0));
+                b.storeWords(1, flags.add(tiles.iv.mul(4)), .shared, .{any});
+                first.close();
+                tiles.close();
+            }
+            b.syncThreads();
+            var first = b.openIf(tid.eq(0));
+            {
+                var entries = b.openFor(0, c.selectionTiles(), 1, .{b.constant(.i32, 0)});
+                {
+                    const valid = b.loadWords(1, flags.add(entries.iv.mul(4)), .shared, .{})[0];
+                    var keep = b.openIf(valid.ne(0));
+                    a.tiles.set(.{ token, entries.carried[0].add(1) }, entries.iv);
+                    keep.close();
+                    entries.yield(.{entries.carried[0].add(valid)});
+                }
+                a.tiles.set(.{ token, 0 }, entries.results[0]);
+                first.close();
+            }
+            sparse.close();
+        }
+        active.close();
+    }
 }

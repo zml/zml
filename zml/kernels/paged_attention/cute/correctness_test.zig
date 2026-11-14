@@ -44,6 +44,8 @@ test "FP16 paged attention" {
         .{ .name = "fp16_mixed", .prefill = 1, .mask = .non_causal },
         .{ .name = "fp16_window_sink", .head_dim = 256, .prefill = 1, .mask = .window, .sink = true },
         .{ .name = "fp16_split_sink", .head_dim = 512, .batch = 1, .kv_len = 2049, .sink = true, .shuffle_pages = true },
+        .{ .name = "fp16_sparse_sink", .head_dim = 256, .prefill = 1, .mask = .indices, .selection_count = 129, .sink = true },
+        .{ .name = "fp16_sparse_decode", .head_dim = 256, .mask = .indices, .selection_count = 129, .sink = true },
     }) |c| try runCorrectness(std.testing.allocator, std.testing.io, platform, c, true);
 }
 

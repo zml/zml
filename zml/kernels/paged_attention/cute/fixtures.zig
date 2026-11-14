@@ -24,7 +24,7 @@ pub const Fixture = struct {
             .lengths = try a.alloc(i32, c.batch),
             .starts = try a.alloc(i32, c.batch + 1),
             .sinks = try a.alloc(f32, c.heads()),
-            .indices = try a.alloc(i32, c.tokens() * cases.topk),
+            .indices = try a.alloc(i32, c.tokens() * c.selection_count),
         };
         var rng = std.Random.DefaultPrng.init(42);
         const random = rng.random();
@@ -55,7 +55,21 @@ pub const Fixture = struct {
             }
             for (@intCast(f.starts[s])..@intCast(f.starts[s + 1])) |t| {
                 const l: i32 = @intCast(len);
-                @memcpy(f.indices[t * cases.topk ..][0..cases.topk], &[_]i32{ 0, l - 1, @divTrunc(l, 2), -1, l, 0, 1, l - 2 });
+                const pattern = [_]i32{ 0, l - 1, @divTrunc(l, 2), -1, l, 0, 1, l - 2 };
+                for (f.indices[t * c.selection_count ..][0..c.selection_count], 0..) |*index, j| {
+                    index.* = if (c.random_indices and j % pattern.len != 3 and j % pattern.len != 4 and j % pattern.len != 5)
+                        @intCast(random.uintLessThan(usize, len))
+                    else if (j % pattern.len == 0)
+                        @mod(@as(i32, @intCast(t)) - f.starts[s], l)
+                    else
+                        pattern[j % pattern.len];
+                    if (c.empty_key_tiles and (j / 128) % 2 == 1) index.* = -1;
+                    if (c.padded_selection) {
+                        const visible: i32 = @intCast(len - c.queryLen(s) + t - @as(usize, @intCast(f.starts[s])) + 1);
+                        const tail = c.selection_count - 3;
+                        index.* = if (j < @as(usize, @intCast(@max(0, visible - 3)))) @intCast(j) else if (j >= tail) visible - 3 + @as(i32, @intCast(j - tail)) else -1;
+                    }
+                }
             }
         }
         if (c.empty_indices) {
@@ -91,7 +105,7 @@ pub const Inputs = struct {
             .lengths = .init(.{ .b = c.batch }, .i32),
             .starts = .init(.{ .b = c.batch + 1 }, .i32),
             .sinks = .init(.{c.heads()}, .f32),
-            .indices = .init(.{ .b = c.tokens(), .topk = cases.topk }, .i32),
+            .indices = .init(.{ .b = c.tokens(), .topk = c.selection_count }, .i32),
         };
     }
 

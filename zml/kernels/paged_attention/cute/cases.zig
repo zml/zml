@@ -15,16 +15,24 @@ pub const Case = struct {
     kv_len: usize = 65,
     kv_capacity: ?usize = null,
     inactive: usize = 0,
+    leading_inactive: bool = false,
+    padding: usize = 0,
     shuffle_pages: bool = false,
+    random_indices: bool = false,
+    empty_key_tiles: bool = false,
+    padded_selection: bool = false,
     skew: bool = false,
     mask: Mask = .causal,
     empty_indices: bool = false,
+    selection_count: usize = topk,
     window: u32 = 17,
     sink: bool = false,
     scale: ?f32 = null,
 
     pub fn tokens(c: Case) usize {
-        return c.prefill * c.chunk + c.batch - c.prefill - c.inactive;
+        var count = c.padding;
+        for (0..c.batch) |seq| count += c.queryLen(seq);
+        return count;
     }
     pub fn pages(c: Case) usize {
         return std.math.divCeil(usize, c.kv_capacity orelse c.kv_len, page_size) catch unreachable;
@@ -33,7 +41,7 @@ pub const Case = struct {
         return c.kv_heads * c.group;
     }
     pub fn queryLen(c: Case, seq: usize) usize {
-        return if (seq >= c.batch - c.inactive) 0 else if (seq < c.prefill) c.chunk else 1;
+        return if (if (c.leading_inactive) seq < c.inactive else seq >= c.batch - c.inactive) 0 else if (seq < c.prefill) c.chunk else 1;
     }
     pub fn kvLen(c: Case, seq: usize) usize {
         const qlen = c.queryLen(seq);
@@ -45,7 +53,7 @@ pub const Case = struct {
 
 // Eight geometry cases plus orthogonal semantics/boundary cases, not a Cartesian product.
 pub const correctness = blk: {
-    var result: [34]Case = undefined;
+    var result: [48]Case = undefined;
     var i: usize = 0;
     for ([_]usize{ 64, 128, 256, 512 }) |dim| {
         for ([_]bool{ false, true }) |mixed| {
@@ -79,6 +87,20 @@ pub const correctness = blk: {
     result[31] = .{ .name = "zero_scale", .head_dim = 256, .prefill = 1, .kv_len = 257, .sink = true, .scale = 0 };
     result[32] = .{ .name = "d512_window_prefill", .head_dim = 512, .batch = 1, .prefill = 1, .chunk = 33, .kv_len = 513, .mask = .window, .window = 129, .sink = true };
     result[33] = .{ .name = "prefill_inactive", .head_dim = 64, .batch = 4, .prefill = 2, .inactive = 2, .kv_len = 257, .group = 5 };
+    result[34] = .{ .name = "sparse_decode", .head_dim = 256, .batch = 16, .kv_heads = 1, .group = 12, .kv_len = 4097, .mask = .indices, .selection_count = 2048, .shuffle_pages = true };
+    result[35] = .{ .name = "sparse_tail", .head_dim = 32, .mask = .indices, .selection_count = 129 };
+    result[36] = .{ .name = "sparse_mixed_sink", .head_dim = 512, .prefill = 1, .mask = .indices, .selection_count = 129, .sink = true };
+    result[37] = .{ .name = "sparse_empty", .mask = .indices, .selection_count = 129, .empty_indices = true };
+    result[38] = .{ .name = "sparse_empty_sink", .mask = .indices, .selection_count = 129, .empty_indices = true, .sink = true };
+    result[39] = .{ .name = "sparse_inactive", .head_dim = 64, .batch = 4, .inactive = 2, .mask = .indices, .selection_count = 65 };
+    result[40] = .{ .name = "sparse_prefill_group_tail", .head_dim = 256, .group = 19, .batch = 4, .prefill = 2, .chunk = 5, .inactive = 1, .mask = .indices, .selection_count = 257, .sink = true, .shuffle_pages = true };
+    result[41] = .{ .name = "sparse_prefill_large", .head_dim = 256, .group = 12, .batch = 2, .prefill = 2, .chunk = 65, .kv_len = 2049, .mask = .indices, .selection_count = 2048, .shuffle_pages = true };
+    result[42] = .{ .name = "sparse_batch_tail", .head_dim = 64, .group = 3, .batch = 40, .prefill = 1, .chunk = 2, .inactive = 3, .mask = .indices, .selection_count = 257, .random_indices = true };
+    result[43] = .{ .name = "sparse_prefill_padding", .head_dim = 256, .group = 12, .batch = 2, .prefill = 1, .chunk = 3, .padding = 7, .mask = .indices };
+    result[44] = .{ .name = "sparse_split_padding", .head_dim = 256, .group = 19, .batch = 2, .prefill = 1, .chunk = 3, .padding = 7, .mask = .indices, .selection_count = 257 };
+    result[45] = .{ .name = "sparse_leading_inactive", .head_dim = 256, .group = 12, .batch = 8, .inactive = 3, .leading_inactive = true, .padding = 3, .mask = .indices, .selection_count = 257 };
+    result[46] = .{ .name = "sparse_empty_key_tiles", .head_dim = 256, .group = 12, .batch = 2, .prefill = 1, .chunk = 5, .padding = 2, .mask = .indices, .selection_count = 2051, .random_indices = true, .empty_key_tiles = true };
+    result[47] = .{ .name = "sparse_all_empty_key_tiles", .head_dim = 256, .group = 12, .batch = 2, .prefill = 1, .chunk = 5, .padding = 2, .mask = .indices, .selection_count = 2051, .empty_indices = true, .sink = true };
     break :blk result;
 };
 

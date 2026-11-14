@@ -68,7 +68,7 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     stdx.debug.assert(isAvailable(zml.Compiler.current().platform), "CuTe paged attention requires SM89 or newer", .{});
     stdx.debug.assert(q.dtype() == k.dtype() and q.dtype() == v.dtype() and (q.dtype() == .bf16 or q.dtype() == .f16), "CuTe paged attention requires matching BF16 or FP16 Q/K/V", .{});
     stdx.debug.assert(q.dim(.hd) == 32 or q.dim(.hd) == 64 or q.dim(.hd) == 128 or q.dim(.hd) == 256 or q.dim(.hd) == 512, "CuTe paged attention supports head dimensions 32, 64, 128, 256 and 512", .{});
-    if (sm10x.isAvailable(zml.Compiler.current().platform) and opts.mask != .indices)
+    if (sm10x.isAvailable(zml.Compiler.current().platform))
         return sm10x.pagedAttention(parameters, q, k, v, opts);
     if (sm120.isAvailable(zml.Compiler.current().platform) and opts.mask != .indices)
         return sm120.pagedAttention(parameters, q, k, v, opts);

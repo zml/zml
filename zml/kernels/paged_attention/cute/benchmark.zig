@@ -5,6 +5,10 @@ const fixtures = @import("fixtures.zig");
 const Inputs = fixtures.Inputs;
 
 pub fn main(init: std.process.Init) !void {
+    try run(init, &cases.benchmarks, 1);
+}
+
+pub fn run(init: std.process.Init, benchmark_cases: []const cases.Case, chain: usize) !void {
     const platform = try zml.Platform.auto(init.gpa, init.io, .{});
     defer platform.deinit(init.gpa, init.io);
 
@@ -19,9 +23,9 @@ pub fn main(init: std.process.Init) !void {
         platform.fmtVerbose(),
     });
 
-    std.debug.print("timing=synchronized_invocation_us devices={d} hkv=per_device (KV heads sharded across all visible GPUs; includes runtime, output allocation, attention, merge and wait; excludes compile, upload and output destruction)\n", .{platform.devices.len});
+    std.debug.print("timing=synchronized_chain_us_per_attention chain={d} devices={d} hkv=per_device (KV heads sharded across all visible GPUs; includes runtime, output allocation, attention, merge and wait; excludes compile, upload and output destruction)\n", .{ chain, platform.devices.len });
     var failures: usize = 0;
-    for (cases.benchmarks) |c| {
+    for (benchmark_cases) |c| {
         std.debug.print("CASE name={s} d={d} b={d} hkv={d} g={d} prefill={d} chunk={d} kv={d} mask={s} backend=cute\n", .{
             c.name,
             c.head_dim,
@@ -34,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
             @tagName(c.mask),
         });
 
-        runBenchmark(init.gpa, init.io, platform, mesh, c) catch |err| {
+        runBenchmark(init.gpa, init.io, platform, mesh, c, chain) catch |err| {
             failures += 1;
             std.debug.print("FAIL error={s}\n", .{@errorName(err)});
         };
@@ -43,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     if (failures != 0) return error.BenchmarkFailed;
 }
 
-fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mesh: *const zml.Mesh, c: cases.Case) !void {
+fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mesh: *const zml.Mesh, c: cases.Case, chain: usize) !void {
     // Keep number of head per GPU constant.
     var global_case = c;
     global_case.kv_heads *= platform.devices.len;
@@ -54,7 +58,7 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     inputs.sinks = inputs.sinks.withPartitioning(mesh, .{ ._0 = .model });
 
     const compile_start: std.Io.Timestamp = .now(io, .awake);
-    const exe = try platform.compileFn(a, io, forward, .{ inputs, global_case, mesh }, .{
+    const exe = try platform.compileFn(a, io, forward, .{ inputs, global_case, mesh, chain }, .{
         .program_name = "paged_attention_harness",
         .meshes = &.{mesh},
     });
@@ -86,8 +90,8 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     while (sample_count < samples.len and (sample_count < 21 or accumulated_us < 100_000)) {
         const call_start: std.Io.Timestamp = .now(io, .awake);
         runner.run(io, .{buffers}, .{&output}, .{ .wait = true });
-        samples[sample_count] = elapsedUs(call_start, io);
-        accumulated_us += samples[sample_count];
+        samples[sample_count] = elapsedUs(call_start, io) / @as(f64, @floatFromInt(chain));
+        accumulated_us += samples[sample_count] * @as(f64, @floatFromInt(chain));
         sample_count += 1;
         output.deinit();
     }
@@ -115,17 +119,21 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     });
 }
 
-fn forward(inputs: Inputs, c: cases.Case, mesh: *const zml.Mesh) zml.Tensor {
+fn forward(inputs: Inputs, c: cases.Case, mesh: *const zml.Mesh, chain: usize) zml.Tensor {
     const Call = struct {
         inputs: Inputs,
         case: cases.Case,
+        chain: usize,
 
         fn local(self: @This(), _: zml.Shape) zml.Tensor {
-            return fixtures.forward(self.inputs, self.case);
+            // Keep the calls dependent so graph CSE cannot remove repetitions.
+            var current = self.inputs;
+            for (0..self.chain) |_| current.q = fixtures.forward(current, self.case);
+            return current.q;
         }
     };
     const heads: zml.Sharding.Partitioning.Logical = .parse(.{ .hkv = .model });
-    return zml.ops.manualComputation(Call.local, .{ .inputs = inputs, .case = c }, inputs.q.shape(), mesh, .{
+    return zml.ops.manualComputation(Call.local, .{ .inputs = inputs, .case = c, .chain = chain }, inputs.q.shape(), mesh, .{
         .in_specs = .{ .inputs = .{
             .q = heads,
             .k = heads,
