@@ -101,18 +101,18 @@ pub const Tokenizer = union(Tokenizers) {
             };
         }
 
-        // Only valid until the next decode and while the decoder AND buffer is alive.
-        pub fn feedOne(self: *Decoder, token_id: u32, buffer: []u8) ![]const u8 {
+        // Only valid until the next decode and while the decoder is alive.
+        pub fn feedOne(self: *Decoder, token_id: u32) ![]const u8 {
             return switch (self.*) {
-                .iree => |*d| d.feedOne(token_id, buffer),
+                .iree => |*d| d.feedOne(token_id),
                 inline else => |*d| try d.next(token_id) orelse &.{},
             };
         }
 
-        /// Output is only valid until the next feed/finalize call and while the decoder AND buffer is alive.
-        pub fn finalize(self: *Decoder, buffer: []u8) ![]const u8 {
+        /// Output is only valid until the next feed/finalize call and while the decoder is alive.
+        pub fn finalize(self: *Decoder) ![]const u8 {
             return switch (self.*) {
-                .iree => |*v| v.finalize(buffer),
+                .iree => |*v| v.finalize(),
                 inline else => &.{},
             };
         }
