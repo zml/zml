@@ -55,6 +55,7 @@ const platforms = switch (builtin.os.tag) {
             @import("zml-smi/platforms/oneapi"),
             @import("zml-smi/platforms/neuron"),
             @import("zml-smi/platforms/tpu"),
+            @import("zml-smi/platforms/furiosa"),
         },
         .aarch64 => .{
             @import("zml-smi/platforms/nvml"),
