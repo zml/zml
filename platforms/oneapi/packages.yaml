@@ -49,5 +49,6 @@ packages:
   - "libigc2 (= 2.41.15-1~24.04)"
   - "libigdfcl2 (= 2.41.15-1~24.04)"
   - "libze-intel-gpu1 (= 26.31.39395.14-1~24.04~ppa1)"
+  - "intel-opencl-icd (= 26.31.39395.14-1~24.04~ppa1)"
   - "libze1"
   - "zlib1g"

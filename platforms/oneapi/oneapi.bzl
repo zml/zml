@@ -40,6 +40,11 @@ def _read_packages(mctx, labels):
     return ret
 
 _UBUNTU_PACKAGES = {
+    "intel-opencl-icd": """
+filegroup(
+    name = "libigdrcl_so",
+    srcs = ["lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so"],
+)""",
     "libnl-3-200": """
 filegroup(
     name = "libnl_3",

@@ -48,6 +48,12 @@ patchelf(
 )
 
 patchelf(
+    name = "libigdrcl_so",
+    src = "@intel-opencl-icd//:libigdrcl_so",
+    set_rpath = "$ORIGIN",
+)
+
+patchelf(
     name = "libigc_so_2",
     src = "@libigc2//:libigc_so_2",
     set_rpath = "$ORIGIN",
@@ -95,6 +101,7 @@ copy_to_directory(
         ":libiga64_so_2",
         ":libigc_so_2",
         ":libigdfcl_so_2",
+        ":libigdrcl_so",
         ":libsycl_so",
         ":libtbb_so_12",
         ":libze_intel_gpu_so",
@@ -128,6 +135,7 @@ copy_to_directory(
     replace_prefixes = {
         "libiga64_so_2": "lib",
         "libigdfcl_so_2": "lib",
+        "libigdrcl_so": "lib",
         "libigc_so_2": "lib",
         "libdnnl_so_3": "lib",
         "libzml_oneapi_so": "lib",

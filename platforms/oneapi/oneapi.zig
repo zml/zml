@@ -28,7 +28,7 @@ fn hasOneApiDevice(io: std.Io) bool {
     return false;
 }
 
-fn setupOneAPIEnv(driver_path: [:0]const u8) void {
+fn setupOneAPIEnv(driver_path: [:0]const u8, opencl_driver_path: [:0]const u8) void {
     _ = c.setenv("CCL_LOG_LEVEL", c.getenv("CCL_LOG_LEVEL") orelse "error", 1);
     _ = c.setenv("CCL_ATL_TRANSPORT", "ofi", 1);
     _ = c.setenv("FI_PROVIDER", "shm", 1);
@@ -38,6 +38,8 @@ fn setupOneAPIEnv(driver_path: [:0]const u8) void {
     _ = c.setenv("XLA_ONECCL_COLLECTIVE_PERMUTE_BYPASS_SYCL_P2P", "1", 1);
     _ = c.setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:*", 0);
     _ = c.setenv("ZE_ENABLE_ALT_DRIVERS", driver_path, 0);
+    // oneDNN also needs the matching OpenCL device for some Level Zero kernels.
+    _ = c.setenv("OCL_ICD_FILENAMES", opencl_driver_path, 0);
 }
 
 pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
@@ -63,7 +65,9 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     var driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libze_intel_gpu.so.1" });
-    setupOneAPIEnv(driver_path);
+    var opencl_driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const opencl_driver_path = try stdx.Io.Dir.path.bufJoinZ(&opencl_driver_path_buf, &.{ sandbox_path, "lib", "libigdrcl.so" });
+    setupOneAPIEnv(driver_path, opencl_driver_path);
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;

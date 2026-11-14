@@ -245,6 +245,17 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
+			"key": "intel-opencl-icd_26.31.39395.14-1_24.04_ppa1_amd64",
+			"name": "intel-opencl-icd",
+			"sha256": "6e79028431b03f98a77d0f0ba56750fcef48cdabbe2b0cd8361d9f03cafb9433",
+			"urls": [
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/i/intel-compute-runtime/intel-opencl-icd_26.31.39395.14-1~24.04~ppa1_amd64.deb"
+			],
+			"version": "26.31.39395.14-1~24.04~ppa1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "libze1_1.32.0-1_24.04_ppa1_amd64",
 			"name": "libze1",
 			"sha256": "d4001dc474d3cb74ded50a449b9f646cfdfbb31e69e70b8af38f2d18273dfce1",
