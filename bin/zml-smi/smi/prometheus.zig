@@ -86,6 +86,8 @@ const host: Metrics(smi.HostData) = .{
     .load_5 = .{ .name = "zml_host_load_5", .help = "5-minute load average", .decimals = 2 },
     .load_15 = .{ .name = "zml_host_load_15", .help = "15-minute load average", .decimals = 2 },
     .uptime_seconds = .{ .name = "zml_host_uptime_seconds", .help = "System uptime in seconds" },
+    .cpu_power_mw = .{ .name = "zml_host_cpu_power_watts", .help = "CPU power draw in watts", .decimals = 3 },
+    .system_power_mw = .{ .name = "zml_host_system_power_watts", .help = "System power draw in watts", .decimals = 3 },
 };
 
 fn metricsOf(comptime T: type) Metrics(T) {

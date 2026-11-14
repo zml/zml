@@ -148,6 +148,9 @@ pub const HostData = struct {
     load_5: ?f32 = null,
     load_15: ?f32 = null,
     uptime_seconds: ?u64 = null,
+    /// Measured by a platform, through `Platform.VTable.host`.
+    cpu_power_mw: ?u64 = null,
+    system_power_mw: ?u64 = null,
 };
 
 /// A source of devices: a local platform or a remote host.
@@ -165,6 +168,9 @@ pub const Platform = struct {
         /// Called right after `poll`, with the samples it just filled. A row's device is its position in `devices`.
         processes: ?*const fn (platform: *Platform, scratch: std.mem.Allocator, samples: []const Sample, out: *ProcessList) ProcessList.Error!void = null,
         deinit: ?*const fn (platform: *Platform) void = null,
+        /// For a platform that also measures the host. Called right after `processes`, in the same task,
+        /// with host data whose fields start null: it fills those it read.
+        host: ?*const fn (platform: *Platform, data: *HostData) void = null,
     };
 };
 

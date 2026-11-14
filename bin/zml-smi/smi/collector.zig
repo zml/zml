@@ -9,6 +9,8 @@ pub const Collector = struct {
     /// Every process list merged into one, with host details. Written by the host step.
     processes: smi.DoubleBuffer(smi.ProcessList),
     host: smi.DoubleBuffer(smi.HostData),
+    /// What the host reader read once. Each host step starts from it, so a value a platform did not measure is null.
+    host_once: smi.HostData,
     /// A source derives values from two polls, so a one-shot print runs two rounds.
     two_readings: bool = false,
 
@@ -32,7 +34,12 @@ pub const Collector = struct {
         scratch: std.heap.ArenaAllocator,
     };
 
-    const Side = struct { samples: []smi.Sample, processes: smi.ProcessList };
+    const Side = struct {
+        samples: []smi.Sample,
+        processes: smi.ProcessList,
+        /// What the platform measured of the host.
+        host: smi.HostData = .{},
+    };
 
     pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, options: Options) Collector {
         var host: smi.HostData = .{};
@@ -40,6 +47,7 @@ pub const Collector = struct {
         return .{
             .processes = .{ .values = .{ .init(gpa), .init(gpa) } },
             .host = .{ .values = .{ host, host } },
+            .host_once = host,
             .host_reader = host_reader,
             .host_scratch = .init(gpa),
             .arena = arena,
@@ -153,6 +161,10 @@ pub const Collector = struct {
                 back.processes.clear();
             }
         }
+        if (platform.vtable.host) |measureHost| {
+            back.host = .{};
+            measureHost(platform, &back.host);
+        }
         source.sides.swap(self.io);
     }
 
@@ -174,8 +186,16 @@ pub const Collector = struct {
         _ = self.host_scratch.reset(.retain_capacity);
 
         const host = self.host.back();
-        host.* = self.host.front().*;
+        host.* = self.host_once;
         self.host_reader.sample(host);
+        for (self.sources.items) |source| {
+            if (source.platform.vtable.host == null) continue;
+            const measured = source.sides.lock(self.io).host;
+            source.sides.unlock(self.io);
+            inline for (@typeInfo(smi.HostData).@"struct".field_names) |field| {
+                if (@field(measured, field)) |value| @field(host, field) = value;
+            }
+        }
 
         self.processes.swap(self.io);
         self.host.swap(self.io);
@@ -186,7 +206,7 @@ const Fake = struct {
     platform: smi.Platform,
     polls: u64 = 0,
 
-    const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes };
+    const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .host = host };
 
     fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
         const self: *Fake = @alignCast(@fieldParentPtr("platform", platform));
@@ -202,6 +222,12 @@ const Fake = struct {
         // A device the platform does not have.
         try out.append(.{ .pid = 7, .device_idx = @intCast(self.platform.devices.len) });
         try out.append(.{ .pid = 42, .device_idx = @intCast(self.platform.devices.len - 1), .remote = true, .username = try out.dupe("alice") });
+    }
+
+    /// Measures the CPU power on odd polls only.
+    fn host(platform: *smi.Platform, data: *smi.HostData) void {
+        const self: *Fake = @alignCast(@fieldParentPtr("platform", platform));
+        if (self.polls % 2 == 1) data.cpu_power_mw = self.polls;
     }
 };
 
@@ -239,10 +265,13 @@ test "collector rounds" {
         try std.testing.expectEqual(2, merged.rows.items[1].device_idx);
         try std.testing.expectEqualStrings("alice", merged.rows.items[1].username);
     }
+    try std.testing.expectEqual(1, collector.host.read(io).cpu_power_mw);
 
     // `processes` fails: no rows this round, not the previous ones.
     collector.round();
     try std.testing.expectEqual(2, collector.sample(@fromBackingInt(0)).cuda.util_percent);
+    // Host values a platform did not measure this round are null, not the previous ones.
+    try std.testing.expectEqual(null, collector.host.read(io).cpu_power_mw);
     const merged = collector.processes.lock(io);
     defer collector.processes.unlock(io);
     try std.testing.expectEqual(0, merged.rows.items.len);
