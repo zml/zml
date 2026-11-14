@@ -53,4 +53,5 @@ test {
     _ = @import("sandbox.zig");
     _ = sysfs;
     _ = units;
+    _ = Host;
 }

@@ -1,21 +1,33 @@
-//! The host, from sysctl and the Mach host statistics.
+//! The host, from sysctl, the Mach host statistics and libproc.
 const std = @import("std");
 const smi = @import("../smi.zig");
 
 const c = std.c;
 
 pub const Host = struct {
+    io: std.Io,
+    /// CPU nanoseconds of each process.
+    cpu_time: smi.Counters(u32),
+    cpus: u64,
+    /// Converts the CPU time libproc reports, in Mach ticks, to nanoseconds.
+    timebase: c.mach_timebase_info_data,
+
     /// Reads what does not change: hostname, kernel, CPU, core count and total memory.
-    pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io, data: *smi.HostData) Host {
+    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, data: *smi.HostData) Host {
         data.hostname = sysctlString(arena, "kern.hostname");
         data.kernel = sysctlString(arena, "kern.osrelease");
         data.cpu_name = sysctlString(arena, "machdep.cpu.brand_string");
         data.cpu_cores = if (sysctl(u32, "hw.logicalcpu")) |cores| cores else null;
         data.mem_total_kib = if (sysctl(u64, "hw.memsize")) |bytes| bytes / 1024 else null;
-        return .{};
+
+        var timebase: c.mach_timebase_info_data = .{ .numer = 1, .denom = 1 };
+        if (c.mach_timebase_info(&timebase) != KERN_SUCCESS or timebase.denom == 0) timebase = .{ .numer = 1, .denom = 1 };
+        return .{ .io = io, .cpu_time = .init(gpa), .cpus = @max(1, data.cpu_cores orelse 1), .timebase = timebase };
     }
 
-    pub fn deinit(_: *Host) void {}
+    pub fn deinit(self: *Host) void {
+        self.cpu_time.deinit();
+    }
 
     /// Overwrites what changes: available memory, load and uptime. A read that fails gives null.
     pub fn sample(_: *Host, data: *smi.HostData) void {
@@ -34,9 +46,99 @@ pub const Host = struct {
         }
     }
 
-    /// The processes all come from remote hosts, which filled their rows.
-    pub fn enrich(_: *Host, _: std.mem.Allocator, _: std.mem.Allocator, _: []smi.ProcessInfo) void {}
+    /// Adds user, command, CPU and RSS to the local rows. Each process is read once,
+    /// however many rows it has. `strings` holds the strings of the rows.
+    /// The CPU and RSS of another user's process read 0, unless zml-smi runs as root.
+    pub fn enrich(self: *Host, strings: std.mem.Allocator, scratch: std.mem.Allocator, rows: []smi.ProcessInfo) void {
+        defer self.cpu_time.sweep();
+
+        var first_row: std.AutoHashMapUnmanaged(u32, usize) = .empty;
+        for (rows, 0..) |*row, i| {
+            // A remote host already filled its rows.
+            if (row.remote) continue;
+            const entry = first_row.getOrPut(scratch, row.pid) catch continue;
+            if (entry.found_existing) {
+                const done = rows[entry.value_ptr.*];
+                row.uid, row.username, row.comm, row.cpu_percent, row.rss_kib = .{ done.uid, done.username, done.comm, done.cpu_percent, done.rss_kib };
+                continue;
+            }
+            entry.value_ptr.* = i;
+            self.read(strings, row);
+        }
+    }
+
+    fn read(self: *Host, strings: std.mem.Allocator, row: *smi.ProcessInfo) void {
+        const pid = std.math.cast(c_int, row.pid) orelse return;
+
+        var short: ProcBsdShortInfo = undefined;
+        if (proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &short, @sizeOf(ProcBsdShortInfo)) == @sizeOf(ProcBsdShortInfo)) {
+            row.uid = short.uid;
+            if (c.getpwuid(row.uid)) |user| {
+                if (user.name) |name| row.username = strings.dupe(u8, std.mem.span(name)) catch "";
+            }
+        }
+
+        var path: [PROC_PIDPATHINFO_MAXSIZE]u8 = undefined;
+        const length = proc_pidpath(pid, &path, path.len);
+        if (length > 0) row.comm = strings.dupe(u8, path[0..@intCast(length)]) catch "";
+
+        var task: ProcTaskInfo = undefined;
+        if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, @sizeOf(ProcTaskInfo)) != @sizeOf(ProcTaskInfo)) return;
+        row.rss_kib = task.resident_size / 1024;
+        const ticks = @as(u128, task.total_user) + task.total_system;
+        const nanoseconds = std.math.lossyCast(u64, ticks * self.timebase.numer / self.timebase.denom);
+        const growth = (self.cpu_time.advance(row.pid, self.io, nanoseconds) catch return) orelse return;
+        // Tenths of a percent of every CPU, as on Linux.
+        const whole = @as(u128, @intCast(growth.elapsed.nanoseconds)) * self.cpus;
+        row.cpu_percent = @intCast(@min(@as(u128, growth.amount) * 1000 / whole, std.math.maxInt(u16)));
+    }
 };
+
+const PROC_PIDTASKINFO: c_int = 4;
+const PROC_PIDT_SHORTBSDINFO: c_int = 13;
+const PROC_PIDPATHINFO_MAXSIZE = 4096;
+
+/// struct proc_bsdshortinfo, which libproc gives for every process.
+const ProcBsdShortInfo = extern struct {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+    status: u32,
+    comm: [16]u8,
+    flags: u32,
+    uid: c.uid_t,
+    gid: c.gid_t,
+    ruid: c.uid_t,
+    rgid: c.gid_t,
+    svuid: c.uid_t,
+    svgid: c.gid_t,
+    rfu: u32,
+};
+
+/// struct proc_taskinfo, which libproc gives for the user's own processes, or any as root.
+const ProcTaskInfo = extern struct {
+    virtual_size: u64,
+    resident_size: u64,
+    total_user: u64,
+    total_system: u64,
+    threads_user: u64,
+    threads_system: u64,
+    policy: i32,
+    faults: i32,
+    pageins: i32,
+    cow_faults: i32,
+    messages_sent: i32,
+    messages_received: i32,
+    syscalls_mach: i32,
+    syscalls_unix: i32,
+    csw: i32,
+    threadnum: i32,
+    numrunning: i32,
+    priority: i32,
+};
+
+extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, size: c_int) c_int;
+extern "c" fn proc_pidpath(pid: c_int, buffer: [*]u8, size: u32) c_int;
 
 const vm_statistics64 = extern struct {
     free_count: c_uint,
@@ -96,4 +198,30 @@ fn sysctlString(arena: std.mem.Allocator, name: [*:0]const u8) ?[]const u8 {
     var len: usize = buffer.len;
     if (c.sysctlbyname(name, &buffer, &len, null, 0) != 0) return null;
     return arena.dupe(u8, std.mem.sliceTo(buffer[0..len], 0)) catch null;
+}
+
+test "enrich" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var data: smi.HostData = .{};
+    var host: Host = .init(arena.allocator(), std.testing.allocator, io, &data);
+    defer host.deinit();
+
+    // This process on two devices, launchd, and a row a remote host filled.
+    const self: u32 = @intCast(c.getpid());
+    var rows = [_]smi.ProcessInfo{ .{ .pid = self }, .{ .pid = 1 }, .{ .pid = self, .device_idx = 1 }, .{ .pid = 1, .remote = true } };
+    host.enrich(arena.allocator(), arena.allocator(), &rows);
+    try std.testing.expectEqual(c.getuid(), rows[0].uid);
+    try std.testing.expect(rows[0].rss_kib > 0);
+    try std.testing.expectEqualStrings(rows[0].comm, rows[2].comm);
+    try std.testing.expectEqualStrings("root", rows[1].username);
+    try std.testing.expectEqualStrings("/sbin/launchd", rows[1].comm);
+    try std.testing.expectEqualStrings("", rows[3].comm);
+
+    // CPU share needs a second reading.
+    const start: std.Io.Timestamp = .now(io, .awake);
+    while (start.untilNow(io, .awake).toMilliseconds() < 20) {}
+    host.enrich(arena.allocator(), arena.allocator(), &rows);
+    try std.testing.expect(rows[0].cpu_percent > 0);
 }
