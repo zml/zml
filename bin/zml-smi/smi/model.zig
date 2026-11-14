@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Target = enum { cuda, rocm, oneapi, neuron, tpu };
+pub const Target = enum { cuda, rocm, oneapi, neuron, tpu, furiosa };
 
 /// What does not change while we run. Its strings live as long as the program.
 pub const Device = struct {
@@ -33,6 +33,7 @@ pub const Sample = union(Target) {
     oneapi: Gpu,
     neuron: Neuron,
     tpu: Tpu,
+    furiosa: Furiosa,
 
     /// A sample of the given target with every field null.
     pub fn init(target: Target) Sample {
@@ -96,6 +97,29 @@ pub const Tpu = struct {
     util_percent: ?u64 = null,
     mem_used_bytes: ?u64 = null,
     mem_total_bytes: ?u64 = null,
+};
+
+/// One FuriosaAI RNGD chip.
+pub const Furiosa = struct {
+    util_percent: ?u64 = null,
+    mem_used_bytes: ?u64 = null,
+    mem_total_bytes: ?u64 = null,
+    power_mw: ?u64 = null,
+    power_limit_mw: ?u64 = null,
+    /// Degrees Celsius, at the hottest point of the SoC.
+    temperature: ?u64 = null,
+    /// Degrees Celsius.
+    ambient_temperature: ?u64 = null,
+    /// A `Governor`.
+    governor: ?u64 = null,
+    /// A `Liveness`.
+    liveness: ?u64 = null,
+    /// A bitmask whose bits are `ThrottleReason`s.
+    throttle_reasons: ?u64 = null,
+
+    pub const Governor = enum(u64) { performance, powersave };
+    pub const Liveness = enum(u64) { unknown, alive };
+    pub const ThrottleReason = enum(u6) { idle, thermal_slowdown, app_power_cap, app_clock_cap, hw_clock_cap, hw_bus_limit, hw_power_cap, gov_clock_cap, other };
 };
 
 pub const ProcessInfo = struct {

@@ -1,0 +1,18 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "furiosa",
+    import_name = "zml-smi/platforms/furiosa",
+    main = "Furiosa.zig",
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    visibility = ["//bin/zml-smi:__subpackages__"],
+    deps = ["//bin/zml-smi/smi"],
+)
+
+zig_test(
+    name = "test",
+    deps = [":furiosa"],
+)
