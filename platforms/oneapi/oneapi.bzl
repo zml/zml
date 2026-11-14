@@ -1,8 +1,9 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202611132003.375.1.7d765f57a407/zml-oneapi-linux-amd64.tar.zst"
-_PLUGIN_ONEAPI_SHA256 = "294722670832c543c8ac4c074c30f636f2a3b0854820f7c5a070fa82c0d6f3d5"
+# Local XLA e726db5f6e build with oneAPI FP8 collective fixes.
+_PLUGIN_ONEAPI_URL = "file:///home/steeve/.cache/zml/plugins/zml-oneapi-fp8-bytes.tar.zst"
+_PLUGIN_ONEAPI_SHA256 = "1e725316a22d48caefe6c8fd9a628f753c165df2450f0b65d9f0746259292484"
 
 ONEAPI_VERSION = "2026.1"
 
