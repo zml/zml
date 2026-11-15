@@ -364,7 +364,7 @@ pub const Loader = struct {
 
     pub fn deinit(self: *Loader) void {
         self.delivered.deinit(self.allocator);
-        for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
+        for (self.pinned_buffer_pools, self.dma_allocators) |*pool, *dma_allocator| pool.deinit(dma_allocator.allocator());
         self.allocator.free(self.pinned_buffer_pools);
         self.allocator.free(self.dma_allocators);
     }
@@ -767,6 +767,8 @@ pub const BufferedMemoryWriter = struct {
 };
 
 const DirectShardWriter = struct {
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain, .flush = flush, .rebase = rebase };
+
     const EventContext = struct {
         self: *DirectShardWriter,
         err: ?*pjrt.Error = null,
@@ -777,55 +779,51 @@ const DirectShardWriter = struct {
 
     allocator: std.mem.Allocator,
     io: std.Io,
-    memory: *const Memory,
+    pjrt_api: *const pjrt.Api,
     pool: *mem.DynamicBufferPool,
     total: usize,
-    pjrt_buffer: *pjrt.Buffer,
 
     transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
+    // Keep the full staging buffer so teardown can return it on early exit.
+    // The writer interface may expose only a prefix of it.
+    buffer: ?[]u8,
     offset: usize = 0,
 
     interface: std.Io.Writer,
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
-        const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
-        const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
-            memory.platform.pjrt_api,
-            .{
-                .shape_specs = &.{shape_spec},
-                .memory = memory.pjrt_memory,
-            },
-        );
-        errdefer transfer_manager.deinit(memory.platform.pjrt_api);
-
-        const pjrt_buffer = try transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0);
-        errdefer pjrt_buffer.deinit(memory.platform.pjrt_api);
-
-        const buf = try pool.get(allocator, io);
+    /// Takes ownership of the transfer manager on success.
+    pub fn init(io: std.Io, args: struct {
+        allocator: std.mem.Allocator,
+        pjrt_api: *const pjrt.Api,
+        pool: *mem.DynamicBufferPool,
+        transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
+        total: usize,
+    }) !DirectShardWriter {
+        const buf = try args.pool.get(args.allocator, io);
+        errdefer args.pool.put(io, buf);
 
         return .{
-            .allocator = allocator,
+            .allocator = args.allocator,
             .io = io,
-            .memory = memory,
-            .pool = pool,
-            .total = shape.byteSize(),
-            .pjrt_buffer = pjrt_buffer,
-            .transfer_manager = transfer_manager,
+            .pjrt_api = args.pjrt_api,
+            .pool = args.pool,
+            .total = args.total,
+            .transfer_manager = args.transfer_manager,
+            .buffer = buf,
             .interface = .{
-                .buffer = buf[0..@min(buf.len, shape.byteSize())],
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
-                    .rebase = rebase,
-                },
+                .buffer = buf[0..@min(buf.len, args.total)],
+                .vtable = &vtable,
             },
         };
     }
 
     pub fn deinit(self: *DirectShardWriter) void {
-        self.transfer_manager.deinit(self.memory.platform.pjrt_api);
+        // A failed flush can leave callbacks that still access this writer.
+        for (&self.events_contexts) |*ctx| self.finishTransfer(ctx) catch {};
+        if (self.buffer) |buf| self.pool.put(self.io, buf);
+        self.transfer_manager.deinit(self.pjrt_api);
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, _: usize) std.Io.Writer.Error!usize {
@@ -866,9 +864,8 @@ const DirectShardWriter = struct {
     fn flushBuffered(self: *DirectShardWriter) std.Io.Writer.Error!void {
         if (self.offset >= self.total) return;
 
-        const pjrt_api = self.memory.platform.pjrt_api;
+        const pjrt_api = self.pjrt_api;
 
-        const current_buffer = self.interface.buffer;
         const buffered = self.interface.buffered();
 
         const slice = buffered[0..@min(buffered.len, self.total - self.offset)];
@@ -883,7 +880,7 @@ const DirectShardWriter = struct {
         const ctx = &self.events_contexts[@intCast(self.flip_flop)];
         ctx.* = .{
             .self = self,
-            .buffer = current_buffer,
+            .buffer = self.buffer orelse @panic("Missing buffer."),
             .pjrt_event = transfer_event,
         };
 
@@ -895,47 +892,50 @@ const DirectShardWriter = struct {
             }
         }.call, &(ctx.*.?)) catch |err| {
             log.err("error when setting up transfer completion callback: {any}", .{err});
+            // The transfer was submitted. Wait before teardown can return its buffer.
+            transfer_event.awaitRaw(pjrt_api) catch {};
+            transfer_event.deinit(pjrt_api);
+            ctx.* = null;
+            self.interface = .failing;
             return std.Io.Writer.Error.WriteFailed;
         };
+        // The callback returns the buffer to the pool and may have run already.
+        self.buffer = null;
+        self.interface = .failing;
 
-        if (self.events_contexts[@intCast(self.flip_flop ^ 1)]) |*ctx_previous| {
-            defer self.events_contexts[@intCast(self.flip_flop ^ 1)] = null;
-            ctx_previous.event.waitUncancelable(self.io);
-            defer ctx_previous.pjrt_event.deinit(pjrt_api);
-            if (ctx_previous.err) |e| {
-                defer e.deinit(pjrt_api);
-                log.err("error while awaiting: {s}: {s}", .{
-                    @tagName(e.getCode(pjrt_api)),
-                    e.getMessage(pjrt_api),
-                });
-                return std.Io.Writer.Error.WriteFailed;
-            }
-        }
+        try self.finishTransfer(&self.events_contexts[@intCast(self.flip_flop ^ 1)]);
 
         if (is_last) {
-            defer ctx.* = null;
-            defer self.interface = .failing;
-            const ctx_ = &ctx.*.?;
-            ctx_.event.waitUncancelable(self.io);
-            defer ctx_.pjrt_event.deinit(pjrt_api);
-            if (ctx_.err) |e| {
-                defer e.deinit(pjrt_api);
-                log.err("error while awaiting: {s}: {s}", .{
-                    @tagName(e.getCode(pjrt_api)),
-                    e.getMessage(pjrt_api),
-                });
-                return std.Io.Writer.Error.WriteFailed;
-            }
+            try self.finishTransfer(ctx);
         } else {
-            self.interface.end = 0;
             const buf = self.pool.get(self.allocator, self.io) catch |err| {
                 log.err("unable to get a new buffer from the pool: {any}", .{err});
                 return std.Io.Writer.Error.WriteFailed;
             };
-            self.interface.buffer = buf[0..@min(buf.len, self.total - (self.offset + slice.len))];
+            self.buffer = buf;
+            self.interface = .{
+                .buffer = buf[0..@min(buf.len, self.total - (self.offset + slice.len))],
+                .vtable = &vtable,
+            };
         }
         self.flip_flop ^= 1;
         self.offset += slice.len;
+    }
+
+    fn finishTransfer(self: *DirectShardWriter, slot: *?EventContext) std.Io.Writer.Error!void {
+        const ctx = if (slot.*) |*ctx| ctx else return;
+        const pjrt_api = self.pjrt_api;
+        defer slot.* = null;
+        ctx.event.waitUncancelable(self.io);
+        defer ctx.pjrt_event.deinit(pjrt_api);
+        if (ctx.err) |err| {
+            defer err.deinit(pjrt_api);
+            log.err("error while awaiting: {s}: {s}", .{
+                @tagName(err.getCode(pjrt_api)),
+                err.getMessage(pjrt_api),
+            });
+            return error.WriteFailed;
+        }
     }
 };
 
@@ -1210,24 +1210,34 @@ pub const DirectMemoryWriter = struct {
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
         errdefer allocator.free(shard_writers);
 
-        var initialized: usize = 0;
-        errdefer for (shard_writers[0..initialized]) |*writer| {
-            writer.deinit();
-        };
-
+        const pjrt_api = platform.pjrt_api;
         var pjrt_buffers: Buffer.Shards = .empty;
-        for (ordered_devices, 0..) |device, i| {
-            const pool = &pools[device.id];
-            const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const pjrt_mem = platform.devices[device.id].memory(memory).?;
+        errdefer for (pjrt_buffers.constSlice()) |pjrt_buffer| pjrt_buffer.deinit(pjrt_api);
 
-            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.localShape(placed_shape));
+        // Tear down transfer managers before destroying their destination handles.
+        var initialized: usize = 0;
+        errdefer for (shard_writers[0..initialized]) |*writer| writer.deinit();
+
+        const shard_shape = placement.localShape(placed_shape);
+        const shape_spec: pjrt.ShapeSpec = .init(shard_shape.dims(), pjrtx.bufferTypeFromDtype(shard_shape.dtype()));
+        for (ordered_devices, shard_writers) |device, *writer| {
+            const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(pjrt_api, .{
+                .shape_specs = &.{shape_spec},
+                .memory = platform.devices[device.id].memory(memory).?.pjrt_memory,
+            });
+            errdefer transfer_manager.deinit(pjrt_api);
+
+            pjrt_buffers.appendAssumeCapacity(try transfer_manager.retrieveBuffer(pjrt_api, 0));
+
+            writer.* = try .init(io, .{
+                .allocator = dma_allocators[device.id].allocator(),
+                .pjrt_api = pjrt_api,
+                .pool = &pools[device.id],
+                .transfer_manager = transfer_manager,
+                .total = shard_shape.byteSize(),
+            });
             initialized += 1;
-
-            pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
-
-        buffer.* = .fromPjrtBuffers(platform, shape, pjrt_buffers.constSlice());
 
         const dispatch_spans: DispatchSpans = try .init(allocator, placed_shape);
         errdefer dispatch_spans.deinit(allocator);
@@ -1236,6 +1246,7 @@ pub const DirectMemoryWriter = struct {
         const first_writer = &shard_writers[first_span.primary_writer];
         const first_window = @min(dma_chunk_size, first_writer.interface.buffer.len);
 
+        buffer.* = .fromPjrtBuffers(platform, shape, pjrt_buffers.constSlice());
         return .{
             .allocator = allocator,
             .shard_writers = shard_writers,
@@ -1338,6 +1349,7 @@ pub const DirectMemoryWriter = struct {
 
     fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
+        errdefer self.interface = .failing;
 
         // Commit the active public window if one remains
         if (self.span_index < self.dispatch_spans.spans.len) {
@@ -1373,6 +1385,7 @@ pub const DirectMemoryWriter = struct {
     // use the same bytes as scratch and are copied before any full buffers are
     // submitted or the public alias is rotated.
     fn commitWindow(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
+        errdefer self.interface = .failing;
         // All dispatch spans are consumed; no shard DMA buffer remains valid to
         // expose as the public alias until flush marks the writer as failing.
         if (self.span_index >= self.dispatch_spans.spans.len) {
@@ -1551,8 +1564,8 @@ const DirectMemoryWriterDeviceTest = struct {
         for (pools) |*pool| {
             pool.* = .init(pool_chunks, pool_chunk_size);
         }
-        defer for (pools, 0..) |*pool, i| {
-            pool.deinit(dma_allocators[i].allocator());
+        defer for (pools, dma_allocators) |*pool, *dma_allocator| {
+            pool.deinit(dma_allocator.allocator());
         };
 
         var written_buffer: Buffer = undefined;
