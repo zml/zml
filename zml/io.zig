@@ -340,7 +340,7 @@ pub const Loader = struct {
         const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
         errdefer allocator.free(dma_allocators);
         for (platform.devices, 0..) |*device, i| {
-            dma_allocators[i] = .init(allocator, device);
+            dma_allocators[i] = .init(std.heap.page_allocator, device);
         }
 
         const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);

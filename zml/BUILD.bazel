@@ -197,3 +197,9 @@ zig_test(
     name = "test",
     deps = ["//zml"],
 )
+
+zig_test(
+    name = "mem_test",
+    main = "mem_test.zig",
+    deps = ["//zml"],
+)
