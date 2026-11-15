@@ -230,7 +230,6 @@ pub const DynamicBufferPool = struct {
     block_size: usize,
     max_blocks: usize,
 
-    arena_state: std.heap.ArenaAllocator.State = .{},
     free_stack: std.atomic.Value(?*Node) = .init(null),
     in_flight: std.atomic.Value(usize) = .init(0),
     mutex: std.Io.Mutex = .init,
@@ -243,8 +242,13 @@ pub const DynamicBufferPool = struct {
         };
     }
 
+    /// All users must have stopped and returned their buffers before teardown.
     pub fn deinit(self: *DynamicBufferPool, allocator: std.mem.Allocator) void {
-        self.arena_state.promote(allocator).deinit();
+        assert(self.in_flight.load(.acquire) == 0);
+        while (self.pop()) |node| {
+            const buffer: []align(@alignOf(Node)) u8 = @alignCast(self.nodeToSlice(node));
+            allocator.free(buffer);
+        }
     }
 
     pub fn get(self: *DynamicBufferPool, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
@@ -263,12 +267,8 @@ pub const DynamicBufferPool = struct {
                 self.mutex.lockUncancelable(io);
                 defer self.mutex.unlock(io);
 
-                var arena = self.arena_state.promote(allocator);
-                defer self.arena_state = arena.state;
-
                 errdefer _ = self.in_flight.fetchSub(1, .release);
-                const buffer = try arena.allocator().alignedAlloc(u8, alignment, self.block_size);
-                return @alignCast(buffer);
+                return try allocator.alignedAlloc(u8, alignment, self.block_size);
             }
 
             self.mutex.lockUncancelable(io);
