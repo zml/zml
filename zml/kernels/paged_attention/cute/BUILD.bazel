@@ -6,6 +6,7 @@ zig_library(
     name = "cute",
     srcs = [
         "attention.zig",
+        "sparse_attention.zig",
         "//zml/kernels/paged_attention/cute/sm10x",
         "//zml/kernels/paged_attention/cute/sm120",
     ],
@@ -52,6 +53,7 @@ zig_binary(
     srcs = [
         "cases.zig",
         "fixtures.zig",
+        "reference.zig",
     ],
     main = "benchmark.zig",
     tags = ["manual"],
