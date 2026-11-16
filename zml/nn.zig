@@ -1,13 +1,13 @@
 //! Common layer definition and functions for Neural Networks (NN)
 const std = @import("std");
 
+const constants = @import("zml/constants");
+const meta = @import("zml/meta");
 const mlir = @import("mlir");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
-const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
-const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const quantization = @import("quantization.zig");

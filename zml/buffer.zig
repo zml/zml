@@ -1,14 +1,14 @@
 const std = @import("std");
 
+const constants = @import("zml/constants");
+const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
-const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
-const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;

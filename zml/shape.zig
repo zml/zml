@@ -2,9 +2,9 @@ const std = @import("std");
 const testing = std.testing;
 const builtin = @import("builtin");
 
+const constants = @import("zml/constants");
 const stdx = @import("stdx");
 
-const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const Sharding = @import("Sharding.zig");
 

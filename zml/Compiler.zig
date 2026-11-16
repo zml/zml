@@ -2,6 +2,7 @@ const std = @import("std");
 
 const c = @import("c");
 const func = @import("mlir/dialects/func");
+const meta = @import("zml/meta");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const shardy = @import("mlir/dialects/shardy");
@@ -14,7 +15,6 @@ const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
 const Exe = @import("exe.zig").Exe;
 const Memory = @import("platform.zig").Memory;
-const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const pjrtx = @import("pjrtx.zig");

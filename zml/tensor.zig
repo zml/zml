@@ -1,17 +1,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const constants = @import("zml/constants");
+const meta = @import("zml/meta");
 const mlir = @import("mlir");
 const shardy = @import("mlir/dialects/shardy");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
 const Compiler = @import("Compiler.zig");
-const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
-const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
