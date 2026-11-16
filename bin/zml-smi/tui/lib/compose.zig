@@ -25,20 +25,6 @@ pub fn surfaceBuilder(arena: std.mem.Allocator) SurfaceBuilder {
     return .{ .arena = arena, .children = .empty };
 }
 
-// ── Fluent widget wrappers ─────────────────────────────────────────
-
-pub fn center(arena: std.mem.Allocator, child: vxfw.Widget) std.mem.Allocator.Error!vxfw.Widget {
-    const c = try arena.create(vxfw.Center);
-    c.* = .{ .child = child };
-    return c.widget();
-}
-
-pub fn sized(arena: std.mem.Allocator, child: vxfw.Widget, size: vxfw.Size) std.mem.Allocator.Error!vxfw.Widget {
-    const s = try arena.create(vxfw.SizedBox);
-    s.* = .{ .child = child, .size = size };
-    return s.widget();
-}
-
 pub fn pad(arena: std.mem.Allocator, child: vxfw.Widget, padding: vxfw.Padding.PadValues) std.mem.Allocator.Error!vxfw.Widget {
     const p = try arena.create(vxfw.Padding);
     p.* = .{ .child = child, .padding = padding };

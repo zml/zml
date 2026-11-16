@@ -5,18 +5,19 @@ const model = @import("model.zig");
 pub const Target = model.Target;
 pub const Device = model.Device;
 pub const Sample = model.Sample;
-pub const Row = model.Row;
+pub const Common = model.Common;
 pub const Gpu = model.Gpu;
 pub const Neuron = model.Neuron;
 pub const Tpu = model.Tpu;
 pub const Furiosa = model.Furiosa;
 pub const Metal = model.Metal;
+pub const Row = model.Row;
 pub const ProcessInfo = model.ProcessInfo;
 pub const HostData = model.HostData;
-pub const Platform = model.Platform;
-pub const ProcessList = model.ProcessList;
 
-pub const Collector = @import("collector.zig").Collector;
+const collector = @import("collector.zig");
+pub const Collector = collector.Collector;
+pub const Reading = collector.Reading;
 pub const Remote = @import("remote.zig").Remote;
 pub const Host = switch (builtin.os.tag) {
     .linux => @import("host/linux.zig").Host,
@@ -41,18 +42,3 @@ pub const csv = @import("csv.zig");
 pub const json = @import("json.zig");
 pub const prometheus = @import("prometheus.zig");
 pub const api = @import("api.zig");
-
-test {
-    _ = @import("collector.zig");
-    _ = counter;
-    _ = @import("double_buffer.zig");
-    _ = dynlib;
-    _ = fdinfo;
-    _ = hwmon;
-    _ = pci;
-    _ = proc;
-    _ = @import("sandbox.zig");
-    _ = sysfs;
-    _ = units;
-    _ = Host;
-}

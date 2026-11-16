@@ -14,5 +14,6 @@ zig_library(
 
 zig_test(
     name = "test",
+    main = "test_amdsmi.zig",
     deps = [":amdsmi"],
 )

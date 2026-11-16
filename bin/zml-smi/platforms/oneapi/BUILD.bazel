@@ -10,5 +10,9 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":oneapi"],
+    main = "test_oneapi.zig",
+    deps = [
+        ":oneapi",
+        "//bin/zml-smi/smi",
+    ],
 )

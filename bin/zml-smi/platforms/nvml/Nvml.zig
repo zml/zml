@@ -6,7 +6,7 @@ const smi = @import("zml-smi");
 const Nvml = @This();
 const log = std.log.scoped(.@"zml-smi/nvml");
 
-platform: smi.Platform,
+devices: []const smi.Device,
 api: Api,
 gpus: []Gpu,
 tick: u8 = 0,
@@ -20,10 +20,9 @@ const Gpu = struct {
     last_seen: u64 = 0,
 };
 
-const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes };
-
 const Api = struct {
     nvmlInit_v2: Checked(c.nvmlInit_v2),
+    nvmlShutdown: *const @TypeOf(c.nvmlShutdown),
     nvmlErrorString: *const @TypeOf(c.nvmlErrorString),
     nvmlSystemGetDriverVersion: Checked(c.nvmlSystemGetDriverVersion),
     nvmlSystemGetCudaDriverVersion_v2: Checked(c.nvmlSystemGetCudaDriverVersion_v2),
@@ -66,7 +65,7 @@ pub fn detect(io: std.Io) bool {
     return smi.sysfs.exists(io, "/dev/nvidiactl");
 }
 
-pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
+pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
     const api = try smi.dynlib.open(Api, &.{ "libnvidia-ml.so.1", "libnvidia-ml.so" });
 
     // The first call says why the library cannot be used.
@@ -75,6 +74,8 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
         log.warn("nvmlInit: {s}", .{std.mem.span(api.nvmlErrorString(status))});
         return err;
     };
+
+    errdefer _ = api.nvmlShutdown();
 
     var version: [c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE]u8 = undefined;
     const driver_version = if (api.nvmlSystemGetDriverVersion.call(.{ &version, version.len })) |_|
@@ -105,20 +106,23 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
     }
 
     return .{
-        .platform = .{ .devices = devices.items, .vtable = &vtable },
+        .devices = devices.items,
         .api = api,
         .gpus = gpus.items,
     };
 }
 
-fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
-    const self: *Nvml = @alignCast(@fieldParentPtr("platform", platform));
+pub fn close(self: *Nvml) void {
+    _ = self.api.nvmlShutdown();
+}
+
+pub fn poll(self: *Nvml, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
     const api = &self.api;
     // PCIe throughput blocks while it measures (#766).
     const read_pcie = self.tick % 4 == 0;
     self.tick +%= 1;
 
-    for (self.gpus, samples) |*gpu, *sample| {
+    for (self.gpus, reading.samples) |*gpu, *sample| {
         const fields = &sample.cuda;
         const handle = gpu.handle;
 
@@ -160,20 +164,18 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
         fields.pcie_tx_kbps = gpu.pcie_tx_kbps;
         fields.pcie_rx_kbps = gpu.pcie_rx_kbps;
     }
-}
 
-fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
-    const self: *Nvml = @alignCast(@fieldParentPtr("platform", platform));
+    // Finish every device's metrics before a process-list allocation can fail.
     var read_any = self.gpus.len == 0;
 
     for (self.gpus, 0..) |*gpu, device| {
         const handle = gpu.handle;
-        const first_row = out.rows.items.len;
-        inline for (.{ self.api.nvmlDeviceGetComputeRunningProcesses_v3, self.api.nvmlDeviceGetGraphicsRunningProcesses_v3 }) |query| {
+        const first_row = reading.processes.items.len;
+        inline for (.{ api.nvmlDeviceGetComputeRunningProcesses_v3, api.nvmlDeviceGetGraphicsRunningProcesses_v3 }) |query| {
             if (running(scratch, query, handle)) |list| {
                 read_any = true;
                 for (list) |process| {
-                    try out.append(.{ .pid = process.pid, .device_idx = @intCast(device), .dev_mem_kib = process.usedGpuMemory / 1024 });
+                    try reading.addProcess(.{ .pid = process.pid, .device_idx = @intCast(device), .dev_mem_kib = process.usedGpuMemory / 1024 });
                 }
             } else |_| {}
         }
@@ -183,7 +185,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
         for (utilization) |util| {
             if (util.smUtil > 100 or util.timeStamp <= since) continue;
             gpu.last_seen = @max(gpu.last_seen, util.timeStamp);
-            for (out.rows.items[first_row..]) |*row| {
+            for (reading.processes.items[first_row..]) |*row| {
                 if (row.pid == util.pid) row.dev_util_percent = @intCast(util.smUtil);
             }
         }

@@ -60,12 +60,13 @@ pub fn link(dir: sysfs.Dir, comptime which: enum { current, max }) Link {
 pub fn upstream(device: sysfs.Dir) !sysfs.Dir {
     const max_depth = 8;
     const vendor = try device.int(u16, "vendor");
-    var path: [3 * max_depth]u8 = undefined;
+    const segments: [max_depth][3]u8 = @splat("../".*);
+    const parents = std.mem.asBytes(&segments);
     var best_depth: usize = 0;
     var best_mbps = link(device, .max).mbps() orelse 0;
 
     for (1..max_depth + 1) |depth| {
-        const dir = device.openDir(parents(&path, depth)) catch break;
+        const dir = device.openDir(parents[0 .. 3 * depth - 1]) catch break;
         defer dir.close();
         if ((dir.int(u16, "vendor") catch break) != vendor) break;
         const mbps = link(dir, .max).mbps() orelse 0;
@@ -74,91 +75,22 @@ pub fn upstream(device: sysfs.Dir) !sysfs.Dir {
             best_mbps = mbps;
         }
     }
-    return device.openDir(parents(&path, best_depth));
+    return device.openDir(if (best_depth == 0) "." else parents[0 .. 3 * best_depth - 1]);
 }
 
-fn parents(buffer: []u8, depth: usize) []const u8 {
-    if (depth == 0) return ".";
-    for (0..depth) |i| @memcpy(buffer[3 * i ..][0..3], "../");
-    return buffer[0 .. 3 * depth - 1];
-}
+const transfers_tenths = [_]u32{ 25, 50, 80, 160, 320, 640 };
 
 /// The generation of a link speed such as "32.0 GT/s PCIe".
 pub fn generation(speed: []const u8) ?u64 {
     const transfers = std.fmt.parseFloat(f32, std.mem.sliceTo(speed, ' ')) catch return null;
     if (!(transfers > 0 and transfers < 100)) return null;
-    return switch (@as(u32, @intFromFloat(transfers * 10))) {
-        25 => 1,
-        50 => 2,
-        80 => 3,
-        160 => 4,
-        320 => 5,
-        640 => 6,
-        else => null,
-    };
+    const tenths: u32 = @intFromFloat(transfers * 10);
+    const index = std.mem.indexOfScalar(u32, &transfers_tenths, tenths) orelse return null;
+    return index + 1;
 }
 
 /// The line rate of one lane, in megabits per second.
 pub fn laneMbps(gen: u64) ?u64 {
-    return switch (gen) {
-        1 => 2_500,
-        2 => 5_000,
-        3 => 8_000,
-        4 => 16_000,
-        5 => 32_000,
-        6 => 64_000,
-        else => null,
-    };
-}
-
-test generation {
-    try std.testing.expectEqual(1, generation("2.5 GT/s PCIe"));
-    try std.testing.expectEqual(3, generation("8 GT/s"));
-    try std.testing.expectEqual(4, generation("16.0 GT/s PCIe"));
-    try std.testing.expectEqual(null, generation("Unknown"));
-}
-
-test Link {
-    try std.testing.expectEqual(10_000, (Link{ .gen = 1, .width = 4 }).mbps());
-    try std.testing.expectEqual(512_000, (Link{ .gen = 5, .width = 16 }).mbps());
-    try std.testing.expectEqual(null, (Link{ .gen = 5 }).mbps());
-}
-
-test upstream {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "root/bridge/gpu");
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/bridge/vendor", .data = "0x8086\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/bridge/max_link_speed", .data = "32.0 GT/s PCIe\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/bridge/max_link_width", .data = "16\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/bridge/gpu/vendor", .data = "0x8086\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/bridge/gpu/max_link_speed", .data = "2.5 GT/s PCIe\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/bridge/gpu/max_link_width", .data = "1\n" });
-
-    const root: sysfs.Dir = .{ .handle = tmp.dir, .io = io };
-    const gpu = try root.openDir("root/bridge/gpu");
-    defer gpu.close();
-    const dir = try upstream(gpu);
-    defer dir.close();
-    try std.testing.expectEqual(512_000, link(dir, .max).mbps());
-}
-
-test Devices {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "0000:03:00.0");
-    try tmp.dir.createDirPath(io, "0000:04:00.0");
-    try tmp.dir.writeFile(io, .{ .sub_path = "0000:03:00.0/vendor", .data = "0x8086\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "0000:03:00.0/device", .data = "0xe223\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "0000:04:00.0/vendor", .data = "0x10de\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "0000:04:00.0/device", .data = "0x2b85\n" });
-
-    const root: sysfs.Dir = .{ .handle = tmp.dir, .io = io };
-    var devices: Devices = .{ .root = root, .it = root.iterate(), .vendor = 0x8086 };
-    const entry = devices.next().?;
-    defer entry.dir.close();
-    try std.testing.expectEqual(0xe223, entry.id);
-    try std.testing.expectEqual(null, devices.next());
+    if (gen == 0 or gen > transfers_tenths.len) return null;
+    return @as(u64, transfers_tenths[@intCast(gen - 1)]) * 100;
 }

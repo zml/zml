@@ -1,12 +1,13 @@
 //! AMD GPUs, through the bundled libamd_smi, with the memory of each process from its fdinfo files.
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c");
 const smi = @import("zml-smi");
 
 const AmdSmi = @This();
 const log = std.log.scoped(.@"zml-smi/amdsmi");
 
-platform: smi.Platform,
+devices: []const smi.Device,
 io: std.Io,
 api: Api,
 gpus: []const Gpu,
@@ -20,7 +21,7 @@ const Gpu = struct {
     address: ?[12]u8,
 };
 
-const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .deinit = deinit };
+pub const two_readings = true;
 
 const Api = struct {
     amdsmi_init: Checked(c.amdsmi_init),
@@ -58,7 +59,7 @@ pub fn detect(io: std.Io) bool {
     return smi.sysfs.exists(io, "/dev/kfd");
 }
 
-pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSmi {
+pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSmi {
     const api = try smi.dynlib.openBundled(Api, io, "libamd_smi.so.27");
 
     // The first call says why the library cannot be used.
@@ -95,7 +96,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
     }
 
     return .{
-        .platform = .{ .devices = devices.items, .two_readings = true, .vtable = &vtable },
+        .devices = devices.items,
         .io = io,
         .api = api,
         .gpus = gpus.items,
@@ -104,17 +105,15 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
     };
 }
 
-fn deinit(platform: *smi.Platform) void {
-    const self: *AmdSmi = @alignCast(@fieldParentPtr("platform", platform));
+pub fn close(self: *AmdSmi) void {
     if (self.proc) |proc| proc.close();
     self.busy.deinit();
 }
 
-fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
-    const self: *AmdSmi = @alignCast(@fieldParentPtr("platform", platform));
+pub fn poll(self: *AmdSmi, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
     const api = &self.api;
 
-    for (self.gpus, samples) |gpu, *sample| {
+    for (self.gpus, reading.samples) |gpu, *sample| {
         const fields = &sample.rocm;
         const handle = gpu.handle;
 
@@ -159,10 +158,7 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
             fields.pcie_bandwidth_mbps = link.mbps();
         } else |_| {}
     }
-}
 
-fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
-    const self: *AmdSmi = @alignCast(@fieldParentPtr("platform", platform));
     defer self.busy.sweep();
     var read_any = self.gpus.len == 0;
 
@@ -172,7 +168,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
         read_any = true;
         for (list) |process| {
             const busy = try self.busy.advance(.{ .pid = process.pid, .device = device }, self.io, process.engine_usage.gfx +| process.engine_usage.enc);
-            try out.append(.{
+            try reading.addProcess(.{
                 .pid = process.pid,
                 .device_idx = device,
                 .dev_util_percent = if (busy) |growth| growth.percentOfTime() else null,
@@ -184,20 +180,8 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
 }
 
 /// The processes on a GPU, from a query sized by a first call.
+/// amdsmi prints while it lists processes, so stderr points at the null device for both calls.
 fn processList(self: *AmdSmi, scratch: std.mem.Allocator, handle: c.amdsmi_processor_handle) ![]const c.amdsmi_proc_info_t {
-    var count: u32 = 0;
-    try Api.check(self.listQuietly(handle, &count, null));
-    if (count == 0) return &.{};
-
-    const list = try scratch.alloc(c.amdsmi_proc_info_t, count);
-    const status = self.listQuietly(handle, &count, list.ptr);
-    // The list is full, and the processes that started since are left out.
-    if (status != c.AMDSMI_STATUS_OUT_OF_RESOURCES) try Api.check(status);
-    return list[0..@min(count, list.len)];
-}
-
-/// amdsmi prints while it lists processes, so stderr points at the null device for the length of the call.
-fn listQuietly(self: *AmdSmi, handle: c.amdsmi_processor_handle, count: *u32, list: [*c]c.amdsmi_proc_info_t) c.amdsmi_status_t {
     const saved = std.c.dup(std.c.STDERR_FILENO);
     if (saved >= 0) {
         const null_device = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
@@ -210,7 +194,16 @@ fn listQuietly(self: *AmdSmi, handle: c.amdsmi_processor_handle, count: *u32, li
         _ = std.c.dup2(saved, std.c.STDERR_FILENO);
         _ = std.c.close(saved);
     };
-    return self.api.amdsmi_get_gpu_process_list.function(handle, count, list);
+
+    var count: u32 = 0;
+    try Api.check(self.api.amdsmi_get_gpu_process_list.function(handle, &count, null));
+    if (count == 0) return &.{};
+
+    const list = try scratch.alloc(c.amdsmi_proc_info_t, count);
+    const status = self.api.amdsmi_get_gpu_process_list.function(handle, &count, list.ptr);
+    // The list is full, and the processes that started since are left out.
+    if (status != c.AMDSMI_STATUS_OUT_OF_RESOURCES) try Api.check(status);
+    return list[0..@min(count, list.len)];
 }
 
 /// The VRAM a process holds on a GPU, summed over its fdinfo files that name the GPU.
@@ -245,8 +238,6 @@ fn pciAddress(bdf: u64) ?[12]u8 {
     return address;
 }
 
-test pciAddress {
-    try std.testing.expectEqualStrings("0000:03:00.0", &pciAddress(0x0300).?);
-    // Bits 28 to 31 hold a partition id, which is not part of the address.
-    try std.testing.expectEqualStrings("0001:c1:00.1", &pciAddress(0x1_1000_c101).?);
-}
+pub const testing = if (builtin.is_test) struct {
+    pub const pciAddress = AmdSmi.pciAddress;
+} else struct {};

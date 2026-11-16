@@ -52,28 +52,15 @@ pub const Host = struct {
         } else |_| {}
     }
 
-    /// Adds user, command, CPU and RSS to the local rows. Each process is read once,
-    /// however many rows it has. `strings` holds the strings of the rows.
-    pub fn enrich(self: *Host, strings: std.mem.Allocator, scratch: std.mem.Allocator, rows: []smi.ProcessInfo) void {
+    /// Adds user, command, CPU and RSS to one row per local PID.
+    pub fn enrich(self: *Host, strings: std.mem.Allocator, rows: []smi.ProcessInfo) void {
         const proc = self.proc orelse return;
         defer self.ticks.sweep();
 
         var buffer: [512]u8 = undefined;
         const total = if (proc.head("stat", &buffer)) |stat| self.total.advance(self.io, totalTicks(stat)) else |_| null;
 
-        var first_row: std.AutoHashMapUnmanaged(u32, usize) = .empty;
-        for (rows, 0..) |*row, i| {
-            // A remote host already filled its rows.
-            if (row.remote) continue;
-            const entry = first_row.getOrPut(scratch, row.pid) catch continue;
-            if (entry.found_existing) {
-                const done = rows[entry.value_ptr.*];
-                row.uid, row.username, row.comm, row.cpu_percent, row.rss_kib = .{ done.uid, done.username, done.comm, done.cpu_percent, done.rss_kib };
-                continue;
-            }
-            entry.value_ptr.* = i;
-            self.read(proc, strings, row, total);
-        }
+        for (rows) |*row| self.read(proc, strings, row, total);
     }
 
     fn read(self: *Host, proc: smi.sysfs.Dir, strings: std.mem.Allocator, row: *smi.ProcessInfo, total: ?smi.Growth) void {

@@ -40,73 +40,54 @@ pub fn handleEvent(self: *DeviceCard, ctx: *vxfw.EventContext, event: vxfw.Event
     }
 }
 
-/// What a card shows of a device: utilization and memory, with a suffix after utilization.
+/// Platform-specific names for the common utilization and memory readings.
 const Usage = struct {
     label: []const u8,
     util_label: []const u8,
-    util_percent: ?u64,
-    mem_used: ?u64,
-    mem_total: ?u64,
-    suffix: []const u8 = "",
 };
 
 pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const i = self.device_id;
     const device = self.state.device(i);
-    const usage: Usage = switch (self.state.sample(i)) {
-        .cuda, .rocm, .oneapi => |gpu| .{
-            .label = "GPU",
-            .util_label = "GPU",
-            .util_percent = gpu.util_percent,
-            .mem_used = gpu.mem_used_bytes,
-            .mem_total = gpu.mem_total_bytes,
-            .suffix = try gpuSuffix(ctx.arena, gpu),
-        },
-        .neuron => |core| .{
+    const common = self.state.sample(i).common();
+    const usage: Usage = switch (device.target) {
+        .neuron => .{
             .label = "NC",
             .util_label = "Core",
-            .util_percent = core.util_percent,
-            .mem_used = core.mem_used_bytes,
-            .mem_total = core.mem_total_bytes,
         },
-        .tpu => |chip| .{
+        .tpu => .{
             .label = "TPU",
             .util_label = "Duty",
-            .util_percent = chip.util_percent,
-            .mem_used = chip.mem_used_bytes,
-            .mem_total = chip.mem_total_bytes,
         },
-        .furiosa => |chip| .{
+        .furiosa => .{
             .label = "NPU",
             .util_label = "NPU",
-            .util_percent = chip.util_percent,
-            .mem_used = chip.mem_used_bytes,
-            .mem_total = chip.mem_total_bytes,
-            .suffix = try gpuSuffix(ctx.arena, .{ .temperature = chip.temperature, .power_mw = chip.power_mw, .power_limit_mw = chip.power_limit_mw }),
         },
-        .metal => |gpu| .{
+        .cuda, .rocm, .oneapi, .metal => .{
             .label = "GPU",
             .util_label = "GPU",
-            .util_percent = gpu.util_percent,
-            .mem_used = gpu.mem_used_bytes,
-            .mem_total = gpu.mem_total_bytes,
-            // An Apple GPU idles below a watt.
-            .suffix = try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C | {d}.{d} W", .{ gpu.temperature orelse 0, (gpu.power_mw orelse 0) / 1000, (gpu.power_mw orelse 0) % 1000 / 100 }),
         },
     };
-    const util_percent: u8 = @intCast(@min(usage.util_percent orelse 0, 100));
-    const mem_used = usage.mem_used orelse 0;
-    const mem_total = usage.mem_total orelse 0;
-    const mem_pct: u8 = if (mem_total > 0) @intCast(@min(mem_used * 100 / mem_total, 100)) else 0;
+    const suffix = switch (device.target) {
+        .neuron, .tpu => "",
+        .metal => try metalSuffix(ctx.arena, common),
+        else => try gpuSuffix(ctx.arena, common),
+    };
+    const util_percent: ?u8 = if (common.util_percent) |value|
+        @as(u8, @intCast(@min(value, 100)))
+    else
+        null;
+    const mem_pct: ?u8 = if (data.memoryPercent(common)) |value|
+        @as(u8, @intCast(value))
+    else
+        null;
 
     const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}{s}", .{
         usage.label, i, device.name orelse "Unknown", try utils.versions(ctx.arena, device, .in_title),
     });
 
-    const mem_used_mb = utils.bytesToMb(mem_used);
-    const mem_total_mb = utils.bytesToMb(mem_total);
-    const mem_total_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{mem_total_mb});
-    const mem_used_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{mem_used_mb});
+    const mem_total_str = try memoryLabel(ctx.arena, common.mem_total_bytes);
+    const mem_used_str = try memoryLabel(ctx.arena, common.mem_used_bytes);
 
     const mem_pad = try utils.repeatStr(ctx.arena, " ", @intCast(mem_total_str.len -| mem_used_str.len));
     const mem_suffix = try std.fmt.allocPrint(ctx.arena, "{s}{s} / {s} MB", .{
@@ -121,19 +102,24 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         .highlighted = self.highlighted,
     };
 
-    const util_chart_data = try utils.normalizeRange(ctx.arena, self.state.history.util[i].items, 0, 100);
-    const mem_chart_data = try utils.normalizeRange(ctx.arena, self.state.history.mem_util[i].items, 0, 100);
-
-    const chart_entries = [2]MetricCard.ChartEntry{
-        .{ .label = usage.util_label, .value = util_percent, .suffix = usage.suffix, .data = util_chart_data },
-        .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix, .data = mem_chart_data },
+    var chart_entries = [2]MetricCard.ChartEntry{
+        .{ .label = usage.util_label, .value = util_percent, .suffix = suffix, .data = &.{} },
+        .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix, .data = &.{} },
     };
     const gauge_entries = [2]MetricCard.GaugeEntry{
-        .{ .label = usage.util_label, .value = util_percent, .suffix = usage.suffix },
+        .{ .label = usage.util_label, .value = util_percent, .suffix = suffix },
         .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix },
     };
 
     if (self.use_braille) {
+        for (&chart_entries, [_]data.Metric{ .util, .memory }) |*entry, metric| {
+            entry.data = try utils.normalizeRange(
+                ctx.arena,
+                try self.state.history(ctx.arena, i, metric),
+                0,
+                100,
+            );
+        }
         card.charts = &chart_entries;
     } else {
         card.gauges = &gauge_entries;
@@ -145,9 +131,39 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
 }
 
 /// "41°C |  10 W", the power padded to the width of the limit.
-fn gpuSuffix(arena: std.mem.Allocator, gpu: smi.Gpu) std.mem.Allocator.Error![]const u8 {
-    const power_str = try std.fmt.allocPrint(arena, "{d}", .{(gpu.power_mw orelse 0) / 1000});
-    const power_limit_str = try std.fmt.allocPrint(arena, "{d}", .{(gpu.power_limit_mw orelse 0) / 1000});
+fn gpuSuffix(arena: std.mem.Allocator, common: smi.Common) std.mem.Allocator.Error![]const u8 {
+    const temperature = try temperatureLabel(arena, common.temperature);
+    const power_str = if (common.power_mw) |power|
+        try std.fmt.allocPrint(arena, "{d}", .{power / 1000})
+    else
+        "N/A";
+    const power_limit_str = if (common.power_limit_mw) |limit|
+        try std.fmt.allocPrint(arena, "{d}", .{limit / 1000})
+    else
+        power_str;
     const pad = try utils.repeatStr(arena, " ", @intCast(power_limit_str.len -| power_str.len));
-    return std.fmt.allocPrint(arena, "{d}\u{00b0}C | {s}{s} W", .{ gpu.temperature orelse 0, pad, power_str });
+    return std.fmt.allocPrint(arena, "{s} | {s}{s} W", .{ temperature, pad, power_str });
+}
+
+fn metalSuffix(arena: std.mem.Allocator, common: smi.Common) std.mem.Allocator.Error![]const u8 {
+    const temperature = try temperatureLabel(arena, common.temperature);
+    const power = if (common.power_mw) |milliwatts|
+        try std.fmt.allocPrint(arena, "{d}.{d} W", .{ milliwatts / 1000, milliwatts % 1000 / 100 })
+    else
+        "N/A";
+    return std.fmt.allocPrint(arena, "{s} | {s}", .{ temperature, power });
+}
+
+fn temperatureLabel(arena: std.mem.Allocator, temperature: ?u64) std.mem.Allocator.Error![]const u8 {
+    return if (temperature) |value|
+        std.fmt.allocPrint(arena, "{d}\u{00b0}C", .{value})
+    else
+        "N/A";
+}
+
+fn memoryLabel(arena: std.mem.Allocator, memory: ?u64) std.mem.Allocator.Error![]const u8 {
+    return if (memory) |value|
+        std.fmt.allocPrint(arena, "{d}", .{value / (1024 * 1024)})
+    else
+        "N/A";
 }

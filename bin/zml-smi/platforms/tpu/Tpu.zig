@@ -5,12 +5,10 @@ const smi = @import("zml-smi");
 
 const Tpu = @This();
 
-platform: smi.Platform,
+devices: []const smi.Device,
 io: std.Io,
 /// The service numbers the devices chip after chip.
 devices_per_chip: u32,
-
-const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes };
 
 /// Each query waits at most 1 s, so a stalled service delays a poll by up to 3 s.
 const address = "localhost:8431";
@@ -34,7 +32,7 @@ pub fn detect(io: std.Io) bool {
     return smi.sysfs.exists(io, "/dev/accel0") or smi.sysfs.exists(io, "/dev/vfio/0");
 }
 
-pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
+pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
     var scan: smi.pci.Devices = try .open(io, google);
     defer scan.close();
     var found: ?Chip = null;
@@ -49,7 +47,7 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
     const devices = try arena.alloc(smi.Device, count * chip.devices_per_chip);
     @memset(devices, .{ .target = .tpu, .name = chip.name });
     return .{
-        .platform = .{ .devices = devices, .vtable = &vtable },
+        .devices = devices,
         .io = io,
         .devices_per_chip = chip.devices_per_chip,
     };
@@ -62,12 +60,21 @@ fn chipOf(device: u16, subsystem: ?u16) ?Chip {
     return null;
 }
 
-fn poll(_: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
+pub fn poll(self: *Tpu, _: std.mem.Allocator, reading: *smi.Reading) !void {
+    const samples = reading.samples;
     const used = query(c_longlong, "tpu.runtime.hbm.memory.usage.bytes");
     const total = query(c_longlong, "tpu.runtime.hbm.memory.total.bytes");
     const duty = query(f64, "tpu.runtime.tensorcore.dutycycle.percent");
-    for (samples[0..@min(samples.len, max_devices)], 0..) |*sample, id| {
-        sample.tpu = .{ .util_percent = duty[id], .mem_used_bytes = used[id], .mem_total_bytes = total[id] };
+    for (samples[0..@min(samples.len, max_devices)], 0..) |*sample, index| {
+        sample.tpu.util_percent = duty[index];
+        sample.tpu.mem_used_bytes = used[index];
+        sample.tpu.mem_total_bytes = total[index];
+    }
+
+    var holders: smi.proc.FdHolders = .init(self.io, &.{ "/dev/accel", "/dev/vfio/" });
+    defer holders.deinit();
+    while (holders.next()) |holder| {
+        try addHolder(reading, self.devices_per_chip, holder.pid, holder.rest);
     }
 }
 
@@ -98,24 +105,17 @@ fn byId(comptime T: type, ids: []const c_longlong, values: []const T) [max_devic
     return out;
 }
 
-fn processes(platform: *smi.Platform, _: std.mem.Allocator, samples: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
-    const self: *Tpu = @alignCast(@fieldParentPtr("platform", platform));
-    var holders: smi.proc.FdHolders = .init(self.io, &.{ "/dev/accel", "/dev/vfio/" });
-    defer holders.deinit();
-    while (holders.next()) |holder| try addHolder(out, samples, self.devices_per_chip, holder.pid, holder.rest);
-}
-
 /// Lists a process that holds the node of a chip on every device of that chip, once.
-fn addHolder(out: *smi.ProcessList, samples: []const smi.Sample, devices_per_chip: u32, pid: u32, node: []const u8) !void {
+fn addHolder(reading: *smi.Reading, devices_per_chip: u32, pid: u32, node: []const u8) !void {
     const chip = std.fmt.parseInt(u16, node, 10) catch return;
     for (0..devices_per_chip) |core| {
         const device = @as(usize, chip) * devices_per_chip + core;
-        if (device >= samples.len) return;
-        for (out.rows.items) |row| {
+        if (device >= reading.samples.len) return;
+        for (reading.processes.items) |row| {
             if (row.pid == pid and row.device_idx == device) break;
         } else {
-            const tpu = samples[device].tpu;
-            try out.append(.{
+            const tpu = reading.samples[device].tpu;
+            try reading.addProcess(.{
                 .pid = pid,
                 .device_idx = @intCast(device),
                 .dev_util_percent = if (tpu.util_percent) |percent| std.math.cast(u16, percent) else null,
@@ -125,38 +125,8 @@ fn addHolder(out: *smi.ProcessList, samples: []const smi.Sample, devices_per_chi
     }
 }
 
-test chipOf {
-    try std.testing.expectEqualStrings("TPU v3", chipOf(0x0027, 0x004f).?.name);
-    try std.testing.expectEqualStrings("TPU v5e", chipOf(0x0063, 0x0001).?.name);
-    try std.testing.expect(chipOf(0x0027, null) == null);
-    try std.testing.expect(chipOf(0x0001, null) == null);
-}
-
-test byId {
-    const used = byId(c_longlong, &.{ 1, 0, -1, 64 }, &.{ 2048, -5, 7, 7 });
-    try std.testing.expectEqual(2048, used[1]);
-    try std.testing.expectEqual(null, used[0]);
-    const duty = byId(f64, &.{ 0, 1 }, &.{ 12.5, std.math.nan(f64) });
-    try std.testing.expectEqual(13, duty[0]);
-    try std.testing.expectEqual(null, duty[1]);
-}
-
-test addHolder {
-    var list: smi.ProcessList = .init(std.testing.allocator);
-    defer list.deinit();
-    const samples = [_]smi.Sample{ .{ .tpu = .{} }, .{ .tpu = .{} }, .{ .tpu = .{ .util_percent = 40, .mem_used_bytes = 8192 } }, .{ .tpu = .{} } };
-
-    // Chip 1 of a two-device chip is devices 2 and 3, listed once however many descriptors.
-    try addHolder(&list, &samples, 2, 7, "1");
-    try addHolder(&list, &samples, 2, 7, "1");
-    // The vfio container and a chip beyond the devices make no row.
-    try addHolder(&list, &samples, 2, 7, "vfio");
-    try addHolder(&list, &samples, 2, 7, "2");
-
-    try std.testing.expectEqual(2, list.rows.items.len);
-    try std.testing.expectEqual(2, list.rows.items[0].device_idx);
-    try std.testing.expectEqual(40, list.rows.items[0].dev_util_percent);
-    try std.testing.expectEqual(8, list.rows.items[0].dev_mem_kib);
-    try std.testing.expectEqual(3, list.rows.items[1].device_idx);
-    try std.testing.expectEqual(null, list.rows.items[1].dev_mem_kib);
-}
+pub const testing = if (@import("builtin").is_test) struct {
+    pub const chipOf = Tpu.chipOf;
+    pub const byId = Tpu.byId;
+    pub const addHolder = Tpu.addHolder;
+} else struct {};

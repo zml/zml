@@ -14,5 +14,13 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":furiosa"],
+    main = "test_furiosa.zig",
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":furiosa",
+        "//bin/zml-smi/smi",
+    ],
 )

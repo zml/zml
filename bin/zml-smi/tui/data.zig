@@ -1,131 +1,117 @@
 const std = @import("std");
 const smi = @import("zml-smi");
 
-/// The samples of one metric, oldest first.
-pub const History = std.ArrayList(u64);
+const implementation = @This();
 
-pub const HistoryBuffers = struct {
-    util: []History = &.{},
-    mem_util: []History = &.{},
-    temp: []History = &.{},
-    power: []History = &.{},
-
-    pub fn init(allocator: std.mem.Allocator, count: usize) !HistoryBuffers {
-        const h: HistoryBuffers = .{
-            .util = try allocator.alloc(History, count),
-            .mem_util = try allocator.alloc(History, count),
-            .temp = try allocator.alloc(History, count),
-            .power = try allocator.alloc(History, count),
-        };
-
-        @memset(h.util, .empty);
-        @memset(h.mem_util, .empty);
-        @memset(h.temp, .empty);
-        @memset(h.power, .empty);
-
-        return h;
-    }
-
-    pub fn deinit(self: *HistoryBuffers, allocator: std.mem.Allocator) void {
-        allocator.free(self.util);
-        allocator.free(self.mem_util);
-        allocator.free(self.temp);
-        allocator.free(self.power);
-    }
-};
+pub const Metric = enum { util, memory, temperature, power };
 
 pub const SystemState = struct {
     collector: *smi.Collector,
-    history: HistoryBuffers = .{},
-    /// Charts plot one sample per braille dot, two per cell: the history
-    /// keeps enough of them to fill the widest terminal seen.
-    history_len: usize = 0,
-    gpa: std.mem.Allocator,
-    arena: std.mem.Allocator,
-    io: std.Io,
+    snapshot: ?smi.Collector.Snapshot = null,
+    /// Bounded by the collector's history capacity when drawing a chart.
+    history_len: usize = 128,
+    captured_at: std.Io.Timestamp = .fromNanoseconds(0),
     tui_refresh_rate: u16,
 
-    pub const Config = struct {
-        collector: *smi.Collector,
-        tui_refresh_rate: u16,
-        gpa: std.mem.Allocator,
-        arena: std.mem.Allocator,
-        io: std.Io,
-    };
-
-    pub fn init(cfg: Config) !SystemState {
-        return .{
-            .collector = cfg.collector,
-            .history = try HistoryBuffers.init(cfg.arena, cfg.collector.devices.items.len),
-            .tui_refresh_rate = cfg.tui_refresh_rate,
-            .gpa = cfg.gpa,
-            .arena = cfg.arena,
-            .io = cfg.io,
-        };
+    /// Called once before drawing a frame. Widgets borrow only this capture.
+    pub fn capture(self: *SystemState, frame: std.mem.Allocator) std.mem.Allocator.Error!void {
+        self.snapshot = try self.collector.capture(frame, true);
+        self.captured_at = .now(self.collector.io, .awake);
     }
 
-    pub fn deinit(self: *SystemState, allocator: std.mem.Allocator) void {
-        self.history.deinit(allocator);
+    pub fn historyInterval(self: *const SystemState) u32 {
+        const milliseconds = @max(
+            @divTrunc(self.collector.interval.nanoseconds, std.time.ns_per_ms),
+            1,
+        );
+        return std.math.cast(u32, milliseconds) orelse std.math.maxInt(u32);
+    }
+
+    /// Projects only a visible chart's metric into timestamp buckets.
+    pub fn history(
+        self: *const SystemState,
+        frame: std.mem.Allocator,
+        device_index: u16,
+        metric: Metric,
+    ) std.mem.Allocator.Error![]const ?u64 {
+        const snapshot = self.snapshot orelse return &.{};
+        return historySeries(
+            frame,
+            snapshot.histories[device_index],
+            metric,
+            self.captured_at,
+            self.historyInterval(),
+            @min(self.history_len, smi.Collector.history_capacity),
+        );
     }
 
     pub fn deviceCount(self: *const SystemState) usize {
         return self.collector.devices.items.len;
     }
 
-    pub fn device(self: *const SystemState, id: u16) smi.Device {
-        return self.collector.devices.items[id];
+    pub fn device(self: *const SystemState, index: u16) smi.Device {
+        return self.collector.devices.items[index];
     }
 
-    pub fn sample(self: *const SystemState, id: u16) smi.Sample {
-        return self.collector.sample(@fromBackingInt(id));
+    pub fn sample(self: *const SystemState, index: u16) smi.Sample {
+        return if (self.snapshot) |snapshot|
+            snapshot.samples[index]
+        else
+            .init(self.device(index).target);
     }
 
     pub fn host(self: *const SystemState) smi.HostData {
-        return self.collector.host.read(self.io);
+        return if (self.snapshot) |snapshot| snapshot.host else .{};
     }
 
-    pub fn recordHistory(self: *SystemState) void {
-        for (0..self.deviceCount()) |i| {
-            switch (self.sample(@intCast(i))) {
-                .cuda, .rocm, .oneapi => |gpu| {
-                    self.recordUsage(i, gpu.util_percent, gpu.mem_used_bytes, gpu.mem_total_bytes);
-                    self.record(&self.history.temp[i], gpu.temperature orelse 0);
-                    self.record(&self.history.power[i], gpu.power_mw orelse 0);
-                },
-                .neuron => |core| {
-                    self.recordUsage(i, core.util_percent, core.mem_used_bytes, core.mem_total_bytes);
-                    self.record(&self.history.temp[i], 0);
-                    self.record(&self.history.power[i], 0);
-                },
-                .tpu => |chip| {
-                    self.recordUsage(i, chip.util_percent, chip.mem_used_bytes, chip.mem_total_bytes);
-                    self.record(&self.history.temp[i], 0);
-                    self.record(&self.history.power[i], 0);
-                },
-                .furiosa => |chip| {
-                    self.recordUsage(i, chip.util_percent, chip.mem_used_bytes, chip.mem_total_bytes);
-                    self.record(&self.history.temp[i], chip.temperature orelse 0);
-                    self.record(&self.history.power[i], chip.power_mw orelse 0);
-                },
-                .metal => |gpu| {
-                    self.recordUsage(i, gpu.util_percent, gpu.mem_used_bytes, gpu.mem_total_bytes);
-                    self.record(&self.history.temp[i], gpu.temperature orelse 0);
-                    self.record(&self.history.power[i], gpu.power_mw orelse 0);
-                },
-            }
-        }
-    }
-
-    fn recordUsage(self: *SystemState, i: usize, util: ?u64, used: ?u64, total: ?u64) void {
-        self.record(&self.history.util[i], util orelse 0);
-        const total_bytes = total orelse 0;
-        self.record(&self.history.mem_util[i], if (total_bytes > 0) (used orelse 0) * 100 / total_bytes else 0);
-    }
-
-    fn record(self: *SystemState, history: *History, value: u64) void {
-        if (history.items.len > 0 and history.items.len >= self.history_len) {
-            _ = history.orderedRemove(0);
-        }
-        history.append(self.arena, value) catch {};
+    pub fn processes(self: *const SystemState) []const smi.ProcessInfo {
+        return if (self.snapshot) |snapshot| snapshot.processes else &.{};
     }
 };
+
+pub fn memoryPercent(common: smi.Common) ?u64 {
+    const used = common.mem_used_bytes orelse return null;
+    const total = common.mem_total_bytes orelse return null;
+    if (total == 0) return null;
+    return @intCast(@min(@as(u128, used) * 100 / total, 100));
+}
+
+fn historySeries(
+    frame: std.mem.Allocator,
+    points: []const smi.Collector.HistoryPoint,
+    metric: Metric,
+    now: std.Io.Timestamp,
+    interval_ms: u32,
+    count: usize,
+) std.mem.Allocator.Error![]const ?u64 {
+    const values = try frame.alloc(?u64, count);
+    @memset(values, null);
+    for (points) |point| {
+        const index = historyIndex(point.at, now, interval_ms, count) orelse continue;
+        values[index] = switch (metric) {
+            .util => point.common.util_percent,
+            .memory => memoryPercent(point.common),
+            .temperature => point.common.temperature,
+            .power => point.common.power_mw,
+        };
+    }
+    return values;
+}
+
+fn historyIndex(
+    completed: std.Io.Timestamp,
+    now: std.Io.Timestamp,
+    interval_ms: u32,
+    count: usize,
+) ?usize {
+    if (count == 0 or interval_ms == 0) return null;
+    const elapsed = @max(completed.durationTo(now).nanoseconds, 0);
+    const age = @divTrunc(elapsed, @as(i96, interval_ms) * std.time.ns_per_ms);
+    if (age >= count) return null;
+    return count - 1 - @as(usize, @intCast(age));
+}
+
+pub const testing = if (@import("builtin").is_test) struct {
+    pub const historyIndex = implementation.historyIndex;
+    pub const historySeries = implementation.historySeries;
+} else struct {};

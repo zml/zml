@@ -1,10 +1,11 @@
 //! Intel GPUs, through sysfs: drm, hwmon, and the fdinfo of every DRM client.
 const std = @import("std");
+const builtin = @import("builtin");
 const smi = @import("zml-smi");
 
 const OneApi = @This();
 
-platform: smi.Platform,
+devices: []const smi.Device,
 io: std.Io,
 gpus: []Gpu,
 proc: ?smi.sysfs.Dir,
@@ -12,8 +13,6 @@ proc: ?smi.sysfs.Dir,
 busy: smi.Counters(EngineKey),
 /// Total cycles of each process and device (xe).
 cycles: smi.Counters(EngineKey),
-/// The rows of this round's scan, in scratch. Null when the scan failed.
-rows: ?[]const smi.ProcessInfo = null,
 
 const Gpu = struct {
     /// The PCI device, /sys/class/drm/renderD<N>/device.
@@ -24,6 +23,12 @@ const Gpu = struct {
     hwmon: ?Hwmon,
     energy: smi.Counter = .{},
     mem_total_bytes: ?u64,
+
+    fn close(gpu: Gpu) void {
+        gpu.dir.close();
+        gpu.link.close();
+        if (gpu.hwmon) |hwmon| hwmon.dir.close();
+    }
 };
 
 /// The files chosen in init, read every poll.
@@ -36,9 +41,10 @@ const Hwmon = struct {
 };
 
 /// A fan PWM, else a fan speed and its maximum.
-const Fan = union(enum) {
-    pwm: []const u8,
-    speed: struct { input: []const u8, max: []const u8 },
+const Fan = struct {
+    input: []const u8,
+    /// Null for PWM; otherwise the file containing the maximum RPM.
+    maximum: ?[]const u8 = null,
 
     /// The first PWM that reads, else the first speed that reads with a maximum above 0.
     fn find(arena: std.mem.Allocator, dir: smi.sysfs.Dir) ?Fan {
@@ -47,50 +53,40 @@ const Fan = union(enum) {
         for (1..16) |index| {
             const pwm = std.fmt.bufPrint(&input, "pwm{d}", .{index}) catch unreachable;
             _ = dir.int(u64, pwm) catch continue;
-            return .{ .pwm = arena.dupe(u8, pwm) catch return null };
+            return .{ .input = arena.dupe(u8, pwm) catch return null };
         }
         for (1..16) |index| {
             const speed = std.fmt.bufPrint(&input, "fan{d}_input", .{index}) catch unreachable;
             const limit = std.fmt.bufPrint(&max, "fan{d}_max", .{index}) catch unreachable;
             _ = dir.int(u64, speed) catch continue;
             if ((dir.int(u64, limit) catch 0) == 0) continue;
-            return .{ .speed = .{ .input = arena.dupe(u8, speed) catch return null, .max = arena.dupe(u8, limit) catch return null } };
+            return .{
+                .input = arena.dupe(u8, speed) catch return null,
+                .maximum = arena.dupe(u8, limit) catch return null,
+            };
         }
         return null;
     }
 
     fn percent(fan: Fan, dir: smi.sysfs.Dir) ?u64 {
-        switch (fan) {
-            .pwm => |file| return smi.hwmon.pwmPercent(dir.int(u64, file) catch return null),
-            .speed => |files| {
-                const input = dir.int(u64, files.input) catch return null;
-                const max = dir.int(u64, files.max) catch return null;
-                return if (max > 0) @min(input * 100 / max, 100) else null;
-            },
-        }
+        const input = dir.int(u64, fan.input) catch return null;
+        const file = fan.maximum orelse return smi.hwmon.pwmPercent(input);
+        const maximum = dir.int(u64, file) catch return null;
+        return if (maximum > 0) @min(input * 100 / maximum, 100) else null;
     }
 };
 
 const EngineKey = struct { pid: u32, device: u16, class: u64 };
 
-const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .deinit = deinit };
+pub const two_readings = true;
 
 const intel = 0x8086;
 
 pub fn detect(io: std.Io) bool {
-    const drm = smi.sysfs.Dir.open(io, "/sys/class/drm") catch return false;
-    defer drm.close();
-    var it = drm.iterate();
-    while (it.next(io) catch null) |entry| {
-        const node = renderNode(entry.name) orelse continue;
-        const dir = openDevice(drm, node) catch continue;
-        defer dir.close();
-        if ((dir.int(u16, "vendor") catch 0) == intel) return true;
-    }
-    return false;
+    return smi.sysfs.exists(io, "/sys/class/drm");
 }
 
-pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneApi {
+pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneApi {
     const drm = try smi.sysfs.Dir.open(io, "/sys/class/drm");
     defer drm.close();
 
@@ -101,21 +97,23 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
     }
     std.mem.sort(u32, nodes.items, {}, std.sort.asc(u32));
 
-    const driver_version = driverVersion(arena, io);
-    var gpus: std.ArrayList(Gpu) = .empty;
-    var devices: std.ArrayList(smi.Device) = .empty;
+    var driver_version: ?[]const u8 = null;
+    var gpus: std.ArrayList(Gpu) = try .initCapacity(arena, nodes.items.len);
+    errdefer for (gpus.items) |gpu| gpu.close();
+    var devices: std.ArrayList(smi.Device) = try .initCapacity(arena, nodes.items.len);
     for (nodes.items) |node| {
         const dir = openDevice(drm, node) catch continue;
         const gpu = openGpu(arena, dir) catch {
             dir.close();
             continue;
         };
-        try gpus.append(arena, gpu);
-        try devices.append(arena, .{ .target = .oneapi, .name = try name(arena, io, gpu), .driver_version = driver_version });
+        if (gpus.items.len == 0) driver_version = driverVersion(arena, io);
+        gpus.appendAssumeCapacity(gpu);
+        devices.appendAssumeCapacity(.{ .target = .oneapi, .name = try name(arena, io, gpu), .driver_version = driver_version });
     }
 
     return .{
-        .platform = .{ .devices = devices.items, .two_readings = true, .vtable = &vtable },
+        .devices = devices.items,
         .io = io,
         .gpus = gpus.items,
         .proc = smi.sysfs.Dir.open(io, "/proc") catch null,
@@ -174,22 +172,15 @@ fn openHwmon(arena: std.mem.Allocator, device: smi.sysfs.Dir) ?Hwmon {
     };
 }
 
-fn deinit(platform: *smi.Platform) void {
-    const self: *OneApi = @alignCast(@fieldParentPtr("platform", platform));
-    for (self.gpus) |gpu| {
-        gpu.dir.close();
-        gpu.link.close();
-        if (gpu.hwmon) |hwmon| hwmon.dir.close();
-    }
+pub fn close(self: *OneApi) void {
+    for (self.gpus) |gpu| gpu.close();
     if (self.proc) |proc| proc.close();
     self.busy.deinit();
     self.cycles.deinit();
 }
 
-fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Sample) void {
-    const self: *OneApi = @alignCast(@fieldParentPtr("platform", platform));
-
-    for (self.gpus, samples) |*gpu, *sample| {
+pub fn poll(self: *OneApi, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+    for (self.gpus, reading.samples) |*gpu, *sample| {
         const fields = &sample.oneapi;
 
         fields.clock_graphics_mhz = gpu.dir.int(u64, "tile0/gt0/freq0/act_freq") catch gpu.dir.int(u64, "tile0/gt0/freq0/cur_freq") catch null;
@@ -214,38 +205,12 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
         if (hwmon.fan) |fan| fields.fan_speed_percent = fan.percent(hwmon.dir);
     }
 
-    self.scan(scratch, samples);
-}
-
-fn processes(platform: *smi.Platform, _: std.mem.Allocator, _: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
-    const self: *OneApi = @alignCast(@fieldParentPtr("platform", platform));
-    for (self.rows orelse return error.Unavailable) |row| try out.append(row);
-}
-
-/// One process on one device: its memory, and the growth of its busy time this round.
-const Usage = struct {
-    row: smi.ProcessInfo,
-    busy: ?smi.Growth = null,
-    /// xe: the growth of the total cycles the busy cycles are a share of.
-    cycles: ?smi.Growth = null,
-};
-
-/// The busy time of every process on one device.
-const DeviceUsage = struct {
-    busy: ?smi.Growth = null,
-    cycles: ?smi.Growth = null,
-    encoder: ?smi.Growth = null,
-    decoder: ?smi.Growth = null,
-    has_encoder: bool = false,
-    has_decoder: bool = false,
-};
-
-/// Reads every DRM client once: memory in use, and utilization through one counter per process.
-fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
+    // Read each DRM client once; its observation supplies both totals and process rows.
     defer self.busy.sweep();
     defer self.cycles.sweep();
-    self.rows = null;
-    const proc = self.proc orelse return;
+    const proc = self.proc orelse return error.Unavailable;
+    const devices = try scratch.alloc(DeviceUsage, self.gpus.len);
+    @memset(devices, .{});
 
     var usages: std.AutoArrayHashMapUnmanaged(struct { u32, u16 }, Usage) = .empty;
     var engines: std.AutoArrayHashMapUnmanaged(EngineKey, Engine) = .empty;
@@ -262,15 +227,18 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
         const info = smi.fdinfo.read(proc, fdinfo_path, &buffer) catch continue;
         const device = self.deviceOf(info.pdev orelse continue) orelse continue;
         if (info.client_id) |id| {
-            if ((clients.getOrPut(scratch, .{ device, id }) catch continue).found_existing) continue;
+            if ((try clients.getOrPut(scratch, .{ device, id })).found_existing) continue;
         }
 
-        const usage = usages.getOrPutValue(scratch, .{ holder.pid, device }, .{ .row = .{ .pid = holder.pid, .device_idx = device } }) catch continue;
-        if (memoryBytes(&info)) |bytes| usage.value_ptr.row.dev_mem_kib = (usage.value_ptr.row.dev_mem_kib orelse 0) + bytes / 1024;
+        const usage = (try usages.getOrPutValue(scratch, .{ holder.pid, device }, .{})).value_ptr;
+        if (memoryBytes(&info)) |bytes| {
+            usage.mem_kib = (usage.mem_kib orelse 0) + bytes / 1024;
+            devices[device].mem_kib += bytes / 1024;
+        }
         for (info.engines()) |engine| {
             const xe = engine.total_cycles != null;
             const key: EngineKey = .{ .pid = holder.pid, .device = device, .class = if (xe) 0 else std.hash.Wyhash.hash(0, engine.class) };
-            const totals = (engines.getOrPutValue(scratch, key, .{ .kind = .of(engine.class) }) catch continue).value_ptr;
+            const totals = (try engines.getOrPutValue(scratch, key, .{ .kind = .of(engine.class) })).value_ptr;
             if (engine.total_cycles) |total| {
                 totals.busy += engine.cycles orelse 0;
                 totals.total = @max(totals.total orelse 0, total);
@@ -280,24 +248,23 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
         }
     }
 
-    const devices = scratch.alloc(DeviceUsage, self.gpus.len) catch return;
-    @memset(devices, .{});
-    var it = engines.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
+    for (engines.keys(), engines.values()) |key, engine| {
         const usage = usages.getPtr(.{ key.pid, key.device }).?;
         const device = &devices[key.device];
-        device.has_encoder = device.has_encoder or entry.value_ptr.kind == .encoder;
-        device.has_decoder = device.has_decoder or entry.value_ptr.kind == .decoder;
+        device.has_encoder = device.has_encoder or engine.kind == .encoder;
+        device.has_decoder = device.has_decoder or engine.kind == .decoder;
 
         // Both counters advance at every reading, even the first.
-        const busy = self.busy.advance(key, self.io, entry.value_ptr.busy) catch continue;
-        const cycles = if (entry.value_ptr.total) |total| self.cycles.advance(key, self.io, total) catch continue else null;
+        const busy = try self.busy.advance(key, self.io, engine.busy);
+        const cycles = if (engine.total) |total|
+            try self.cycles.advance(key, self.io, total)
+        else
+            null;
         const growth = busy orelse continue;
-        if (entry.value_ptr.total != null and cycles == null) continue;
+        if (engine.total != null and cycles == null) continue;
         smi.Growth.add(&usage.busy, growth);
         smi.Growth.add(&device.busy, growth);
-        switch (entry.value_ptr.kind) {
+        switch (engine.kind) {
             .encoder => smi.Growth.add(&device.encoder, growth),
             .decoder => smi.Growth.add(&device.decoder, growth),
             .other => {},
@@ -308,25 +275,43 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
         }
     }
 
-    const rows = scratch.alloc(smi.ProcessInfo, usages.count()) catch return;
-    for (rows, usages.values()) |*row, usage| {
-        row.* = usage.row;
-        row.dev_util_percent = percent(usage.busy, usage.cycles);
-    }
-    self.rows = rows;
-
-    for (samples, devices, 0..) |*sample, device, index| {
+    for (reading.samples, devices) |*sample, device| {
         const fields = &sample.oneapi;
         fields.util_percent = percent(device.busy, device.cycles) orelse 0;
         fields.encoder_util_percent = if (device.has_encoder) percent(device.encoder, null) orelse 0 else null;
         fields.decoder_util_percent = if (device.has_decoder) percent(device.decoder, null) orelse 0 else null;
-        var mem_kib: u64 = 0;
-        for (rows) |row| {
-            if (row.device_idx == index) mem_kib += row.dev_mem_kib orelse 0;
-        }
-        fields.mem_used_bytes = mem_kib * 1024;
+        fields.mem_used_bytes = device.mem_kib * 1024;
+    }
+
+    // Complete device totals before a process-list allocation can fail.
+    for (usages.keys(), usages.values()) |key, usage| {
+        try reading.addProcess(.{
+            .pid = key[0],
+            .device_idx = key[1],
+            .dev_util_percent = percent(usage.busy, usage.cycles),
+            .dev_mem_kib = usage.mem_kib,
+        });
     }
 }
+
+/// One process on one device: its memory, and the growth of its busy time this round.
+const Usage = struct {
+    mem_kib: ?u64 = null,
+    busy: ?smi.Growth = null,
+    /// xe: the growth of the total cycles the busy cycles are a share of.
+    cycles: ?smi.Growth = null,
+};
+
+/// The busy time of every process on one device.
+const DeviceUsage = struct {
+    mem_kib: u64 = 0,
+    busy: ?smi.Growth = null,
+    cycles: ?smi.Growth = null,
+    encoder: ?smi.Growth = null,
+    decoder: ?smi.Growth = null,
+    has_encoder: bool = false,
+    has_decoder: bool = false,
+};
 
 /// The busy time of one engine class, summed over the clients of a process.
 const Engine = struct {
@@ -436,46 +421,12 @@ fn parseLspciName(output: []const u8) ?[]const u8 {
     return null;
 }
 
-test parseLspciName {
-    try std.testing.expectEqualStrings(
-        "Intel Corporation Battlemage G31 [Arc Pro B70]",
-        parseLspciName("0000:84:00.0 VGA compatible controller [0300]: Intel Corporation Battlemage G31 [Arc Pro B70] [8086:e223] (rev 04)\n").?,
-    );
-    // A generic name is no better than the device id.
-    try std.testing.expectEqual(null, parseLspciName("0000:84:00.0 Display controller [0380]: Intel Corporation Device e223 [8086:e223] (rev 04)\n"));
-}
-
-test largestBar {
-    try std.testing.expectEqual(34_359_738_368, largestBar(
-        \\0x0000048800000000 0x0000048fffffffff 0x000000000014220c
-        \\0x00000000f6c00000 0x00000000f6dfffff 0x0000000000046200
-        \\0x0000000000000000 0x0000000000000000 0x0000000000000000
-    ));
-    try std.testing.expectEqual(null, largestBar("0x00000000f6c00000 0x00000000f6dfffff 0x0000000000046200\n"));
-}
-
-test memoryBytes {
-    const xe = smi.fdinfo.parse("drm-total-system:\t184 MiB\ndrm-total-vram0:\t4096 KiB\ndrm-resident-vram0:\t3072 KiB\n");
-    try std.testing.expectEqual(3072 * 1024, memoryBytes(&xe));
-    const system = smi.fdinfo.parse("drm-total-system0:\t2 MiB\n");
-    try std.testing.expectEqual(2 * 1024 * 1024, memoryBytes(&system));
-}
-
-test Fan {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const dir: smi.sysfs.Dir = .{ .handle = tmp.dir, .io = io };
-
-    // fan1 has no maximum, so the speed is fan2's.
-    try tmp.dir.writeFile(io, .{ .sub_path = "fan1_input", .data = "900\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "fan2_input", .data = "1500\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "fan2_max", .data = "3000\n" });
-    try std.testing.expectEqual(50, Fan.find(arena.allocator(), dir).?.percent(dir));
-
-    // A PWM comes first, whatever its index.
-    try tmp.dir.writeFile(io, .{ .sub_path = "pwm3", .data = "255\n" });
-    try std.testing.expectEqual(100, Fan.find(arena.allocator(), dir).?.percent(dir));
-}
+pub const testing = if (builtin.is_test) struct {
+    pub const parseLspciName = OneApi.parseLspciName;
+    pub const largestBar = OneApi.largestBar;
+    pub const memoryBytes = OneApi.memoryBytes;
+    pub const Fan = struct {
+        pub const find = OneApi.Fan.find;
+        pub const percent = OneApi.Fan.percent;
+    };
+} else struct {};

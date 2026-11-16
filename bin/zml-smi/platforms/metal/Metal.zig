@@ -25,6 +25,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const smi = @import("zml-smi");
 const iokit = @import("iokit.zig");
@@ -33,18 +34,18 @@ const Smc = @import("Smc.zig");
 const Metal = @This();
 const log = std.log.scoped(.@"zml-smi/metal");
 
-platform: smi.Platform,
+devices: []const smi.Device = &.{},
 io: std.Io,
 cf: CoreFoundation,
 io_kit: iokit.Api,
 ioreport: IoReport,
 keys: std.EnumArray(Key, *const String),
-accelerator: iokit.Object,
-smc: ?Smc,
+accelerator: iokit.Object = 0,
+smc: ?Smc = null,
 /// The GPU shares the host's memory.
 mem_total_bytes: ?u64,
 /// The frequency of each active GPU performance state, in MHz, in order.
-frequencies: []const u64,
+frequencies: []const u64 = &.{},
 channels: *Dictionary,
 subscription: *const Subscription,
 /// The sample the next poll makes its delta against.
@@ -52,17 +53,14 @@ last: ?Reading = null,
 /// macOS 27 reads 0 for the CPU in the Energy Model. Once it does while the PMP
 /// histograms show power, they give the CPU power for the rest of the run.
 cpu_from_pmp: bool = false,
-/// What this round measured of the host, for `host`.
-cpu_power_mw: ?u64 = null,
-system_power_mw: ?u64 = null,
 /// GPU nanoseconds of each process.
 busy: smi.Counters(u32),
 
 const Reading = struct { sample: *const Dictionary, at: std.Io.Timestamp };
 
-const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .deinit = deinit, .host = host };
+pub const two_readings = true;
 
-/// The keys Metal looks up, named by their text. Made once in `init`.
+/// The keys Metal looks up, named by their text. Made once in `open`.
 const Key = enum {
     IOReportChannels,
     PerformanceStatistics,
@@ -77,23 +75,14 @@ const Key = enum {
     @"voltage-states9",
 };
 
-/// Every Apple silicon Mac has a GPU, which `init` finds.
-pub fn detect(_: std.Io) bool {
-    return true;
-}
-
-pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal {
+pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal {
     var self: Metal = .{
-        .platform = undefined,
         .io = io,
         .cf = try smi.dynlib.open(CoreFoundation, &.{"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"}),
         .io_kit = try iokit.open(),
         .ioreport = try smi.dynlib.open(IoReport, &.{"/usr/lib/libIOReport.dylib"}),
         .keys = undefined,
-        .accelerator = 0,
-        .smc = null,
         .mem_total_bytes = memoryTotal(),
-        .frequencies = &.{},
         .channels = undefined,
         .subscription = undefined,
         .busy = .init(gpa),
@@ -137,12 +126,11 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal
         .name = try self.propertyText(arena, .model),
         .driver_version = try self.propertyText(arena, .IOSourceVersion),
     };
-    self.platform = .{ .devices = devices, .two_readings = true, .vtable = &vtable };
+    self.devices = devices;
     return self;
 }
 
-fn deinit(platform: *smi.Platform) void {
-    const self: *Metal = @alignCast(@fieldParentPtr("platform", platform));
+pub fn close(self: *Metal) void {
     if (self.last) |last| self.cf.CFRelease(last.sample);
     self.cf.CFRelease(self.subscription);
     self.cf.CFRelease(self.channels);
@@ -152,40 +140,29 @@ fn deinit(platform: *smi.Platform) void {
     self.busy.deinit();
 }
 
-fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
-    const self: *Metal = @alignCast(@fieldParentPtr("platform", platform));
-    const gpu = &samples[0].metal;
-
+pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+    const gpu = &reading.samples[0].metal;
     gpu.mem_total_bytes = self.mem_total_bytes;
-    gpu.clock_graphics_max_mhz = if (self.frequencies.len > 0) std.mem.max(u64, self.frequencies) else null;
+    gpu.clock_graphics_max_mhz = if (self.frequencies.len > 0)
+        std.mem.max(u64, self.frequencies)
+    else
+        null;
     if (self.property(self.accelerator, .PerformanceStatistics)) |statistics| {
         defer self.cf.CFRelease(statistics);
         if (self.as(Dictionary, statistics)) |values| {
-            gpu.util_percent = self.number(self.cf.CFDictionaryGetValue(values, self.keys.get(.@"Device Utilization %")));
-            gpu.mem_used_bytes = self.number(self.cf.CFDictionaryGetValue(values, self.keys.get(.@"In use system memory")));
+            gpu.util_percent = self.numberAt(values, .@"Device Utilization %");
+            gpu.mem_used_bytes = self.numberAt(values, .@"In use system memory");
         }
     }
 
-    self.cpu_power_mw = null;
-    self.readReport(gpu);
-
-    self.system_power_mw = null;
+    self.readReport(gpu, &reading.host);
     if (self.smc) |smc| {
         gpu.temperature = smc.temperature();
         gpu.fan_speed_percent = smc.fanPercent();
-        self.system_power_mw = smc.systemPower();
+        reading.host.system_power_mw = smc.systemPower();
     }
-}
 
-fn host(platform: *smi.Platform, data: *smi.HostData) void {
-    const self: *Metal = @alignCast(@fieldParentPtr("platform", platform));
-    data.cpu_power_mw = self.cpu_power_mw;
-    data.system_power_mw = self.system_power_mw;
-}
-
-/// One row per process with GPU time, which has no GPU memory of its own.
-fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
-    const self: *Metal = @alignCast(@fieldParentPtr("platform", platform));
+    // One row per process with GPU time, which has no GPU memory of its own.
     defer self.busy.sweep();
     const children = self.io_kit.IORegistryEntryGetChildIterator.get(.{ self.accelerator, "IOService" }) catch return error.Unavailable;
     defer _ = self.io_kit.IOObjectRelease(children);
@@ -208,10 +185,12 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []con
         growth.* = if (nanoseconds == 0) null else try self.busy.advance(pid, self.io, nanoseconds);
         if (growth.*) |busy| total +|= busy.amount;
     }
-    const device = samples[0].metal.util_percent;
     for (times.keys(), times.values(), growths) |pid, nanoseconds, growth| {
         if (nanoseconds == 0) continue;
-        try out.append(.{ .pid = pid, .dev_util_percent = if (growth) |busy| share(busy, total, device) else null });
+        try reading.addProcess(.{
+            .pid = pid,
+            .dev_util_percent = if (growth) |busy| share(busy, total, gpu.util_percent) else null,
+        });
     }
 }
 
@@ -230,9 +209,9 @@ fn clientPid(self: *Metal, client: iokit.Object) ?u32 {
     defer self.cf.CFRelease(creator);
     var buffer: [128]u8 = undefined;
     const creator_text = self.text(self.as(String, creator), &buffer);
-    if (!std.mem.startsWith(u8, creator_text, "pid ")) return null;
-    const end = std.mem.indexOfScalar(u8, creator_text, ',') orelse return null;
-    return std.fmt.parseInt(u32, creator_text[4..end], 10) catch null;
+    const rest = std.mem.cutPrefix(u8, creator_text, "pid ") orelse return null;
+    const pid, _ = std.mem.cutScalar(u8, rest, ',') orelse return null;
+    return std.fmt.parseInt(u32, pid, 10) catch null;
 }
 
 /// The GPU nanoseconds of a client, summed over the APIs it used.
@@ -243,20 +222,22 @@ fn gpuTime(self: *Metal, client: iokit.Object) u64 {
     var total: u64 = 0;
     for (0..@intCast(@max(0, self.cf.CFArrayGetCount(uses)))) |index| {
         const use = self.as(Dictionary, self.cf.CFArrayGetValueAtIndex(uses, @intCast(index))) orelse continue;
-        total +|= self.number(self.cf.CFDictionaryGetValue(use, self.keys.get(.accumulatedGPUTime))) orelse 0;
+        total +|= self.numberAt(use, .accumulatedGPUTime) orelse 0;
     }
     return total;
 }
 
 /// Takes a sample and reads its delta against the last one: GPU, ANE and CPU power, and the GPU clock.
-fn readReport(self: *Metal, gpu: *smi.Metal) void {
-    const sample = self.ioreport.IOReportCreateSamples(self.subscription, self.channels, null) orelse return;
+fn readReport(self: *Metal, gpu: *smi.Metal, host: *smi.HostData) void {
+    const sample = self.ioreport.IOReportCreateSamples(
+        self.subscription,
+        self.channels,
+        null,
+    ) orelse return;
     const reading: Reading = .{ .sample = sample, .at = .now(self.io, .awake) };
-    const last = self.last orelse {
-        self.last = reading;
-        return;
-    };
+    const previous = self.last;
     self.last = reading;
+    const last = previous orelse return;
     defer self.cf.CFRelease(last.sample);
 
     const delta = self.ioreport.IOReportCreateSamplesDelta(last.sample, sample, null) orelse return;
@@ -289,11 +270,11 @@ fn readReport(self: *Metal, gpu: *smi.Metal) void {
     }
 
     // Whole-CPU totals, else the clusters: an OS with both would count them twice.
-    const cpu = if (energy.get(.cpu) > 0) energy.get(.cpu) else energy.get(.cpu_cluster);
+    const cpu = Energy.preferred(&energy, .cpu, .cpu_cluster);
     if (cpu == 0 and pmp_cpu_mw > 0) self.cpu_from_pmp = true;
-    self.cpu_power_mw = if (self.cpu_from_pmp) pmp_cpu_mw else cpu;
-    gpu.power_mw = if (energy.get(.gpu) > 0) energy.get(.gpu) else energy.get(.gpu_alias);
-    gpu.ane_power_mw = if (energy.get(.ane_block) > 0) energy.get(.ane_block) else energy.get(.ane);
+    host.cpu_power_mw = if (self.cpu_from_pmp) pmp_cpu_mw else cpu;
+    gpu.power_mw = Energy.preferred(&energy, .gpu, .gpu_alias);
+    gpu.ane_power_mw = Energy.preferred(&energy, .ane_block, .ane);
 }
 
 /// The Energy Model channels Metal reads, by name. Where an OS has two names for one
@@ -305,6 +286,11 @@ const Energy = enum {
     gpu_alias,
     ane_block,
     ane,
+
+    fn preferred(values: *const std.EnumArray(Energy, u64), first: Energy, fallback: Energy) u64 {
+        const primary = values.get(first);
+        return if (primary > 0) primary else values.get(fallback);
+    }
 
     fn of(name: []const u8) ?Energy {
         const clusters = [_][]const u8{ "ECPU Energy", "PCPU Energy", "MCPU Energy", "eCPUs Energy", "pCPUs Energy", "mCPUs Energy" };
@@ -371,9 +357,8 @@ fn stateWatts(name: []const u8) f64 {
 
 /// "PMP" on older chips, "PMP0", "PMP1"... one per die on an M5 Max.
 fn isPmpGroup(group: []const u8) bool {
-    if (!std.mem.startsWith(u8, group, "PMP")) return false;
-    for (group[3..]) |char| if (!std.ascii.isDigit(char)) return false;
-    return true;
+    const suffix = std.mem.cutPrefix(u8, group, "PMP") orelse return false;
+    return std.mem.findNone(u8, suffix, "0123456789") == null;
 }
 
 /// A CPU cluster's power histogram: "PACC", "MACC1", "PACC0 SRAM", but not "AGX", the GPU.
@@ -417,12 +402,12 @@ fn channelsIn(self: *Metal, group: [:0]const u8, subgroup: ?[:0]const u8) ?*cons
     defer if (subgroup_string) |string| self.cf.CFRelease(string);
 
     const channels = self.ioreport.IOReportCopyChannelsInGroup(group_string, subgroup_string, 0, 0, 0) orelse return null;
-    const list = self.as(Array, self.cf.CFDictionaryGetValue(channels, self.keys.get(.IOReportChannels)));
-    if (list == null or self.cf.CFArrayGetCount(list.?) == 0) {
-        self.cf.CFRelease(channels);
-        return null;
+    const entries = self.cf.CFDictionaryGetValue(channels, self.keys.get(.IOReportChannels));
+    if (self.as(Array, entries)) |list| {
+        if (self.cf.CFArrayGetCount(list) != 0) return channels;
     }
-    return channels;
+    self.cf.CFRelease(channels);
+    return null;
 }
 
 /// The frequency of each GPU performance state, from the power manager's voltage states:
@@ -487,6 +472,10 @@ fn number(self: *Metal, object: ?*const anyopaque) ?u64 {
     return std.math.cast(u64, result);
 }
 
+fn numberAt(self: *Metal, dictionary: *const Dictionary, key: Key) ?u64 {
+    return self.number(self.cf.CFDictionaryGetValue(dictionary, self.keys.get(key)));
+}
+
 /// The text of a string, in `buffer`. Empty when there is none or it does not fit.
 fn text(self: *Metal, string: ?*const String, buffer: []u8) []const u8 {
     if (self.cf.CFStringGetCString(string orelse return "", buffer.ptr, @intCast(buffer.len), utf8) == 0) return "";
@@ -512,132 +501,76 @@ const utf8: u32 = 0x08000100;
 /// kCFNumberSInt64Type.
 const number_sint64: isize = 4;
 
+/// Create and Copy functions return an object the caller releases; Get functions borrow it.
 const CoreFoundation = struct {
-    CFRelease: *const @TypeOf(decls.CFRelease),
-    CFGetTypeID: *const @TypeOf(decls.CFGetTypeID),
-    CFStringGetTypeID: *const @TypeOf(decls.CFStringGetTypeID),
-    CFNumberGetTypeID: *const @TypeOf(decls.CFNumberGetTypeID),
-    CFArrayGetTypeID: *const @TypeOf(decls.CFArrayGetTypeID),
-    CFDictionaryGetTypeID: *const @TypeOf(decls.CFDictionaryGetTypeID),
-    CFDataGetTypeID: *const @TypeOf(decls.CFDataGetTypeID),
-    CFStringCreateWithCString: *const @TypeOf(decls.CFStringCreateWithCString),
-    CFStringGetCString: *const @TypeOf(decls.CFStringGetCString),
-    CFNumberGetValue: *const @TypeOf(decls.CFNumberGetValue),
-    CFArrayGetCount: *const @TypeOf(decls.CFArrayGetCount),
-    CFArrayGetValueAtIndex: *const @TypeOf(decls.CFArrayGetValueAtIndex),
-    CFDictionaryGetValue: *const @TypeOf(decls.CFDictionaryGetValue),
-    CFDictionaryCreateMutableCopy: *const @TypeOf(decls.CFDictionaryCreateMutableCopy),
-    CFDataGetLength: *const @TypeOf(decls.CFDataGetLength),
-    CFDataGetBytePtr: *const @TypeOf(decls.CFDataGetBytePtr),
+    CFRelease: *const fn (*const anyopaque) callconv(.c) void,
+    CFGetTypeID: *const fn (*const anyopaque) callconv(.c) usize,
+    CFStringGetTypeID: *const fn () callconv(.c) usize,
+    CFNumberGetTypeID: *const fn () callconv(.c) usize,
+    CFArrayGetTypeID: *const fn () callconv(.c) usize,
+    CFDictionaryGetTypeID: *const fn () callconv(.c) usize,
+    CFDataGetTypeID: *const fn () callconv(.c) usize,
+    CFStringCreateWithCString: *const fn (
+        ?*const anyopaque,
+        [*:0]const u8,
+        u32,
+    ) callconv(.c) ?*const String,
+    CFStringGetCString: *const fn (*const String, [*]u8, isize, u32) callconv(.c) u8,
+    CFNumberGetValue: *const fn (*const Number, isize, *anyopaque) callconv(.c) u8,
+    CFArrayGetCount: *const fn (*const Array) callconv(.c) isize,
+    CFArrayGetValueAtIndex: *const fn (*const Array, isize) callconv(.c) ?*const anyopaque,
+    CFDictionaryGetValue: *const fn (*const Dictionary, *const anyopaque) callconv(.c) ?*const anyopaque,
+    CFDictionaryCreateMutableCopy: *const fn (
+        ?*const anyopaque,
+        isize,
+        *const Dictionary,
+    ) callconv(.c) ?*Dictionary,
+    CFDataGetLength: *const fn (*const Data) callconv(.c) isize,
+    CFDataGetBytePtr: *const fn (*const Data) callconv(.c) [*]const u8,
 };
 
 /// The private library behind powermetrics.
 const IoReport = struct {
-    IOReportCopyChannelsInGroup: *const @TypeOf(decls.IOReportCopyChannelsInGroup),
-    IOReportMergeChannels: *const @TypeOf(decls.IOReportMergeChannels),
-    IOReportCreateSubscription: *const @TypeOf(decls.IOReportCreateSubscription),
-    IOReportCreateSamples: *const @TypeOf(decls.IOReportCreateSamples),
-    IOReportCreateSamplesDelta: *const @TypeOf(decls.IOReportCreateSamplesDelta),
-    IOReportChannelGetGroup: *const @TypeOf(decls.IOReportChannelGetGroup),
-    IOReportChannelGetChannelName: *const @TypeOf(decls.IOReportChannelGetChannelName),
-    IOReportChannelGetUnitLabel: *const @TypeOf(decls.IOReportChannelGetUnitLabel),
-    IOReportSimpleGetIntegerValue: *const @TypeOf(decls.IOReportSimpleGetIntegerValue),
-    IOReportStateGetCount: *const @TypeOf(decls.IOReportStateGetCount),
-    IOReportStateGetNameForIndex: *const @TypeOf(decls.IOReportStateGetNameForIndex),
-    IOReportStateGetResidency: *const @TypeOf(decls.IOReportStateGetResidency),
+    IOReportCopyChannelsInGroup: *const fn (
+        ?*const String,
+        ?*const String,
+        u64,
+        u64,
+        u64,
+    ) callconv(.c) ?*const Dictionary,
+    /// Adds the channels of the second argument to the first.
+    IOReportMergeChannels: *const fn (*Dictionary, *const Dictionary, ?*const anyopaque) callconv(.c) void,
+    IOReportCreateSubscription: *const fn (
+        ?*const anyopaque,
+        *Dictionary,
+        *?*Dictionary,
+        u64,
+        ?*const anyopaque,
+    ) callconv(.c) ?*const Subscription,
+    IOReportCreateSamples: *const fn (
+        *const Subscription,
+        *Dictionary,
+        ?*const anyopaque,
+    ) callconv(.c) ?*const Dictionary,
+    IOReportCreateSamplesDelta: *const fn (
+        *const Dictionary,
+        *const Dictionary,
+        ?*const anyopaque,
+    ) callconv(.c) ?*const Dictionary,
+    IOReportChannelGetGroup: *const fn (*const Dictionary) callconv(.c) ?*const String,
+    IOReportChannelGetChannelName: *const fn (*const Dictionary) callconv(.c) ?*const String,
+    IOReportChannelGetUnitLabel: *const fn (*const Dictionary) callconv(.c) ?*const String,
+    IOReportSimpleGetIntegerValue: *const fn (*const Dictionary, i32) callconv(.c) i64,
+    IOReportStateGetCount: *const fn (*const Dictionary) callconv(.c) i32,
+    IOReportStateGetNameForIndex: *const fn (*const Dictionary, i32) callconv(.c) ?*const String,
+    IOReportStateGetResidency: *const fn (*const Dictionary, i32) callconv(.c) i64,
 };
 
-/// Never called directly: `CoreFoundation` and `IoReport` take their types.
-/// The functions named Create or Copy return an object the caller releases; Get functions do not.
-const decls = struct {
-    extern fn CFRelease(object: *const anyopaque) void;
-    extern fn CFGetTypeID(object: *const anyopaque) usize;
-    extern fn CFStringGetTypeID() usize;
-    extern fn CFNumberGetTypeID() usize;
-    extern fn CFArrayGetTypeID() usize;
-    extern fn CFDictionaryGetTypeID() usize;
-    extern fn CFDataGetTypeID() usize;
-    extern fn CFStringCreateWithCString(allocator: ?*const anyopaque, text: [*:0]const u8, encoding: u32) ?*const String;
-    extern fn CFStringGetCString(string: *const String, buffer: [*]u8, size: isize, encoding: u32) u8;
-    extern fn CFNumberGetValue(number: *const Number, kind: isize, value: *anyopaque) u8;
-    extern fn CFArrayGetCount(array: *const Array) isize;
-    extern fn CFArrayGetValueAtIndex(array: *const Array, index: isize) ?*const anyopaque;
-    extern fn CFDictionaryGetValue(dictionary: *const Dictionary, key: *const anyopaque) ?*const anyopaque;
-    extern fn CFDictionaryCreateMutableCopy(allocator: ?*const anyopaque, capacity: isize, dictionary: *const Dictionary) ?*Dictionary;
-    extern fn CFDataGetLength(data: *const Data) isize;
-    extern fn CFDataGetBytePtr(data: *const Data) [*]const u8;
-
-    extern fn IOReportCopyChannelsInGroup(group: ?*const String, subgroup: ?*const String, a: u64, b: u64, c: u64) ?*const Dictionary;
-    /// Adds the channels of `from` to `into`.
-    extern fn IOReportMergeChannels(into: *Dictionary, from: *const Dictionary, unused: ?*const anyopaque) void;
-    extern fn IOReportCreateSubscription(a: ?*const anyopaque, channels: *Dictionary, subscribed: *?*Dictionary, d: u64, e: ?*const anyopaque) ?*const Subscription;
-    extern fn IOReportCreateSamples(subscription: *const Subscription, channels: *Dictionary, unused: ?*const anyopaque) ?*const Dictionary;
-    extern fn IOReportCreateSamplesDelta(previous: *const Dictionary, current: *const Dictionary, unused: ?*const anyopaque) ?*const Dictionary;
-    extern fn IOReportChannelGetGroup(channel: *const Dictionary) ?*const String;
-    extern fn IOReportChannelGetChannelName(channel: *const Dictionary) ?*const String;
-    extern fn IOReportChannelGetUnitLabel(channel: *const Dictionary) ?*const String;
-    extern fn IOReportSimpleGetIntegerValue(channel: *const Dictionary, index: i32) i64;
-    extern fn IOReportStateGetCount(channel: *const Dictionary) i32;
-    extern fn IOReportStateGetNameForIndex(channel: *const Dictionary, index: i32) ?*const String;
-    extern fn IOReportStateGetResidency(channel: *const Dictionary, index: i32) i64;
-};
-
-test "channel names" {
-    try std.testing.expectEqual(.cpu, Energy.of("CPU Energy"));
-    try std.testing.expectEqual(.cpu, Energy.of("DIE_0_CPU Energy"));
-    try std.testing.expectEqual(.cpu_cluster, Energy.of("PCPU Energy"));
-    try std.testing.expectEqual(.gpu, Energy.of("GPU Energy"));
-    try std.testing.expectEqual(null, Energy.of("GPU0"));
-    try std.testing.expectEqual(.ane_block, Energy.of("ANE0"));
-    try std.testing.expectEqual(.ane, Energy.of("ANE Energy"));
-    try std.testing.expectEqual(null, Energy.of("PACC_0"));
-
-    try std.testing.expect(isPmpGroup("PMP") and isPmpGroup("PMP1") and !isPmpGroup("PMPX"));
-    try std.testing.expect(isPmpCpuPower("PACC") and isPmpCpuPower("MACC1") and isPmpCpuPower("PACC0 SRAM"));
-    try std.testing.expect(!isPmpCpuPower("AGX") and !isPmpCpuPower("AGX AFR") and !isPmpCpuPower("PACC SRAM2"));
-    try std.testing.expectEqual(0.25, stateWatts(" 0.250W"));
-    try std.testing.expectEqual(64, stateWatts("  64W"));
-
-    // 1500 mJ in 500 ms.
-    try std.testing.expectEqual(3000, milliwatts(1500, "mJ", .fromMilliseconds(500)));
-    try std.testing.expectEqual(450, milliwatts(450_000_000, "nJ", .fromSeconds(1)));
-}
-
-test share {
-    const second: std.Io.Duration = .fromSeconds(1);
-    // Two processes with 300 ms and 100 ms of GPU time share a device at 80%.
-    try std.testing.expectEqual(60, share(.{ .amount = 300_000_000, .elapsed = second }, 400_000_000, 80));
-    try std.testing.expectEqual(20, share(.{ .amount = 100_000_000, .elapsed = second }, 400_000_000, 80));
-    try std.testing.expectEqual(30, share(.{ .amount = 300_000_000, .elapsed = second }, 400_000_000, null));
-}
-
-test "a GPU of this Mac" {
-    const io = std.testing.io;
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var metal = Metal.init(arena.allocator(), std.testing.allocator, io) catch return error.SkipZigTest;
-    defer deinit(&metal.platform);
-
-    var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer scratch.deinit();
-    var list: smi.ProcessList = .init(std.testing.allocator);
-    defer list.deinit();
-    var data: smi.HostData = .{};
-
-    var samples: [1]smi.Sample = .{.init(.metal)};
-    for (0..2) |round| {
-        samples = .{.init(.metal)};
-        list.clear();
-        if (round > 0) try io.sleep(.fromMilliseconds(100), .awake);
-        poll(&metal.platform, scratch.allocator(), &samples);
-        try processes(&metal.platform, scratch.allocator(), &samples, &list);
-        host(&metal.platform, &data);
-    }
-    const gpu = samples[0].metal;
-    try std.testing.expect(gpu.util_percent.? <= 100);
-    try std.testing.expect(gpu.mem_used_bytes.? < gpu.mem_total_bytes.?);
-    try std.testing.expect(gpu.clock_graphics_mhz.? <= gpu.clock_graphics_max_mhz.?);
-    try std.testing.expect(gpu.power_mw != null and data.cpu_power_mw != null);
-    // WindowServer draws the screen with the GPU.
-    try std.testing.expect(list.rows.items.len > 0);
-}
+pub const testing = if (builtin.is_test) struct {
+    pub const energyOf = Energy.of;
+    pub const isPmpGroup = Metal.isPmpGroup;
+    pub const isPmpCpuPower = Metal.isPmpCpuPower;
+    pub const stateWatts = Metal.stateWatts;
+    pub const milliwatts = Metal.milliwatts;
+    pub const share = Metal.share;
+} else struct {};

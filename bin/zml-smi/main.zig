@@ -54,31 +54,30 @@ pub fn main(init: std.process.Init) !void {
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
     const interval: std.Io.Duration = .fromMilliseconds(args.poll_interval);
 
-    var collector: smi.Collector = .init(arena, gpa, io, .{ .poll_interval_ms = args.poll_interval });
+    const serving = args.prometheus_listen != null or args.api;
+    var collector: smi.Collector = .init(arena, gpa, io, .{
+        .poll_interval_ms = args.poll_interval,
+        .history = args.top and !serving,
+    });
     defer collector.deinit();
 
     inline for (platforms.all) |Platform| {
-        if (Platform.detect(io)) {
-            const platform = try arena.create(Platform);
-            if (Platform.init(arena, gpa, io)) |value| {
-                platform.* = value;
-                try collector.add(&platform.platform);
-            } else |err| log.warn("{s} skipped: {t}", .{ @typeName(Platform), err });
-        }
+        collector.open(Platform, .{}) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            log.warn("{s} skipped: {t}", .{ @typeName(Platform), err });
+        };
     }
 
     if (args.remotes) |hosts| {
         var it = std.mem.splitScalar(u8, hosts, ',');
         while (it.next()) |host| {
-            const remote = try arena.create(smi.Remote);
-            if (smi.Remote.open(arena, gpa, io, host, interval)) |value| {
-                remote.* = value;
-                try collector.add(&remote.platform);
-            } else |err| log.warn("{s} skipped: {t}", .{ host, err });
+            collector.open(smi.Remote, .{ host, interval }) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                log.warn("{s} skipped: {t}", .{ host, err });
+            };
         }
     }
 
-    const serving = args.prometheus_listen != null or args.api;
     if (serving or args.top) {
         try collector.start();
     } else {
@@ -112,14 +111,10 @@ pub fn main(init: std.process.Init) !void {
         return stdout.interface.flush();
     }
 
-    var state: tui.data.SystemState = try .init(.{
+    var state: tui.data.SystemState = .{
         .collector = &collector,
         .tui_refresh_rate = args.tui_refresh_rate,
-        .gpa = gpa,
-        .arena = arena,
-        .io = io,
-    });
-    defer state.deinit(arena);
+    };
 
     if (args.top) {
         try tui.top.run(gpa, io, init.environ_map, &state);

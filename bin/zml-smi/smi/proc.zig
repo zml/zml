@@ -6,10 +6,8 @@ const std = @import("std");
 pub const FdHolders = struct {
     io: std.Io,
     prefixes: []const []const u8,
-    proc: ?std.Io.Dir,
-    pids: std.Io.Dir.Iterator = undefined,
-    fds: ?std.Io.Dir = null,
-    fd_names: std.Io.Dir.Iterator = undefined,
+    pids: ?std.Io.Dir.Iterator,
+    fds: ?std.Io.Dir.Iterator = null,
     pid: u32 = 0,
     own_pid: u32,
     link: [std.Io.Dir.max_path_bytes]u8 = undefined,
@@ -27,68 +25,48 @@ pub const FdHolders = struct {
     }
 
     fn initAt(io: std.Io, proc: ?std.Io.Dir, prefixes: []const []const u8) FdHolders {
-        var self: FdHolders = .{ .io = io, .prefixes = prefixes, .proc = proc, .own_pid = @intCast(std.c.getpid()) };
-        if (proc) |dir| self.pids = dir.iterate();
-        return self;
+        return .{
+            .io = io,
+            .prefixes = prefixes,
+            .pids = if (proc) |dir| dir.iterate() else null,
+            .own_pid = @intCast(std.c.getpid()),
+        };
     }
 
     pub fn next(self: *FdHolders) ?Holder {
-        const proc = self.proc orelse return null;
+        const pids = if (self.pids) |*pids| pids else return null;
         while (true) {
-            if (self.fds) |fds| {
-                while (self.fd_names.next(self.io) catch null) |entry| {
+            if (self.fds) |*fds| {
+                const dir = fds.reader.dir;
+                while (fds.next(self.io) catch null) |entry| {
                     const fd = std.fmt.parseInt(u32, entry.name, 10) catch continue;
-                    const len = fds.readLink(self.io, entry.name, &self.link) catch continue;
-                    const target = self.link[0..len];
+                    const len = dir.readLink(self.io, entry.name, &self.link) catch continue;
                     for (self.prefixes) |prefix| {
-                        if (std.mem.startsWith(u8, target, prefix)) return .{ .pid = self.pid, .fd = fd, .rest = target[prefix.len..] };
+                        const rest = std.mem.cutPrefix(u8, self.link[0..len], prefix) orelse continue;
+                        return .{ .pid = self.pid, .fd = fd, .rest = rest };
                     }
                 }
-                fds.close(self.io);
+                dir.close(self.io);
                 self.fds = null;
             }
 
-            const entry = (self.pids.next(self.io) catch null) orelse return null;
+            const entry = (pids.next(self.io) catch null) orelse return null;
             const pid = std.fmt.parseInt(u32, entry.name, 10) catch continue;
             if (pid == self.own_pid) continue;
             var path: [16]u8 = undefined;
             const fd_path = std.fmt.bufPrint(&path, "{d}/fd", .{pid}) catch continue;
-            const fds = proc.openDir(self.io, fd_path, .{ .iterate = true }) catch continue;
-            self.fds = fds;
-            self.fd_names = fds.iterate();
+            const fds = pids.reader.dir.openDir(self.io, fd_path, .{ .iterate = true }) catch continue;
+            self.fds = fds.iterate();
             self.pid = pid;
         }
     }
 
     pub fn deinit(self: *FdHolders) void {
-        if (self.fds) |fds| fds.close(self.io);
-        if (self.proc) |proc| proc.close(self.io);
+        if (self.fds) |*fds| fds.reader.dir.close(self.io);
+        if (self.pids) |*pids| pids.reader.dir.close(self.io);
     }
 };
 
-test FdHolders {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "100/fd");
-    try tmp.dir.createDirPath(io, "200/fd");
-    try tmp.dir.symLink(io, "/dev/accel3", "100/fd/5", .{});
-    try tmp.dir.symLink(io, "/dev/null", "100/fd/0", .{});
-    try tmp.dir.symLink(io, "/dev/vfio/1", "200/fd/9", .{});
-
-    var holders: FdHolders = .initAt(io, try tmp.dir.openDir(io, ".", .{ .iterate = true }), &.{ "/dev/accel", "/dev/vfio/" });
-    defer holders.deinit();
-
-    var count: usize = 0;
-    while (holders.next()) |holder| : (count += 1) {
-        switch (holder.pid) {
-            100 => {
-                try std.testing.expectEqual(5, holder.fd);
-                try std.testing.expectEqualStrings("3", holder.rest);
-            },
-            200 => try std.testing.expectEqualStrings("1", holder.rest),
-            else => return error.TestUnexpectedResult,
-        }
-    }
-    try std.testing.expectEqual(2, count);
-}
+pub const testing = if (@import("builtin").is_test) struct {
+    pub const initAt = FdHolders.initAt;
+} else struct {};

@@ -21,21 +21,26 @@ pub const Dir = struct {
     /// Trimmed content of a file. The slice points into `buffer`.
     /// A file that does not fit is error.StreamTooLong, never a silent cut.
     pub fn read(self: Dir, sub_path: []const u8, buffer: []u8) ![]const u8 {
-        const file = try self.handle.openFile(self.io, sub_path, .{});
-        defer file.close(self.io);
-
-        const len = try readAll(file, self.io, buffer);
-        var extra: [1]u8 = undefined;
-        if (len == buffer.len and try readAll(file, self.io, &extra) != 0) return error.StreamTooLong;
-        return std.mem.trim(u8, buffer[0..len], &std.ascii.whitespace);
+        return std.mem.trim(u8, try self.readPrefix(sub_path, buffer, true), &std.ascii.whitespace);
     }
 
     /// The first bytes of a file, cut at `buffer.len`: for /proc/<pid>/cmdline.
     pub fn head(self: Dir, sub_path: []const u8, buffer: []u8) ![]const u8 {
+        return self.readPrefix(sub_path, buffer, false);
+    }
+
+    fn readPrefix(self: Dir, sub_path: []const u8, buffer: []u8, whole_file: bool) ![]const u8 {
         const file = try self.handle.openFile(self.io, sub_path, .{});
         defer file.close(self.io);
-
-        return buffer[0..try readAll(file, self.io, buffer)];
+        var reader = file.readerStreaming(self.io, &.{});
+        const len = reader.interface.readSliceShort(buffer) catch return reader.err.?;
+        if (whole_file and len == buffer.len) {
+            var extra: [1]u8 = undefined;
+            if ((reader.interface.readSliceShort(&extra) catch return reader.err.?) != 0) {
+                return error.StreamTooLong;
+            }
+        }
+        return buffer[0..len];
     }
 
     /// A number, in decimal or in hex with a 0x prefix.
@@ -86,7 +91,7 @@ pub fn exists(io: std.Io, path: []const u8) bool {
 
 /// A number, in decimal or in hex with a 0x prefix.
 pub fn parseInt(comptime T: type, text: []const u8) !T {
-    if (std.mem.startsWith(u8, text, "0x")) return std.fmt.parseInt(T, text[2..], 16);
+    if (std.mem.cutPrefix(u8, text, "0x")) |digits| return std.fmt.parseInt(T, digits, 16);
     return std.fmt.parseInt(T, text, 10);
 }
 
@@ -98,51 +103,7 @@ pub fn firstNumber(text: []const u8) ?u64 {
 
 /// The value of `key` on a "key: value" or "key=value" line.
 pub fn fieldValue(line: []const u8, key: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, line, key)) return null;
-    const rest = line[key.len..];
+    const rest = std.mem.cutPrefix(u8, line, key) orelse return null;
     if (rest.len > 0 and std.mem.indexOfScalar(u8, ":= \t", rest[0]) == null) return null;
     return std.mem.trim(u8, rest, ":= \t");
-}
-
-fn readAll(file: std.Io.File, io: std.Io, buffer: []u8) !usize {
-    var len: usize = 0;
-    while (len < buffer.len) {
-        len += file.readStreaming(io, &.{buffer[len..]}) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => |e| return e,
-        };
-    }
-    return len;
-}
-
-test Dir {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "vendor", .data = "0x8086\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "temp1_input", .data = "58500\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "meminfo", .data = "MemTotal:       65137624 kB\nMemTotalX: 1 kB\nFlags: fpu vme de pse tsc msr pae mce cx8\nMemAvailable:   33697096 kB\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "cmdline", .data = "python\x00-m\x00llmd\x00" });
-
-    const dir: Dir = .{ .handle = tmp.dir, .io = io };
-    var buffer: [16]u8 = undefined;
-
-    try std.testing.expectEqualStrings("0x8086", try dir.read("vendor", &buffer));
-    try std.testing.expectEqual(0x8086, try dir.int(u16, "vendor"));
-    try std.testing.expectEqual(59, try dir.scaled("temp1_input", .milli, .one));
-    try std.testing.expectError(error.StreamTooLong, dir.read("vendor", buffer[0..4]));
-    try std.testing.expectEqualStrings("python\x00-m", try dir.head("cmdline", buffer[0..9]));
-
-    var line: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("33697096 kB", try dir.field("meminfo", "MemAvailable", &line));
-    try std.testing.expectEqualStrings("65137624 kB", try dir.field("meminfo", "MemTotal", &line));
-    try std.testing.expectError(error.NotFound, dir.field("meminfo", "Mem", &line));
-    // A line longer than the buffer is skipped, not cut.
-    try std.testing.expectEqualStrings("33697096 kB", try dir.field("meminfo", "MemAvailable", line[0..30]));
-}
-
-test fieldValue {
-    try std.testing.expectEqualStrings("0000:03:00.0", fieldValue("PCI_SLOT_NAME=0000:03:00.0", "PCI_SLOT_NAME").?);
-    try std.testing.expectEqualStrings("AMD Ryzen", fieldValue("model name\t: AMD Ryzen", "model name").?);
-    try std.testing.expectEqual(null, fieldValue("model names: x", "model name"));
 }

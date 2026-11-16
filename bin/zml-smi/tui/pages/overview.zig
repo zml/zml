@@ -47,32 +47,33 @@ pub fn deinit(self: *Overview, allocator: std.mem.Allocator) void {
     allocator.free(self.device_cards);
 }
 
-fn drawNarrowBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
+fn drawBanner(
+    self: *const Overview,
+    ctx: vxfw.DrawContext,
+    content_width: u16,
+    narrow: bool,
+    layout: *compose.SurfaceBuilder,
+) !u16 {
     const logo: Logo = .{ .image = image_cache.global.zml };
-    const info_lines: InfoLines = .{ .state = self.state };
+    const info: InfoLines = .{ .state = self.state };
+    const logo_width = if (narrow) content_width else Logo.logo_width + 6;
+    const banner_height = if (narrow) Logo.logo_height else @max(Logo.logo_height, InfoLines.entry_count);
+    const logo_surface = try logo.draw(ui.maxSize(ctx, logo_width, banner_height));
+    const logo_column = (logo_width -| logo_surface.size.width) / 2;
+    const logo_row = 1 + (banner_height -| logo_surface.size.height) / 2;
+    try layout.add(logo_row, logo_column + @as(u16, if (narrow) 2 else 0), logo_surface);
 
-    const children = [2]vxfw.Widget{
-        try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = content_w, .height = Logo.logo_height }),
-        ui.widget(&info_lines),
-    };
-    const layout: ColumnLayout = .{ .children = &children, .gap = 1 };
-    return ui.widget(&layout).draw(ui.fixedWidth(ctx, content_w));
-}
-
-fn drawWideBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
-    const logo: Logo = .{ .image = image_cache.global.zml };
-    const info_lines: InfoLines = .{ .state = self.state };
-
-    const logo_box_w = Logo.logo_width + 6; // +4 centering + 2 absorbed page margin
-    const info_max_w = @min(content_w -| logo_box_w, max_info_width);
-    const banner_h = @max(Logo.logo_height, InfoLines.entry_count);
-
-    const flex_items = [2]vxfw.FlexItem{
-        .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = logo_box_w, .height = banner_h }), .flex = 0 },
-        .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&info_lines)), .{ .width = info_max_w, .height = banner_h }), .flex = 0 },
-    };
-    const sized_banner = try compose.sized(ctx.arena, (vxfw.FlexRow{ .children = &flex_items }).widget(), .{ .width = content_w, .height = banner_h });
-    return sized_banner.draw(ui.fixedWidth(ctx, content_w));
+    if (narrow) {
+        const info_surface = try info.draw(ui.fixedWidth(ctx, content_width));
+        try layout.add(banner_height + 2, 2, info_surface);
+        return banner_height + 1 + info_surface.size.height;
+    }
+    const info_width = @min(content_width + 2 -| logo_width, max_info_width);
+    const info_surface = try info.draw(ui.maxSize(ctx, info_width, banner_height));
+    const info_row = 1 + (banner_height -| info_surface.size.height) / 2;
+    const info_column = logo_width + (info_width -| info_surface.size.width) / 2;
+    try layout.add(info_row, info_column, info_surface);
+    return banner_height;
 }
 
 pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -82,20 +83,12 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
     const content_ctx = ui.fixedWidth(ctx, content_w);
 
     var sb = compose.surfaceBuilder(ctx.arena);
-    var row: i17 = 1; // top margin
+    var row: i17 = @as(i17, try self.drawBanner(ctx, content_w, narrow, &sb)) + 2;
 
-    // ── Banner (Logo + Info Lines) ─────────────────────────
-    const banner_surf = try if (narrow) self.drawNarrowBanner(ctx, content_w) else self.drawWideBanner(ctx, content_w + 2);
-    try sb.add(row, if (narrow) @as(i17, 2) else 0, banner_surf);
-    row += @intCast(banner_surf.size.height + 1);
-
-    // ── Device Grid ─────────────────────────────────────────
-    for (self.device_cards) |*card| {
-        card.use_braille = self.use_braille;
-        card.viewing_device = self.viewing_device;
-    }
     const card_widgets = try ctx.arena.alloc(vxfw.Widget, self.device_cards.len);
     for (self.device_cards, card_widgets) |*card, *cw| {
+        card.use_braille = self.use_braille;
+        card.viewing_device = self.viewing_device;
         cw.* = ui.widget(card);
     }
     const device_grid: ColumnLayout = .{
@@ -104,13 +97,12 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
         .col_gap = 2,
         .gap = 1,
     };
-    const grid_surf = try ui.widget(&device_grid).draw(content_ctx);
+    const grid_surf = try device_grid.draw(content_ctx);
     try sb.add(row, 2, grid_surf);
     row += @intCast(grid_surf.size.height + 1);
 
-    // ── Process Table ────────────────────────────────────────
     if (self.process_table) |pt| {
-        const pt_surf = try ui.widget(pt).draw(content_ctx);
+        const pt_surf = try pt.draw(content_ctx);
         try sb.add(row, 2, pt_surf);
         row += @intCast(pt_surf.size.height);
     }

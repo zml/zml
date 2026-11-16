@@ -49,7 +49,6 @@ const Model = struct {
     overview: Overview = undefined,
 
     fn deinit(self: *Model) void {
-        self.process_table.deinit(self.allocator);
         self.overview.deinit(self.allocator);
         image_cache.global.deinit();
     }
@@ -63,7 +62,6 @@ const Model = struct {
                 try ctx.tick(1000, ui.widget(self));
             },
             .tick => {
-                self.state.recordHistory();
                 try ctx.tick(self.state.tui_refresh_rate, ui.widget(self));
                 ctx.redraw = true;
             },
@@ -119,7 +117,8 @@ const Model = struct {
             self.prev_viewing_device = self.viewing_device;
         }
 
-        self.process_table.prepare(self.state, self.viewing_device, ctx.arena);
+        try self.state.capture(ctx.arena);
+        try self.process_table.prepare(ctx.arena, self.state, self.viewing_device);
 
         var content_surf: vxfw.Surface = undefined;
 

@@ -24,22 +24,14 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
 
     const chart_label = if (self.use_braille) "gauges" else "charts";
 
-    var bindings_buf: [8]Binding = undefined;
-    var n: usize = 0;
-
-    if (self.viewing_device != null) {
-        bindings_buf[n] = .{ .key = "Esc", .desc = "back" };
-        n += 1;
-    } else {
-        bindings_buf[n] = .{ .key = "v", .desc = chart_label };
-        n += 1;
-        bindings_buf[n] = .{ .key = "click", .desc = "device details" };
-        n += 1;
-    }
-    bindings_buf[n] = .{ .key = "q", .desc = "quit" };
-    n += 1;
-
-    const bindings = bindings_buf[0..n];
+    const bindings: []const Binding = if (self.viewing_device != null) &.{
+        .{ .key = "Esc", .desc = "back" },
+        .{ .key = "q", .desc = "quit" },
+    } else &.{
+        .{ .key = "v", .desc = chart_label },
+        .{ .key = "click", .desc = "device details" },
+        .{ .key = "q", .desc = "quit" },
+    };
 
     // Build segments: " key desc | key desc | ... "
     var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
@@ -65,11 +57,9 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
     const surf = try rich.draw(ui.fixedSize(ctx, w, 1));
 
     // Fill background across full width
-    if (surf.buffer.len > 0) {
-        for (surf.buffer) |*cell| {
-            if (cell.style.bg == .default) {
-                cell.style.bg = bg_style.bg;
-            }
+    for (surf.buffer) |*cell| {
+        if (cell.style.bg == .default) {
+            cell.style.bg = bg_style.bg;
         }
     }
 

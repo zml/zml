@@ -14,14 +14,14 @@ const time_labels_h: u16 = 1; // time labels below x-axis
 const info_line_h: u16 = 1; // info text below time labels
 
 title: []const u8,
-data: []const u8, // 0-100 normalized
+data: []const ?u8, // 0-100 normalized; null leaves a gap
 value_label: ?[]const u8 = null,
 info_line: ?[]const u8 = null,
 y_min: u32 = 0,
 y_max: u32 = 100,
 y_unit: []const u8 = "%",
 chart_height: u16 = 6,
-tui_refresh_rate: u16,
+sample_interval_ms: u32,
 
 pub fn draw(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const tb: TitledBorder = .{
@@ -93,9 +93,9 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     }
 
     // ── X-axis time labels ───────────────────────────────────
-    const total_ms: u32 = @as(u32, chart_w) * 2 * @as(u32, self.tui_refresh_rate);
-    const total_s: u16 = @intCast(std.math.divCeil(u32, total_ms, 1000) catch unreachable);
-    const mid_s: u16 = @intCast(std.math.divCeil(u32, total_ms / 2, 1000) catch unreachable);
+    const total_ms = (@as(u64, chart_w) * 2 - 1) * self.sample_interval_ms;
+    const total_s = std.math.divCeil(u64, total_ms, 1000) catch unreachable;
+    const mid_s = std.math.divCeil(u64, total_ms / 2, 1000) catch unreachable;
     const label_row = self.chart_height + x_axis_h;
     const left_str = try fmtTime(ctx.arena, total_s);
     const mid_str = try fmtTime(ctx.arena, mid_s);
@@ -120,7 +120,7 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
 fn writeStr(surface: *vxfw.Surface, col: u16, row: u16, text: []const u8, style: vaxis.Cell.Style) void {
     var c = col;
     var i: usize = 0;
-    while (i < text.len) {
+    while (i < text.len and c < surface.size.width) {
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
         const end = @min(i + len, text.len);
         surface.writeCell(c, row, .{
@@ -132,7 +132,7 @@ fn writeStr(surface: *vxfw.Surface, col: u16, row: u16, text: []const u8, style:
     }
 }
 
-fn fmtTime(arena: std.mem.Allocator, seconds: u16) std.mem.Allocator.Error![]const u8 {
+fn fmtTime(arena: std.mem.Allocator, seconds: u64) std.mem.Allocator.Error![]const u8 {
     if (seconds >= 120) {
         return std.fmt.allocPrint(arena, "-{d}m", .{seconds / 60});
     } else {

@@ -71,6 +71,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
         },
     };
 
+    try state.capture(draw_ctx.arena);
     const surface = try overview.draw(draw_ctx);
 
     try silentResize(&vx, allocator, .{

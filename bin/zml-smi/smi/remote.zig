@@ -3,46 +3,43 @@ const smi = @import("smi.zig");
 
 const log = std.log.scoped(.@"zml-smi/remote");
 
-/// The devices of another zml-smi, read from its API.
+/// The fixed device inventory of another zml-smi, read from its JSON API.
 pub const Remote = struct {
-    platform: smi.Platform,
+    devices: []const smi.Device,
     io: std.Io,
-    /// "http://host:9090/metrics".
     url: []const u8,
-    /// For each row of the peer, the position of its device here, or null when this build does not know its target.
+    /// Peer row to local device, or null when this build does not know its target.
     positions: []const ?u16,
     timeout: std.Io.Duration,
-    /// What the poll of this round fetched, in scratch, for `processes`.
-    fetched: ?std.json.Value = null,
     warned: bool = false,
 
-    const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes };
-
-    /// Fetches the devices once. `interval` bounds every later fetch, to at least a second.
+    /// Fetches the devices once. Later fetches time out after at least one second.
     pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, host: []const u8, interval: std.Io.Duration) !Remote {
         if (!std.mem.startsWith(u8, host, "http://") and !std.mem.startsWith(u8, host, "https://")) {
-            log.err("{s}: a remote host starts with http:// or https://", .{host});
             return error.InvalidUrl;
         }
         const url = try std.fmt.allocPrint(arena, "{s}/metrics", .{host});
-
         var scratch: std.heap.ArenaAllocator = .init(gpa);
         defer scratch.deinit();
         const rows = items(try fetch(scratch.allocator(), io, url, .fromSeconds(3)), "devices");
-
         var devices: std.ArrayList(smi.Device) = try .initCapacity(arena, rows.len);
         const positions = try arena.alloc(?u16, rows.len);
+        @memset(positions, null);
         for (rows, positions) |item, *position| {
-            const row = std.json.parseFromValueLeaky(smi.Row, scratch.allocator(), item, .{ .ignore_unknown_fields = true }) catch {
-                position.* = null;
+            // FromValue owns the metadata strings in arena, independently of the response.
+            var row = std.json.parseFromValueLeaky(smi.Row, arena, item, .{
+                .ignore_unknown_fields = true,
+            }) catch |err| {
+                if (err == error.OutOfMemory) return err;
                 continue;
             };
-            position.* = @intCast(devices.items.len);
-            devices.appendAssumeCapacity(try copy(arena, row.device));
+            if (std.meta.activeTag(row.sample) != row.device.target) continue;
+            position.* = std.math.cast(u16, devices.items.len) orelse return error.TooManyDevices;
+            row.device.remote = true;
+            devices.appendAssumeCapacity(row.device);
         }
-
         return .{
-            .platform = .{ .devices = devices.items, .vtable = &vtable },
+            .devices = devices.items,
             .io = io,
             .url = url,
             .positions = positions,
@@ -50,65 +47,62 @@ pub const Remote = struct {
         };
     }
 
-    fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Sample) void {
-        const self: *Remote = @alignCast(@fieldParentPtr("platform", platform));
-        self.fetched = null;
-        const root = fetch(scratch, self.io, self.url, self.timeout) catch return;
+    pub fn poll(self: *Remote, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+        try self.readResponse(scratch, try fetch(scratch, self.io, self.url, self.timeout), reading);
+    }
 
-        const rows = items(root, "devices");
-        if (rows.len != self.positions.len) return self.changed(samples);
-        for (rows, self.positions) |item, maybe_position| {
-            const position = maybe_position orelse continue;
-            const row = std.json.parseFromValueLeaky(smi.Row, scratch, item, .{ .ignore_unknown_fields = true }) catch return self.changed(samples);
-            const device = self.platform.devices[position];
-            if (row.device.target != device.target or !std.mem.eql(u8, row.device.name orelse "", device.name orelse "")) {
-                return self.changed(samples);
+    pub const testing = if (@import("builtin").is_test) struct {
+        pub const readResponse = Remote.readResponse;
+    } else struct {};
+
+    fn readResponse(
+        self: *Remote,
+        scratch: std.mem.Allocator,
+        root: std.json.Value,
+        reading: *smi.Reading,
+    ) !void {
+        {
+            // Nothing is published during this transaction. Roll back partial inventory reads.
+            errdefer for (reading.samples, self.devices) |*sample, device| {
+                sample.* = .init(device.target);
+            };
+            const rows = items(root, "devices");
+            if (rows.len != self.positions.len) return self.changed();
+            for (rows, self.positions) |item, position| {
+                const index = position orelse continue;
+                const row = std.json.parseFromValueLeaky(smi.Row, scratch, item, .{
+                    .ignore_unknown_fields = true,
+                }) catch |err| return if (err == error.OutOfMemory) err else self.changed();
+                const device = self.devices[index];
+                if (row.device.target != device.target or
+                    std.meta.activeTag(row.sample) != device.target or
+                    !std.mem.eql(u8, row.device.name orelse "", device.name orelse ""))
+                {
+                    return self.changed();
+                }
+                reading.samples[index] = row.sample;
             }
-            samples[position] = row.sample;
         }
-        self.fetched = root;
-    }
-
-    /// The peer's devices are not the ones it had when it was opened: show nothing.
-    fn changed(self: *Remote, samples: []smi.Sample) void {
-        for (samples, self.platform.devices) |*sample, device| sample.* = .init(device.target);
-        if (!self.warned) log.warn("{s}: the devices changed since zml-smi started", .{self.url});
-        self.warned = true;
-    }
-
-    fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
-        const self: *Remote = @alignCast(@fieldParentPtr("platform", platform));
-        const root = self.fetched orelse return error.Unavailable;
         for (items(root, "processes")) |item| {
-            var row = std.json.parseFromValueLeaky(smi.ProcessInfo, scratch, item, .{ .ignore_unknown_fields = true }) catch continue;
+            var row = std.json.parseFromValueLeaky(smi.ProcessInfo, reading.allocator, item, .{
+                .ignore_unknown_fields = true,
+            }) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                continue;
+            };
             if (row.device_idx >= self.positions.len) continue;
             row.device_idx = self.positions[row.device_idx] orelse continue;
             row.remote = true;
-            row.username = try out.dupe(row.username);
-            row.comm = try out.dupe(row.comm);
-            try out.append(row);
+            try reading.addProcess(row);
         }
     }
-};
 
-fn copy(arena: std.mem.Allocator, device: smi.Device) !smi.Device {
-    const details = try arena.alloc(smi.Device.Detail, device.details.len);
-    for (details, device.details) |*detail, source| {
-        detail.* = .{
-            .key = try arena.dupe(u8, source.key),
-            .label = try arena.dupe(u8, source.label),
-            .value = try arena.dupe(u8, source.value),
-            .in_title = source.in_title,
-        };
+    fn changed(self: *Remote) error{Unavailable} {
+        if (!self.warned) log.warn("{s}: the devices changed since zml-smi started", .{self.url});
+        self.warned = true;
+        return error.Unavailable;
     }
-    return .{
-        .target = device.target,
-        .remote = true,
-        .name = if (device.name) |name| try arena.dupe(u8, name) else null,
-        .driver_version = if (device.driver_version) |version| try arena.dupe(u8, version) else null,
-        .details = details,
-    };
-}
+};
 
 fn items(root: std.json.Value, key: []const u8) []const std.json.Value {
     if (root != .object) return &.{};

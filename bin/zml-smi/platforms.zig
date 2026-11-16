@@ -1,4 +1,4 @@
-//! The platforms of this OS and architecture. Each one is a file whose struct holds an `smi.Platform`.
+//! Native readers available on this OS and architecture.
 const builtin = @import("builtin");
 
 pub const all = switch (builtin.os.tag) {

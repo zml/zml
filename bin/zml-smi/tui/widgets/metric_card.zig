@@ -5,7 +5,6 @@ const theme = @import("../theme.zig");
 const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const Gauge = @import("gauge.zig");
-const BrailleChart = @import("braille_chart.zig");
 const TitledBorder = @import("titled_border.zig");
 
 const MetricCard = @This();
@@ -31,15 +30,15 @@ pub const LineEntry = struct {
 
 pub const GaugeEntry = struct {
     label: []const u8,
-    value: u8,
+    value: ?u8,
     suffix: ?[]const u8 = null,
 };
 
 pub const ChartEntry = struct {
     label: []const u8,
-    value: u8,
+    value: ?u8,
     suffix: ?[]const u8 = null,
-    data: []const u8, // history values 0-100
+    data: []const ?u8, // history values 0-100; null leaves a gap
     chart_height: u16 = 3,
 };
 
@@ -75,79 +74,26 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
     var sb = compose.surfaceBuilder(ctx.arena);
     var row: i17 = 0;
 
-    // Charts (gauge-like layout: label [braille] pct% suffix, braille spans multiple rows)
-    {
-        const max_chart_label_w = maxFieldWidth(ctx, self.charts, "label") + 1; // +1 trailing space
-        const max_chart_suffix_w = maxFieldWidth(ctx, self.charts, "suffix") + Gauge.sep_w;
-
-        for (self.charts, 0..) |chart, ci| {
-            if (ci > 0) {
-                row += 1;
-            }
-
-            const ch_h = chart.chart_height;
-
-            const pct_str = try std.fmt.allocPrint(ctx.arena, "{d:>3}%", .{chart.value});
-            const pct_w: u16 = @intCast(ctx.stringWidth(pct_str));
-
-            const reserved = max_chart_label_w + pct_w + 1 + max_chart_suffix_w;
-            const braille_w: u16 = if (reserved < inner_w) inner_w - reserved else 0;
-            const text_row: i17 = row + @as(i17, @intCast(ch_h / 2));
-
-            // Label (vertically centered, col 0)
-            const label_surf = try ui.drawRichLine(ctx, &.{
-                .{ .text = chart.label, .style = theme.label_style },
-            }, max_chart_label_w);
-            try sb.add(text_row, 0, label_surf);
-
-            // Braille chart (all rows, after label)
-            if (braille_w > 0) {
-                const braille: BrailleChart = .{ .values = chart.data, .height = ch_h };
-                const braille_surf = try braille.draw(ui.fixedSize(ctx, braille_w, ch_h));
-                try sb.add(row, @intCast(max_chart_label_w), braille_surf);
-            }
-
-            // Pct + suffix (vertically centered, after braille)
-            const right_col: i17 = @intCast(max_chart_label_w + braille_w);
-            const pct_surf = try ui.drawRichLine(ctx, &.{
-                .{ .text = " ", .style = .{} },
-                .{ .text = pct_str, .style = .{ .bold = true, .fg = theme.colorForPercent(chart.value) } },
-            }, pct_w + 1);
-            try sb.add(text_row, right_col, pct_surf);
-
-            if (chart.suffix) |suffix| {
-                const suffix_text_w: u16 = @intCast(ctx.stringWidth(suffix));
-                const suffix_col: i17 = @intCast(inner_w -| suffix_text_w);
-                const suffix_surf = try ui.drawRichLine(ctx, &.{
-                    .{ .text = suffix, .style = theme.dim_style },
-                }, suffix_text_w);
-                try sb.add(text_row, suffix_col, suffix_surf);
-            }
-
-            row += @intCast(ch_h);
+    // Both presentations share alignment, percentage, suffix, and row spacing.
+    inline for (.{ self.charts, self.gauges }) |entries| {
+        const label_width = maxFieldWidth(ctx, entries, "label") + 1;
+        const suffix_width = maxFieldWidth(ctx, entries, "suffix") + Gauge.sep_w;
+        for (entries) |entry| {
+            if (row > 0) row += 1;
+            const has_history = @hasField(@TypeOf(entry), "data");
+            const gauge: Gauge = .{
+                .value = entry.value,
+                .label = entry.label,
+                .suffix = entry.suffix,
+                .history = if (has_history) entry.data else null,
+                .chart_height = if (has_history) entry.chart_height else 1,
+                .label_reserve = label_width,
+                .suffix_reserve = suffix_width,
+            };
+            const surface = try gauge.draw(ui.fixedWidth(ctx, inner_w));
+            try sb.add(row, 0, surface);
+            row += @intCast(surface.size.height);
         }
-    }
-
-    // Gap between charts and gauges
-    if (self.charts.len > 0 and self.gauges.len > 0) {
-        row += 1;
-    }
-
-    // Gauges (with 1-row gap between consecutive gauges)
-    const max_label_w = maxFieldWidth(ctx, self.gauges, "label") + 1; // +1 trailing space
-    const max_suffix_w = maxFieldWidth(ctx, self.gauges, "suffix") + Gauge.sep_w;
-    for (self.gauges, 0..) |ge, gi| {
-        const gauge: Gauge = .{
-            .value = ge.value,
-            .label = ge.label,
-            .suffix = ge.suffix,
-            .label_reserve = max_label_w,
-            .suffix_reserve = max_suffix_w,
-        };
-        const gauge_surf = try gauge.draw(ui.fixedSize(ctx, inner_w, 1));
-        try sb.add(row, 0, gauge_surf);
-        row += 1;
-        if (gi + 1 < self.gauges.len) row += 1; // gap between gauges
     }
 
     // Text lines

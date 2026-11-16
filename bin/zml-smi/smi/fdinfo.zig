@@ -52,9 +52,8 @@ pub fn parse(text: []const u8) Fdinfo {
     var info: Fdinfo = .{};
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const key = line[0..colon];
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        const key, const raw_value = std.mem.cutScalar(u8, line, ':') orelse continue;
+        const value = std.mem.trim(u8, raw_value, " \t");
 
         if (std.mem.eql(u8, key, "drm-pdev") or std.mem.eql(u8, key, "pdev")) {
             info.pdev = value;
@@ -70,14 +69,12 @@ pub fn parse(text: []const u8) Fdinfo {
             if (info.engine(class)) |engine| engine.cycles = sysfs.firstNumber(value);
         } else if (std.mem.cutPrefix(u8, key, "drm-total-")) |name| {
             if (info.region(name)) |region| region.total = bytes(value);
-        } else if (std.mem.cutPrefix(u8, key, "drm-resident-")) |name| {
+        } else if (std.mem.cutPrefix(u8, key, "drm-resident-") orelse
+            std.mem.cutPrefix(u8, key, "drm-memory-") orelse
+            std.mem.cutSuffix(u8, key, " mem")) |name|
+        {
+            // The last two spellings are older amdgpu keys.
             if (info.region(name)) |region| region.resident = bytes(value);
-        } else if (std.mem.cutPrefix(u8, key, "drm-memory-")) |name| {
-            // The older amdgpu name of resident memory.
-            if (info.region(name)) |region| region.resident = bytes(value);
-        } else if (std.mem.endsWith(u8, key, " mem")) {
-            // The oldest amdgpu one: "vram mem".
-            if (info.region(key[0 .. key.len - " mem".len])) |region| region.resident = bytes(value);
         }
     }
     return info;
@@ -101,66 +98,11 @@ fn bytes(value: []const u8) ?u64 {
     var words = std.mem.tokenizeAny(u8, value, " \t");
     const size = std.fmt.parseInt(u64, words.next() orelse return null, 10) catch return null;
     const unit = words.next() orelse return size;
-    const shift: u6 = if (std.ascii.eqlIgnoreCase(unit, "KiB") or std.ascii.eqlIgnoreCase(unit, "kB"))
-        10
-    else if (std.ascii.eqlIgnoreCase(unit, "MiB"))
-        20
-    else if (std.ascii.eqlIgnoreCase(unit, "GiB"))
-        30
-    else
-        0;
-    return std.math.mul(u64, size, @as(u64, 1) << shift) catch null;
-}
-
-test "i915 engines and regions" {
-    const info = parse(
-        \\pos: 0
-        \\drm-driver: i915
-        \\drm-pdev: 0000:03:00.0
-        \\drm-client-id: 42
-        \\drm-total-system0: 2048 KiB
-        \\drm-resident-local0: 3 MiB
-        \\drm-engine-render: 100 ns
-        \\drm-engine-capacity-video: 2
-        \\drm-engine-video-decode: 50 ns
-    );
-    try std.testing.expectEqualStrings("0000:03:00.0", info.pdev.?);
-    try std.testing.expectEqual(42, info.client_id);
-    try std.testing.expectEqual(2, info.regions().len);
-    try std.testing.expectEqualStrings("system0", info.regions()[0].name);
-    try std.testing.expectEqual(2048 * 1024, info.regions()[0].total);
-    try std.testing.expectEqual(3 * 1024 * 1024, info.regions()[1].resident);
-    try std.testing.expectEqual(2, info.engines().len);
-    try std.testing.expectEqualStrings("render", info.engines()[0].class);
-    try std.testing.expectEqual(100, info.engines()[0].busy_ns);
-    try std.testing.expectEqualStrings("video-decode", info.engines()[1].class);
-}
-
-test "xe cycles" {
-    const info = parse(
-        \\drm-pdev: 0000:03:00.0
-        \\drm-cycles-rcs: 10
-        \\drm-total-cycles-rcs: 100
-        \\drm-cycles-ccs: 30
-        \\drm-total-cycles-ccs: 100
-        \\drm-total-vram0: 4096 KiB
-        \\drm-resident-vram0: 3072 KiB
-    );
-    try std.testing.expectEqual(2, info.engines().len);
-    try std.testing.expectEqual(10, info.engines()[0].cycles);
-    try std.testing.expectEqual(100, info.engines()[0].total_cycles);
-    try std.testing.expectEqual(null, info.engines()[0].busy_ns);
-    try std.testing.expectEqual(4096 * 1024, info.regions()[0].total);
-    try std.testing.expectEqual(3072 * 1024, info.regions()[0].resident);
-}
-
-test "amdgpu keys" {
-    const old = parse("pdev:\t0000:0c:00.0\nvram mem:\t1024 kB\n");
-    try std.testing.expectEqualStrings("0000:0c:00.0", old.pdev.?);
-    try std.testing.expectEqualStrings("vram", old.regions()[0].name);
-    try std.testing.expectEqual(1024 * 1024, old.regions()[0].resident);
-
-    const current = parse("drm-pdev:\t0000:0c:00.0\ndrm-memory-vram:\t2048 KiB\ndrm-engine-gfx:\t5 ns\n");
-    try std.testing.expectEqual(2048 * 1024, current.regions()[0].resident);
-    try std.testing.expectEqual(5, current.engines()[0].busy_ns);
+    const spellings = [_][]const u8{ "kB", "KiB", "MiB", "GiB" };
+    for (spellings, [_]u6{ 10, 10, 20, 30 }) |spelling, bits| {
+        if (std.ascii.eqlIgnoreCase(unit, spelling)) {
+            return std.math.mul(u64, size, @as(u64, 1) << bits) catch null;
+        }
+    }
+    return size;
 }

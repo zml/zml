@@ -6,7 +6,6 @@ const theme = @import("../theme.zig");
 const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const TitledBorder = @import("titled_border.zig");
-const ColumnLayout = @import("column_layout.zig");
 const ProcessInfo = @import("zml-smi").ProcessInfo;
 
 const RichText = vxfw.RichText;
@@ -23,39 +22,34 @@ scroll_bars: vxfw.ScrollBars = .{
     },
     .draw_horizontal_scrollbar = false,
 },
-processes: std.ArrayList(ProcessInfo) = .empty,
+processes: []ProcessInfo = &.{},
 
-pub fn deinit(self: *ProcessTable, allocator: std.mem.Allocator) void {
-    self.processes.deinit(allocator);
-}
-
-/// Copies the rows to draw, and their strings into `frame`, the arena of the frame.
-pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16, frame: std.mem.Allocator) void {
+/// Selects and sorts rows whose strings are owned by the captured frame.
+pub fn prepare(
+    self: *ProcessTable,
+    frame: std.mem.Allocator,
+    state: *const data.SystemState,
+    device_id: ?u16,
+) std.mem.Allocator.Error!void {
     self.scroll_bars.scroll_view.children.builder.userdata = self;
-    self.processes.clearRetainingCapacity();
-
-    const merged = state.collector.processes.lock(state.io);
-    defer state.collector.processes.unlock(state.io);
-    for (merged.rows.items) |entry| {
-        if (device_id) |did| {
-            if (entry.device_idx != did) {
-                continue;
-            }
-        }
-        var row = entry;
-        row.username = frame.dupe(u8, entry.username) catch "";
-        row.comm = frame.dupe(u8, entry.comm) catch "";
-        self.processes.append(state.gpa, row) catch break;
+    const processes = state.processes();
+    const rows = try frame.alloc(ProcessInfo, processes.len);
+    var kept: usize = 0;
+    for (processes) |entry| {
+        if (device_id != null and entry.device_idx != device_id.?) continue;
+        rows[kept] = entry;
+        kept += 1;
     }
 
     // Sort by dev_mem descending
-    std.sort.insertion(ProcessInfo, self.processes.items, {}, struct {
+    std.sort.insertion(ProcessInfo, rows[0..kept], {}, struct {
         fn cmp(_: void, a: ProcessInfo, b: ProcessInfo) bool {
             return (a.dev_mem_kib orelse 0) > (b.dev_mem_kib orelse 0);
         }
     }.cmp);
 
-    const count: u32 = @intCast(self.processes.items.len);
+    self.processes = rows[0..kept];
+    const count: u32 = @intCast(kept);
     self.scroll_bars.estimated_content_height = count;
     self.scroll_bars.scroll_view.item_count = count;
 }
@@ -66,45 +60,43 @@ pub fn resetScroll(self: *ProcessTable) void {
 }
 
 pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const w = ctx.max.width orelse 80;
-    const row_count = self.processes.items.len;
-
-    var header_rt: RichText = .{ .text = &header_segs, .softwrap = false, .overflow = .clip };
-    const empty_rt: RichText = .{
-        .text = &.{.{ .text = "  No process data available", .style = theme.dim_style }},
-        .softwrap = false,
-        .overflow = .clip,
-    };
-
-    var children: std.ArrayList(vxfw.Widget) = .empty;
-    try children.append(ctx.arena, header_rt.widget());
-
-    if (row_count == 0) {
-        try children.append(ctx.arena, try compose.sized(
-            ctx.arena,
-            try compose.pad(ctx.arena, empty_rt.widget(), .{ .top = 1 }),
-            .{ .width = w, .height = 2 },
-        ));
-    } else {
-        const scroll_h: u16 = @min(@as(u16, @intCast(row_count)), max_visible_rows);
-        try children.append(ctx.arena, try compose.sized(ctx.arena, self.scroll_bars.widget(), .{ .width = w, .height = scroll_h }));
-    }
-
-    const content: ColumnLayout = .{ .children = children.items };
-    const tb: TitledBorder = .{
-        .child = ui.widget(&content),
+    const border: TitledBorder = .{
+        .child = ui.drawWidget(self, drawContent),
         .title = "Processes",
     };
-    return tb.draw(ui.fixedWidth(ctx, w));
+    return border.draw(ui.fixedWidth(ctx, ctx.max.width orelse 80));
+}
+
+fn drawContent(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const width = ctx.max.width orelse 80;
+    const header = try ui.drawRichLine(ctx, &header_segs, width);
+    var layout = compose.surfaceBuilder(ctx.arena);
+    try layout.add(0, 0, header);
+    var height = header.size.height;
+
+    if (self.processes.len == 0) {
+        const empty: []const Segment = &.{.{
+            .text = "  No process data available",
+            .style = theme.dim_style,
+        }};
+        try layout.add(height + 1, 0, try ui.drawRichLine(ctx, empty, width));
+        height += 2;
+    } else {
+        const rows: u16 = @intCast(@min(self.processes.len, max_visible_rows));
+        const body = try self.scroll_bars.draw(ui.fixedSize(ctx, width, rows));
+        try layout.add(height, 0, body);
+        height += body.size.height;
+    }
+    return layout.finish(.{ .width = width, .height = height }, ui.drawWidget(self, drawContent));
 }
 
 /// Builds only data rows (no header) for the scroll view.
 fn buildRow(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
     const self: *ProcessTable = @ptrCast(@alignCast(@constCast(ptr)));
-    if (idx >= self.processes.items.len) {
+    if (idx >= self.processes.len) {
         return null;
     }
-    return .{ .userdata = @ptrCast(&self.processes.items[idx]), .drawFn = drawProcessRow };
+    return .{ .userdata = @ptrCast(&self.processes[idx]), .drawFn = drawProcessRow };
 }
 
 // Column format strings — shared between header (comptime) and row (runtime).
@@ -166,15 +158,8 @@ fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
 }
 
 fn fmtMem(arena: std.mem.Allocator, kib: u64) std.mem.Allocator.Error![]const u8 {
-    if (kib >= 1024 * 1024) {
-        const whole = kib / (1024 * 1024);
-        const frac = (kib % (1024 * 1024)) * 10 / (1024 * 1024);
-        return std.fmt.allocPrint(arena, "{d}.{d}G", .{ whole, frac });
-    } else if (kib >= 1024) {
-        const whole = kib / 1024;
-        const frac = (kib % 1024) * 10 / 1024;
-        return std.fmt.allocPrint(arena, "{d}.{d}M", .{ whole, frac });
-    } else {
-        return std.fmt.allocPrint(arena, "{d}K", .{kib});
-    }
+    if (kib < 1024) return std.fmt.allocPrint(arena, "{d}K", .{kib});
+    const gib = kib >= 1024 * 1024;
+    const unit: u64 = if (gib) 1024 * 1024 else 1024;
+    return std.fmt.allocPrint(arena, "{d}.{d}{c}", .{ kib / unit, kib % unit * 10 / unit, @as(u8, if (gib) 'G' else 'M') });
 }

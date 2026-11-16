@@ -46,25 +46,12 @@ pub const Host = struct {
         }
     }
 
-    /// Adds user, command, CPU and RSS to the local rows. Each process is read once,
-    /// however many rows it has. `strings` holds the strings of the rows.
+    /// Adds user, command, CPU and RSS to one row per local PID.
     /// The CPU and RSS of another user's process read 0, unless zml-smi runs as root.
-    pub fn enrich(self: *Host, strings: std.mem.Allocator, scratch: std.mem.Allocator, rows: []smi.ProcessInfo) void {
+    pub fn enrich(self: *Host, strings: std.mem.Allocator, rows: []smi.ProcessInfo) void {
         defer self.cpu_time.sweep();
 
-        var first_row: std.AutoHashMapUnmanaged(u32, usize) = .empty;
-        for (rows, 0..) |*row, i| {
-            // A remote host already filled its rows.
-            if (row.remote) continue;
-            const entry = first_row.getOrPut(scratch, row.pid) catch continue;
-            if (entry.found_existing) {
-                const done = rows[entry.value_ptr.*];
-                row.uid, row.username, row.comm, row.cpu_percent, row.rss_kib = .{ done.uid, done.username, done.comm, done.cpu_percent, done.rss_kib };
-                continue;
-            }
-            entry.value_ptr.* = i;
-            self.read(strings, row);
-        }
+        for (rows) |*row| self.read(strings, row);
     }
 
     fn read(self: *Host, strings: std.mem.Allocator, row: *smi.ProcessInfo) void {
@@ -198,30 +185,4 @@ fn sysctlString(arena: std.mem.Allocator, name: [*:0]const u8) ?[]const u8 {
     var len: usize = buffer.len;
     if (c.sysctlbyname(name, &buffer, &len, null, 0) != 0) return null;
     return arena.dupe(u8, std.mem.sliceTo(buffer[0..len], 0)) catch null;
-}
-
-test "enrich" {
-    const io = std.testing.io;
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var data: smi.HostData = .{};
-    var host: Host = .init(arena.allocator(), std.testing.allocator, io, &data);
-    defer host.deinit();
-
-    // This process on two devices, launchd, and a row a remote host filled.
-    const self: u32 = @intCast(c.getpid());
-    var rows = [_]smi.ProcessInfo{ .{ .pid = self }, .{ .pid = 1 }, .{ .pid = self, .device_idx = 1 }, .{ .pid = 1, .remote = true } };
-    host.enrich(arena.allocator(), arena.allocator(), &rows);
-    try std.testing.expectEqual(c.getuid(), rows[0].uid);
-    try std.testing.expect(rows[0].rss_kib > 0);
-    try std.testing.expectEqualStrings(rows[0].comm, rows[2].comm);
-    try std.testing.expectEqualStrings("root", rows[1].username);
-    try std.testing.expectEqualStrings("/sbin/launchd", rows[1].comm);
-    try std.testing.expectEqualStrings("", rows[3].comm);
-
-    // CPU share needs a second reading.
-    const start: std.Io.Timestamp = .now(io, .awake);
-    while (start.untilNow(io, .awake).toMilliseconds() < 20) {}
-    host.enrich(arena.allocator(), arena.allocator(), &rows);
-    try std.testing.expect(rows[0].cpu_percent > 0);
 }

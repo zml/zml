@@ -7,7 +7,7 @@ const ui = @import("../lib/ui.zig");
 
 const BrailleChart = @This();
 
-values: []const u8, // 0-100
+values: []const ?u8, // 0-100; null leaves a gap
 height: u16 = 2,
 
 pub const chart_bg: vaxis.Cell.Color = .{ .rgb = .{ 30, 30, 40 } };
@@ -40,7 +40,9 @@ pub fn renderTo(self: *const BrailleChart, arena: std.mem.Allocator, surface: *v
         for (0..2) |dx| {
             const dot_x: u32 = @as(u32, @intCast(cell_col)) * 2 + @as(u32, @intCast(dx));
             if (dot_x + data_len >= dot_cols) {
-                max_val = @max(max_val, self.values[@intCast(dot_x + data_len - dot_cols)]);
+                if (self.values[@intCast(dot_x + data_len - dot_cols)]) |value| {
+                    max_val = @max(max_val, value);
+                }
             }
         }
         const color = theme.colorForPercent(max_val);
@@ -50,7 +52,7 @@ pub fn renderTo(self: *const BrailleChart, arena: std.mem.Allocator, surface: *v
             for (0..2) |dx| {
                 const dot_x: u32 = @as(u32, @intCast(cell_col)) * 2 + @as(u32, @intCast(dx));
                 if (dot_x + data_len >= dot_cols) {
-                    const val = self.values[@intCast(dot_x + data_len - dot_cols)];
+                    const val = self.values[@intCast(dot_x + data_len - dot_cols)] orelse continue;
                     const fill: u32 = @as(u32, val) * dot_rows / 100;
                     const threshold: u32 = dot_rows - fill;
                     for (0..4) |dr| {

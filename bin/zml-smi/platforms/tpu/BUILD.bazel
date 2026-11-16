@@ -1,6 +1,11 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
+_DEPS = [
+    ":tpuinfo",
+    "//bin/zml-smi/smi",
+]
+
 cc_library(
     name = "tpuinfo",
     srcs = ["tpuinfo.cc"],
@@ -18,13 +23,13 @@ zig_library(
     main = "Tpu.zig",
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//bin/zml-smi:__subpackages__"],
-    deps = [
-        ":tpuinfo",
-        "//bin/zml-smi/smi",
-    ],
+    deps = _DEPS,
 )
 
 zig_test(
     name = "test",
-    deps = [":tpu"],
+    srcs = ["Tpu.zig"],
+    main = "test_tpu.zig",
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = _DEPS,
 )

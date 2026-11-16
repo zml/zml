@@ -1,11 +1,11 @@
 //! FuriosaAI RNGD chips, through sysfs. Paths, units and formulas follow furiosa-smi-go 2026.4.0.
 const std = @import("std");
+const builtin = @import("builtin");
 const smi = @import("zml-smi");
 
 const Furiosa = @This();
 
-platform: smi.Platform,
-io: std.Io,
+devices: []const smi.Device,
 /// /sys/class/rngd_mgmt: rngd!npu<N>mgmt for chip N, and rngd!npu<N>pe<C> for its core C.
 class: smi.sysfs.Dir,
 chips: []Chip,
@@ -26,6 +26,11 @@ const Chip = struct {
     /// This round: the utilization of each core, and the memory in use of the group each core heads.
     util: [cores]u8 = @splat(0),
     mem_used: [cores]u64 = @splat(0),
+
+    fn close(chip: Chip) void {
+        chip.mgmt.close();
+        if (chip.hwmon) |hwmon| hwmon.dir.close();
+    }
 
     fn lessThan(_: void, a: Chip, b: Chip) bool {
         if (a.model.device != b.model.device) return a.model.device < b.model.device;
@@ -75,31 +80,29 @@ const Hwmon = struct {
 const Model = struct {
     device: u16,
     name: []const u8,
-    dram_bytes: u64,
-
-    fn memoryBytes(model: Model) u64 {
-        return model.dram_bytes - 512 * 1024 * 1024;
-    }
+    memory_bytes: u64,
 };
 
 const models = [_]Model{
-    .{ .device = 0x0001, .name = "RNGD", .dram_bytes = 48 << 30 },
-    .{ .device = 0x0002, .name = "RNGD+", .dram_bytes = 72 << 30 },
+    .{ .device = 0x0001, .name = "RNGD", .memory_bytes = (48 << 30) - (512 << 20) },
+    .{ .device = 0x0002, .name = "RNGD+", .memory_bytes = (72 << 30) - (512 << 20) },
 };
 
 const vendor = 0x1ed2;
 
-const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .deinit = deinit };
+pub const two_readings = true;
 
 pub fn detect(io: std.Io) bool {
     return smi.sysfs.exists(io, "/dev/rngd");
 }
 
-pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa {
+pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa {
     const usable = try usableCores(io);
     const class = try smi.sysfs.Dir.open(io, "/sys/class/rngd_mgmt");
+    errdefer class.close();
 
     var chips: std.ArrayList(Chip) = .empty;
+    errdefer for (chips.items) |chip| chip.close();
     var it = class.iterate();
     while (try it.next(io)) |entry| {
         const node = mgmtNode(entry.name) orelse continue;
@@ -110,6 +113,7 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa
             mgmt.close();
             continue;
         };
+        errdefer chip.close();
         try chips.append(arena, chip);
     }
     std.mem.sort(Chip, chips.items, {}, Chip.lessThan);
@@ -128,8 +132,7 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa
     }
 
     return .{
-        .platform = .{ .devices = devices, .two_readings = true, .vtable = &vtable },
-        .io = io,
+        .devices = devices,
         .class = class,
         .chips = chips.items,
     };
@@ -164,21 +167,16 @@ fn openChip(arena: std.mem.Allocator, mgmt: smi.sysfs.Dir, node: u8, usable: Cor
     return .{ .node = node, .model = model, .mgmt = mgmt, .hwmon = .open(arena, pci), .usable = usable };
 }
 
-fn deinit(platform: *smi.Platform) void {
-    const self: *Furiosa = @alignCast(@fieldParentPtr("platform", platform));
-    for (self.chips) |chip| {
-        chip.mgmt.close();
-        if (chip.hwmon) |hwmon| hwmon.dir.close();
-    }
+pub fn close(self: *Furiosa) void {
+    for (self.chips) |chip| chip.close();
     self.class.close();
 }
 
-fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
-    const self: *Furiosa = @alignCast(@fieldParentPtr("platform", platform));
-
+pub fn poll(self: *Furiosa, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+    const samples = reading.samples;
     for (self.chips, samples) |*chip, *sample| {
         const fields = &sample.furiosa;
-        fields.mem_total_bytes = chip.model.memoryBytes();
+        fields.mem_total_bytes = chip.model.memory_bytes;
         fields.governor = governor(chip.mgmt);
         fields.liveness = liveness(chip.mgmt);
         fields.throttle_reasons = throttleReasons(chip.mgmt);
@@ -197,6 +195,25 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
         if (hwmon.power) |file| fields.power_mw = hwmon.dir.scaled(file, .micro, .milli) catch null;
         fields.power_limit_mw = hwmon.dir.scaled("power1_max", .micro, .milli) catch null;
     }
+
+    // The cores each process holds on each chip, from the chip and core nodes it has open.
+    var held: std.AutoArrayHashMapUnmanaged(struct { u32, u16 }, Cores) = .empty;
+    defer held.deinit(scratch);
+    var holders: smi.proc.FdHolders = .init(self.class.io, &.{"/dev/rngd/"});
+    defer holders.deinit();
+    while (holders.next()) |holder| {
+        const node = Node.parse(holder.rest) orelse continue;
+        const device: u16 = for (self.chips, 0..) |chip, index| {
+            if (chip.node == node.chip) break @intCast(index);
+        } else continue;
+        const entry = try held.getOrPutValue(scratch, .{ holder.pid, device }, .empty);
+        entry.value_ptr.setUnion(node.cores);
+    }
+    for (held.keys(), held.values()) |key, set| {
+        const pid, const device = key;
+        const row = self.chips[device].row(pid, device, set, samples[device].furiosa);
+        try reading.addProcess(row);
+    }
 }
 
 /// The mean over the usable cores of the share of its cycles each spent on tasks.
@@ -209,8 +226,8 @@ fn utilization(self: *const Furiosa, chip: *Chip, in_use: Cores) ?u64 {
         // A core not in use reads 0 cycles, as in furiosa-smi-go.
         const all = if (text) |metrics| (hexField(metrics, "CycleCount") orelse return null) else 0;
         const task = if (text) |metrics| (hexField(metrics, "TaskCycleCount") orelse return null) else 0;
-        const all_growth = chip.cycles[core].all.advance(self.io, all);
-        const task_growth = chip.cycles[core].task.advance(self.io, task);
+        const all_growth = chip.cycles[core].all.advance(self.class.io, all);
+        const task_growth = chip.cycles[core].task.advance(self.class.io, task);
         chip.util[core] = if (all_growth != null and task_growth != null) task_growth.?.percentOf(all_growth.?) else 0;
         sum += chip.util[core];
     }
@@ -220,9 +237,8 @@ fn utilization(self: *const Furiosa, chip: *Chip, in_use: Cores) ?u64 {
 /// Memory in use, summed over the groups of fused cores. Every core of a group reports the whole
 /// group, so a group is read once, from its first core. A core not in use is a group of its own.
 fn memoryInUse(self: *const Furiosa, chip: *Chip, in_use: Cores) ?u64 {
-    const share = chip.model.memoryBytes() / cores;
+    const share = chip.model.memory_bytes / cores;
     var used: u64 = 0;
-    var left = chip.usable.count();
     var it = chip.usable.iterator(.{});
     while (it.next()) |head| {
         var size: usize = 1;
@@ -237,9 +253,7 @@ fn memoryInUse(self: *const Furiosa, chip: *Chip, in_use: Cores) ?u64 {
                 used += usage;
             }
         }
-        if (size > left) return null;
-        left -= size;
-        for (1..size) |_| _ = it.next();
+        for (1..size) |_| _ = it.next() orelse return null;
     }
     return used;
 }
@@ -311,31 +325,6 @@ fn hex(text: []const u8) ?u64 {
     return std.fmt.parseInt(u64, digits, 16) catch null;
 }
 
-fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
-    const self: *Furiosa = @alignCast(@fieldParentPtr("platform", platform));
-    // The cores each process holds on each chip, from the chip and core nodes it has open.
-    var held: std.AutoArrayHashMapUnmanaged(struct { u32, u16 }, Cores) = .empty;
-    var holders: smi.proc.FdHolders = .init(self.io, &.{"/dev/rngd/"});
-    defer holders.deinit();
-    while (holders.next()) |holder| {
-        const node = Node.parse(holder.rest) orelse continue;
-        const device = self.deviceOf(node.chip) orelse continue;
-        const entry = try held.getOrPutValue(scratch, .{ holder.pid, device }, .empty);
-        entry.value_ptr.setUnion(node.cores);
-    }
-    for (held.keys(), held.values()) |key, set| {
-        const pid, const device = key;
-        try out.append(self.chips[device].row(pid, device, set, samples[device].furiosa));
-    }
-}
-
-fn deviceOf(self: *const Furiosa, node: u8) ?u16 {
-    for (self.chips, 0..) |chip, index| {
-        if (chip.node == node) return @intCast(index);
-    }
-    return null;
-}
-
 /// The chip and cores a node of /dev/rngd names: npu<N>, npu<N>pe<C> or npu<N>pe<C>-<D>.
 /// A bare npu<N> is core 0, as furiosa-smi-go reads it. Other nodes, such as npu<N>ch0, name no core.
 const Node = struct {
@@ -376,73 +365,14 @@ fn string(arena: std.mem.Allocator, dir: smi.sysfs.Dir, file: []const u8) ?[]con
     return arena.dupe(u8, text) catch null;
 }
 
-test Node {
-    try std.testing.expectEqual(Node{ .chip = 3, .cores = .{ .mask = 0x0f } }, Node.parse("npu3pe0-3").?);
-    try std.testing.expectEqual(Node{ .chip = 0, .cores = .{ .mask = 0x20 } }, Node.parse("npu0pe5").?);
-    try std.testing.expectEqual(Node{ .chip = 12, .cores = .{ .mask = 0x01 } }, Node.parse("npu12").?);
-    for ([_][]const u8{ "npu0ch0", "npu0ch0r", "npu0mgmt", "npu0bar4", "npu0dmar", "npu0pe3-1", "npu0pe8", "npu0pe", "npu" }) |name| {
-        try std.testing.expectEqual(null, Node.parse(name));
-    }
-    try std.testing.expectEqual(7, mgmtNode("rngd!npu7mgmt"));
-    try std.testing.expectEqual(null, mgmtNode("rngd!npu7pe0"));
-}
-
-test "utilization and memory of fused cores" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    const gib: u64 = 1 << 30;
-    const share = models[0].memoryBytes() / cores;
-
-    // Cores 0 to 3 are one group, core 5 is alone, and core 6 was released after the occupancy was read:
-    // the files of a core not in use are empty.
-    try tmp.dir.createDirPath(io, "rngd!npu0mgmt");
-    try tmp.dir.createDirPath(io, "rngd!npu0pe6");
-    try tmp.dir.writeFile(io, .{ .sub_path = "rngd!npu0pe6/metrics", .data = "" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "rngd!npu0pe6/alloc_status", .data = "" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "rngd!npu0mgmt/pe_occupancy", .data = "1\n1\n1\n1\n0\n1\n1\n0\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "rngd!npu0mgmt/npu_governor", .data = "powersave\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "rngd!npu0mgmt/device_state", .data = "0\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "rngd!npu0mgmt/throttle_reason", .data = "Throttle reason = 0x00000003\n" });
-    var text: [128]u8 = undefined;
-    var path: [32]u8 = undefined;
-    for ([_]u8{ 0, 1, 2, 3, 5 }) |core| {
-        const fused = core < 4;
-        try tmp.dir.createDirPath(io, try std.fmt.bufPrint(&path, "rngd!npu0pe{d}", .{core}));
-        try tmp.dir.writeFile(io, .{
-            .sub_path = try std.fmt.bufPrint(&path, "rngd!npu0pe{d}/alloc_status", .{core}),
-            .data = try std.fmt.bufPrint(&text, "dram_capacity: 0x{x}\ndram_usage: 0x{x}\nshared_capacity: 0x0\nshared_usage: 0x0\n", .{
-                if (fused) 4 * share else share, if (fused) 3 * gib else gib,
-            }),
-        });
-    }
-
-    const class: smi.sysfs.Dir = .{ .handle = tmp.dir, .io = io };
-    var chips = [_]Chip{.{ .node = 0, .model = &models[0], .mgmt = try class.openDir("rngd!npu0mgmt"), .hwmon = null, .usable = .full }};
-    defer chips[0].mgmt.close();
-    var furiosa: Furiosa = .{ .platform = .{ .devices = &.{.{ .target = .furiosa }}, .vtable = &vtable }, .io = io, .class = class, .chips = &chips };
-
-    // Between the polls, the group spends half its cycles on tasks and core 5 all of them.
-    for ([_]u64{ 0, 37 }, [_]u64{ 1000, 2000 }) |util, cycles| {
-        for ([_]u8{ 0, 1, 2, 3, 5 }) |core| {
-            const task = if (core == 5) cycles else cycles / 2 + 250;
-            try tmp.dir.writeFile(io, .{
-                .sub_path = try std.fmt.bufPrint(&path, "rngd!npu0pe{d}/metrics", .{core}),
-                .data = try std.fmt.bufPrint(&text, "CycleCount: 0x{x}\nTaskCycleCount: 0x{x}\n", .{ cycles, task }),
-            });
-        }
-        var samples = [_]smi.Sample{.init(.furiosa)};
-        poll(&furiosa.platform, std.testing.allocator, &samples);
-        const chip = samples[0].furiosa;
-        try std.testing.expectEqual(util, chip.util_percent);
-        try std.testing.expectEqual(4 * gib, chip.mem_used_bytes);
-        try std.testing.expectEqual(@backingInt(smi.Furiosa.Governor.powersave), chip.governor);
-        try std.testing.expectEqual(@backingInt(smi.Furiosa.Liveness.alive), chip.liveness);
-        try std.testing.expectEqual(0b11, chip.throttle_reasons);
-    }
-
-    // A process that holds the group sees its share.
-    const row = chips[0].row(7, 0, .{ .mask = 0x0f }, .{ .util_percent = 37, .mem_used_bytes = 4 * gib });
-    try std.testing.expectEqual(50, row.dev_util_percent);
-    try std.testing.expectEqual(3 * gib / 1024, row.dev_mem_kib);
-}
+/// Private declarations exposed only to the sibling test module.
+pub const testing = if (builtin.is_test) struct {
+    pub const Node = Furiosa.Node;
+    pub const Chip = Furiosa.Chip;
+    pub const models = Furiosa.models;
+    pub const cores = Furiosa.cores;
+    pub const parseNode = Furiosa.Node.parse;
+    pub const mgmtNode = Furiosa.mgmtNode;
+    pub const processRow = Furiosa.Chip.row;
+    pub const memoryInUse = Furiosa.memoryInUse;
+} else struct {};

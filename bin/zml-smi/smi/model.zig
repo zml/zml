@@ -42,6 +42,30 @@ pub const Sample = union(Target) {
             inline else => |tag| @unionInit(Sample, @tagName(tag), .{}),
         };
     }
+
+    /// The only platform projection needed by shared presentation and history.
+    pub fn common(self: Sample) Common {
+        var result: Common = .{};
+        switch (self) {
+            inline else => |values| {
+                inline for (@typeInfo(Common).@"struct".field_names) |field| {
+                    if (@hasField(@TypeOf(values), field)) @field(result, field) = @field(values, field);
+                }
+            },
+        }
+        return result;
+    }
+};
+
+/// Values shared by cards and history; missing platform fields remain null.
+pub const Common = struct {
+    util_percent: ?u64 = null,
+    mem_used_bytes: ?u64 = null,
+    mem_total_bytes: ?u64 = null,
+    temperature: ?u64 = null,
+    fan_speed_percent: ?u64 = null,
+    power_mw: ?u64 = null,
+    power_limit_mw: ?u64 = null,
 };
 
 /// A device and its latest sample: what JSON writes and what a remote host sends.
@@ -165,61 +189,7 @@ pub const HostData = struct {
     load_5: ?f32 = null,
     load_15: ?f32 = null,
     uptime_seconds: ?u64 = null,
-    /// Measured by a platform, through `Platform.VTable.host`.
+    /// Measured alongside the device samples by sources such as Metal.
     cpu_power_mw: ?u64 = null,
     system_power_mw: ?u64 = null,
-};
-
-/// A source of devices: a local platform or a remote host.
-/// It is a field of its implementation, which finds itself with @fieldParentPtr.
-pub const Platform = struct {
-    /// The devices found when the platform was opened. The list never changes afterwards.
-    devices: []const Device,
-    /// Values are derived from two polls, so a one-shot print polls twice.
-    two_readings: bool = false,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        /// Called every poll, with one empty sample per device, in the order of `devices`.
-        poll: *const fn (platform: *Platform, scratch: std.mem.Allocator, samples: []Sample) void,
-        /// Called right after `poll`, with the samples it just filled. A row's device is its position in `devices`.
-        processes: ?*const fn (platform: *Platform, scratch: std.mem.Allocator, samples: []const Sample, out: *ProcessList) ProcessList.Error!void = null,
-        deinit: ?*const fn (platform: *Platform) void = null,
-        /// For a platform that also measures the host. Called right after `processes`, in the same task,
-        /// with host data whose fields start null: it fills those it read.
-        host: ?*const fn (platform: *Platform, data: *HostData) void = null,
-    };
-};
-
-/// The process rows of one source for one poll, and the strings they point into.
-pub const ProcessList = struct {
-    rows: std.ArrayList(ProcessInfo) = .empty,
-    /// Owns every string a row holds.
-    strings: std.heap.ArenaAllocator,
-    gpa: std.mem.Allocator,
-
-    pub const Error = error{ OutOfMemory, Unavailable };
-
-    pub fn init(gpa: std.mem.Allocator) ProcessList {
-        return .{ .strings = .init(gpa), .gpa = gpa };
-    }
-
-    pub fn deinit(list: *ProcessList) void {
-        list.rows.deinit(list.gpa);
-        list.strings.deinit();
-    }
-
-    pub fn clear(list: *ProcessList) void {
-        list.rows.clearRetainingCapacity();
-        _ = list.strings.reset(.retain_capacity);
-    }
-
-    pub fn append(list: *ProcessList, row: ProcessInfo) error{OutOfMemory}!void {
-        try list.rows.append(list.gpa, row);
-    }
-
-    /// Copies a string into the list, for a row to hold.
-    pub fn dupe(list: *ProcessList, string: []const u8) error{OutOfMemory}![]const u8 {
-        return list.strings.allocator().dupe(u8, string);
-    }
 };

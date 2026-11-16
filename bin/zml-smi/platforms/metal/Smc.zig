@@ -31,11 +31,11 @@ const Smc = @This();
 api: iokit.Api,
 connection: iokit.Object,
 /// The GPU sensors.
-temperatures: []const Key,
-fans: []const Fan,
+temperatures: []const Key = &.{},
+fans: []const Fan = &.{},
 /// Whole-machine power: the system total (laptops), the DC-in total, then the DC-in rail,
 /// which is the power supply's output on a Mac Studio. The first that reads a value wins.
-power: []const Key,
+power: []const Key = &.{},
 
 /// A key and the type and size of its value.
 const Key = struct { code: u32, info: Info };
@@ -76,9 +76,6 @@ pub fn open(arena: std.mem.Allocator, api: iokit.Api) !Smc {
     var smc: Smc = .{
         .api = api,
         .connection = try api.IOServiceOpen.get(.{ service, std.c.mach_task_self(), 0 }),
-        .temperatures = &.{},
-        .fans = &.{},
-        .power = &.{},
     };
     errdefer smc.close();
     smc.temperatures = try smc.gpuSensors(arena);

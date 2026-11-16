@@ -15,5 +15,10 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":metal"],
+    main = "test_metal.zig",
+    target_compatible_with = ["@platforms//os:macos"],
+    deps = [
+        ":metal",
+        "//bin/zml-smi/smi",
+    ],
 )
