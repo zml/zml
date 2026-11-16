@@ -1,6 +1,22 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
-filegroup(
+zig_library(
     name = "flashinfer_cutlass",
-    srcs = ["flashinfer_cutlass.zig"],
+    import_name = "zml/kernels/moe/flashinfer_cutlass",
+    main = "flashinfer_cutlass.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//platforms",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/moe/api",
+        "//zml/kernels/moe/weights",
+        "//zml/nn",
+        "//zml/quantization",
+    ] + select({
+        "//platforms:cuda.enabled": [
+            "//platforms/cuda/flashinfer_cutlass_moe",
+        ],
+        "//conditions:default": [],
+    }),
 )

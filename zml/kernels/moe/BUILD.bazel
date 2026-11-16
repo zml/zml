@@ -1,0 +1,40 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "moe",
+    import_name = "zml/kernels/moe",
+    main = "moe.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//platforms",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/moe/api",
+        "//zml/kernels/moe/cute",
+        "//zml/kernels/moe/flashinfer_cutlass",
+        "//zml/kernels/moe/fly",
+        "//zml/kernels/moe/metal",
+        "//zml/kernels/moe/mosaic_tpu",
+        "//zml/kernels/moe/stablehlo",
+        "//zml/kernels/moe/tcl",
+        "//zml/kernels/moe/triton",
+        "//zml/meta",
+        "//zml/nn",
+        "//zml/quantization",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":moe"],
+)
+
+zig_test(
+    name = "integration_test",
+    main = "tests.zig",
+    deps = [
+        "//zml",
+        "//zml/kernels/moe/api",
+        "//zml/kernels/moe/stablehlo",
+    ],
+)

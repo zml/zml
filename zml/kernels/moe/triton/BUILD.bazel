@@ -1,9 +1,23 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-filegroup(
+zig_library(
     name = "triton",
     srcs = [
         "moe.zig",
-        "triton.zig",
     ],
+    import_name = "zml/kernels/moe/triton",
+    main = "triton.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/moe/api",
+        "//zml/nn",
+        "//zml/quantization",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":triton"],
 )

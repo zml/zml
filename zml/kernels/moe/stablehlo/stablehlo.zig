@@ -4,13 +4,15 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
+const nn = @import("zml/nn");
+
+const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const GlobalOptions = @import("../api.zig").Options;
-const Activation = @import("../api.zig").Activation;
-const RoutingWeightPlacement = @import("../api.zig").RoutingWeightPlacement;
-const LocalRouting = @import("../api.zig").LocalRouting;
+const GlobalOptions = @import("zml/kernels/moe/api").Options;
+const Activation = @import("zml/kernels/moe/api").Activation;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 
 pub fn activate(x: Tensor, activation: Activation) Tensor {
     return switch (activation) {
@@ -71,11 +73,11 @@ fn expandScales(scales: Tensor, shape: Shape) Tensor {
     return result.withTags(shape.tags());
 }
 
-pub fn dequantize(linear: zml.nn.Linear) Tensor {
+pub fn dequantize(linear: nn.Linear) Tensor {
     var weight = linear.weight;
     const q = linear.quantization orelse return weight.convert(.f32);
     stdx.debug.assert(!q.swizzled_scales, "StableHLO reference requires plain block scales", .{});
-    if (zml.nn.isPackedFp4(q.scheme, weight.dtype())) {
+    if (nn.isPackedFp4(q.scheme, weight.dtype())) {
         // StableHLO bitcast expands the low nibble first along the input axis.
         weight = weight.bitCast(.f4e2m1).merge(.{ .unpacked = .{ linear.tag, .bitcast } }).renameTag(.unpacked, linear.tag);
     }
@@ -101,7 +103,7 @@ fn roundFp4(x: Tensor) Tensor {
 
 // Quantize and dequantize activation groups using tensor math, independently of
 // Triton's quantizer. The return value is the represented value in FP32.
-fn roundedInput(x: Tensor, linear: zml.nn.Linear, opts: Options, dtype: zml.DataType) Tensor {
+fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType) Tensor {
     if (opts.input_quantization == .none) return x.convert(dtype).convert(.f32);
     const q = linear.quantization orelse return x.convert(dtype).convert(.f32);
     const fixed_mxfp8 = opts.input_quantization == .mxfp8 or opts.input_quantization == .mxfp8_bf16;
@@ -138,7 +140,7 @@ fn roundedInput(x: Tensor, linear: zml.nn.Linear, opts: Options, dtype: zml.Data
         .convert(output_dtype).optimizationBarrier().convert(.f32).mul(broad).reshape(x.shape().withDtype(.f32));
 }
 
-fn project(x: Tensor, linear: zml.nn.Linear, ids: Tensor, opts: Options, dtype: zml.DataType) Tensor {
+fn project(x: Tensor, linear: nn.Linear, ids: Tensor, opts: Options, dtype: zml.DataType) Tensor {
     const weight = dequantize(linear).withTags(.{ .expert, .out, .in });
     const selected = weight.gather(.{ .expert = ids }, .{});
     var result = roundedInput(x, linear, opts, dtype).dot(selected, .in);
@@ -163,7 +165,7 @@ pub const Options = struct {
 };
 
 /// Negative expert IDs denote nonlocal routes and contribute zero, including bias.
-pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: Options) Tensor {
+pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: nn.Linear, down: nn.Linear, opts: Options) Tensor {
     stdx.debug.assert(topk_ids.dim(.topk) > 0, "reference top-k must be positive", .{});
     stdx.debug.assert(topk_ids.dtype() == .i32, "reference expects i32 expert ids", .{});
     stdx.debug.assert(gate_up.weight.rank() == 3 and down.weight.rank() == 3, "reference expects rank-three expert weights", .{});
@@ -192,7 +194,7 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
         .sum(.topk).squeeze(.topk).convert(input.dtype());
 }
 
-pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: GlobalOptions) Tensor {
+pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: nn.Linear, down: nn.Linear, opts: GlobalOptions) Tensor {
     stdx.debug.assert(routing.ids.dim(.topk) > 0 and routing.ids.dim(.topk) <= routing.global_num_experts, "MoE top-k must fit the global expert count", .{});
     return reference(input, routing.localIds(), routing.weights, gate_up, down, .{
         .activation = opts.activation,

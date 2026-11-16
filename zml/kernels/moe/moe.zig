@@ -1,30 +1,33 @@
 const std = @import("std");
 
 const platforms = @import("platforms");
+const stdx = @import("stdx");
 
-const zml = @import("../../zml.zig");
-const stdx = zml.stdx;
-pub const Activation = @import("api.zig").Activation;
-pub const ActivationKind = @import("api.zig").ActivationKind;
-pub const cute = @import("cute/cute.zig");
-pub const ExpertsLayout = @import("api.zig").ExpertsLayout;
-pub const flashinfer_cutlass = @import("flashinfer_cutlass/flashinfer_cutlass.zig");
-pub const fly = @import("fly/fly.zig");
-pub const LocalRouting = @import("api.zig").LocalRouting;
-pub const metal = @import("metal/metal.zig");
-pub const mosaic_tpu = @import("mosaic_tpu/mosaic_tpu.zig");
-pub const Options = @import("api.zig").Options;
-pub const ProjectionLayout = @import("api.zig").ProjectionLayout;
-pub const RoutingWeightPlacement = @import("api.zig").RoutingWeightPlacement;
-pub const stablehlo = @import("stablehlo/stablehlo.zig");
-pub const tcl = @import("tcl/tcl.zig");
-pub const triton = @import("triton/triton.zig");
+const nn = @import("zml/nn");
+const Quantization = @import("zml/quantization").Quantization;
+const meta = @import("zml/meta");
+
+const zml = @import("zml/core");
+pub const Activation = @import("zml/kernels/moe/api").Activation;
+pub const ActivationKind = @import("zml/kernels/moe/api").ActivationKind;
+pub const cute = @import("zml/kernels/moe/cute");
+pub const ExpertsLayout = @import("zml/kernels/moe/api").ExpertsLayout;
+pub const flashinfer_cutlass = @import("zml/kernels/moe/flashinfer_cutlass");
+pub const fly = @import("zml/kernels/moe/fly");
+pub const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+pub const metal = @import("zml/kernels/moe/metal");
+pub const mosaic_tpu = @import("zml/kernels/moe/mosaic_tpu");
+pub const Options = @import("zml/kernels/moe/api").Options;
+pub const ProjectionLayout = @import("zml/kernels/moe/api").ProjectionLayout;
+pub const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+pub const stablehlo = @import("zml/kernels/moe/stablehlo");
+pub const tcl = @import("zml/kernels/moe/tcl");
+pub const triton = @import("zml/kernels/moe/triton");
 
 const log = std.log.scoped(.@"zml/moe");
 
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("tests.zig");
 }
 
 pub const Backend = enum {
@@ -37,7 +40,7 @@ pub const Backend = enum {
     metal,
     tcl,
 
-    pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
+    pub fn auto(platform: *const zml.Platform, scheme: ?Quantization.Scheme, dtype: zml.DataType) !Backend {
         return switch (platform.target) {
             .cuda => b: {
                 const s = scheme orelse break :b .triton;
@@ -109,7 +112,7 @@ pub const Backend = enum {
     }
 
     /// The layout contract the expert weights must have for a given backend with scheme
-    pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
+    pub fn expertsLayout(backend: Backend, scheme: ?Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
             .cute => if (scheme) |s| switch (s) {
@@ -184,8 +187,8 @@ pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
     topk_weights: zml.Tensor,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
+    gate_up: nn.Linear,
+    down: nn.Linear,
     backend: Backend,
     mesh: *const zml.Mesh,
     partitioning: Partitioning,
@@ -224,8 +227,8 @@ pub fn forwardMoe(
         input: zml.Tensor,
         ids: zml.Tensor,
         weights: zml.Tensor,
-        gate_up: zml.nn.Linear,
-        down: zml.nn.Linear,
+        gate_up: nn.Linear,
+        down: nn.Linear,
         backend: Backend,
         opts: Options,
         mesh: *const zml.Mesh,
@@ -266,9 +269,9 @@ pub fn forwardMoe(
         .global_experts = @intCast(gate_up.weight.dim(.expert)),
     };
     const Logical = zml.Sharding.Partitioning.Logical;
-    var projection_specs: [2]zml.ops.PartitionSpecs(zml.nn.Linear) = undefined;
-    for ([_]zml.nn.Linear{ gate_up, down }, &projection_specs) |linear, *specs| {
-        zml.meta.mapAlloc(struct {
+    var projection_specs: [2]zml.ops.PartitionSpecs(nn.Linear) = undefined;
+    for ([_]nn.Linear{ gate_up, down }, &projection_specs) |linear, *specs| {
+        meta.mapAlloc(struct {
             fn spec(ctx: struct { experts: i64, axis: ?zml.Shape.Tag }, tensor: zml.Tensor) Logical {
                 const axis = ctx.axis orelse return .replicated;
                 if (tensor.count() == 1) return .replicated;

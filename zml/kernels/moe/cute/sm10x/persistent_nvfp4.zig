@@ -14,7 +14,7 @@ const std = @import("std");
 const mlir = @import("mlir");
 const nvvm = @import("mlir/dialects/nvvm");
 
-const zml = @import("../../../../zml.zig");
+const zml = @import("zml/core");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const V = cute.Value;

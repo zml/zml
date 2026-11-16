@@ -4,11 +4,14 @@ const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
-const GlobalOptions = @import("../api.zig").Options;
-const Activation = @import("../api.zig").Activation;
-const LocalRouting = @import("../api.zig").LocalRouting;
-const unpackedWeight = @import("../weights.zig").unpackedWeight;
+const nn = @import("zml/nn");
+const Quantization = @import("zml/quantization").Quantization;
+
+const zml = @import("zml/core");
+const GlobalOptions = @import("zml/kernels/moe/api").Options;
+const Activation = @import("zml/kernels/moe/api").Activation;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const unpackedWeight = @import("zml/kernels/moe/weights").unpackedWeight;
 const contract = @import("zml/core").flashinfer_cutlass.contract;
 const Attributes = contract.Attributes;
 const runtime = @import("zml/core").flashinfer_cutlass.runtime;
@@ -312,8 +315,8 @@ pub fn fusedExpertsNvfp4(
 pub fn fusedExperts(
     input: zml.Tensor,
     routing: LocalRouting,
-    gate_up: zml.nn.Linear,
-    down: zml.nn.Linear,
+    gate_up: nn.Linear,
+    down: nn.Linear,
     opts: GlobalOptions,
 ) zml.Tensor {
     if (comptime !platforms.isEnabled(.cuda)) {
@@ -330,14 +333,14 @@ pub fn fusedExperts(
 
     const runner_options: Options = .fromGlobalOptions(opts);
 
-    const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
+    const quant_scheme: ?Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
     stdx.debug.assert(quant_scheme == .nvfp4, "FlashInfer CUTLASS MoE only supports NVFP4, got {?}", .{quant_scheme});
 
     const gate_up_weight_unpacked = unpackedWeight(gate_up);
     const down_weight_unpacked = unpackedWeight(down);
 
     // TODO(Corentin): Do error checking on nvfp4
-    // Also, maybe pass `zml.nn.Linear` directly
+    // Also, maybe pass `nn.Linear` directly
     return fusedExpertsNvfp4(
         input,
         gate_up_weight_unpacked,
