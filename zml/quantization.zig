@@ -3,13 +3,13 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("core.zig");
+const zml = @import("zml/core");
 
-const DataType = @import("dtype.zig").DataType;
-const platform_mod = @import("platform.zig");
+const DataType = zml.DataType;
+const platform_mod = zml.platform;
 const Platform = platform_mod.Platform;
-const Shape = @import("shape.zig").Shape;
-const Tensor = @import("tensor.zig").Tensor;
+const Shape = zml.Shape;
+const Tensor = zml.Tensor;
 
 pub const nvfp4_block_size = 16;
 pub const mx_block_size = 32;
