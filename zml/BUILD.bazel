@@ -3,7 +3,6 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 zig_library(
     name = "zml",
     srcs = [
-        "attention/attention.zig",
         "kernels/moe/api.zig",
         "kernels/moe/moe.zig",
         "kernels/moe/tests.zig",
@@ -11,6 +10,7 @@ zig_library(
         "kernels/paged_attention/options.zig",
         "kernels/paged_attention/paged_attention.zig",
         "zml.zig",
+        "//zml/attention",
         "//zml/kernels/moe/cute",
         "//zml/kernels/moe/flashinfer_cutlass",
         "//zml/kernels/moe/fly",
@@ -46,7 +46,7 @@ zig_library(
         "//platforms",
         "//platforms/tpu:ragged_paged",
         "//stdx",
-        "//zml/attention/options",
+        "//zml/attention:options",
         "//zml/constants",
         "//zml/core",
         "//zml/kernels/flash_attention",

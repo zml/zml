@@ -8,7 +8,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//stdx",
-        "//zml/attention/options",
+        "//zml/attention:options",
         "//zml/core",
         "//zml/kernels/flash_attention/cute",
         "//zml/kernels/flash_attention/metal",
