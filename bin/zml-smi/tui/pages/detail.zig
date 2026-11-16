@@ -54,11 +54,11 @@ pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
 
     const chart_count: usize = if (sample == .neuron or sample == .tpu) 2 else 4;
     var charts: [4]Chart = undefined;
-    charts[0] = try common.historyChart(ctx, self.state, index, .util, .{
+    charts[0] = try common.historyChart(ctx, self.state, index, reading, .util, .{
         .title = title,
         .info_line = util_info,
     });
-    charts[1] = try common.historyChart(ctx, self.state, index, .memory, .{
+    charts[1] = try common.historyChart(ctx, self.state, index, reading, .memory, .{
         .info_line = try common.memoryInfo(ctx.arena, reading, memory_prefix, memory_suffix),
     });
     if (chart_count == 4) {
@@ -70,7 +70,7 @@ pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
                 try common.metric(ctx.arena, reading.fan_speed_percent, "%"),
             }),
         };
-        charts[2] = try common.historyChart(ctx, self.state, index, .temperature, .{
+        charts[2] = try common.historyChart(ctx, self.state, index, reading, .temperature, .{
             .info_line = temperature_info,
         });
         const power_info = if (sample == .metal)
@@ -79,7 +79,7 @@ pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
             })
         else
             null;
-        charts[3] = try common.powerChart(ctx, self.state, index, reading, power_info);
+        charts[3] = try common.historyChart(ctx, self.state, index, reading, .power, .{ .info_line = power_info });
     }
     var chart_widgets: [4]vxfw.Widget = undefined;
     for (charts[0..chart_count], 0..) |*chart, position| chart_widgets[position] = ui.widget(chart);

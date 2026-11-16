@@ -93,7 +93,9 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
     var nodes: std.ArrayList(u32) = .empty;
     var it = drm.iterate();
     while (try it.next(io)) |entry| {
-        if (renderNode(entry.name)) |node| try nodes.append(arena, node);
+        const suffix = std.mem.cutPrefix(u8, entry.name, "renderD") orelse continue;
+        const node = std.fmt.parseInt(u32, suffix, 10) catch continue;
+        try nodes.append(arena, node);
     }
     std.mem.sort(u32, nodes.items, {}, std.sort.asc(u32));
 
@@ -102,7 +104,9 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
     errdefer for (gpus.items) |gpu| gpu.close();
     var devices: std.ArrayList(smi.Device) = try .initCapacity(arena, nodes.items.len);
     for (nodes.items) |node| {
-        const dir = openDevice(drm, node) catch continue;
+        var path: [32]u8 = undefined;
+        const subpath = std.fmt.bufPrint(&path, "renderD{d}/device", .{node}) catch continue;
+        const dir = drm.openDir(subpath) catch continue;
         const gpu = openGpu(arena, dir) catch {
             dir.close();
             continue;
@@ -120,16 +124,6 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
         .busy = .init(gpa),
         .cycles = .init(gpa),
     };
-}
-
-fn renderNode(entry: []const u8) ?u32 {
-    if (!std.mem.startsWith(u8, entry, "renderD")) return null;
-    return std.fmt.parseInt(u32, entry["renderD".len..], 10) catch null;
-}
-
-fn openDevice(drm: smi.sysfs.Dir, node: u32) !smi.sysfs.Dir {
-    var path: [32]u8 = undefined;
-    return drm.openDir(try std.fmt.bufPrint(&path, "renderD{d}/device", .{node}));
 }
 
 fn openGpu(arena: std.mem.Allocator, dir: smi.sysfs.Dir) !Gpu {
@@ -193,9 +187,13 @@ pub fn poll(self: *OneApi, scratch: std.mem.Allocator, reading: *smi.Reading) !v
         fields.pcie_bandwidth_mbps = link.mbps();
 
         const hwmon = gpu.hwmon orelse continue;
-        // hwmon reports millidegrees, microwatts and microjoules.
-        if (hwmon.temperature) |file| fields.temperature = hwmon.dir.scaled(file, .milli, .one) catch null;
-        if (hwmon.power_limit) |file| fields.power_limit_mw = hwmon.dir.scaled(file, .micro, .milli) catch null;
+        fields.poll(.{&hwmon}, .{
+            .read = smi.hwmon.readScalar,
+            .fields = .{
+                .temperature = .{ .temperature, .milli, .one },
+                .power_limit_mw = .{ .power_limit, .micro, .milli },
+            },
+        });
         if (hwmon.energy) |file| {
             // Energy is a running total: its growth per second is microwatts.
             if (hwmon.dir.int(u64, file)) |microjoules| {

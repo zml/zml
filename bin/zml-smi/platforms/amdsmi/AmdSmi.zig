@@ -116,6 +116,14 @@ pub fn poll(self: *AmdSmi, scratch: std.mem.Allocator, reading: *smi.Reading) !v
     for (self.gpus, reading.samples) |gpu, *sample| {
         const fields = &sample.rocm;
         const handle = gpu.handle;
+        fields.poll(.{ api, handle }, .{
+            .read = smi.dynlib.readScalar,
+            .fields = .{
+                .temperature = .{ .amdsmi_get_temp_metric, .{ c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT } },
+                .mem_used_bytes = .{ .amdsmi_get_gpu_memory_usage, .{c.AMDSMI_MEM_TYPE_VRAM} },
+                .mem_total_bytes = .{ .amdsmi_get_gpu_memory_total, .{c.AMDSMI_MEM_TYPE_VRAM} },
+            },
+        });
 
         // Watts: the current power where the GPU has it, else the average.
         if (api.amdsmi_get_gpu_metrics_info.get(.{handle})) |metrics| {
@@ -123,9 +131,6 @@ pub fn poll(self: *AmdSmi, scratch: std.mem.Allocator, reading: *smi.Reading) !v
         } else |_| {}
         if (api.amdsmi_get_power_info.get(.{handle})) |info| {
             if (known(info.power_limit)) |microwatts| fields.power_limit_mw = smi.units.scale(microwatts, .micro, .milli);
-        } else |_| {}
-        if (api.amdsmi_get_temp_metric.get(.{ handle, c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT })) |celsius| {
-            fields.temperature = std.math.cast(u64, celsius);
         } else |_| {}
         if (api.amdsmi_get_gpu_fan_speed.get(.{ handle, 0 })) |speed| {
             if (std.math.cast(u64, speed)) |pwm| fields.fan_speed_percent = smi.hwmon.pwmPercent(pwm);
@@ -146,9 +151,6 @@ pub fn poll(self: *AmdSmi, scratch: std.mem.Allocator, reading: *smi.Reading) !v
             fields.clock_mem_mhz = known(clock.clk);
             fields.clock_mem_max_mhz = known(clock.max_clk);
         } else |_| {}
-
-        fields.mem_used_bytes = api.amdsmi_get_gpu_memory_usage.get(.{ handle, c.AMDSMI_MEM_TYPE_VRAM }) catch null;
-        fields.mem_total_bytes = api.amdsmi_get_gpu_memory_total.get(.{ handle, c.AMDSMI_MEM_TYPE_VRAM }) catch null;
 
         if (api.amdsmi_get_pcie_info.get(.{handle})) |pcie| {
             const link: smi.pci.Link = .{ .gen = known(pcie.pcie_static.pcie_interface_version), .width = known(pcie.pcie_metric.pcie_width) };

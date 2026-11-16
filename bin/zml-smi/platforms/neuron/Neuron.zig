@@ -137,6 +137,27 @@ pub fn close(self: *Neuron) void {
     self.busy.deinit();
 }
 
+const memory_poll = .{
+    .read = readCategory,
+    .fields = .{
+        .nc_tensors = "tensors",
+        .nc_constants = "constants",
+        .nc_model_code = "model_code",
+        .nc_shared_scratchpad = "model_shared_scratchpad",
+        .nc_nonshared_scratchpad = "nonshared_scratchpad",
+        .nc_runtime = "runtime_memory",
+        .nc_driver = "driver_memory",
+        .nc_dma_rings = "dma_rings",
+        .nc_collectives = "collectives",
+        .nc_notifications = "notifications",
+        .nc_uncategorized = "uncategorized",
+    },
+};
+
+fn readCategory(dir: smi.sysfs.Dir, comptime category: []const u8) ?u64 {
+    return dir.int(u64, category ++ "/total") catch null;
+}
+
 pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
     const samples = reading.samples;
     defer self.busy.sweep();
@@ -152,18 +173,7 @@ pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *smi.Reading) !v
             const core = &sample.neuron;
             core.mem_used_bytes = mem_used;
             core.mem_total_bytes = chip.mem_total_bytes;
-            const dir = memory orelse continue;
-            core.nc_tensors = dir.int(u64, "tensors/total") catch null;
-            core.nc_constants = dir.int(u64, "constants/total") catch null;
-            core.nc_model_code = dir.int(u64, "model_code/total") catch null;
-            core.nc_shared_scratchpad = dir.int(u64, "model_shared_scratchpad/total") catch null;
-            core.nc_nonshared_scratchpad = dir.int(u64, "nonshared_scratchpad/total") catch null;
-            core.nc_runtime = dir.int(u64, "runtime_memory/total") catch null;
-            core.nc_driver = dir.int(u64, "driver_memory/total") catch null;
-            core.nc_dma_rings = dir.int(u64, "dma_rings/total") catch null;
-            core.nc_collectives = dir.int(u64, "collectives/total") catch null;
-            core.nc_notifications = dir.int(u64, "notifications/total") catch null;
-            core.nc_uncategorized = dir.int(u64, "uncategorized/total") catch null;
+            if (memory) |dir| core.poll(.{dir}, memory_poll);
         }
 
         self.scan(scratch, chip.handle, @intCast(first), cores, reading) catch |err| {

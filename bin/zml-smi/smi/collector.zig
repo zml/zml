@@ -46,11 +46,11 @@ pub const Collector = struct {
     const Source = struct {
         context: *anyopaque,
         read: *const fn (*anyopaque, std.mem.Allocator, *Reading) anyerror!void,
-        close: ?*const fn (*anyopaque) void,
+        close: *const fn (*anyopaque) void,
         first: usize,
         scratch: std.heap.ArenaAllocator,
         readings: smi.DoubleBuffer(Reading),
-        history: []HistoryPoint,
+        history: [][history_capacity]HistoryPoint,
         next: usize = 0,
         count: usize = 0,
     };
@@ -78,7 +78,7 @@ pub const Collector = struct {
         self.stopping.store(true, .release);
         self.tasks.cancel(self.io);
         for (self.sources.items) |source| {
-            if (source.close) |close| close(source.context);
+            source.close(source.context);
             source.readings.deinit();
             source.scratch.deinit();
         }
@@ -97,17 +97,14 @@ pub const Collector = struct {
 
             fn close(context: *anyopaque) void {
                 const backend: *Backend = @ptrCast(@alignCast(context));
-                backend.close();
+                if (@hasDecl(Backend, "close")) backend.close();
             }
         };
         const backend = try self.arena.create(Backend);
         backend.* = try @call(.auto, Backend.open, .{ self.arena, self.gpa, self.io } ++ args);
-        errdefer if (@hasDecl(Backend, "close")) backend.close();
+        errdefer Adapter.close(backend);
         const count = backend.devices.len;
-        if (count == 0) {
-            if (@hasDecl(Backend, "close")) backend.close();
-            return;
-        }
+        if (count == 0) return Adapter.close(backend);
         const first = self.devices.items.len;
         if (count > std.math.maxInt(u16) - first) return error.TooManyDevices;
 
@@ -115,12 +112,12 @@ pub const Collector = struct {
         source.* = .{
             .context = backend,
             .read = Adapter.read,
-            .close = if (@hasDecl(Backend, "close")) Adapter.close else null,
+            .close = Adapter.close,
             .first = first,
             .scratch = .init(self.gpa),
             .readings = .{ .values = undefined },
             .history = if (self.keep_history)
-                try self.arena.alloc(HistoryPoint, count * history_capacity)
+                try self.arena.alloc([history_capacity]HistoryPoint, count)
             else
                 &.{},
         };
@@ -162,8 +159,7 @@ pub const Collector = struct {
         defer _ = source.scratch.reset(.retain_capacity);
         for (back.samples, devices) |*sample, device| sample.* = .init(device.target);
         _ = slot.arena.reset(.retain_capacity);
-        back.processes = .empty;
-        back.host = .{};
+        back.* = .{ .samples = back.samples, .allocator = back.allocator };
         source.read(source.context, source.scratch.allocator(), back) catch
             back.processes.clearRetainingCapacity();
         for (back.samples, devices) |*sample, device| {
@@ -174,11 +170,8 @@ pub const Collector = struct {
         _ = source.readings.lock(self.io);
         defer source.readings.unlock(self.io);
         if (source.history.len != 0) {
-            for (back.samples, 0..) |sample, index| {
-                source.history[index * history_capacity + source.next] = .{
-                    .at = completed,
-                    .common = sample.common(),
-                };
+            for (source.history, back.samples) |*ring, sample| {
+                ring[source.next] = .{ .at = completed, .common = sample.common() };
             }
             source.next = (source.next + 1) % history_capacity;
             source.count = @min(source.count + 1, history_capacity);
@@ -219,6 +212,7 @@ pub const Collector = struct {
             try frame.alloc([]const HistoryPoint, samples.len)
         else
             &.{};
+        @memset(histories, &.{});
         var processes: std.ArrayList(smi.ProcessInfo) = .empty;
         var power: smi.HostData = .{};
         for (self.sources.items) |source| {
@@ -236,17 +230,13 @@ pub const Collector = struct {
             if (front.host.cpu_power_mw) |value| power.cpu_power_mw = value;
             if (front.host.system_power_mw) |value| power.system_power_mw = value;
 
-            if (with_history) {
+            if (with_history and source.count != 0) {
                 const first = (source.next + history_capacity - source.count) % history_capacity;
                 const split = @min(source.count, history_capacity - first);
-                for (histories[source.first..][0..front.samples.len], 0..) |*history, index| {
-                    history.* = &.{};
-                    if (source.count == 0) continue;
-                    const ring = source.history[index * history_capacity ..][0..history_capacity];
-                    const points = try frame.alloc(HistoryPoint, source.count);
-                    @memcpy(points[0..split], ring[first..][0..split]);
-                    @memcpy(points[split..], ring[0 .. source.count - split]);
-                    history.* = points;
+                for (histories[source.first..][0..front.samples.len], source.history) |*history, *ring| {
+                    history.* = try std.mem.concat(frame, HistoryPoint, &.{
+                        ring[first..][0..split], ring[0 .. source.count - split],
+                    });
                 }
             }
         }

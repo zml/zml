@@ -25,35 +25,55 @@ pub fn historyChart(
     ctx: vxfw.DrawContext,
     state: *const data.SystemState,
     id: u16,
+    reading: smi.Common,
     kind: data.Metric,
     opts: struct {
         title: ?[]const u8 = null,
         info_line: ?[]const u8 = null,
     },
 ) std.mem.Allocator.Error!Chart {
-    const reading = state.sample(id).common();
-    if (kind == .power) return powerChart(ctx, state, id, reading, opts.info_line);
     const history = try state.history(ctx.arena, id, kind);
-    const temperature = kind == .temperature;
-    const minimum: u32 = if (temperature) 20 else 0;
+    const minimum: u32 = if (kind == .temperature) 20 else 0;
+    const limit = reading.power_limit_mw orelse 0;
+    const maximum: u32 = if (kind == .power) maximum_blk: {
+        var ceiling = limit;
+        if (limit == 0) {
+            ceiling = reading.power_mw orelse 0;
+            for (history) |value| ceiling = @max(ceiling, value orelse 0);
+        }
+        const whole_watts = ceiling / 1000 + @intFromBool(ceiling % 1000 != 0);
+        break :maximum_blk std.math.lossyCast(u32, @max(2, whole_watts));
+    } else 100;
+    // Normalize power in milliwatts while labeling its axis in watts.
+    const scale: u64 = if (kind == .power) 1000 else 1;
+    const unit: []const u8 = switch (kind) {
+        .util, .memory => "%",
+        .temperature => "\u{00b0}C",
+        .power => "W",
+    };
     return .{
         .title = opts.title orelse switch (kind) {
             .util => "Utilization",
             .memory => "Memory",
             .temperature => "Temperature",
-            .power => unreachable,
+            .power => "Power",
         },
-        .data = try utils.normalizeRange(ctx.arena, history, minimum, 100),
+        .data = try utils.normalizeRange(ctx.arena, history, minimum, @as(u64, maximum) * scale),
         .value_label = switch (kind) {
             .util => try metric(ctx.arena, reading.util_percent, "%"),
             .memory => try memoryPercent(ctx.arena, reading),
-            .temperature => try metric(ctx.arena, reading.temperature, "\u{00b0}C"),
-            .power => unreachable,
+            .temperature => try metric(ctx.arena, reading.temperature, unit),
+            .power => try watts(ctx.arena, reading.power_mw),
         },
-        .info_line = opts.info_line,
+        .info_line = opts.info_line orelse if (kind != .power)
+            null
+        else if (limit > 0)
+            try std.fmt.allocPrint(ctx.arena, "Limit {s}", .{try watts(ctx.arena, limit)})
+        else
+            "Limit N/A",
         .y_min = minimum,
-        .y_max = 100,
-        .y_unit = if (temperature) "\u{00b0}C" else "%",
+        .y_max = maximum,
+        .y_unit = unit,
         .chart_height = 8,
         .sample_interval_ms = state.historyInterval(),
     };
@@ -98,39 +118,6 @@ pub fn memoryInfo(
 pub fn watts(arena: std.mem.Allocator, milliwatts: ?u64) std.mem.Allocator.Error![]const u8 {
     const value = milliwatts orelse return "N/A";
     return std.fmt.allocPrint(arena, "{d}.{d}W", .{ value / 1000, value % 1000 / 100 });
-}
-
-/// Keeps missing samples as gaps and scales raw milliwatts without rounding them to watts.
-pub fn powerChart(
-    ctx: vxfw.DrawContext,
-    state: *const data.SystemState,
-    index: u16,
-    reading: smi.Common,
-    info_line: ?[]const u8,
-) std.mem.Allocator.Error!Chart {
-    const history = try state.history(ctx.arena, index, .power);
-    var highest = reading.power_mw orelse 0;
-    for (history) |value| {
-        if (value) |milliwatts| highest = @max(highest, milliwatts);
-    }
-    const limit = reading.power_limit_mw orelse 0;
-    const ceiling = if (limit > 0) limit else highest;
-    const whole_watts = ceiling / 1000 + @intFromBool(ceiling % 1000 != 0);
-    const maximum: u32 = std.math.lossyCast(u32, @max(2, whole_watts));
-    return .{
-        .title = "Power",
-        .data = try utils.normalizeRange(ctx.arena, history, 0, @as(u64, maximum) * 1000),
-        .value_label = try watts(ctx.arena, reading.power_mw),
-        .info_line = info_line orelse if (limit > 0)
-            try std.fmt.allocPrint(ctx.arena, "Limit {s}", .{try watts(ctx.arena, limit)})
-        else
-            "Limit N/A",
-        .y_min = 0,
-        .y_max = maximum,
-        .y_unit = "W",
-        .chart_height = 8,
-        .sample_interval_ms = state.historyInterval(),
-    };
 }
 
 /// Draws a page-level layout with standard margin (top=1, left/right=2) inside a full-width surface.

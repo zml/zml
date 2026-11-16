@@ -1,5 +1,6 @@
 //! The core of zml-smi: the model, the collector, the blocks platforms are made of, and the outputs.
 const builtin = @import("builtin");
+const std = @import("std");
 
 const model = @import("model.zig");
 pub const Target = model.Target;
@@ -42,3 +43,11 @@ pub const csv = @import("csv.zig");
 pub const json = @import("json.zig");
 pub const prometheus = @import("prometheus.zig");
 pub const api = @import("api.zig");
+
+const Serializer = *const fn (*std.Io.Writer, []const Device, Collector.Snapshot) std.Io.Writer.Error!void;
+
+pub fn write(writer: *std.Io.Writer, source: *Collector, serialize: Serializer) !void {
+    var frame: std.heap.ArenaAllocator = .init(source.gpa);
+    defer frame.deinit();
+    try serialize(writer, source.devices.items, try source.capture(frame.allocator(), false));
+}

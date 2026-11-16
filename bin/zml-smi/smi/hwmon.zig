@@ -37,6 +37,12 @@ pub fn resolve(arena: std.mem.Allocator, dir: sysfs.Dir, candidates: []const Can
     return null;
 }
 
+/// A binding names the sensor's path field and unit conversion.
+pub fn readScalar(sensors: anytype, comptime binding: anytype) ?u64 {
+    const file = @field(sensors.*, @tagName(binding[0])) orelse return null;
+    return sensors.dir.scaled(file, binding[1], binding[2]) catch null;
+}
+
 fn fileName(dir: sysfs.Dir, candidate: Candidate, buffer: []u8) ?[]const u8 {
     const label = candidate.label orelse
         return std.fmt.bufPrint(buffer, "{s}_{s}", .{ candidate.prefix, candidate.suffix }) catch null;

@@ -3,12 +3,9 @@ const smi = @import("smi.zig");
 
 /// One table per target: index, type, remote, the strings of the device, then the fields of its sample.
 /// A device column that is empty for the whole table is left out.
-pub fn write(writer: *std.Io.Writer, collector: *smi.Collector) !void {
-    var frame: std.heap.ArenaAllocator = .init(collector.gpa);
-    defer frame.deinit();
-    const snapshot = try collector.capture(frame.allocator(), false);
+pub fn write(writer: *std.Io.Writer, devices: []const smi.Device, snapshot: smi.Collector.Snapshot) !void {
     inline for (@typeInfo(smi.Target).@"enum".field_names) |name| {
-        try writeTable(writer, collector.devices.items, snapshot.samples, @field(smi.Target, name));
+        try writeTable(writer, devices, snapshot.samples, @field(smi.Target, name));
     }
 }
 

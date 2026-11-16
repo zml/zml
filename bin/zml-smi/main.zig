@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.csv or args.json) {
         var buffer: [4096]u8 = undefined;
         var stdout = std.Io.File.stdout().writer(io, &buffer);
-        try if (args.csv) smi.csv.write(&stdout.interface, &collector) else smi.json.write(&stdout.interface, &collector);
+        try smi.write(&stdout.interface, &collector, if (args.csv) smi.csv.write else smi.json.write);
         return stdout.interface.flush();
     }
 

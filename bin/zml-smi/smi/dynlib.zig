@@ -42,6 +42,13 @@ pub fn openBundled(comptime Api: type, io: std.Io, name: []const u8) !Api {
     return open(Api, &.{path});
 }
 
+/// A scalar binding supplies a checked getter and the arguments after the handle.
+pub fn readScalar(api: anytype, handle: anytype, comptime spec: anytype) ?u64 {
+    const getter = @field(api.*, @tagName(spec[0]));
+    const value = getter.get(.{handle} ++ spec[1]) catch return null;
+    return std.math.cast(u64, value);
+}
+
 /// A C function that reports failure through its return value, turned into an error by `check`.
 pub fn Checked(comptime function: anytype, comptime check: anytype) type {
     const Function = if (@TypeOf(function) == type) function else @TypeOf(function);

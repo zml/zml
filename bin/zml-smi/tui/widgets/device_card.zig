@@ -7,6 +7,7 @@ const theme = @import("../theme.zig");
 const utils = @import("../lib/utils.zig");
 const ui = @import("../lib/ui.zig");
 const image_cache = @import("../image_cache.zig");
+const Gauge = @import("gauge.zig");
 const MetricCard = @import("metric_card.zig");
 
 const DeviceCard = @This();
@@ -94,36 +95,29 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         mem_pad, mem_used_str, mem_total_str,
     });
 
-    var card: MetricCard = .{
-        .title = card_title,
-        .title_image = image_cache.global.get(device.target),
-        .title_right = if (device.remote) "remote" else null,
-        .cell_size = ctx.cell_size,
-        .highlighted = self.highlighted,
-    };
-
-    var chart_entries = [2]MetricCard.ChartEntry{
-        .{ .label = usage.util_label, .value = util_percent, .suffix = suffix, .data = &.{} },
-        .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix, .data = &.{} },
-    };
-    const gauge_entries = [2]MetricCard.GaugeEntry{
+    var gauges = [2]Gauge{
         .{ .label = usage.util_label, .value = util_percent, .suffix = suffix },
         .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix },
     };
-
     if (self.use_braille) {
-        for (&chart_entries, [_]data.Metric{ .util, .memory }) |*entry, metric| {
-            entry.data = try utils.normalizeRange(
+        for (&gauges, [_]data.Metric{ .util, .memory }) |*gauge, metric| {
+            gauge.history = try utils.normalizeRange(
                 ctx.arena,
                 try self.state.history(ctx.arena, i, metric),
                 0,
                 100,
             );
         }
-        card.charts = &chart_entries;
-    } else {
-        card.gauges = &gauge_entries;
     }
+
+    const card: MetricCard = .{
+        .title = card_title,
+        .title_image = image_cache.global.get(device.target),
+        .title_right = if (device.remote) "remote" else null,
+        .cell_size = ctx.cell_size,
+        .gauges = &gauges,
+        .highlighted = self.highlighted,
+    };
 
     var card_surf = try card.draw(ctx);
     card_surf.widget = ui.widget(self);

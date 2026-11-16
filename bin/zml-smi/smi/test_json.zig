@@ -18,7 +18,7 @@ test "snapshot JSON preserves target shape, nulls, zeroes, and process fields" {
         .remote = true,
     }};
 
-    try json.testing.snapshot(&output.writer, &devices, .{
+    try json.write(&output.writer, &devices, .{
         .samples = &samples,
         .processes = &processes,
         .host = .{},

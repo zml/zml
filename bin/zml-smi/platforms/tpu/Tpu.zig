@@ -66,9 +66,11 @@ pub fn poll(self: *Tpu, _: std.mem.Allocator, reading: *smi.Reading) !void {
     const total = query(c_longlong, "tpu.runtime.hbm.memory.total.bytes");
     const duty = query(f64, "tpu.runtime.tensorcore.dutycycle.percent");
     for (samples[0..@min(samples.len, max_devices)], 0..) |*sample, index| {
-        sample.tpu.util_percent = duty[index];
-        sample.tpu.mem_used_bytes = used[index];
-        sample.tpu.mem_total_bytes = total[index];
+        sample.tpu = .{
+            .util_percent = duty[index],
+            .mem_used_bytes = used[index],
+            .mem_total_bytes = total[index],
+        };
     }
 
     var holders: smi.proc.FdHolders = .init(self.io, &.{ "/dev/accel", "/dev/vfio/" });

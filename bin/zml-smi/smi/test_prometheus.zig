@@ -29,7 +29,7 @@ test "snapshot output preserves family order, missing values, labels and unit co
     };
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try prometheus.testing.snapshot(&output.writer, &devices, .{
+    try prometheus.write(&output.writer, &devices, .{
         .samples = &samples,
         .processes = &.{},
         .histories = &.{},

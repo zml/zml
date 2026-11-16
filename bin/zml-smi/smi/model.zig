@@ -1,4 +1,5 @@
 const std = @import("std");
+const telemetry = @import("telemetry.zig");
 
 pub const Target = enum { cuda, rocm, oneapi, neuron, tpu, furiosa, metal };
 
@@ -97,6 +98,8 @@ pub const Gpu = struct {
     pcie_bandwidth_mbps: ?u64 = null,
     pcie_link_gen: ?u64 = null,
     pcie_link_width: ?u64 = null,
+
+    pub const poll = telemetry.poll;
 };
 
 /// One Neuron core.
@@ -116,6 +119,8 @@ pub const Neuron = struct {
     nc_collectives: ?u64 = null,
     nc_notifications: ?u64 = null,
     nc_uncategorized: ?u64 = null,
+
+    pub const poll = telemetry.poll;
 };
 
 pub const Tpu = struct {
@@ -142,6 +147,8 @@ pub const Furiosa = struct {
     /// A bitmask whose bits are `ThrottleReason`s.
     throttle_reasons: ?u64 = null,
 
+    pub const poll = telemetry.poll;
+
     pub const Governor = enum(u64) { performance, powersave };
     pub const Liveness = enum(u64) { unknown, alive };
     pub const ThrottleReason = enum(u6) { idle, thermal_slowdown, app_power_cap, app_clock_cap, hw_clock_cap, hw_bus_limit, hw_power_cap, gov_clock_cap, other };
@@ -161,6 +168,8 @@ pub const Metal = struct {
     clock_graphics_max_mhz: ?u64 = null,
     /// The Neural Engine.
     ane_power_mw: ?u64 = null,
+
+    pub const poll = telemetry.poll;
 };
 
 pub const ProcessInfo = struct {

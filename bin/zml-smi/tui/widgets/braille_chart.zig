@@ -37,31 +37,22 @@ pub fn renderTo(self: *const BrailleChart, arena: std.mem.Allocator, surface: *v
 
     for (0..w) |cell_col| {
         var max_val: u8 = 0;
-        for (0..2) |dx| {
-            const dot_x: u32 = @as(u32, @intCast(cell_col)) * 2 + @as(u32, @intCast(dx));
-            if (dot_x + data_len >= dot_cols) {
-                if (self.values[@intCast(dot_x + data_len - dot_cols)]) |value| {
-                    max_val = @max(max_val, value);
-                }
-            }
+        var thresholds: [2]u32 = @splat(dot_rows);
+        for (&thresholds, 0..) |*threshold, offset| {
+            const dot_x: u32 = @intCast(cell_col * 2 + offset);
+            if (dot_x + data_len < dot_cols) continue;
+            const value = self.values[dot_x + data_len - dot_cols] orelse continue;
+            max_val = @max(max_val, value);
+            threshold.* = dot_rows - @as(u32, value) * dot_rows / 100;
         }
         const color = theme.colorForPercent(max_val);
 
         for (0..h) |cell_row| {
             var pattern: u8 = 0;
-            for (0..2) |dx| {
-                const dot_x: u32 = @as(u32, @intCast(cell_col)) * 2 + @as(u32, @intCast(dx));
-                if (dot_x + data_len >= dot_cols) {
-                    const val = self.values[@intCast(dot_x + data_len - dot_cols)] orelse continue;
-                    const fill: u32 = @as(u32, val) * dot_rows / 100;
-                    const threshold: u32 = dot_rows - fill;
-                    for (0..4) |dr| {
-                        const abs_row: u32 = @as(u32, @intCast(cell_row)) * 4 + @as(u32, @intCast(dr));
-                        if (abs_row >= threshold) {
-                            pattern |= dot_bits[dr][dx];
-                        }
-                    }
-                }
+            for (dot_bits, 0..) |bits, dot_row| {
+                const row = cell_row * 4 + dot_row;
+                if (row >= thresholds[0]) pattern |= bits[0];
+                if (row >= thresholds[1]) pattern |= bits[1];
             }
 
             const buf = try arena.alloc(u8, 3);

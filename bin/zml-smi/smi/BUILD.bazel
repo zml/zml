@@ -19,6 +19,7 @@ _SRCS = [
     "remote.zig",
     "sandbox.zig",
     "sysfs.zig",
+    "telemetry.zig",
     "units.zig",
 ]
 

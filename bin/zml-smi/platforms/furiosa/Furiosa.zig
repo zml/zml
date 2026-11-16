@@ -64,6 +64,7 @@ const Hwmon = struct {
     temperature: ?[]const u8,
     ambient: ?[]const u8,
     power: ?[]const u8,
+    power_limit: ?[]const u8 = "power1_max",
 
     fn open(arena: std.mem.Allocator, device: smi.sysfs.Dir) ?Hwmon {
         const dir = smi.hwmon.find(device, null) catch return null;
@@ -188,12 +189,15 @@ pub fn poll(self: *Furiosa, scratch: std.mem.Allocator, reading: *smi.Reading) !
             fields.mem_used_bytes = self.memoryInUse(chip, in_use);
         }
 
-        const hwmon = chip.hwmon orelse continue;
-        // hwmon reports millidegrees and microwatts.
-        if (hwmon.temperature) |file| fields.temperature = hwmon.dir.scaled(file, .milli, .one) catch null;
-        if (hwmon.ambient) |file| fields.ambient_temperature = hwmon.dir.scaled(file, .milli, .one) catch null;
-        if (hwmon.power) |file| fields.power_mw = hwmon.dir.scaled(file, .micro, .milli) catch null;
-        fields.power_limit_mw = hwmon.dir.scaled("power1_max", .micro, .milli) catch null;
+        if (chip.hwmon) |*hwmon| fields.poll(.{hwmon}, .{
+            .read = smi.hwmon.readScalar,
+            .fields = .{
+                .temperature = .{ .temperature, .milli, .one },
+                .ambient_temperature = .{ .ambient, .milli, .one },
+                .power_mw = .{ .power, .micro, .milli },
+                .power_limit_mw = .{ .power_limit, .micro, .milli },
+            },
+        });
     }
 
     // The cores each process holds on each chip, from the chip and core nodes it has open.

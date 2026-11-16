@@ -111,14 +111,7 @@ const host: HostMetrics = .{
     .system_power_mw = .{ .name = "zml_host_system_power_watts", .help = "System power draw in watts", .decimals = 3 },
 };
 
-pub fn write(writer: *std.Io.Writer, collector: *smi.Collector) !void {
-    var frame: std.heap.ArenaAllocator = .init(collector.gpa);
-    defer frame.deinit();
-    const snapshot = try collector.capture(frame.allocator(), false);
-    try writeSnapshot(writer, collector.devices.items, snapshot);
-}
-
-fn writeSnapshot(
+pub fn write(
     writer: *std.Io.Writer,
     devices: []const smi.Device,
     snapshot: smi.Collector.Snapshot,
@@ -183,7 +176,3 @@ fn number(writer: *std.Io.Writer, comptime family: Metric, value: anytype) !void
     const one = comptime std.math.pow(u64, 10, family.decimals);
     try writer.print(std.fmt.comptimePrint("{{d}}.{{d:0>{d}}}", .{family.decimals}), .{ scaled / one, scaled % one });
 }
-
-pub const testing = if (@import("builtin").is_test) struct {
-    pub const snapshot = writeSnapshot;
-} else struct {};

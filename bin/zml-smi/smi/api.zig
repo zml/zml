@@ -48,11 +48,10 @@ fn answer(gpa: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, collect
         }
 
         body.clearRetainingCapacity();
-        const written = switch (format) {
-            .json => smi.json.write(&body.writer, collector),
-            .prometheus => smi.prometheus.write(&body.writer, collector),
-        };
-        written catch return;
+        smi.write(&body.writer, collector, switch (format) {
+            .json => smi.json.write,
+            .prometheus => smi.prometheus.write,
+        }) catch return;
 
         request.respond(body.written(), .{ .extra_headers = switch (format) {
             .json => &.{

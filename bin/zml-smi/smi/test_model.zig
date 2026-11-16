@@ -58,3 +58,32 @@ fn expectFields(comptime Record: type, expected: []const u8) !void {
     }
     try std.testing.expect(names.next() == null);
 }
+
+test "poll reads each query once and fills only its declared fields" {
+    var reader: PollReader = .{};
+    var sample: model.Gpu = .{ .temperature = 70, .pcie_tx_kbps = 1000 };
+    sample.poll(.{&reader}, .{
+        .read = PollReader.readScalar,
+        .fields = .{ .temperature = .sensor },
+        .query = PollReader.readMemory,
+    });
+    try std.testing.expectEqual(1, reader.memory_reads);
+    try std.testing.expectEqualDeep(model.Gpu{
+        .pcie_tx_kbps = 1000,
+        .mem_used_bytes = 4096,
+        .mem_total_bytes = 8192,
+    }, sample);
+}
+
+const PollReader = struct {
+    memory_reads: usize = 0,
+
+    fn readScalar(_: *PollReader, comptime _: anytype) ?u64 {
+        return null;
+    }
+
+    fn readMemory(self: *PollReader) struct { mem_used_bytes: u64, mem_total_bytes: u64 } {
+        self.memory_reads += 1;
+        return .{ .mem_used_bytes = 4096, .mem_total_bytes = 8192 };
+    }
+};

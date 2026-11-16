@@ -15,10 +15,8 @@ title_right: ?[]const u8 = null,
 cell_size: vxfw.Size = .{},
 /// Lines of "label: value" pairs to display.
 lines: []const LineEntry = &.{},
-/// Optional gauge bars.
-gauges: []const GaugeEntry = &.{},
-/// Optional braille mini-charts.
-charts: []const ChartEntry = &.{},
+/// Gauges with bars or braille history.
+gauges: []const Gauge = &.{},
 /// Whether this card is highlighted (e.g. hovered).
 highlighted: bool = false,
 
@@ -26,20 +24,6 @@ pub const LineEntry = struct {
     label: []const u8,
     value: []const u8,
     style: vaxis.Cell.Style = theme.value_style,
-};
-
-pub const GaugeEntry = struct {
-    label: []const u8,
-    value: ?u8,
-    suffix: ?[]const u8 = null,
-};
-
-pub const ChartEntry = struct {
-    label: []const u8,
-    value: ?u8,
-    suffix: ?[]const u8 = null,
-    data: []const ?u8, // history values 0-100; null leaves a gap
-    chart_height: u16 = 3,
 };
 
 pub fn draw(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -58,42 +42,26 @@ pub fn draw(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator.Er
     return tb.draw(ctx);
 }
 
-fn maxFieldWidth(ctx: vxfw.DrawContext, entries: anytype, comptime field: []const u8) u16 {
-    var max_w: u16 = 0;
-    for (entries) |entry| {
-        const raw = @field(entry, field);
-        const value: []const u8 = if (@typeInfo(@TypeOf(raw)) == .optional) raw orelse continue else raw;
-        max_w = @max(max_w, @as(u16, @intCast(ctx.stringWidth(value))));
-    }
-    return max_w;
-}
-
 fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const inner_w = ctx.max.width orelse 40;
 
     var sb = compose.surfaceBuilder(ctx.arena);
     var row: i17 = 0;
 
-    // Both presentations share alignment, percentage, suffix, and row spacing.
-    inline for (.{ self.charts, self.gauges }) |entries| {
-        const label_width = maxFieldWidth(ctx, entries, "label") + 1;
-        const suffix_width = maxFieldWidth(ctx, entries, "suffix") + Gauge.sep_w;
-        for (entries) |entry| {
-            if (row > 0) row += 1;
-            const has_history = @hasField(@TypeOf(entry), "data");
-            const gauge: Gauge = .{
-                .value = entry.value,
-                .label = entry.label,
-                .suffix = entry.suffix,
-                .history = if (has_history) entry.data else null,
-                .chart_height = if (has_history) entry.chart_height else 1,
-                .label_reserve = label_width,
-                .suffix_reserve = suffix_width,
-            };
-            const surface = try gauge.draw(ui.fixedWidth(ctx, inner_w));
-            try sb.add(row, 0, surface);
-            row += @intCast(surface.size.height);
-        }
+    var label_width: usize = 0;
+    var suffix_width: usize = 0;
+    for (self.gauges) |gauge| {
+        if (gauge.label) |label| label_width = @max(label_width, ctx.stringWidth(label));
+        if (gauge.suffix) |suffix| suffix_width = @max(suffix_width, ctx.stringWidth(suffix));
+    }
+    for (self.gauges) |entry| {
+        if (row > 0) row += 1;
+        var gauge = entry;
+        gauge.label_reserve = @intCast(label_width + 1);
+        gauge.suffix_reserve = @intCast(suffix_width + Gauge.sep_w);
+        const surface = try gauge.draw(ui.fixedWidth(ctx, inner_w));
+        try sb.add(row, 0, surface);
+        row += @intCast(surface.size.height);
     }
 
     // Text lines

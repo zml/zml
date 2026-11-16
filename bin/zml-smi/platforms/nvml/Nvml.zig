@@ -116,6 +116,30 @@ pub fn close(self: *Nvml) void {
     _ = self.api.nvmlShutdown();
 }
 
+const poll_plan = .{
+    .read = smi.dynlib.readScalar,
+    .fields = .{
+        .power_mw = .{ .nvmlDeviceGetPowerUsage, .{} },
+        .power_limit_mw = .{ .nvmlDeviceGetEnforcedPowerLimit, .{} },
+        .temperature = .{ .nvmlDeviceGetTemperature, .{c.NVML_TEMPERATURE_GPU} },
+        .fan_speed_percent = .{ .nvmlDeviceGetFanSpeed, .{} },
+        .clock_graphics_mhz = .{ .nvmlDeviceGetClockInfo, .{c.NVML_CLOCK_GRAPHICS} },
+        .clock_sm_mhz = .{ .nvmlDeviceGetClockInfo, .{c.NVML_CLOCK_SM} },
+        .clock_mem_mhz = .{ .nvmlDeviceGetClockInfo, .{c.NVML_CLOCK_MEM} },
+        .clock_graphics_max_mhz = .{ .nvmlDeviceGetMaxClockInfo, .{c.NVML_CLOCK_GRAPHICS} },
+        .clock_mem_max_mhz = .{ .nvmlDeviceGetMaxClockInfo, .{c.NVML_CLOCK_MEM} },
+        .mem_bus_width = .{ .nvmlDeviceGetMemoryBusWidth, .{} },
+        .pcie_link_gen = .{ .nvmlDeviceGetCurrPcieLinkGeneration, .{} },
+        .pcie_link_width = .{ .nvmlDeviceGetCurrPcieLinkWidth, .{} },
+    },
+    .query = readMemory,
+};
+
+fn readMemory(api: *const Api, handle: c.nvmlDevice_t) struct { mem_used_bytes: ?u64 = null, mem_total_bytes: ?u64 = null } {
+    const memory = api.nvmlDeviceGetMemoryInfo.get(.{handle}) catch return .{};
+    return .{ .mem_used_bytes = memory.used, .mem_total_bytes = memory.total };
+}
+
 pub fn poll(self: *Nvml, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
     const api = &self.api;
     // PCIe throughput blocks while it measures (#766).
@@ -125,11 +149,8 @@ pub fn poll(self: *Nvml, scratch: std.mem.Allocator, reading: *smi.Reading) !voi
     for (self.gpus, reading.samples) |*gpu, *sample| {
         const fields = &sample.cuda;
         const handle = gpu.handle;
+        fields.poll(.{ api, handle }, poll_plan);
 
-        fields.power_mw = api.nvmlDeviceGetPowerUsage.get(.{handle}) catch null;
-        fields.power_limit_mw = api.nvmlDeviceGetEnforcedPowerLimit.get(.{handle}) catch null;
-        fields.temperature = api.nvmlDeviceGetTemperature.get(.{ handle, c.NVML_TEMPERATURE_GPU }) catch null;
-        fields.fan_speed_percent = api.nvmlDeviceGetFanSpeed.get(.{handle}) catch null;
         fields.util_percent = if (api.nvmlDeviceGetUtilizationRates.get(.{handle})) |rates| rates.gpu else |_| null;
 
         // Utilization and its sampling period.
@@ -137,21 +158,6 @@ pub fn poll(self: *Nvml, scratch: std.mem.Allocator, reading: *smi.Reading) !voi
         fields.encoder_util_percent = if (api.nvmlDeviceGetEncoderUtilization.call(.{ handle, &util, &period })) |_| util else |_| null;
         fields.decoder_util_percent = if (api.nvmlDeviceGetDecoderUtilization.call(.{ handle, &util, &period })) |_| util else |_| null;
 
-        fields.clock_graphics_mhz = api.nvmlDeviceGetClockInfo.get(.{ handle, c.NVML_CLOCK_GRAPHICS }) catch null;
-        fields.clock_sm_mhz = api.nvmlDeviceGetClockInfo.get(.{ handle, c.NVML_CLOCK_SM }) catch null;
-        fields.clock_mem_mhz = api.nvmlDeviceGetClockInfo.get(.{ handle, c.NVML_CLOCK_MEM }) catch null;
-        fields.clock_graphics_max_mhz = api.nvmlDeviceGetMaxClockInfo.get(.{ handle, c.NVML_CLOCK_GRAPHICS }) catch null;
-        fields.clock_mem_max_mhz = api.nvmlDeviceGetMaxClockInfo.get(.{ handle, c.NVML_CLOCK_MEM }) catch null;
-
-        // One call fills two fields. On failure both stay null.
-        if (api.nvmlDeviceGetMemoryInfo.get(.{handle})) |memory| {
-            fields.mem_used_bytes = memory.used;
-            fields.mem_total_bytes = memory.total;
-        } else |_| {}
-        fields.mem_bus_width = api.nvmlDeviceGetMemoryBusWidth.get(.{handle}) catch null;
-
-        fields.pcie_link_gen = api.nvmlDeviceGetCurrPcieLinkGeneration.get(.{handle}) catch null;
-        fields.pcie_link_width = api.nvmlDeviceGetCurrPcieLinkWidth.get(.{handle}) catch null;
         // NVML gives the speed of one lane.
         if (api.nvmlDeviceGetPcieSpeed.get(.{handle})) |lane_mbps| {
             if (fields.pcie_link_width) |width| fields.pcie_bandwidth_mbps = lane_mbps * width;

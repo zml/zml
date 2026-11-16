@@ -147,12 +147,13 @@ pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *smi.Reading) !vo
         std.mem.max(u64, self.frequencies)
     else
         null;
-    if (self.property(self.accelerator, .PerformanceStatistics)) |statistics| {
-        defer self.cf.CFRelease(statistics);
-        if (self.as(Dictionary, statistics)) |values| {
-            gpu.util_percent = self.numberAt(values, .@"Device Utilization %");
-            gpu.mem_used_bytes = self.numberAt(values, .@"In use system memory");
-        }
+    {
+        const statistics = self.property(self.accelerator, .PerformanceStatistics);
+        defer if (statistics) |value| self.cf.CFRelease(value);
+        gpu.poll(.{ self, self.as(Dictionary, statistics) }, .{
+            .read = numberAt,
+            .fields = .{ .util_percent = .@"Device Utilization %", .mem_used_bytes = .@"In use system memory" },
+        });
     }
 
     self.readReport(gpu, &reading.host);
@@ -472,8 +473,8 @@ fn number(self: *Metal, object: ?*const anyopaque) ?u64 {
     return std.math.cast(u64, result);
 }
 
-fn numberAt(self: *Metal, dictionary: *const Dictionary, key: Key) ?u64 {
-    return self.number(self.cf.CFDictionaryGetValue(dictionary, self.keys.get(key)));
+fn numberAt(self: *Metal, dictionary: ?*const Dictionary, key: Key) ?u64 {
+    return self.number(self.cf.CFDictionaryGetValue(dictionary orelse return null, self.keys.get(key)));
 }
 
 /// The text of a string, in `buffer`. Empty when there is none or it does not fit.
