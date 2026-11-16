@@ -1,7 +1,7 @@
 const platforms = @import("platforms");
 
-const zml = @import("../../../zml.zig");
-const stdx = zml.stdx;
+const zml = @import("zml/core");
+const stdx = @import("stdx");
 
 const KernelSpec = struct {
     name: []const u8,
@@ -24,14 +24,14 @@ pub const Parameters = struct {
                     .trn1, .inf2, .trn1n, .trn2, .trn2n, .trn3 => .{
                         .name = "nki_attention_trn1_decode",
                         .entrypoint = "decode",
-                        .source_path = "zml/zml/attention/nki/attention.py",
+                        .source_path = "zml/zml/kernels/flash_attention/nki/attention.py",
                     },
                 },
                 .prefill_kernel = switch (compiler_target) {
                     .trn1, .inf2, .trn1n, .trn2, .trn2n, .trn3 => .{
                         .name = "nki_attention_trn1_prefill",
                         .entrypoint = "prefill",
-                        .source_path = "zml/zml/attention/nki/attention.py",
+                        .source_path = "zml/zml/kernels/flash_attention/nki/attention.py",
                     },
                 },
             };

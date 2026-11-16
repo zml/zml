@@ -1,6 +1,7 @@
 const std = @import("std");
 
-const zml = @import("../../../zml.zig");
+const zml = @import("zml/core");
+const nn = @import("zml/nn");
 const flash_attn = @import("flash_attn.zig");
 
 pub const Metadata = struct {
@@ -28,9 +29,9 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
     const head_dim = q.dim(.hd);
     if (!((dtype == .bf16 or dtype == .f16) and k.dtype() == dtype and v.dtype() == dtype and flash_attn.FaTiled.tileConfig(head_dim) != null)) {
         const seq_len = k.dim(.k);
-        const mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, dtype, null)
+        const mask = nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, dtype, null)
             .gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, dtype), token_index.appendAxes(.{.coord}), .{});
-        return zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
+        return nn.sdpa(q, k, v, .{ .attn_mask = mask });
     }
 
     const batched = q.shape().hasTag(.b) != null;

@@ -1,9 +1,22 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-filegroup(
+zig_library(
     name = "cute",
-    srcs = [
-        "attention.zig",
-        "cute.zig",
+    srcs = ["attention.zig"],
+    import_name = "zml/kernels/flash_attention/cute",
+    main = "cute.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects/llvm",
+        "//mlir/dialects/vector",
+        "//stdx",
+        "//zml/core",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":cute"],
 )

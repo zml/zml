@@ -3,7 +3,7 @@ const mlir = @import("mlir");
 const llvm = @import("mlir/dialects/llvm");
 const vector = @import("mlir/dialects/vector");
 
-const zml = @import("../../../zml.zig");
+const zml = @import("zml/core");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const Value = cute.Value;
