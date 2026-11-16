@@ -4,8 +4,8 @@ const mlir = @import("mlir");
 const ragged_paged = @import("platforms/tpu/ragged_paged");
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
-const AttentionOptions = @import("../options.zig").AttentionOptions;
+const zml = @import("zml/core");
+const AttentionOptions = @import("zml/kernels/paged_attention/options").AttentionOptions;
 const ragged_attention = @import("ragged_attention.zig");
 
 const log = std.log.scoped(.tpu_attention);

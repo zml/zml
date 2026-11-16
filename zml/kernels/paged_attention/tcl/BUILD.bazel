@@ -1,6 +1,20 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-filegroup(
+zig_library(
     name = "tcl",
-    srcs = ["tcl.zig"],
+    import_name = "zml/kernels/paged_attention/tcl",
+    main = "tcl.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dsl/tcl:builder",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/paged_attention/options",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":tcl"],
 )

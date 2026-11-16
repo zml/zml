@@ -1,6 +1,6 @@
 const stdx = @import("stdx");
 
-const zml = @import("../../../../zml.zig");
+const zml = @import("zml/core");
 const cute = @import("../cute.zig");
 const kernel = @import("attention.zig");
 

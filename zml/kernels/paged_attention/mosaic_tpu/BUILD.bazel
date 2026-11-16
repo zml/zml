@@ -1,9 +1,24 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-filegroup(
+zig_library(
     name = "mosaic_tpu",
     srcs = [
-        "mosaic_tpu.zig",
         "ragged_attention.zig",
     ],
+    import_name = "zml/kernels/paged_attention/mosaic_tpu",
+    main = "mosaic_tpu.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//platforms/tpu:ragged_paged",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/paged_attention/options",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":mosaic_tpu"],
 )

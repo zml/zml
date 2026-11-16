@@ -1,11 +1,21 @@
-package(default_visibility = ["//zml:__pkg__"])
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
-filegroup(
+zig_library(
     name = "triton",
     srcs = [
         "sparse_unified_attention.zig",
-        "triton.zig",
         "unified_attention.zig",
         "unified_attention_oneapi.zig",
+    ],
+    import_name = "zml/kernels/paged_attention/triton",
+    main = "triton.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects/ttir",
+        "//stdx",
+        "//zml/core",
+        "//zml/kernels/paged_attention/options",
     ],
 )
