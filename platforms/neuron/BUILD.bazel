@@ -134,7 +134,10 @@ zig_library(
     import_name = "platforms/neuron/nki_kernel",
     main = "nki_kernel.zig",
     tags = ["manual"],
-    visibility = ["//zml:__pkg__"],
+    visibility = [
+        "//zml:__pkg__",
+        "//zml/core:__pkg__",
+    ],
     deps = [
         ":neuron",
         "//bazel",

@@ -1,0 +1,18 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "quantization",
+    import_name = "zml/quantization",
+    main = "quantization.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//stdx",
+        "//zml/core",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":quantization"],
+)

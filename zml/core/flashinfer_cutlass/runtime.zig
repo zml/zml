@@ -3,7 +3,7 @@ const std = @import("std");
 const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const pjrt = @import("pjrt");
 
-const DataType = @import("../../../dtype.zig").DataType;
+const DataType = @import("../dtype.zig").DataType;
 const contract = @import("contract.zig");
 
 const log = std.log.scoped(.@"zml/kernels/moe/flashinfer_cutlass/runtime");
