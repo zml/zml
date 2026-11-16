@@ -1,5 +1,6 @@
 #include "zml/profiling/traceme.h"
 
+#include <climits>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <string>
@@ -56,6 +57,35 @@ zig_slice CopyToOwnedSlice(const std::string& data) {
   }
   std::memcpy(ptr, data.data(), data.size());
   return {ptr, data.size()};
+}
+
+// PJRT's generic contract is binary data with an explicit length. Some
+// providers append one NUL sentinel; accept that only if the exact bytes fail
+// and removing that sentinel produces a valid XSpace.
+bool ParseXSpace(zig_slice bytes, tensorflow::profiler::XSpace* space) {
+  if (bytes.len > INT_MAX || (bytes.len != 0 && bytes.ptr == nullptr)) {
+    return false;
+  }
+  if (bytes.len == 0) {
+    return true;
+  }
+  const int size = static_cast<int>(bytes.len);
+  if (space->ParseFromArray(bytes.ptr, size)) {
+    return true;
+  }
+  const auto* data = static_cast<const uint8_t*>(bytes.ptr);
+  if (data[bytes.len - 1] != 0) {
+    return false;
+  }
+  space->Clear();
+  return space->ParseFromArray(bytes.ptr, size - 1);
+}
+
+void DiscardLocalHostTraceSession() {
+  if (g_local_host_trace_session.active) {
+    (void)tsl::profiler::TraceMeRecorder::Stop();
+    g_local_host_trace_session.active = false;
+  }
 }
 
 #if defined(ZML_RUNTIME_CUDA)
@@ -215,10 +245,9 @@ extern "C" void zml_traceme_session_start(int level, uint64_t filter_mask,
 
 extern "C" zig_slice zml_traceme_session_merge(zig_slice xspace) {
   tensorflow::profiler::XSpace space;
-  if (xspace.len != 0 &&
-      !space.ParseFromArray(xspace.ptr, static_cast<int>(xspace.len))) {
-    return CopyToOwnedSlice(
-        std::string(static_cast<const char*>(xspace.ptr), xspace.len));
+  if (!ParseXSpace(xspace, &space)) {
+    DiscardLocalHostTraceSession();
+    return {};
   }
 
   if (g_local_host_trace_session.active) {
@@ -238,8 +267,8 @@ extern "C" zig_slice zml_traceme_session_postprocess(zig_slice xspace,
                                                      uint64_t start_time_ns,
                                                      uint64_t stop_time_ns) {
   tensorflow::profiler::XSpace space;
-  if (xspace.len != 0 &&
-      !space.ParseFromArray(xspace.ptr, static_cast<int>(xspace.len))) {
+  if (!ParseXSpace(xspace, &space)) {
+    DiscardLocalHostTraceSession();
     return {};
   }
 

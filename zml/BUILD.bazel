@@ -1,5 +1,5 @@
 load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 upb_c_proto_library(
@@ -63,6 +63,16 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+cc_test(
+    name = "profiling_traceme_test",
+    srcs = ["profiling/traceme_test.cc"],
+    deps = [
+        ":profiling_traceme_lib",
+        "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@xla//xla/tsl/profiler/backends/cpu:traceme_recorder",
+    ],
 )
 
 zig_library(
