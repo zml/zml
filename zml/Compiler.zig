@@ -8,6 +8,7 @@ const pjrt = @import("pjrt");
 const shardy = @import("mlir/dialects/shardy");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
+const tracer = @import("zml/profiling").tracer;
 const upb = @import("upb");
 const zio = @import("zio");
 
@@ -19,7 +20,6 @@ const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
-const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;

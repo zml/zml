@@ -89,6 +89,29 @@ zig_library(
 )
 
 zig_library(
+    name = "profiling",
+    srcs = [
+        "profiling/profiler.zig",
+        "profiling/tracer.zig",
+    ],
+    import_name = "zml/profiling",
+    main = "profiling/profiling.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    zigopts = ["-lc"],
+    deps = [
+        ":profiler_options",
+        ":profiling_traceme_lib",
+        "//ffi:zig",
+        "//pjrt",
+        "//platforms",
+        "//stdx",
+        "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",
+        "//upb",
+    ],
+)
+
+zig_library(
     name = "zml",
     srcs = [
         "Compiler.zig",
@@ -117,8 +140,6 @@ zig_library(
         "ops/manual_computation.zig",
         "pjrtx.zig",
         "platform.zig",
-        "profiling/profiler.zig",
-        "profiling/tracer.zig",
         "quantization.zig",
         "safetensors.zig",
         "shape.zig",
@@ -162,8 +183,7 @@ zig_library(
         ":constants",
         ":meta",
         ":posix",
-        ":profiler_options",
-        ":profiling_traceme_lib",
+        ":profiling",
         ":xla_compile_options_upb",
         ":xla_data_upb",
         "//bazel",
@@ -188,7 +208,6 @@ zig_library(
         "//platforms",
         "//platforms/tpu:ragged_paged",
         "//stdx",
-        "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",
         "//upb",
         "//vfs",
         "//zml/tokenizer",
