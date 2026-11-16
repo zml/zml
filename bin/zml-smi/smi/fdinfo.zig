@@ -57,17 +57,17 @@ pub fn parse(text: []const u8) Fdinfo {
             info.client_id = sysfs.firstNumber(value);
         } else if (std.mem.startsWith(u8, key, "drm-engine-capacity-")) {
             continue;
-        } else if (cut(key, "drm-engine-")) |class| {
+        } else if (std.mem.cutPrefix(u8, key, "drm-engine-")) |class| {
             if (info.engine(class)) |engine| engine.busy_ns = sysfs.firstNumber(value);
-        } else if (cut(key, "drm-total-cycles-")) |class| {
+        } else if (std.mem.cutPrefix(u8, key, "drm-total-cycles-")) |class| {
             if (info.engine(class)) |engine| engine.total_cycles = sysfs.firstNumber(value);
-        } else if (cut(key, "drm-cycles-")) |class| {
+        } else if (std.mem.cutPrefix(u8, key, "drm-cycles-")) |class| {
             if (info.engine(class)) |engine| engine.cycles = sysfs.firstNumber(value);
-        } else if (cut(key, "drm-total-")) |name| {
+        } else if (std.mem.cutPrefix(u8, key, "drm-total-")) |name| {
             if (info.region(name)) |region| region.total = bytes(value);
-        } else if (cut(key, "drm-resident-")) |name| {
+        } else if (std.mem.cutPrefix(u8, key, "drm-resident-")) |name| {
             if (info.region(name)) |region| region.resident = bytes(value);
-        } else if (cut(key, "drm-memory-")) |name| {
+        } else if (std.mem.cutPrefix(u8, key, "drm-memory-")) |name| {
             // The older amdgpu name of resident memory.
             if (info.region(name)) |region| region.resident = bytes(value);
         } else if (std.mem.endsWith(u8, key, " mem")) {
@@ -76,10 +76,6 @@ pub fn parse(text: []const u8) Fdinfo {
         }
     }
     return info;
-}
-
-fn cut(key: []const u8, prefix: []const u8) ?[]const u8 {
-    return if (std.mem.startsWith(u8, key, prefix)) key[prefix.len..] else null;
 }
 
 fn slot(comptime T: type, buffer: []T, count: *u8, comptime key: []const u8, name: []const u8) ?*T {
