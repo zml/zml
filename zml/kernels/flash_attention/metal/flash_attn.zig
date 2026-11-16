@@ -4,7 +4,7 @@
 
 const std = @import("std");
 
-const metal = @import("../../../kernel/kernel.zig").metal;
+const metal = @import("zml/core").kernel.metal;
 
 const ArgSpec = metal.ArgSpec;
 const Builder = metal.Builder;

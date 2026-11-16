@@ -1878,7 +1878,7 @@ fn expectDevicesReadShards(platform: *const Platform, shape_: Shape) !void {
 }
 
 test "HostAccessible executions read shared inputs on every device" {
-    const zml = @import("../zml.zig");
+    const zml = @import("../core.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = testing.env();
@@ -2107,7 +2107,7 @@ test "HostAccessible.View copies across layouts, shards and replicas" {
 }
 
 test "HostAccessible await after executable donation permits the next host update" {
-    const zml = @import("../zml.zig");
+    const zml = @import("../core.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = testing.env();
@@ -2159,7 +2159,7 @@ test "HostAccessible await after executable donation permits the next host updat
 }
 
 test "HostAccessible await follows an output that doesn't reuse the pinned allocation" {
-    const zml = @import("../zml.zig");
+    const zml = @import("../core.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = testing.env();

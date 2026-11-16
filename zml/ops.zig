@@ -667,7 +667,7 @@ pub fn @"while"(
 pub const while_ = @"while";
 
 test @"while" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     const While = struct {
@@ -812,7 +812,7 @@ pub fn @"if"(
 }
 
 test "if" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
@@ -893,7 +893,7 @@ pub fn if2(
 }
 
 test if2 {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
     const allocator = std.testing.allocator;
 
@@ -1107,7 +1107,7 @@ pub fn fly(inputs: anytype, outputs: anytype, opts: FlyOps) [outputs.len]Tensor 
 }
 
 test "fly custom call, both entry ABIs" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
     if (platform.target != .rocm) return error.SkipZigTest;
 
@@ -1298,7 +1298,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
 }
 
 test "triton" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     if (platform.target != .cuda and platform.target != .rocm and platform.target != .oneapi) return error.SkipZigTest;
@@ -1617,7 +1617,7 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
 }
 
 test "cute" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     if (platform.target != .cuda) return error.SkipZigTest;
@@ -1682,7 +1682,7 @@ test "cute" {
 }
 
 test "cuda_tile" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     if (platform.target != .cuda) return error.SkipZigTest;
@@ -1741,7 +1741,7 @@ test "cuda_tile" {
 }
 
 test "cuda_tile grid" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     if (platform.target != .cuda) return error.SkipZigTest;
@@ -1808,7 +1808,7 @@ test "cuda_tile grid" {
 }
 
 test "cuda_tile zeroed_outputs" {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     if (platform.target != .cuda) return error.SkipZigTest;
@@ -2107,7 +2107,7 @@ fn scatterConfig(
 }
 
 test scatterConfig {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
 
     var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
@@ -2984,7 +2984,7 @@ fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.
 }
 
 test customCall {
-    const zml = @import("zml.zig");
+    const zml = @import("core.zig");
     const platform = zml.testing.env();
     const tp = zml.testing.tpMesh();
 
