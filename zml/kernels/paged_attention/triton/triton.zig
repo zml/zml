@@ -87,6 +87,10 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
         }
         num_stages_2d = 1;
         num_warps = 4;
+        if (isOneapiTarget() and options.head_dim >= 256) {
+            tile_size = 64;
+            num_warps = 32;
+        }
     }
     block_q = block_m / options.numQueriesPerKv();
     const total_q_blocks = options.num_tokens / block_q + options.batch_size;
