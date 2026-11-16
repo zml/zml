@@ -282,7 +282,13 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return self,
+            .cpu, .neuron, .metal => {
+                // A single memory needs no copy, but the result must still be a distinct
+                // tensor: `reuseBuffer` donations are keyed by tensor id.
+                var res = _result(self._shape, self.value());
+                res._shape._sharding = self._shape._sharding;
+                return res;
+            },
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
