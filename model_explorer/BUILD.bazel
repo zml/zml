@@ -1,0 +1,92 @@
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+load(":zig_proto_library.bzl", "zig_proto_library")
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = ["--upgrade"],
+    tags = ["manual"],
+)
+
+py_library(
+    name = "server_lib",
+    srcs = [
+        "hlo2json.py",
+        "server.py",
+    ],
+    data = [":hlo2json"],
+    imports = ["."],
+    deps = [
+        "@model_explorer_py_deps//ai_edge_model_explorer:pkg",
+        "@model_explorer_py_deps//flask:pkg",
+        "@model_explorer_py_deps//requests:pkg",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_binary(
+    name = "server",
+    srcs = ["server.py"],
+    deps = [":server_lib"],
+)
+
+py_test(
+    name = "server_test",
+    size = "small",
+    srcs = ["server_test.py"],
+    deps = [":server_lib"],
+)
+
+zig_binary(
+    name = "hlo2json",
+    srcs = [
+        "dump_context.zig",
+        "gpu_info.zig",
+        "graph_partitioner.zig",
+        "json_writer.zig",
+    ],
+    main = "hlo2json.zig",
+    deps = [
+        ":dump_context_proto",
+        ":hlo_proto",
+    ],
+)
+
+zig_proto_library(
+    name = "hlo_proto",
+    import_name = "@xla//xla/service:hlo_proto",
+    proto_package = "xla",
+    deps = ["@xla//xla/service:hlo_proto"],
+)
+
+zig_test(
+    name = "test",
+    srcs = [
+        "dump_context.zig",
+        "gpu_info.zig",
+        "graph_partitioner.zig",
+        "json_writer.zig",
+    ],
+    main = "hlo2json.zig",
+    deps = [
+        ":dump_context_proto",
+        ":hlo_proto",
+    ],
+)
+
+proto_library(
+    name = "dump_context_schema",
+    srcs = ["dump_context.proto"],
+)
+
+zig_proto_library(
+    name = "dump_context_proto",
+    proto_package = "zml_context",
+    deps = [":dump_context_schema"],
+)

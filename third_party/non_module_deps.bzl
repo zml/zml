@@ -14,6 +14,7 @@ load("//third_party/stb:repo.bzl", stb = "repo")
 load("//third_party/translate-c:repo.bzl", translate_c = "repo")
 load("//third_party/uucode:repo.bzl", uucode = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
+load("//third_party/zig-protobuf:repo.bzl", zig_protobuf = "repo")
 load("//third_party/zigimg:repo.bzl", zigimg = "repo")
 load("//third_party/zio:repo.bzl", zio = "repo")
 load("//third_party/zls:repo.bzl", zls = "repo")
@@ -38,6 +39,7 @@ def _non_module_deps_impl(mctx):
     cute_ir()
     zio()
     zls()
+    zig_protobuf()
 
     return mctx.extension_metadata(
         reproducible = True,

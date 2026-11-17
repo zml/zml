@@ -1,0 +1,32 @@
+syntax = "proto3";
+package zml_context;
+
+// Wire-compatible read-only projections of XLA's
+// xla/pjrt/proto/topology_description.proto,
+// xla/service/gpu_topology.proto and
+// xla/stream_executor/device_description.proto.
+// Only diagnostic fields are retained; protobuf skips all other fields.
+// This avoids importing the CPU executable/compiler schema into the viewer.
+message Any {
+  string type_url = 1;
+  bytes value = 2;
+}
+message PjRtTopologyDescriptionProto {
+  Any platform_specific_topology = 9;
+}
+message GpuTopologyProto {
+  string platform_version = 3;
+  int32 num_partitions = 4;
+  int32 num_hosts_per_partition = 5;
+  int32 num_devices_per_host = 6;
+  GpuTargetConfig gpu_target_config = 8;
+}
+message GpuTargetConfig {
+  DeviceDescription gpu_device_info = 1;
+}
+message DeviceDescription {
+  string driver_version = 23;
+  string runtime_version = 25;
+  string name = 34;
+  int64 pcie_bandwidth = 41;
+}
