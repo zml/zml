@@ -79,11 +79,9 @@ fn tileN(tokens: i64, experts: i64, topk: i64) i64 {
 /// One persistent CTA per SM. Each CTA needs the full 227 KiB of shared
 /// memory, so launching more CTAs than SMs (e.g. 160 on a 152-SM GB300)
 /// runs the surplus as a second wave and nearly doubles the GEMM time.
-fn persistentCtas() i64 {
+fn persistentCtas() u32 {
     const platform = zml.Compiler.current().platform;
-    if (platform.devices.len == 0) return 148;
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 148;
-    return if (attribute.int64 > 0) attribute.int64 else 148;
+    return platform.coreCountPerDevice() orelse 148;
 }
 
 // TODO(Corentin): settle on groups/capacity.
@@ -189,7 +187,7 @@ pub fn forwardMxfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, t
         .n = n,
         .k = hidden,
         .groups = routing.groups,
-        .persistent_ctas = persistentCtas(),
+        .persistent_ctas = @intCast(persistentCtas()),
         .epilogue = .swiglu_mxfp8,
         .routes = routes,
         .direct = direct,
@@ -293,7 +291,7 @@ pub fn forwardNvfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, t
         .n = n,
         .k = hidden,
         .groups = routing.groups,
-        .persistent_ctas = persistentCtas(),
+        .persistent_ctas = @intCast(persistentCtas()),
         .epilogue = .swiglu_nvfp4,
         .routes = routes,
         .direct = direct,

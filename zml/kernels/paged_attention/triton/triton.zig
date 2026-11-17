@@ -170,14 +170,6 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     };
 }
 
-pub fn getCuCount() usize {
-    const platform = zml.Compiler.current().platform;
-    if (platform.devices.len == 0) return 1;
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
-    if (attribute.int64 <= 0) return 1;
-    return @intCast(attribute.int64);
-}
-
 const SparseConfig = struct {
     tile_size: usize,
     num_segments: usize,
@@ -278,7 +270,6 @@ pub const paged = struct {
             return pagedSparseAttention(parameters, q, k_cache, v_cache, opts);
         }
 
-        const cu_count = getCuCount();
         const num_heads: usize = @intCast(q.dim(.hkv) * q.dim(.hg));
         const num_kv_heads: usize = @intCast(k_cache.dim(.hkv));
         const num_queries_per_kv: usize = num_heads / num_kv_heads;
@@ -292,13 +283,19 @@ pub const paged = struct {
         const num_tokens: usize = @intCast(q.dim(.b));
         const num_seqs: usize = @intCast(parameters.block_table.dim(.b));
         const total_q_blocks: usize = num_tokens / block_q + num_seqs;
+
+        const cu_count = blk: {
+            const platform = zml.Compiler.current().platform;
+            break :blk platform.coreCountPerDevice() orelse 1;
+        };
+
         const target_num_prgms: usize = cu_count * 4;
         const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
 
         const sliding_window: usize = opts.mask.slidingWindow() orelse 0;
 
         const paged_attention_opts: PagedAttentionOptions = .{
-            .cu_count = getCuCount(),
+            .cu_count = cu_count,
             .all_decode = !parameters.options_.is_prefill,
             .num_tokens = num_tokens,
             .num_heads = num_heads,

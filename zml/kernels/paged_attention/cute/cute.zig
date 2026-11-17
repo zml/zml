@@ -45,13 +45,6 @@ pub const Parameters = struct {
     }
 };
 
-// TODO(Corentin): This should be moved in the platform probably
-pub fn multiprocessorCount(platform: *const zml.Platform) usize {
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
-    if (attribute.int64 <= 0) return 1;
-    return @intCast(attribute.int64);
-}
-
 test {
     _ = kernel;
     _ = sm10x;

@@ -64,7 +64,11 @@ fn decode(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, positions: zml.Tensor, sc
     const num_kv_heads: i32 = @intCast(k.dim(.h));
     const keys: i32 = @intCast(k.dim(.k));
     const nrows = batch * num_heads;
-    const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), keys, coreCount());
+    const core_count = blk: {
+        const platform = zml.Compiler.current().platform;
+        break :blk platform.coreCountPerDevice() orelse std.debug.panic("Metal device has no core_count attribute", .{});
+    };
+    const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), keys, core_count);
     const args: flash_attn.FaVec.HostArgs = .{ .num_heads = num_heads, .n_kv = num_kv_heads, .k_len = keys, .scale = scale };
 
     const dst = if (launch.splits == 1) q.shape() else zml.Shape.init(.{nrows * (head_dim * launch.splits + 2 * launch.splits)}, .f32);
@@ -125,13 +129,6 @@ fn vecLaunch(rows: i32, group: i32, span: i32, cores: i32) VecLaunch {
     var splits: i32 = 1;
     while (splits * 2 <= @min(want, chunks)) splits *= 2;
     return .{ .heads = heads, .splits = splits, .splits_per_threadgroup = @min(splits, @divFloor(8, heads)) };
-}
-
-fn coreCount() i32 {
-    const platform = zml.Compiler.current().platform;
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse
-        std.debug.panic("Metal device has no core_count attribute", .{});
-    return @intCast(attribute.int64);
 }
 
 test vecLaunch {

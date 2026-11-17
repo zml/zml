@@ -130,7 +130,13 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         const kv_capacity = max_blocks * block_size;
         const span = if (opts.sliding_window < 0) kv_capacity else @min(kv_capacity, opts.sliding_window + 32);
         const nrows = total_q_tokens * num_heads;
-        const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), span, coreCount());
+
+        const core_count = blk: {
+            const platform = zml.Compiler.current().platform;
+            break :blk platform.coreCountPerDevice() orelse std.debug.panic("Metal device has no core_count attribute", .{});
+        };
+
+        const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), span, core_count);
 
         const cfg: paged_attn.FaVecPaged.Cfg = .{
             .head_dim = head_dim,
@@ -222,13 +228,6 @@ fn vecLaunch(rows: i32, group: i32, span: i32, cores: i32) VecLaunch {
     var splits: i32 = 1;
     while (splits * 2 <= @min(want, chunks)) splits *= 2;
     return .{ .heads = heads, .splits = splits, .splits_per_threadgroup = @min(splits, @divFloor(8, heads)) };
-}
-
-fn coreCount() i32 {
-    const platform = zml.Compiler.current().platform;
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse
-        std.debug.panic("Metal device has no core_count attribute", .{});
-    return @intCast(attribute.int64);
 }
 
 test vecLaunch {
