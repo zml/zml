@@ -454,6 +454,17 @@ pub const Partitioning = packed struct {
         const replicated_tag: Shape.Tag = Shape.toTag(.replicated);
         const open_tag: Shape.Tag = Shape.toTag(.open);
 
+        /// Accepts `.replicated`, an existing logical partitioning, or a mapping
+        /// supported by `parse`.
+        pub fn init(v: anytype) Logical {
+            const V = @TypeOf(v);
+
+            return switch (V) {
+                Logical, @EnumLiteral() => v,
+                else => Logical.parse(v),
+            };
+        }
+
         pub fn parse(v: anytype) Logical {
             const V = @TypeOf(v);
 
