@@ -50,8 +50,8 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 
 # repo_name = None prevents rules_swift from eagerly auto-registering toolchains.
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
+bazel_dep(name = "rules_runfiles_group", version = "0.1.0")
 bazel_dep(name = "rules_zig", version = "0.17.0")
-
 bazel_dep(name = "tar.bzl", version = "0.10.4")
 bazel_dep(name = "llvm", version = "0.8.24")
 bazel_dep(name = "libxml2", version = "2.15.3")

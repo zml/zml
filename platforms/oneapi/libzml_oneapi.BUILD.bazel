@@ -1,5 +1,6 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:patchelf.bzl", "patchelf")
+load("@zml//bazel:runtime_groups.bzl", "runtime_group")
 
 patchelf(
     name = "libzml_oneapi_so",
@@ -147,8 +148,14 @@ copy_to_directory(
     root_paths = ["."],
 )
 
+runtime_group(
+    name = "runtime_group",
+    group = "oneapi",
+)
+
 cc_library(
     name = "libzml_oneapi",
+    aspect_hints = [":runtime_group"],
     data = [":sandbox"],
     visibility = ["@zml//platforms/oneapi:__subpackages__"],
 )
