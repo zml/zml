@@ -9,7 +9,12 @@ zig_library(
         "@platforms//cpu:x86_64",
     ],
     visibility = ["//bin/zml-smi:__subpackages__"],
-    deps = ["//bin/zml-smi/smi"],
+    deps = [
+        "//bin/zml-smi/smi:model",
+        "//bin/zml-smi/smi:native",
+        "//bin/zml-smi/smi:source",
+        "//bin/zml-smi/smi:telemetry",
+    ],
 )
 
 zig_test(
@@ -21,6 +26,8 @@ zig_test(
     ],
     deps = [
         ":furiosa",
-        "//bin/zml-smi/smi",
+        "//bin/zml-smi/smi:model",
+        "//bin/zml-smi/smi:native",
+        "//bin/zml-smi/smi:source",
     ],
 )

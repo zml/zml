@@ -1,5 +1,6 @@
 const std = @import("std");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const source = @import("zml-smi/source");
 const Metal = @import("zml-smi/platforms/metal");
 
 const energyOf = Metal.testing.energyOf;
@@ -48,17 +49,17 @@ test "a GPU of this Mac" {
 
     var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer scratch.deinit();
-    var samples: [1]smi.Sample = .{.init(.metal)};
-    var reading: smi.Reading = .{
+    var samples: [1]model.Sample = .{.init(.metal)};
+    var reading: source.Reading = .{
         .samples = &samples,
         .allocator = std.testing.allocator,
-        .host = .{},
+        .host_power = .{},
     };
     defer reading.processes.deinit(std.testing.allocator);
     for (0..2) |round| {
         samples[0] = .init(.metal);
         reading.processes.clearRetainingCapacity();
-        reading.host = .{};
+        reading.host_power = .{};
         if (round > 0) try io.sleep(.fromMilliseconds(100), .awake);
         try metal.poll(scratch.allocator(), &reading);
     }
@@ -66,7 +67,7 @@ test "a GPU of this Mac" {
     try std.testing.expect(gpu.util_percent.? <= 100);
     try std.testing.expect(gpu.mem_used_bytes.? < gpu.mem_total_bytes.?);
     try std.testing.expect(gpu.clock_graphics_mhz.? <= gpu.clock_graphics_max_mhz.?);
-    try std.testing.expect(gpu.power_mw != null and reading.host.cpu_power_mw != null);
+    try std.testing.expect(gpu.power_mw != null and reading.host_power.cpu_power_mw != null);
     // WindowServer draws the screen with the GPU.
     try std.testing.expect(reading.processes.items.len > 0);
 }

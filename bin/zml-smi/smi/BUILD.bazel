@@ -1,44 +1,110 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
-_SRCS = [
-    "api.zig",
-    "collector.zig",
-    "counter.zig",
-    "csv.zig",
-    "double_buffer.zig",
-    "dynlib.zig",
-    "fdinfo.zig",
-    "host/linux.zig",
-    "host/macos.zig",
-    "hwmon.zig",
-    "json.zig",
-    "model.zig",
-    "pci.zig",
-    "proc.zig",
-    "prometheus.zig",
-    "remote.zig",
-    "sandbox.zig",
-    "sysfs.zig",
-    "telemetry.zig",
-    "units.zig",
-]
-
-_DEPS = ["@rules_zig//zig/runfiles"]
+package(default_visibility = ["//bin/zml-smi:__subpackages__"])
 
 zig_library(
-    name = "smi",
-    srcs = _SRCS,
-    import_name = "zml-smi",
-    main = "smi.zig",
-    visibility = ["//bin/zml-smi:__subpackages__"],
-    deps = _DEPS,
+    name = "model",
+    import_name = "zml-smi/model",
+    main = "model.zig",
+)
+
+zig_library(
+    name = "source",
+    import_name = "zml-smi/source",
+    main = "source.zig",
+    deps = [":model"],
+)
+
+zig_library(
+    name = "telemetry",
+    import_name = "zml-smi/telemetry",
+    main = "telemetry.zig",
+)
+
+zig_library(
+    name = "native",
+    srcs = [
+        "counter.zig",
+        "dynlib.zig",
+        "fdinfo.zig",
+        "hwmon.zig",
+        "pci.zig",
+        "proc.zig",
+        "sandbox.zig",
+        "sysfs.zig",
+        "units.zig",
+    ],
+    import_name = "zml-smi/native",
+    main = "native.zig",
+    deps = ["@rules_zig//zig/runfiles"],
+)
+
+zig_library(
+    name = "host",
+    srcs = [
+        "host/linux.zig",
+        "host/macos.zig",
+    ],
+    import_name = "zml-smi/host",
+    main = "host.zig",
+    deps = [
+        ":model",
+        ":native",
+    ],
+)
+
+zig_library(
+    name = "collector",
+    srcs = ["double_buffer.zig"],
+    import_name = "zml-smi/collector",
+    main = "collector.zig",
+    deps = [
+        ":model",
+        ":source",
+    ],
+)
+
+zig_library(
+    name = "remote",
+    import_name = "zml-smi/remote",
+    main = "remote.zig",
+    deps = [
+        ":model",
+        ":source",
+    ],
+)
+
+zig_library(
+    name = "formats",
+    srcs = [
+        "csv.zig",
+        "json.zig",
+        "prometheus.zig",
+    ],
+    import_name = "zml-smi/formats",
+    main = "formats.zig",
+    deps = [":model"],
+)
+
+zig_library(
+    name = "output",
+    import_name = "zml-smi/output",
+    main = "output.zig",
+    deps = [
+        ":collector",
+        ":formats",
+        ":model",
+    ],
 )
 
 zig_test(
     name = "test",
-    srcs = _SRCS + [
+    srcs = [
+        "collector.zig",
+        "double_buffer.zig",
+        "host/macos.zig",
         "host/test_macos.zig",
-        "smi.zig",
+        "remote.zig",
         "test_collector.zig",
         "test_counter.zig",
         "test_double_buffer.zig",
@@ -58,5 +124,11 @@ zig_test(
     # The sandbox test looks the directory up through the runfiles.
     data = ["//bin/zml-smi:sandbox"],
     main = "test_smi.zig",
-    deps = _DEPS,
+    deps = [
+        ":formats",
+        ":model",
+        ":native",
+        ":source",
+        ":telemetry",
+    ],
 )

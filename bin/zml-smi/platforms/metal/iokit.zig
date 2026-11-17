@@ -1,7 +1,7 @@
 //! The IOKit functions Metal calls. The hermetic toolchain has no IOKit to link
 //! against and no headers for it, so they are declared here and resolved by install name.
 const std = @import("std");
-const smi = @import("zml-smi");
+const native = @import("zml-smi/native");
 
 /// An io_object_t: a service, an iterator or a connection. 0 is none.
 pub const Object = std.c.mach_port_t;
@@ -39,12 +39,10 @@ pub const Api = struct {
 };
 
 pub fn open() !Api {
-    return smi.dynlib.open(Api, &.{"/System/Library/Frameworks/IOKit.framework/IOKit"});
+    return native.dynlib.open(Api, &.{"/System/Library/Frameworks/IOKit.framework/IOKit"});
 }
 
-fn Checked(comptime Function: type) type {
-    return smi.dynlib.Checked(Function, check);
-}
+const Checked = native.dynlib.CheckedBy(check);
 
 fn check(status: Status) error{IoKitError}!void {
     if (status != 0) return error.IoKitError;

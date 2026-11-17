@@ -1,25 +1,20 @@
 const std = @import("std");
-const smi = @import("smi.zig");
-
-const Collector = smi.Collector;
-const Reading = smi.Reading;
+const model = @import("zml-smi/model");
+const source = @import("zml-smi/source");
+const Collector = @import("collector.zig").Collector;
 
 const Fake = struct {
-    devices: []const smi.Device,
+    devices: []const model.Device,
     polls: u64 = 0,
+    closes: usize = 0,
 
     pub const two_readings = true;
 
-    pub fn open(
-        _: std.mem.Allocator,
-        _: std.mem.Allocator,
-        _: std.Io,
-        devices: []const smi.Device,
-    ) !Fake {
-        return .{ .devices = devices };
+    pub fn close(self: *Fake) void {
+        self.closes += 1;
     }
 
-    pub fn poll(self: *Fake, _: std.mem.Allocator, reading: *Reading) !void {
+    pub fn poll(self: *Fake, _: std.mem.Allocator, reading: *source.Reading) !void {
         const samples = reading.samples;
         self.polls += 1;
         samples[0].cuda.util_percent = self.polls;
@@ -33,37 +28,51 @@ const Fake = struct {
             .username = try reading.allocator.dupe(u8, if (self.polls == 1) "alice" else "carol"),
         });
         if (self.polls % 2 == 0) return error.Unavailable;
-        reading.host.cpu_power_mw = self.polls;
+        reading.host_power.cpu_power_mw = self.polls;
     }
+};
+
+const FakeHost = struct {
+    pub fn enrich(_: *FakeHost, _: std.mem.Allocator, _: []model.ProcessInfo) void {}
+    pub fn sample(_: *FakeHost, _: *model.HostData) void {}
+    pub fn deinit(_: *FakeHost) void {}
 };
 
 test "source publication keeps readings, history, and owned process rows together" {
     const io = std.testing.io;
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var collector: Collector = .init(arena.allocator(), std.testing.allocator, io, .{ .history = true });
+    var host: FakeHost = .{};
+    const host_reader: source.HostReader = .from(&host);
+    var collector: Collector = .init(arena.allocator(), gpa, io, host_reader, .{}, .{
+        .history = true,
+    });
     defer collector.deinit();
-    const devices: []const smi.Device = &.{ .{ .target = .cuda }, .{ .target = .cuda } };
-    try collector.open(Fake, .{devices});
-    try collector.open(Fake, .{devices[0..1]});
+    const devices: []const model.Device = &.{ .{ .target = .cuda }, .{ .target = .cuda } };
+    var first: Fake = .{ .devices = devices };
+    var second: Fake = .{ .devices = devices[0..1] };
+    try collector.add(.from(&first));
+    try collector.add(.from(&second));
     try std.testing.expect(collector.two_readings);
 
     collector.round();
     const frame = try collector.capture(arena.allocator(), true);
+    try std.testing.expectEqual(3, frame.devices.len);
     try std.testing.expectEqual(1, frame.samples[0].cuda.util_percent);
     try std.testing.expectEqual(null, frame.samples[1].cuda.util_percent);
     try std.testing.expectEqual(1, frame.samples[2].cuda.util_percent);
     try std.testing.expectEqual(1, frame.host.cpu_power_mw);
     try std.testing.expectEqual(2, frame.processes.len);
     try std.testing.expectEqual(2, frame.processes[1].device_idx);
-    try std.testing.expectEqual(1, frame.histories[0].len);
+    try std.testing.expectEqual(1, frame.history.?.points[0].len);
 
     collector.round();
     const next = try collector.capture(arena.allocator(), true);
     try std.testing.expectEqual(2, next.samples[0].cuda.util_percent);
     try std.testing.expectEqual(null, next.host.cpu_power_mw);
     try std.testing.expectEqual(0, next.processes.len);
-    try std.testing.expectEqual(2, next.histories[0].len);
+    try std.testing.expectEqual(2, next.history.?.points[0].len);
     // Reuse the arena from the first publication. Its captured strings must survive.
     collector.round();
     try std.testing.expectEqualStrings("alice", frame.processes[1].username);
@@ -71,18 +80,40 @@ test "source publication keeps readings, history, and owned process rows togethe
 
 test "collector joins workers before deinit" {
     const io = std.testing.io;
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var collector: Collector = .init(arena.allocator(), std.testing.allocator, io, .{ .poll_interval_ms = 1 });
+    var host: FakeHost = .{};
+    const host_reader: source.HostReader = .from(&host);
+    var collector: Collector = .init(arena.allocator(), gpa, io, host_reader, .{}, .{
+        .poll_interval_ms = 1,
+    });
     defer collector.deinit();
-    const devices: []const smi.Device = &.{.{ .target = .cuda }};
-    try collector.open(Fake, .{devices});
+    var backend: Fake = .{ .devices = &.{.{ .target = .cuda }} };
+    try collector.add(.from(&backend));
     try collector.start();
     while (true) {
-        const source = collector.sources.items[0];
-        const util = source.readings.lock(io).value.samples[0].cuda.util_percent orelse 0;
-        source.readings.unlock(io);
+        const publication = collector.sources.items[0];
+        const util = publication.readings.lock(io).value.samples[0].cuda.util_percent orelse 0;
+        publication.readings.unlock(io);
         if (util >= 3) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
+}
+
+test "source registration transfers ownership only on success" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var host: FakeHost = .{};
+    var collector: Collector = .init(std.testing.failing_allocator, gpa, io, .from(&host), .{}, .{});
+    defer collector.deinit();
+
+    var empty: Fake = .{ .devices = &.{} };
+    try collector.add(.from(&empty));
+    try std.testing.expectEqual(1, empty.closes);
+
+    var backend: Fake = .{ .devices = &.{.{ .target = .cuda }} };
+    try std.testing.expectError(error.OutOfMemory, collector.add(.from(&backend)));
+    try std.testing.expectEqual(0, backend.closes);
+    try std.testing.expectEqual(0, collector.devices.items.len);
 }

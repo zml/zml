@@ -1,14 +1,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const dynlib = @import("dynlib.zig");
+const dynlib = @import("zml-smi/native").dynlib;
 
 const open = dynlib.open;
 const openBundled = dynlib.openBundled;
 
 const Libc = struct {
     getpid: *const @TypeOf(std.c.getpid),
-    clock_gettime: dynlib.Checked(std.c.clock_gettime, checkLibc),
-    close: dynlib.Checked(std.c.close, checkLibc),
+    clock_gettime: Checked(std.c.clock_gettime),
+    close: Checked(std.c.close),
+
+    const Checked = dynlib.CheckedBy(checkLibc);
 
     fn checkLibc(status: c_int) error{Failed}!void {
         if (status != 0) return error.Failed;

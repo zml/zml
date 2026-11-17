@@ -1,30 +1,31 @@
 const std = @import("std");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
 
 const implementation = @This();
 
 pub const Metric = enum { util, memory, temperature, power };
 
+/// Captures readings into a frame allocator. Device indices stay stable across captures.
+pub const FrameProvider = struct {
+    context: *anyopaque,
+    capture: *const fn (*anyopaque, std.mem.Allocator) std.mem.Allocator.Error!model.Frame,
+};
+
 pub const SystemState = struct {
-    collector: *smi.Collector,
-    snapshot: ?smi.Collector.Snapshot = null,
-    /// Bounded by the collector's history capacity when drawing a chart.
+    provider: FrameProvider,
+    frame: ?model.Frame = null,
+    /// Bounded by the available history capacity when drawing a chart.
     history_len: usize = 128,
-    captured_at: std.Io.Timestamp = .fromNanoseconds(0),
     tui_refresh_rate: u16,
 
     /// Called once before drawing a frame. Widgets borrow only this capture.
-    pub fn capture(self: *SystemState, frame: std.mem.Allocator) std.mem.Allocator.Error!void {
-        self.snapshot = try self.collector.capture(frame, true);
-        self.captured_at = .now(self.collector.io, .awake);
+    pub fn capture(self: *SystemState, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+        self.frame = try self.provider.capture(self.provider.context, allocator);
     }
 
     pub fn historyInterval(self: *const SystemState) u32 {
-        const milliseconds = @max(
-            @divTrunc(self.collector.interval.nanoseconds, std.time.ns_per_ms),
-            1,
-        );
-        return std.math.cast(u32, milliseconds) orelse std.math.maxInt(u32);
+        const history_data = (self.frame orelse return 1).history orelse return 1;
+        return history_data.interval_ms;
     }
 
     /// Projects only a visible chart's metric into timestamp buckets.
@@ -34,42 +35,31 @@ pub const SystemState = struct {
         device_index: u16,
         metric: Metric,
     ) std.mem.Allocator.Error![]const ?u64 {
-        const snapshot = self.snapshot orelse return &.{};
+        const history_data = (self.frame orelse return &.{}).history orelse return &.{};
         return historySeries(
             frame,
-            snapshot.histories[device_index],
+            history_data.points[device_index],
             metric,
-            self.captured_at,
-            self.historyInterval(),
-            @min(self.history_len, smi.Collector.history_capacity),
+            history_data.captured_at,
+            history_data.interval_ms,
+            @min(self.history_len, history_data.capacity),
         );
     }
 
     pub fn deviceCount(self: *const SystemState) usize {
-        return self.collector.devices.items.len;
+        return if (self.frame) |frame| frame.devices.len else 0;
     }
 
-    pub fn device(self: *const SystemState, index: u16) smi.Device {
-        return self.collector.devices.items[index];
+    pub fn host(self: *const SystemState) model.HostData {
+        return if (self.frame) |frame| frame.host else .{};
     }
 
-    pub fn sample(self: *const SystemState, index: u16) smi.Sample {
-        return if (self.snapshot) |snapshot|
-            snapshot.samples[index]
-        else
-            .init(self.device(index).target);
-    }
-
-    pub fn host(self: *const SystemState) smi.HostData {
-        return if (self.snapshot) |snapshot| snapshot.host else .{};
-    }
-
-    pub fn processes(self: *const SystemState) []const smi.ProcessInfo {
-        return if (self.snapshot) |snapshot| snapshot.processes else &.{};
+    pub fn processes(self: *const SystemState) []const model.ProcessInfo {
+        return if (self.frame) |frame| frame.processes else &.{};
     }
 };
 
-pub fn memoryPercent(common: smi.Common) ?u64 {
+pub fn memoryPercent(common: model.Common) ?u64 {
     const used = common.mem_used_bytes orelse return null;
     const total = common.mem_total_bytes orelse return null;
     if (total == 0) return null;
@@ -78,7 +68,7 @@ pub fn memoryPercent(common: smi.Common) ?u64 {
 
 fn historySeries(
     frame: std.mem.Allocator,
-    points: []const smi.Collector.HistoryPoint,
+    points: []const model.HistoryPoint,
     metric: Metric,
     now: std.Io.Timestamp,
     interval_ms: u32,

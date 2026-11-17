@@ -6,7 +6,6 @@ const data = @import("data.zig");
 const ui = @import("lib/ui.zig");
 const compose = @import("lib/compose.zig");
 const image_cache = @import("image_cache.zig");
-const Logo = @import("widgets/logo.zig");
 const ProcessTable = @import("widgets/process_table.zig");
 const Overview = @import("pages/overview.zig");
 const Detail = @import("pages/detail.zig");
@@ -56,8 +55,6 @@ const Model = struct {
     pub fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .init => {
-                self.overview = try Overview.init(self.allocator, self.state, &self.process_table, &self.viewing_device);
-                self.overview.use_braille = true;
                 image_cache.global.loadAll(self.vx, self.allocator, self.tty.writer());
                 try ctx.tick(1000, ui.widget(self));
             },
@@ -70,18 +67,12 @@ const Model = struct {
                     ctx.quit = true;
                     return;
                 }
-                if (self.viewing_device != null) {
-                    if (key.matches(vaxis.Key.escape, .{}) or key.matches(vaxis.Key.backspace, .{})) {
-                        self.viewing_device = null;
-                        return ctx.consumeAndRedraw();
-                    }
-                } else {
-                    if (key.matches('v', .{})) {
-                        self.overview.use_braille = !self.overview.use_braille;
-                        return ctx.consumeAndRedraw();
-                    }
-                }
-                if (key.matches(vaxis.Key.down, .{})) {
+                const back = key.matches(vaxis.Key.escape, .{}) or key.matches(vaxis.Key.backspace, .{});
+                if (self.viewing_device != null and back) {
+                    self.viewing_device = null;
+                } else if (self.viewing_device == null and key.matches('v', .{})) {
+                    self.overview.use_braille = !self.overview.use_braille;
+                } else if (key.matches(vaxis.Key.down, .{})) {
                     self.scroll.scrollBy(1, 0);
                 } else if (key.matches(vaxis.Key.up, .{})) {
                     self.scroll.scrollBy(-1, 0);
@@ -118,20 +109,18 @@ const Model = struct {
         }
 
         try self.state.capture(ctx.arena);
+        try self.overview.prepare(self.allocator);
         try self.process_table.prepare(ctx.arena, self.state, self.viewing_device);
 
-        var content_surf: vxfw.Surface = undefined;
-
-        if (self.viewing_device) |dev_id| {
+        const content_ctx = ui.fixedWidth(ctx, content_w);
+        var content_surf = if (self.viewing_device) |dev_id| detail_blk: {
             const detail: Detail = .{
                 .state = self.state,
                 .device_id = dev_id,
                 .process_table = &self.process_table,
             };
-            content_surf = try detail.draw(ui.fixedWidth(ctx, content_w));
-        } else {
-            content_surf = try self.overview.draw(ui.fixedWidth(ctx, content_w));
-        }
+            break :detail_blk try detail.draw(content_ctx);
+        } else try self.overview.draw(content_ctx);
 
         content_surf.size.height = @max(content_surf.size.height, min_height);
 
@@ -161,6 +150,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
         .state = state,
         .vx = &app.vx,
         .tty = &app.tty,
+    };
+    model.overview = .{
+        .state = state,
+        .viewing_device = &model.viewing_device,
+        .process_table = &model.process_table,
+        .use_braille = true,
     };
     defer model.deinit();
 

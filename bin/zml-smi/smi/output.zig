@@ -1,5 +1,7 @@
 const std = @import("std");
-const smi = @import("smi.zig");
+const Collector = @import("zml-smi/collector").Collector;
+const formats = @import("zml-smi/formats");
+const model = @import("zml-smi/model");
 
 const log = std.log.scoped(.@"zml-smi/api");
 
@@ -9,8 +11,17 @@ pub const Format = enum {
     prometheus,
 };
 
+const Serializer = *const fn (*std.Io.Writer, model.Frame) std.Io.Writer.Error!void;
+
+pub fn write(writer: *std.Io.Writer, collector: *Collector, serialize: Serializer) !void {
+    var frame: std.heap.ArenaAllocator = .init(collector.gpa);
+    defer frame.deinit();
+    try serialize(writer, try collector.capture(frame.allocator(), false));
+}
+
 /// Answers every request on `address` with the latest values, until canceled.
-pub fn serve(gpa: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, collector: *smi.Collector, format: Format) void {
+pub fn serve(collector: *Collector, address: std.Io.net.IpAddress, format: Format) void {
+    const io = collector.io;
     var server = address.listen(io, .{ .reuse_address = true }) catch |err| {
         log.err("{t} server cannot listen on {f}: {t}", .{ format, address, err });
         return;
@@ -21,14 +32,15 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, 
     defer connections.cancel(io);
     while (true) {
         const stream = server.accept(io) catch return;
-        connections.concurrent(io, answer, .{ gpa, io, stream, collector, format }) catch {
+        connections.concurrent(io, answer, .{ collector, stream, format }) catch {
             stream.close(io);
             return;
         };
     }
 }
 
-fn answer(gpa: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, collector: *smi.Collector, format: Format) void {
+fn answer(collector: *Collector, stream: std.Io.net.Stream, format: Format) void {
+    const io = collector.io;
     defer stream.close(io);
     var read_buffer: [8192]u8 = undefined;
     var write_buffer: [4096]u8 = undefined;
@@ -37,7 +49,7 @@ fn answer(gpa: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, collect
     var http: std.http.Server = .init(&reader.interface, &writer.interface);
 
     // The body is written to memory first, so a slow client never holds a lock.
-    var body: std.Io.Writer.Allocating = .init(gpa);
+    var body: std.Io.Writer.Allocating = .init(collector.gpa);
     defer body.deinit();
 
     while (true) {
@@ -48,9 +60,9 @@ fn answer(gpa: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, collect
         }
 
         body.clearRetainingCapacity();
-        smi.write(&body.writer, collector, switch (format) {
-            .json => smi.json.write,
-            .prometheus => smi.prometheus.write,
+        write(&body.writer, collector, switch (format) {
+            .json => formats.json.write,
+            .prometheus => formats.prometheus.write,
         }) catch return;
 
         request.respond(body.written(), .{ .extra_headers = switch (format) {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const path = @import("sandbox.zig").path;
+const path = @import("zml-smi/native").testing.sandbox.path;
 
 test path {
     const io = std.testing.io;

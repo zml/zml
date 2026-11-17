@@ -1,6 +1,6 @@
 const std = @import("std");
-const pci = @import("pci.zig");
-const sysfs = @import("sysfs.zig");
+const pci = @import("zml-smi/native").pci;
+const sysfs = @import("zml-smi/native").sysfs;
 
 const generation = pci.generation;
 const Link = pci.Link;

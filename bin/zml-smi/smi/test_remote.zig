@@ -1,7 +1,8 @@
 const std = @import("std");
-const smi = @import("smi.zig");
+const model = @import("zml-smi/model");
+const Reading = @import("zml-smi/source").Reading;
 
-const Remote = smi.Remote;
+const Remote = @import("remote.zig").Remote;
 
 test "remote transactions map indices, own strings, and reject inventory changes" {
     var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -14,10 +15,10 @@ test "remote transactions map indices, own strings, and reject inventory changes
         .timeout = .fromSeconds(1),
         .warned = true,
     };
-    var samples = [_]smi.Sample{ .init(.cuda), .init(.cuda) };
+    var samples = [_]model.Sample{ .init(.cuda), .init(.cuda) };
     var owned: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer owned.deinit();
-    var reading: smi.Reading = .{ .samples = &samples, .allocator = owned.allocator() };
+    var reading: Reading = .{ .samples = &samples, .allocator = owned.allocator() };
     const response = try std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(),
         \\{"devices":[
         \\ {"device":{"target":"unknown"}},

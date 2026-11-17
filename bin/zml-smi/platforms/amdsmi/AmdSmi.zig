@@ -2,18 +2,21 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const native = @import("zml-smi/native");
+const source = @import("zml-smi/source");
+const telemetry = @import("zml-smi/telemetry");
 
 const AmdSmi = @This();
 const log = std.log.scoped(.@"zml-smi/amdsmi");
 
-devices: []const smi.Device,
+devices: []const model.Device,
 io: std.Io,
 api: Api,
 gpus: []const Gpu,
-proc: ?smi.sysfs.Dir,
+proc: ?native.sysfs.Dir,
 /// Graphics plus encode nanoseconds of each process on each GPU.
-busy: smi.Counters(struct { pid: u32, device: u16 }),
+busy: native.Counters(struct { pid: u32, device: u16 }),
 
 const Gpu = struct {
     handle: c.amdsmi_processor_handle,
@@ -42,9 +45,7 @@ const Api = struct {
     amdsmi_get_pcie_info: Checked(c.amdsmi_get_pcie_info),
     amdsmi_get_gpu_process_list: Checked(c.amdsmi_get_gpu_process_list),
 
-    fn Checked(comptime function: anytype) type {
-        return smi.dynlib.Checked(function, check);
-    }
+    const Checked = native.dynlib.CheckedBy(check);
 
     fn check(status: c.amdsmi_status_t) error{ Unsupported, AmdSmiError }!void {
         return switch (status) {
@@ -56,11 +57,11 @@ const Api = struct {
 };
 
 pub fn detect(io: std.Io) bool {
-    return smi.sysfs.exists(io, "/dev/kfd");
+    return native.sysfs.exists(io, "/dev/kfd");
 }
 
 pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSmi {
-    const api = try smi.dynlib.openBundled(Api, io, "libamd_smi.so.27");
+    const api = try native.dynlib.openBundled(Api, io, "libamd_smi.so.27");
 
     // The first call says why the library cannot be used.
     const status = api.amdsmi_init.function(c.AMDSMI_INIT_AMD_GPUS);
@@ -77,7 +78,7 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
     try api.amdsmi_get_socket_handles.call(.{ &socket_count, sockets.ptr });
 
     var gpus: std.ArrayList(Gpu) = .empty;
-    var devices: std.ArrayList(smi.Device) = .empty;
+    var devices: std.ArrayList(model.Device) = .empty;
     for (sockets[0..socket_count]) |socket| {
         var count: u32 = 0;
         try api.amdsmi_get_processor_handles.call(.{ socket, &count, null });
@@ -100,7 +101,7 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
         .io = io,
         .api = api,
         .gpus = gpus.items,
-        .proc = smi.sysfs.Dir.open(io, "/proc") catch null,
+        .proc = native.sysfs.Dir.open(io, "/proc") catch null,
         .busy = .init(gpa),
     };
 }
@@ -110,30 +111,32 @@ pub fn close(self: *AmdSmi) void {
     self.busy.deinit();
 }
 
-pub fn poll(self: *AmdSmi, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+const pollGpu = telemetry.Bind(model.Gpu, .{
+    .read = native.dynlib.readScalar,
+    .fields = .{
+        .temperature = .{ .amdsmi_get_temp_metric, .{ c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT } },
+        .mem_used_bytes = .{ .amdsmi_get_gpu_memory_usage, .{c.AMDSMI_MEM_TYPE_VRAM} },
+        .mem_total_bytes = .{ .amdsmi_get_gpu_memory_total, .{c.AMDSMI_MEM_TYPE_VRAM} },
+    },
+}).poll;
+
+pub fn poll(self: *AmdSmi, scratch: std.mem.Allocator, reading: *source.Reading) !void {
     const api = &self.api;
 
     for (self.gpus, reading.samples) |gpu, *sample| {
         const fields = &sample.rocm;
         const handle = gpu.handle;
-        fields.poll(.{ api, handle }, .{
-            .read = smi.dynlib.readScalar,
-            .fields = .{
-                .temperature = .{ .amdsmi_get_temp_metric, .{ c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT } },
-                .mem_used_bytes = .{ .amdsmi_get_gpu_memory_usage, .{c.AMDSMI_MEM_TYPE_VRAM} },
-                .mem_total_bytes = .{ .amdsmi_get_gpu_memory_total, .{c.AMDSMI_MEM_TYPE_VRAM} },
-            },
-        });
+        pollGpu(fields, .{ api, handle });
 
         // Watts: the current power where the GPU has it, else the average.
         if (api.amdsmi_get_gpu_metrics_info.get(.{handle})) |metrics| {
             if (known(metrics.current_socket_power) orelse known(metrics.average_socket_power)) |watts| fields.power_mw = watts * 1000;
         } else |_| {}
         if (api.amdsmi_get_power_info.get(.{handle})) |info| {
-            if (known(info.power_limit)) |microwatts| fields.power_limit_mw = smi.units.scale(microwatts, .micro, .milli);
+            if (known(info.power_limit)) |microwatts| fields.power_limit_mw = native.units.scale(microwatts, .micro, .milli);
         } else |_| {}
         if (api.amdsmi_get_gpu_fan_speed.get(.{ handle, 0 })) |speed| {
-            if (std.math.cast(u64, speed)) |pwm| fields.fan_speed_percent = smi.hwmon.pwmPercent(pwm);
+            if (std.math.cast(u64, speed)) |pwm| fields.fan_speed_percent = native.hwmon.pwmPercent(pwm);
         } else |_| {}
         if (api.amdsmi_get_gpu_activity.get(.{handle})) |activity| {
             // Not a percentage when unsupported: 0xFFFF.
@@ -153,7 +156,7 @@ pub fn poll(self: *AmdSmi, scratch: std.mem.Allocator, reading: *smi.Reading) !v
         } else |_| {}
 
         if (api.amdsmi_get_pcie_info.get(.{handle})) |pcie| {
-            const link: smi.pci.Link = .{ .gen = known(pcie.pcie_static.pcie_interface_version), .width = known(pcie.pcie_metric.pcie_width) };
+            const link: native.pci.Link = .{ .gen = known(pcie.pcie_static.pcie_interface_version), .width = known(pcie.pcie_metric.pcie_width) };
             fields.pcie_link_gen = link.gen;
             fields.pcie_link_width = link.width;
             // The rate comes from the generation: the speed amdsmi reports stays at 2.5 GT/s on an R9700 whose link runs at 32.
@@ -219,7 +222,7 @@ fn vramKib(self: *AmdSmi, pid: u32, address: []const u8) ?u64 {
     var buffer: [8192]u8 = undefined;
     var it = files.iterate();
     while (it.next(self.io) catch null) |entry| {
-        const info = smi.fdinfo.read(files, entry.name, &buffer) catch continue;
+        const info = native.fdinfo.read(files, entry.name, &buffer) catch continue;
         if (!std.mem.eql(u8, info.pdev orelse continue, address)) continue;
         for (info.regions()) |region| {
             if (std.mem.eql(u8, region.name, "vram")) bytes += region.resident orelse 0;

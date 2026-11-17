@@ -3,7 +3,9 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 _DEPS = [
     ":tpuinfo",
-    "//bin/zml-smi/smi",
+    "//bin/zml-smi/smi:model",
+    "//bin/zml-smi/smi:native",
+    "//bin/zml-smi/smi:source",
 ]
 
 cc_library(

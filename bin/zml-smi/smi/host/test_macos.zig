@@ -1,5 +1,5 @@
 const std = @import("std");
-const smi = @import("../smi.zig");
+const model = @import("zml-smi/model");
 
 const Host = @import("macos.zig").Host;
 const c = std.c;
@@ -8,12 +8,12 @@ test "enrich" {
     const io = std.testing.io;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    var data: smi.HostData = .{};
+    var data: model.HostData = .{};
     var host: Host = .init(arena.allocator(), std.testing.allocator, io, &data);
     defer host.deinit();
 
     const self: u32 = @intCast(c.getpid());
-    var rows = [_]smi.ProcessInfo{ .{ .pid = self }, .{ .pid = 1 } };
+    var rows = [_]model.ProcessInfo{ .{ .pid = self }, .{ .pid = 1 } };
     host.enrich(arena.allocator(), &rows);
     try std.testing.expectEqual(c.getuid(), rows[0].uid);
     try std.testing.expect(rows[0].rss_kib > 0);

@@ -27,14 +27,17 @@
 
 const builtin = @import("builtin");
 const std = @import("std");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const source = @import("zml-smi/source");
+const telemetry = @import("zml-smi/telemetry");
+const native = @import("zml-smi/native");
 const iokit = @import("iokit.zig");
 const Smc = @import("Smc.zig");
 
 const Metal = @This();
 const log = std.log.scoped(.@"zml-smi/metal");
 
-devices: []const smi.Device = &.{},
+devices: []const model.Device = &.{},
 io: std.Io,
 cf: CoreFoundation,
 io_kit: iokit.Api,
@@ -54,7 +57,7 @@ last: ?Reading = null,
 /// histograms show power, they give the CPU power for the rest of the run.
 cpu_from_pmp: bool = false,
 /// GPU nanoseconds of each process.
-busy: smi.Counters(u32),
+busy: native.Counters(u32),
 
 const Reading = struct { sample: *const Dictionary, at: std.Io.Timestamp };
 
@@ -75,12 +78,22 @@ const Key = enum {
     @"voltage-states9",
 };
 
+const pollStatistics = telemetry.Bind(model.Metal, .{
+    .read = numberAt,
+    .fields = .{
+        .util_percent = .@"Device Utilization %",
+        .mem_used_bytes = .@"In use system memory",
+    },
+}).poll;
+
 pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal {
     var self: Metal = .{
         .io = io,
-        .cf = try smi.dynlib.open(CoreFoundation, &.{"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"}),
+        .cf = try native.dynlib.open(CoreFoundation, &.{
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+        }),
         .io_kit = try iokit.open(),
-        .ioreport = try smi.dynlib.open(IoReport, &.{"/usr/lib/libIOReport.dylib"}),
+        .ioreport = try native.dynlib.open(IoReport, &.{"/usr/lib/libIOReport.dylib"}),
         .keys = undefined,
         .mem_total_bytes = memoryTotal(),
         .channels = undefined,
@@ -95,11 +108,11 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal
     }
     errdefer _ = self.io_kit.IOObjectRelease(self.accelerator);
 
-    for (std.enums.values(Key), 0..) |key, made| {
-        self.keys.set(key, self.cf.CFStringCreateWithCString(null, @tagName(key), utf8) orelse {
-            for (std.enums.values(Key)[0..made]) |done| self.cf.CFRelease(self.keys.get(done));
+    for (std.enums.values(Key), &self.keys.values, 0..) |key, *value, made| {
+        value.* = self.cf.CFStringCreateWithCString(null, @tagName(key), utf8) orelse {
+            for (self.keys.values[0..made]) |string| self.cf.CFRelease(string);
             return error.OutOfMemory;
-        });
+        };
     }
     errdefer for (self.keys.values) |string| self.cf.CFRelease(string);
 
@@ -120,13 +133,11 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal
     };
     errdefer if (self.smc) |smc| smc.close();
 
-    const devices = try arena.alloc(smi.Device, 1);
-    devices[0] = .{
+    self.devices = try arena.dupe(model.Device, &.{.{
         .target = .metal,
         .name = try self.propertyText(arena, .model),
         .driver_version = try self.propertyText(arena, .IOSourceVersion),
-    };
-    self.devices = devices;
+    }});
     return self;
 }
 
@@ -140,7 +151,7 @@ pub fn close(self: *Metal) void {
     self.busy.deinit();
 }
 
-pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *source.Reading) !void {
     const gpu = &reading.samples[0].metal;
     gpu.mem_total_bytes = self.mem_total_bytes;
     gpu.clock_graphics_max_mhz = if (self.frequencies.len > 0)
@@ -150,17 +161,14 @@ pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *smi.Reading) !vo
     {
         const statistics = self.property(self.accelerator, .PerformanceStatistics);
         defer if (statistics) |value| self.cf.CFRelease(value);
-        gpu.poll(.{ self, self.as(Dictionary, statistics) }, .{
-            .read = numberAt,
-            .fields = .{ .util_percent = .@"Device Utilization %", .mem_used_bytes = .@"In use system memory" },
-        });
+        pollStatistics(gpu, .{ self, self.as(Dictionary, statistics) });
     }
 
-    self.readReport(gpu, &reading.host);
+    self.readReport(gpu, &reading.host_power);
     if (self.smc) |smc| {
         gpu.temperature = smc.temperature();
         gpu.fan_speed_percent = smc.fanPercent();
-        reading.host.system_power_mw = smc.systemPower();
+        reading.host_power.system_power_mw = smc.systemPower();
     }
 
     // One row per process with GPU time, which has no GPU memory of its own.
@@ -180,7 +188,7 @@ pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *smi.Reading) !vo
         time.value_ptr.* +|= self.gpuTime(client);
     }
 
-    const growths = try scratch.alloc(?smi.Growth, times.count());
+    const growths = try scratch.alloc(?native.Growth, times.count());
     var total: u64 = 0;
     for (times.keys(), times.values(), growths) |pid, nanoseconds, *growth| {
         growth.* = if (nanoseconds == 0) null else try self.busy.advance(pid, self.io, nanoseconds);
@@ -198,7 +206,7 @@ pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *smi.Reading) !vo
 /// A process's part of the device's utilization, in proportion to its GPU time, as mactop does:
 /// the GPU time of the clients adds up to less than the device's utilization.
 /// Its own share of the elapsed time when the device's utilization is unknown or 0.
-fn share(busy: smi.Growth, total: u64, device: ?u64) u16 {
+fn share(busy: native.Growth, total: u64, device: ?u64) u16 {
     const percent = device orelse 0;
     if (percent == 0 or total == 0) return busy.percentOfTime();
     return @intCast(@as(u128, @min(percent, 100)) * busy.amount / total);
@@ -229,7 +237,7 @@ fn gpuTime(self: *Metal, client: iokit.Object) u64 {
 }
 
 /// Takes a sample and reads its delta against the last one: GPU, ANE and CPU power, and the GPU clock.
-fn readReport(self: *Metal, gpu: *smi.Metal, host: *smi.HostData) void {
+fn readReport(self: *Metal, gpu: *model.Metal, host_power: *source.HostPower) void {
     const sample = self.ioreport.IOReportCreateSamples(
         self.subscription,
         self.channels,
@@ -273,7 +281,7 @@ fn readReport(self: *Metal, gpu: *smi.Metal, host: *smi.HostData) void {
     // Whole-CPU totals, else the clusters: an OS with both would count them twice.
     const cpu = Energy.preferred(&energy, .cpu, .cpu_cluster);
     if (cpu == 0 and pmp_cpu_mw > 0) self.cpu_from_pmp = true;
-    host.cpu_power_mw = if (self.cpu_from_pmp) pmp_cpu_mw else cpu;
+    host_power.cpu_power_mw = if (self.cpu_from_pmp) pmp_cpu_mw else cpu;
     gpu.power_mw = Energy.preferred(&energy, .gpu, .gpu_alias);
     gpu.ane_power_mw = Energy.preferred(&energy, .ane_block, .ane);
 }
@@ -312,9 +320,14 @@ const Energy = enum {
 /// Energy over the time it took, in milliwatts. mactop reads a unit that is not mJ or nJ as µJ.
 fn milliwatts(amount: u64, unit: []const u8, elapsed: std.Io.Duration) u64 {
     const symbol = unit[0 .. std.mem.indexOfScalar(u8, unit, ' ') orelse unit.len];
-    const prefix: smi.units.Prefix = if (std.mem.eql(u8, symbol, "mJ")) .milli else if (std.mem.eql(u8, symbol, "nJ")) .nano else .micro;
-    const growth: smi.Growth = .{ .amount = amount, .elapsed = elapsed };
-    return smi.units.scale(growth.perSecond(), prefix, .milli);
+    const prefix: native.units.Prefix = if (std.mem.eql(u8, symbol, "mJ"))
+        .milli
+    else if (std.mem.eql(u8, symbol, "nJ"))
+        .nano
+    else
+        .micro;
+    const growth: native.Growth = .{ .amount = amount, .elapsed = elapsed };
+    return native.units.scale(growth.perSecond(), prefix, .milli);
 }
 
 /// The mean frequency of the active GPU performance states, weighted by the time spent in each.
@@ -380,17 +393,15 @@ fn copyChannels(self: *Metal) !*Dictionary {
     defer self.cf.CFRelease(energy);
     const channels = self.cf.CFDictionaryCreateMutableCopy(null, 0, energy) orelse return error.OutOfMemory;
 
-    if (self.channelsIn("GPU Stats", "GPU Performance States")) |gpu| {
-        defer self.cf.CFRelease(gpu);
-        self.ioreport.IOReportMergeChannels(channels, gpu, null);
-    }
-    // The dies are numbered contiguously, so the first without channels ends the search.
-    for (0..9) |die| {
-        var buffer: [8]u8 = undefined;
-        const group = if (die == 0) "PMP" else std.fmt.bufPrintSentinel(&buffer, "PMP{d}", .{die - 1}, 0) catch unreachable;
-        const pmp = self.channelsIn(group, "Energy") orelse if (die == 0) continue else break;
-        defer self.cf.CFRelease(pmp);
-        self.ioreport.IOReportMergeChannels(channels, pmp, null);
+    const groups = [_][:0]const u8{
+        "GPU Stats", "PMP", "PMP0", "PMP1", "PMP2", "PMP3", "PMP4", "PMP5", "PMP6", "PMP7",
+    };
+    for (groups, 0..) |group, index| {
+        const subgroup: [:0]const u8 = if (index == 0) "GPU Performance States" else "Energy";
+        // The GPU group and legacy PMP are optional. Numbered dies are contiguous.
+        const extra = self.channelsIn(group, subgroup) orelse if (index < 2) continue else break;
+        defer self.cf.CFRelease(extra);
+        self.ioreport.IOReportMergeChannels(channels, extra, null);
     }
     return channels;
 }

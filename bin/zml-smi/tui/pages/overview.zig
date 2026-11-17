@@ -6,7 +6,6 @@ const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const image_cache = @import("../image_cache.zig");
 const ColumnLayout = @import("../widgets/column_layout.zig");
-const common = @import("detail/detail_common.zig");
 const DeviceCard = @import("../widgets/device_card.zig");
 const Logo = @import("../widgets/logo.zig");
 const InfoLines = @import("../widgets/info_lines.zig");
@@ -21,30 +20,26 @@ const max_info_width: u16 = 50;
 pub const host_line_width: u16 = (Logo.logo_width + 6) + max_info_width + 2;
 
 state: *const data.SystemState,
-device_cards: []DeviceCard = &.{},
-process_table: ?*ProcessTable = null, // maybe null if we decide not to print the process table in print mode
-viewing_device: *?u16 = undefined,
+device_cards: ?[]DeviceCard = null,
+process_table: ?*ProcessTable = null,
+viewing_device: *?u16,
 use_braille: bool = false,
 
-pub fn init(allocator: std.mem.Allocator, state: *const data.SystemState, process_table: ?*ProcessTable, viewing_device: *?u16) !Overview {
-    const count = state.deviceCount();
-    const cards = try allocator.alloc(DeviceCard, count);
+pub fn prepare(self: *Overview, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
+    if (self.device_cards != null) return;
+    const cards = try allocator.alloc(DeviceCard, self.state.deviceCount());
     for (cards, 0..) |*card, i| {
         card.* = .{
             .device_id = @intCast(i),
-            .state = state,
+            .state = self.state,
+            .viewing_device = self.viewing_device,
         };
     }
-    return .{
-        .state = state,
-        .device_cards = cards,
-        .process_table = process_table,
-        .viewing_device = viewing_device,
-    };
+    self.device_cards = cards;
 }
 
 pub fn deinit(self: *Overview, allocator: std.mem.Allocator) void {
-    allocator.free(self.device_cards);
+    if (self.device_cards) |cards| allocator.free(cards);
 }
 
 fn drawBanner(
@@ -85,10 +80,10 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
     var sb = compose.surfaceBuilder(ctx.arena);
     var row: i17 = @as(i17, try self.drawBanner(ctx, content_w, narrow, &sb)) + 2;
 
-    const card_widgets = try ctx.arena.alloc(vxfw.Widget, self.device_cards.len);
-    for (self.device_cards, card_widgets) |*card, *cw| {
+    const cards = self.device_cards.?;
+    const card_widgets = try ctx.arena.alloc(vxfw.Widget, cards.len);
+    for (cards, card_widgets) |*card, *cw| {
         card.use_braille = self.use_braille;
-        card.viewing_device = self.viewing_device;
         cw.* = ui.widget(card);
     }
     const device_grid: ColumnLayout = .{

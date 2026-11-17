@@ -1,19 +1,20 @@
 //! The host, from sysctl, the Mach host statistics and libproc.
 const std = @import("std");
-const smi = @import("../smi.zig");
+const model = @import("zml-smi/model");
+const native = @import("zml-smi/native");
 
 const c = std.c;
 
 pub const Host = struct {
     io: std.Io,
     /// CPU nanoseconds of each process.
-    cpu_time: smi.Counters(u32),
+    cpu_time: native.Counters(u32),
     cpus: u64,
     /// Converts the CPU time libproc reports, in Mach ticks, to nanoseconds.
     timebase: c.mach_timebase_info_data,
 
     /// Reads what does not change: hostname, kernel, CPU, core count and total memory.
-    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, data: *smi.HostData) Host {
+    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, data: *model.HostData) Host {
         data.hostname = sysctlString(arena, "kern.hostname");
         data.kernel = sysctlString(arena, "kern.osrelease");
         data.cpu_name = sysctlString(arena, "machdep.cpu.brand_string");
@@ -30,7 +31,7 @@ pub const Host = struct {
     }
 
     /// Overwrites what changes: available memory, load and uptime. A read that fails gives null.
-    pub fn sample(_: *Host, data: *smi.HostData) void {
+    pub fn sample(_: *Host, data: *model.HostData) void {
         data.mem_available_kib = memAvailable();
 
         var load: [3]f64 = undefined;
@@ -48,13 +49,13 @@ pub const Host = struct {
 
     /// Adds user, command, CPU and RSS to one row per local PID.
     /// The CPU and RSS of another user's process read 0, unless zml-smi runs as root.
-    pub fn enrich(self: *Host, strings: std.mem.Allocator, rows: []smi.ProcessInfo) void {
+    pub fn enrich(self: *Host, strings: std.mem.Allocator, rows: []model.ProcessInfo) void {
         defer self.cpu_time.sweep();
 
         for (rows) |*row| self.read(strings, row);
     }
 
-    fn read(self: *Host, strings: std.mem.Allocator, row: *smi.ProcessInfo) void {
+    fn read(self: *Host, strings: std.mem.Allocator, row: *model.ProcessInfo) void {
         const pid = std.math.cast(c_int, row.pid) orelse return;
 
         var short: ProcBsdShortInfo = undefined;

@@ -8,25 +8,22 @@
 #include "tpu_metric_service.grpc.pb.h"
 #include "tpu_metric_service.pb.h"
 
-using tpu::monitoring::runtime::MetricRequest;
-using tpu::monitoring::runtime::MetricResponse;
-using tpu::monitoring::runtime::RuntimeMetricService;
+namespace monitoring = tpu::monitoring::runtime;
 
 template <typename Value, typename ReadValue>
 static int QueryMetric(const char* address, const char* metric_name,
                        long long* device_ids, Value* values, int max_n,
                        ReadValue read_value) {
-  auto channel =
-      grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
-  auto stub = RuntimeMetricService::NewStub(channel);
+  auto stub = monitoring::RuntimeMetricService::NewStub(
+      grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
 
   grpc::ClientContext ctx;
   ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
 
-  MetricRequest req;
+  monitoring::MetricRequest req;
   req.set_metric_name(metric_name);
 
-  MetricResponse resp;
+  monitoring::MetricResponse resp;
   if (!stub->GetRuntimeMetric(&ctx, req, &resp).ok()) return -1;
 
   std::map<int, Value> sorted;

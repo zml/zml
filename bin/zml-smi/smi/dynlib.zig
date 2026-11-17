@@ -49,28 +49,32 @@ pub fn readScalar(api: anytype, handle: anytype, comptime spec: anytype) ?u64 {
     return std.math.cast(u64, value);
 }
 
-/// A C function that reports failure through its return value, turned into an error by `check`.
-pub fn Checked(comptime function: anytype, comptime check: anytype) type {
-    const Function = if (@TypeOf(function) == type) function else @TypeOf(function);
-    const Error = @typeInfo(@typeInfo(@TypeOf(check)).@"fn".return_type.?).error_union.error_set;
-
+/// Binds a library's status check to wrappers for its C functions.
+pub fn CheckedBy(comptime check: anytype) fn (comptime anytype) type {
+    const checker = @typeInfo(@TypeOf(check)).@"fn";
+    const Error = @typeInfo(checker.return_type.?).error_union.error_set;
     return struct {
-        function: *const Function,
+        fn Checked(comptime function: anytype) type {
+            const Function = if (@TypeOf(function) == type) function else @TypeOf(function);
+            return struct {
+                function: *const Function,
 
-        const Args = std.meta.ArgsTuple(Function);
-        const params = @typeInfo(Args).@"struct".field_types;
-        const Result = @typeInfo(params[params.len - 1]).pointer.child;
-        const Inputs = @Tuple(params[0 .. params.len - 1]);
+                const Args = std.meta.ArgsTuple(Function);
+                const params = @typeInfo(Args).@"struct".field_types;
+                const Result = @typeInfo(params[params.len - 1]).pointer.child;
+                const Inputs = @Tuple(params[0 .. params.len - 1]);
 
-        pub fn call(self: @This(), args: Args) Error!void {
-            return check(@call(.auto, self.function, args));
+                pub fn call(self: @This(), args: Args) Error!void {
+                    return check(@call(.auto, self.function, args));
+                }
+
+                /// For a function whose only result is its last parameter: returns that result.
+                pub fn get(self: @This(), args: Inputs) Error!Result {
+                    var result: Result = std.mem.zeroes(Result);
+                    try self.call(args ++ .{&result});
+                    return result;
+                }
+            };
         }
-
-        /// For a function whose only result is its last parameter: returns that result.
-        pub fn get(self: @This(), args: Inputs) Error!Result {
-            var result: Result = std.mem.zeroes(Result);
-            try self.call(args ++ .{&result});
-            return result;
-        }
-    };
+    }.Checked;
 }

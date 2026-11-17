@@ -1,5 +1,5 @@
 const std = @import("std");
-const smi = @import("zml-smi");
+const native = @import("zml-smi/native");
 const OneApi = @import("zml-smi/platforms/oneapi");
 
 const parseLspciName = OneApi.testing.parseLspciName;
@@ -26,9 +26,9 @@ test largestBar {
 }
 
 test memoryBytes {
-    const xe = smi.fdinfo.parse("drm-total-system:\t184 MiB\ndrm-total-vram0:\t4096 KiB\ndrm-resident-vram0:\t3072 KiB\n");
+    const xe = native.fdinfo.parse("drm-total-system:\t184 MiB\ndrm-total-vram0:\t4096 KiB\ndrm-resident-vram0:\t3072 KiB\n");
     try std.testing.expectEqual(3072 * 1024, memoryBytes(&xe));
-    const system = smi.fdinfo.parse("drm-total-system0:\t2 MiB\n");
+    const system = native.fdinfo.parse("drm-total-system0:\t2 MiB\n");
     try std.testing.expectEqual(2 * 1024 * 1024, memoryBytes(&system));
 }
 
@@ -38,7 +38,7 @@ test Fan {
     defer tmp.cleanup();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const dir: smi.sysfs.Dir = .{ .handle = tmp.dir, .io = io };
+    const dir: native.sysfs.Dir = .{ .handle = tmp.dir, .io = io };
 
     // fan1 has no maximum, so the speed is fan2's.
     try tmp.dir.writeFile(io, .{ .sub_path = "fan1_input", .data = "900\n" });

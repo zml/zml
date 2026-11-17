@@ -1,13 +1,16 @@
 //! FuriosaAI RNGD chips, through sysfs. Paths, units and formulas follow furiosa-smi-go 2026.4.0.
 const std = @import("std");
 const builtin = @import("builtin");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const native = @import("zml-smi/native");
+const source = @import("zml-smi/source");
+const telemetry = @import("zml-smi/telemetry");
 
 const Furiosa = @This();
 
-devices: []const smi.Device,
+devices: []const model.Device,
 /// /sys/class/rngd_mgmt: rngd!npu<N>mgmt for chip N, and rngd!npu<N>pe<C> for its core C.
-class: smi.sysfs.Dir,
+class: native.sysfs.Dir,
 chips: []Chip,
 
 /// The cores (PEs) of a chip.
@@ -18,7 +21,7 @@ const Chip = struct {
     /// N in /dev/rngd/npu<N>.
     node: u8,
     model: *const Model,
-    mgmt: smi.sysfs.Dir,
+    mgmt: native.sysfs.Dir,
     hwmon: ?Hwmon,
     /// The cores this host may use: those a node of /dev/rngd names.
     usable: Cores,
@@ -38,7 +41,7 @@ const Chip = struct {
     }
 
     /// The row of a process: the mean utilization of the cores it holds, and the memory their groups use.
-    fn row(chip: *const Chip, pid: u32, device: u16, held: Cores, sample: smi.Furiosa) smi.ProcessInfo {
+    fn row(chip: *const Chip, pid: u32, device: u16, held: Cores, sample: model.Furiosa) model.ProcessInfo {
         const mine = held.intersectWith(chip.usable);
         var util: u64 = 0;
         var mem_used: u64 = 0;
@@ -57,25 +60,35 @@ const Chip = struct {
 };
 
 /// The running totals of a core: its cycles, and those it spent on tasks.
-const Cycles = struct { all: smi.Counter = .{}, task: smi.Counter = .{} };
+const Cycles = struct { all: native.Counter = .{}, task: native.Counter = .{} };
 
 const Hwmon = struct {
-    dir: smi.sysfs.Dir,
+    dir: native.sysfs.Dir,
     temperature: ?[]const u8,
     ambient: ?[]const u8,
     power: ?[]const u8,
     power_limit: ?[]const u8 = "power1_max",
 
-    fn open(arena: std.mem.Allocator, device: smi.sysfs.Dir) ?Hwmon {
-        const dir = smi.hwmon.find(device, null) catch return null;
+    fn open(arena: std.mem.Allocator, device: native.sysfs.Dir) ?Hwmon {
+        const dir = native.hwmon.find(device, null) catch return null;
         return .{
             .dir = dir,
-            .temperature = smi.hwmon.resolve(arena, dir, &.{.{ .prefix = "temp", .label = "PEAK" }}),
-            .ambient = smi.hwmon.resolve(arena, dir, &.{.{ .prefix = "temp", .label = "AMBIENT" }}),
-            .power = smi.hwmon.resolve(arena, dir, &.{.{ .prefix = "power", .label = "RMS_TOTAL", .suffix = "average" }}),
+            .temperature = native.hwmon.resolve(arena, dir, &.{.{ .prefix = "temp", .label = "PEAK" }}),
+            .ambient = native.hwmon.resolve(arena, dir, &.{.{ .prefix = "temp", .label = "AMBIENT" }}),
+            .power = native.hwmon.resolve(arena, dir, &.{.{ .prefix = "power", .label = "RMS_TOTAL", .suffix = "average" }}),
         };
     }
 };
+
+const pollSensors = telemetry.Bind(model.Furiosa, .{
+    .read = native.hwmon.readScalar,
+    .fields = .{
+        .temperature = .{ .temperature, .milli, .one },
+        .ambient_temperature = .{ .ambient, .milli, .one },
+        .power_mw = .{ .power, .micro, .milli },
+        .power_limit_mw = .{ .power_limit, .micro, .milli },
+    },
+}).poll;
 
 /// A device type. Its firmware reserves 512 MiB of its DRAM, and its cores share the rest evenly.
 const Model = struct {
@@ -94,12 +107,12 @@ const vendor = 0x1ed2;
 pub const two_readings = true;
 
 pub fn detect(io: std.Io) bool {
-    return smi.sysfs.exists(io, "/dev/rngd");
+    return native.sysfs.exists(io, "/dev/rngd");
 }
 
 pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa {
     const usable = try usableCores(io);
-    const class = try smi.sysfs.Dir.open(io, "/sys/class/rngd_mgmt");
+    const class = try native.sysfs.Dir.open(io, "/sys/class/rngd_mgmt");
     errdefer class.close();
 
     var chips: std.ArrayList(Chip) = .empty;
@@ -109,19 +122,15 @@ pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa
         const node = mgmtNode(entry.name) orelse continue;
         // A chip with no node in /dev/rngd is not this host's.
         if (usable[node].count() == 0) continue;
-        const mgmt = class.openDir(entry.name) catch continue;
-        const chip = openChip(arena, mgmt, node, usable[node]) catch {
-            mgmt.close();
-            continue;
-        };
+        const chip = openChip(arena, class, entry.name, node, usable[node]) catch continue;
         errdefer chip.close();
         try chips.append(arena, chip);
     }
     std.mem.sort(Chip, chips.items, {}, Chip.lessThan);
 
-    const devices = try arena.alloc(smi.Device, chips.items.len);
+    const devices = try arena.alloc(model.Device, chips.items.len);
     for (devices, chips.items) |*device, chip| {
-        var details: std.ArrayList(smi.Device.Detail) = .empty;
+        var details: std.ArrayList(model.Device.Detail) = .empty;
         if (string(arena, chip.mgmt, "fw_version")) |value| try details.append(arena, .{ .key = "firmware_version", .label = "Firmware", .value = value });
         if (string(arena, chip.mgmt, "device_sn")) |value| try details.append(arena, .{ .key = "serial", .label = "Serial", .value = value });
         device.* = .{
@@ -142,7 +151,7 @@ pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa
 /// The cores of each chip that the nodes of /dev/rngd name.
 fn usableCores(io: std.Io) ![256]Cores {
     var usable: [256]Cores = @splat(.empty);
-    const dev = try smi.sysfs.Dir.open(io, "/dev/rngd");
+    const dev = try native.sysfs.Dir.open(io, "/dev/rngd");
     defer dev.close();
     var it = dev.iterate();
     while (try it.next(io)) |entry| {
@@ -153,19 +162,22 @@ fn usableCores(io: std.Io) ![256]Cores {
     return usable;
 }
 
-fn openChip(arena: std.mem.Allocator, mgmt: smi.sysfs.Dir, node: u8, usable: Cores) !Chip {
+fn openChip(arena: std.mem.Allocator, class: native.sysfs.Dir, name: []const u8, node: u8, usable: Cores) !Chip {
+    const mgmt = try class.openDir(name);
+    errdefer mgmt.close();
+
     var buffer: [64]u8 = undefined;
     var path: [64]u8 = undefined;
-    const pci = try smi.sysfs.Dir.open(mgmt.io, try std.fmt.bufPrint(&path, "/sys/bus/pci/devices/{s}", .{try mgmt.read("busname", &buffer)}));
+    const pci = try native.sysfs.Dir.open(mgmt.io, try std.fmt.bufPrint(&path, "/sys/bus/pci/devices/{s}", .{try mgmt.read("busname", &buffer)}));
     defer pci.close();
 
     if (try pci.int(u16, "vendor") != vendor) return error.NotFuriosa;
     const device = try pci.int(u16, "device");
-    const model = for (&models) |*model| {
-        if (model.device == device) break model;
+    const chip_model = for (&models) |*candidate| {
+        if (candidate.device == device) break candidate;
     } else return error.UnknownDevice;
 
-    return .{ .node = node, .model = model, .mgmt = mgmt, .hwmon = .open(arena, pci), .usable = usable };
+    return .{ .node = node, .model = chip_model, .mgmt = mgmt, .hwmon = .open(arena, pci), .usable = usable };
 }
 
 pub fn close(self: *Furiosa) void {
@@ -173,7 +185,7 @@ pub fn close(self: *Furiosa) void {
     self.class.close();
 }
 
-pub fn poll(self: *Furiosa, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+pub fn poll(self: *Furiosa, scratch: std.mem.Allocator, reading: *source.Reading) !void {
     const samples = reading.samples;
     for (self.chips, samples) |*chip, *sample| {
         const fields = &sample.furiosa;
@@ -189,21 +201,13 @@ pub fn poll(self: *Furiosa, scratch: std.mem.Allocator, reading: *smi.Reading) !
             fields.mem_used_bytes = self.memoryInUse(chip, in_use);
         }
 
-        if (chip.hwmon) |*hwmon| fields.poll(.{hwmon}, .{
-            .read = smi.hwmon.readScalar,
-            .fields = .{
-                .temperature = .{ .temperature, .milli, .one },
-                .ambient_temperature = .{ .ambient, .milli, .one },
-                .power_mw = .{ .power, .micro, .milli },
-                .power_limit_mw = .{ .power_limit, .micro, .milli },
-            },
-        });
+        if (chip.hwmon) |*hwmon| pollSensors(fields, .{hwmon});
     }
 
     // The cores each process holds on each chip, from the chip and core nodes it has open.
     var held: std.AutoArrayHashMapUnmanaged(struct { u32, u16 }, Cores) = .empty;
     defer held.deinit(scratch);
-    var holders: smi.proc.FdHolders = .init(self.class.io, &.{"/dev/rngd/"});
+    var holders: native.proc.FdHolders = .init(self.class.io, &.{"/dev/rngd/"});
     defer holders.deinit();
     while (holders.next()) |holder| {
         const node = Node.parse(holder.rest) orelse continue;
@@ -273,7 +277,7 @@ fn coreFile(self: *const Furiosa, node: u8, core: usize, name: []const u8, buffe
 }
 
 /// The cores in use: one line per core, 1 when it is in use and 0 when it is not.
-fn occupancy(mgmt: smi.sysfs.Dir) ?Cores {
+fn occupancy(mgmt: native.sysfs.Dir) ?Cores {
     var buffer: [64]u8 = undefined;
     const text = mgmt.read("pe_occupancy", &buffer) catch return null;
     var in_use: Cores = .empty;
@@ -289,25 +293,25 @@ fn occupancy(mgmt: smi.sysfs.Dir) ?Cores {
 }
 
 /// The governor whose name ends the first line.
-fn governor(mgmt: smi.sysfs.Dir) ?u64 {
+fn governor(mgmt: native.sysfs.Dir) ?u64 {
     var buffer: [256]u8 = undefined;
     const text = mgmt.read("npu_governor", &buffer) catch return null;
     const line = std.mem.trimEnd(u8, std.mem.sliceTo(text, '\n'), &std.ascii.whitespace);
-    for (std.enums.values(smi.Furiosa.Governor)) |profile| {
+    for (std.enums.values(model.Furiosa.Governor)) |profile| {
         if (std.mem.endsWith(u8, line, @tagName(profile))) return @backingInt(profile);
     }
     return null;
 }
 
 /// Alive when the device state is 0.
-fn liveness(mgmt: smi.sysfs.Dir) ?u64 {
+fn liveness(mgmt: native.sysfs.Dir) ?u64 {
     var buffer: [64]u8 = undefined;
     const state = mgmt.read("device_state", &buffer) catch return null;
-    return @backingInt(if (std.mem.eql(u8, state, "0")) smi.Furiosa.Liveness.alive else .unknown);
+    return @backingInt(if (std.mem.eql(u8, state, "0")) model.Furiosa.Liveness.alive else .unknown);
 }
 
 /// The bitmask that ends the file, in hex: "Throttle reason = 0x00000000".
-fn throttleReasons(mgmt: smi.sysfs.Dir) ?u64 {
+fn throttleReasons(mgmt: native.sysfs.Dir) ?u64 {
     var buffer: [128]u8 = undefined;
     const text = mgmt.read("throttle_reason", &buffer) catch return null;
     const start = if (std.mem.findLastAny(u8, text, &std.ascii.whitespace)) |space| space + 1 else 0;
@@ -318,7 +322,7 @@ fn throttleReasons(mgmt: smi.sysfs.Dir) ?u64 {
 fn hexField(text: []const u8, key: []const u8) ?u64 {
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        if (smi.sysfs.fieldValue(std.mem.trim(u8, line, " \t"), key)) |value| return hex(value);
+        if (native.sysfs.fieldValue(std.mem.trim(u8, line, " \t"), key)) |value| return hex(value);
     }
     return null;
 }
@@ -362,7 +366,7 @@ fn decimal(text: []const u8) ?u8 {
 }
 
 /// A string of a sysfs file, copied into `arena`, or null when it is missing or empty.
-fn string(arena: std.mem.Allocator, dir: smi.sysfs.Dir, file: []const u8) ?[]const u8 {
+fn string(arena: std.mem.Allocator, dir: native.sysfs.Dir, file: []const u8) ?[]const u8 {
     var buffer: [128]u8 = undefined;
     const text = dir.read(file, &buffer) catch return null;
     if (text.len == 0) return null;

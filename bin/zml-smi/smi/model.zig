@@ -1,5 +1,4 @@
 const std = @import("std");
-const telemetry = @import("telemetry.zig");
 
 pub const Target = enum { cuda, rocm, oneapi, neuron, tpu, furiosa, metal };
 
@@ -72,6 +71,25 @@ pub const Common = struct {
 /// A device and its latest sample: what JSON writes and what a remote host sends.
 pub const Row = struct { device: Device, sample: Sample };
 
+pub const HistoryPoint = struct { at: std.Io.Timestamp, common: Common };
+
+/// The inventory lives for the run. Captured values live in the frame allocator.
+/// Samples and history points use the same device indices as the inventory.
+pub const Frame = struct {
+    devices: []const Device,
+    samples: []const Sample,
+    processes: []const ProcessInfo,
+    host: HostData,
+    history: ?History = null,
+
+    pub const History = struct {
+        points: []const []const HistoryPoint,
+        captured_at: std.Io.Timestamp,
+        interval_ms: u32,
+        capacity: usize,
+    };
+};
+
 /// Every GPU target. CSV columns and JSON keys follow the field order.
 pub const Gpu = struct {
     util_percent: ?u64 = null,
@@ -98,8 +116,6 @@ pub const Gpu = struct {
     pcie_bandwidth_mbps: ?u64 = null,
     pcie_link_gen: ?u64 = null,
     pcie_link_width: ?u64 = null,
-
-    pub const poll = telemetry.poll;
 };
 
 /// One Neuron core.
@@ -119,8 +135,6 @@ pub const Neuron = struct {
     nc_collectives: ?u64 = null,
     nc_notifications: ?u64 = null,
     nc_uncategorized: ?u64 = null,
-
-    pub const poll = telemetry.poll;
 };
 
 pub const Tpu = struct {
@@ -147,8 +161,6 @@ pub const Furiosa = struct {
     /// A bitmask whose bits are `ThrottleReason`s.
     throttle_reasons: ?u64 = null,
 
-    pub const poll = telemetry.poll;
-
     pub const Governor = enum(u64) { performance, powersave };
     pub const Liveness = enum(u64) { unknown, alive };
     pub const ThrottleReason = enum(u6) { idle, thermal_slowdown, app_power_cap, app_clock_cap, hw_clock_cap, hw_bus_limit, hw_power_cap, gov_clock_cap, other };
@@ -168,8 +180,6 @@ pub const Metal = struct {
     clock_graphics_max_mhz: ?u64 = null,
     /// The Neural Engine.
     ane_power_mw: ?u64 = null,
-
-    pub const poll = telemetry.poll;
 };
 
 pub const ProcessInfo = struct {

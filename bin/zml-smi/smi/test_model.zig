@@ -1,5 +1,6 @@
 const std = @import("std");
-const model = @import("model.zig");
+const model = @import("zml-smi/model");
+const telemetry = @import("zml-smi/telemetry");
 
 test "every target preserves nulls, zeroes and all values through JSON" {
     inline for (std.enums.values(model.Target)) |target| {
@@ -62,11 +63,12 @@ fn expectFields(comptime Record: type, expected: []const u8) !void {
 test "poll reads each query once and fills only its declared fields" {
     var reader: PollReader = .{};
     var sample: model.Gpu = .{ .temperature = 70, .pcie_tx_kbps = 1000 };
-    sample.poll(.{&reader}, .{
+    const poll = telemetry.Bind(model.Gpu, .{
         .read = PollReader.readScalar,
         .fields = .{ .temperature = .sensor },
         .query = PollReader.readMemory,
-    });
+    }).poll;
+    poll(&sample, .{&reader});
     try std.testing.expectEqual(1, reader.memory_reads);
     try std.testing.expectEqualDeep(model.Gpu{
         .pcie_tx_kbps = 1000,

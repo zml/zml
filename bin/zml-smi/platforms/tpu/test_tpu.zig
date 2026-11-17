@@ -1,5 +1,6 @@
 const std = @import("std");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const source = @import("zml-smi/source");
 const Tpu = @import("Tpu.zig");
 
 const chipOf = Tpu.testing.chipOf;
@@ -23,9 +24,9 @@ test byId {
 }
 
 test addHolder {
-    var samples: [4]smi.Sample = @splat(.{ .tpu = .{} });
+    var samples: [4]model.Sample = @splat(.{ .tpu = .{} });
     samples[2].tpu = .{ .util_percent = 40, .mem_used_bytes = 8192 };
-    var reading: smi.Reading = .{ .samples = &samples, .allocator = std.testing.allocator };
+    var reading: source.Reading = .{ .samples = &samples, .allocator = std.testing.allocator };
     defer reading.processes.deinit(std.testing.allocator);
 
     // Chip 1 of a two-device chip is devices 2 and 3, listed once however many descriptors.

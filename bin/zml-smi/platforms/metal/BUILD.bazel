@@ -10,7 +10,12 @@ zig_library(
     main = "Metal.zig",
     target_compatible_with = ["@platforms//os:macos"],
     visibility = ["//bin/zml-smi:__subpackages__"],
-    deps = ["//bin/zml-smi/smi"],
+    deps = [
+        "//bin/zml-smi/smi:model",
+        "//bin/zml-smi/smi:native",
+        "//bin/zml-smi/smi:source",
+        "//bin/zml-smi/smi:telemetry",
+    ],
 )
 
 zig_test(
@@ -19,6 +24,7 @@ zig_test(
     target_compatible_with = ["@platforms//os:macos"],
     deps = [
         ":metal",
-        "//bin/zml-smi/smi",
+        "//bin/zml-smi/smi:model",
+        "//bin/zml-smi/smi:source",
     ],
 )

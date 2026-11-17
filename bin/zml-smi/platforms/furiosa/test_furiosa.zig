@@ -1,6 +1,8 @@
 const std = @import("std");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const native = @import("zml-smi/native");
 const Furiosa = @import("zml-smi/platforms/furiosa");
+const source = @import("zml-smi/source");
 
 const support = Furiosa.testing;
 const Node = support.Node;
@@ -50,7 +52,7 @@ test "utilization and memory of fused cores" {
         });
     }
 
-    const class: smi.sysfs.Dir = .{ .handle = tmp.dir, .io = io };
+    const class: native.sysfs.Dir = .{ .handle = tmp.dir, .io = io };
     var chips = [_]Chip{.{ .node = 0, .model = &models[0], .mgmt = try class.openDir("rngd!npu0mgmt"), .hwmon = null, .usable = .full }};
     defer chips[0].mgmt.close();
     var furiosa: Furiosa = .{
@@ -68,8 +70,8 @@ test "utilization and memory of fused cores" {
                 .data = try std.fmt.bufPrint(&text, "CycleCount: 0x{x}\nTaskCycleCount: 0x{x}\n", .{ cycles, task }),
             });
         }
-        var samples = [_]smi.Sample{.init(.furiosa)};
-        var reading: smi.Reading = .{
+        var samples = [_]model.Sample{.init(.furiosa)};
+        var reading: source.Reading = .{
             .samples = &samples,
             .allocator = std.testing.allocator,
         };
@@ -78,8 +80,8 @@ test "utilization and memory of fused cores" {
         const chip = samples[0].furiosa;
         try std.testing.expectEqual(util, chip.util_percent);
         try std.testing.expectEqual(4 * gib, chip.mem_used_bytes);
-        try std.testing.expectEqual(@backingInt(smi.Furiosa.Governor.powersave), chip.governor);
-        try std.testing.expectEqual(@backingInt(smi.Furiosa.Liveness.alive), chip.liveness);
+        try std.testing.expectEqual(@backingInt(model.Furiosa.Governor.powersave), chip.governor);
+        try std.testing.expectEqual(@backingInt(model.Furiosa.Liveness.alive), chip.liveness);
         try std.testing.expectEqual(0b11, chip.throttle_reasons);
     }
 

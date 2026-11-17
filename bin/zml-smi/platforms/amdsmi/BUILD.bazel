@@ -7,7 +7,10 @@ zig_library(
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [
-        "//bin/zml-smi/smi",
+        "//bin/zml-smi/smi:model",
+        "//bin/zml-smi/smi:native",
+        "//bin/zml-smi/smi:source",
+        "//bin/zml-smi/smi:telemetry",
         "@amdrocm-amdsmi//:amdsmi",
     ],
 )

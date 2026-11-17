@@ -1,11 +1,13 @@
 //! Google TPUs, through a PCI scan and the runtime metrics service of libtpu.
 const std = @import("std");
 const c = @import("c");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const source = @import("zml-smi/source");
+const native = @import("zml-smi/native");
 
 const Tpu = @This();
 
-devices: []const smi.Device,
+devices: []const model.Device,
 io: std.Io,
 /// The service numbers the devices chip after chip.
 devices_per_chip: u32,
@@ -29,11 +31,11 @@ const chips = [_]Chip{
 };
 
 pub fn detect(io: std.Io) bool {
-    return smi.sysfs.exists(io, "/dev/accel0") or smi.sysfs.exists(io, "/dev/vfio/0");
+    return native.sysfs.exists(io, "/dev/accel0") or native.sysfs.exists(io, "/dev/vfio/0");
 }
 
 pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
-    var scan: smi.pci.Devices = try .open(io, google);
+    var scan: native.pci.Devices = try .open(io, google);
     defer scan.close();
     var found: ?Chip = null;
     var count: u32 = 0;
@@ -44,7 +46,7 @@ pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
     }
     const chip = found orelse return error.TpuUnavailable;
 
-    const devices = try arena.alloc(smi.Device, count * chip.devices_per_chip);
+    const devices = try arena.alloc(model.Device, count * chip.devices_per_chip);
     @memset(devices, .{ .target = .tpu, .name = chip.name });
     return .{
         .devices = devices,
@@ -60,7 +62,7 @@ fn chipOf(device: u16, subsystem: ?u16) ?Chip {
     return null;
 }
 
-pub fn poll(self: *Tpu, _: std.mem.Allocator, reading: *smi.Reading) !void {
+pub fn poll(self: *Tpu, _: std.mem.Allocator, reading: *source.Reading) !void {
     const samples = reading.samples;
     const used = query(c_longlong, "tpu.runtime.hbm.memory.usage.bytes");
     const total = query(c_longlong, "tpu.runtime.hbm.memory.total.bytes");
@@ -73,7 +75,7 @@ pub fn poll(self: *Tpu, _: std.mem.Allocator, reading: *smi.Reading) !void {
         };
     }
 
-    var holders: smi.proc.FdHolders = .init(self.io, &.{ "/dev/accel", "/dev/vfio/" });
+    var holders: native.proc.FdHolders = .init(self.io, &.{ "/dev/accel", "/dev/vfio/" });
     defer holders.deinit();
     while (holders.next()) |holder| {
         try addHolder(reading, self.devices_per_chip, holder.pid, holder.rest);
@@ -84,13 +86,9 @@ pub fn poll(self: *Tpu, _: std.mem.Allocator, reading: *smi.Reading) !void {
 fn query(comptime T: type, metric: [:0]const u8) [max_devices]?u64 {
     var ids: [max_devices]c_longlong = undefined;
     var values: [max_devices]T = undefined;
-    const count = switch (T) {
-        c_longlong => c.tpu_query_int(address, metric, &ids, &values, max_devices),
-        f64 => c.tpu_query_double(address, metric, &ids, &values, max_devices),
-        else => @compileError("a metric is an int or a double"),
-    };
-    const n = std.math.cast(usize, count) orelse 0;
-    return byId(T, ids[0..n], values[0..n]);
+    const get = if (T == c_longlong) c.tpu_query_int else c.tpu_query_double;
+    const count = std.math.cast(usize, get(address, metric, &ids, &values, max_devices)) orelse 0;
+    return byId(T, ids[0..count], values[0..count]);
 }
 
 fn byId(comptime T: type, ids: []const c_longlong, values: []const T) [max_devices]?u64 {
@@ -108,7 +106,7 @@ fn byId(comptime T: type, ids: []const c_longlong, values: []const T) [max_devic
 }
 
 /// Lists a process that holds the node of a chip on every device of that chip, once.
-fn addHolder(reading: *smi.Reading, devices_per_chip: u32, pid: u32, node: []const u8) !void {
+fn addHolder(reading: *source.Reading, devices_per_chip: u32, pid: u32, node: []const u8) !void {
     const chip = std.fmt.parseInt(u16, node, 10) catch return;
     for (0..devices_per_chip) |core| {
         const device = @as(usize, chip) * devices_per_chip + core;

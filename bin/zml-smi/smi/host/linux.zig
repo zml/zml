@@ -1,26 +1,27 @@
 //! The host, from /proc and /sys.
 const std = @import("std");
-const smi = @import("../smi.zig");
+const model = @import("zml-smi/model");
+const native = @import("zml-smi/native");
 
 pub const Host = struct {
     io: std.Io,
-    proc: ?smi.sysfs.Dir,
+    proc: ?native.sysfs.Dir,
     /// CPU ticks of every CPU together.
-    total: smi.Counter = .{},
+    total: native.Counter = .{},
     /// CPU ticks of each process.
-    ticks: smi.Counters(u32),
+    ticks: native.Counters(u32),
 
     /// Reads what does not change: hostname, kernel, CPU, core count and total memory.
-    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, data: *smi.HostData) Host {
-        const proc = smi.sysfs.Dir.open(io, "/proc") catch null;
+    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, data: *model.HostData) Host {
+        const proc = native.sysfs.Dir.open(io, "/proc") catch null;
         var buffer: [256]u8 = undefined;
         if (proc) |dir| {
             data.hostname = dupe(arena, dir.read("sys/kernel/hostname", &buffer) catch null);
             data.kernel = dupe(arena, dir.read("sys/kernel/osrelease", &buffer) catch null);
             data.cpu_name = dupe(arena, dir.field("cpuinfo", "model name", &buffer) catch null);
-            data.mem_total_kib = smi.sysfs.firstNumber(dir.field("meminfo", "MemTotal", &buffer) catch "");
+            data.mem_total_kib = native.sysfs.firstNumber(dir.field("meminfo", "MemTotal", &buffer) catch "");
         }
-        if (smi.sysfs.Dir.open(io, "/sys/devices/system/cpu")) |cpu| {
+        if (native.sysfs.Dir.open(io, "/sys/devices/system/cpu")) |cpu| {
             defer cpu.close();
             data.cpu_cores = cores(cpu.read("present", &buffer) catch "");
         } else |_| {}
@@ -33,14 +34,14 @@ pub const Host = struct {
     }
 
     /// Overwrites what changes: available memory, load and uptime. A read that fails gives null.
-    pub fn sample(self: *Host, data: *smi.HostData) void {
+    pub fn sample(self: *Host, data: *model.HostData) void {
         data.mem_available_kib = null;
         data.load_1, data.load_5, data.load_15 = .{ null, null, null };
         data.uptime_seconds = null;
         const proc = self.proc orelse return;
 
         var buffer: [256]u8 = undefined;
-        data.mem_available_kib = smi.sysfs.firstNumber(proc.field("meminfo", "MemAvailable", &buffer) catch "");
+        data.mem_available_kib = native.sysfs.firstNumber(proc.field("meminfo", "MemAvailable", &buffer) catch "");
         if (proc.read("loadavg", &buffer)) |loadavg| {
             var words = std.mem.tokenizeScalar(u8, loadavg, ' ');
             inline for (.{ &data.load_1, &data.load_5, &data.load_15 }) |load| {
@@ -53,7 +54,7 @@ pub const Host = struct {
     }
 
     /// Adds user, command, CPU and RSS to one row per local PID.
-    pub fn enrich(self: *Host, strings: std.mem.Allocator, rows: []smi.ProcessInfo) void {
+    pub fn enrich(self: *Host, strings: std.mem.Allocator, rows: []model.ProcessInfo) void {
         const proc = self.proc orelse return;
         defer self.ticks.sweep();
 
@@ -63,15 +64,21 @@ pub const Host = struct {
         for (rows) |*row| self.read(proc, strings, row, total);
     }
 
-    fn read(self: *Host, proc: smi.sysfs.Dir, strings: std.mem.Allocator, row: *smi.ProcessInfo, total: ?smi.Growth) void {
+    fn read(
+        self: *Host,
+        proc: native.sysfs.Dir,
+        strings: std.mem.Allocator,
+        row: *model.ProcessInfo,
+        total: ?native.Growth,
+    ) void {
         var path: [32]u8 = undefined;
         var buffer: [4096]u8 = undefined;
 
         if (proc.read(processPath(&path, row.pid, "status"), &buffer)) |status| {
             var lines = std.mem.tokenizeScalar(u8, status, '\n');
             while (lines.next()) |line| {
-                if (smi.sysfs.fieldValue(line, "Uid")) |uid| row.uid = @intCast(smi.sysfs.firstNumber(uid) orelse 0);
-                if (smi.sysfs.fieldValue(line, "VmRSS")) |rss| row.rss_kib = smi.sysfs.firstNumber(rss) orelse 0;
+                if (native.sysfs.fieldValue(line, "Uid")) |uid| row.uid = @intCast(native.sysfs.firstNumber(uid) orelse 0);
+                if (native.sysfs.fieldValue(line, "VmRSS")) |rss| row.rss_kib = native.sysfs.firstNumber(rss) orelse 0;
             }
             if (std.c.getpwuid(row.uid)) |user| {
                 if (user.name) |name| row.username = strings.dupe(u8, std.mem.span(name)) catch "";

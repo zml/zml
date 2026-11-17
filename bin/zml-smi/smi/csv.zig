@@ -1,21 +1,21 @@
 const std = @import("std");
-const smi = @import("smi.zig");
+const model = @import("zml-smi/model");
 
 /// One table per target: index, type, remote, the strings of the device, then the fields of its sample.
 /// A device column that is empty for the whole table is left out.
-pub fn write(writer: *std.Io.Writer, devices: []const smi.Device, snapshot: smi.Collector.Snapshot) !void {
-    inline for (@typeInfo(smi.Target).@"enum".field_names) |name| {
-        try writeTable(writer, devices, snapshot.samples, @field(smi.Target, name));
+pub fn write(writer: *std.Io.Writer, frame: model.Frame) !void {
+    inline for (@typeInfo(model.Target).@"enum".field_names) |name| {
+        try writeTable(writer, frame.devices, frame.samples, @field(model.Target, name));
     }
 }
 
 fn writeTable(
     writer: *std.Io.Writer,
-    devices: []const smi.Device,
-    samples: []const smi.Sample,
-    comptime target: smi.Target,
+    devices: []const model.Device,
+    samples: []const model.Sample,
+    comptime target: model.Target,
 ) !void {
-    const fields = @typeInfo(@FieldType(smi.Sample, @tagName(target))).@"struct".field_names;
+    const fields = @typeInfo(@FieldType(model.Sample, @tagName(target))).@"struct".field_names;
 
     var rows: usize = 0;
     var names = false;
@@ -63,7 +63,7 @@ fn contains(keys: []const []const u8, key: []const u8) bool {
     return false;
 }
 
-fn detailValue(device: smi.Device, key: []const u8) ?[]const u8 {
+fn detailValue(device: model.Device, key: []const u8) ?[]const u8 {
     for (device.details) |item| {
         if (std.mem.eql(u8, item.key, key)) return item.value;
     }

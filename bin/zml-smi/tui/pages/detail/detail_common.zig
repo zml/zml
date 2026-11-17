@@ -1,31 +1,20 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
 const data = @import("../../data.zig");
-const theme = @import("../../theme.zig");
 const utils = @import("../../lib/utils.zig");
 const ui = @import("../../lib/ui.zig");
 const compose = @import("../../lib/compose.zig");
 const Chart = @import("../../widgets/chart.zig");
 const ColumnLayout = @import("../../widgets/column_layout.zig");
 
-/// "Device 0: NVIDIA GeForce RTX 5090 (615.71.09, CUDA 13.4)", with every detail.
-pub fn headerText(arena: std.mem.Allocator, id: u16, device: smi.Device) std.mem.Allocator.Error!vxfw.Text {
-    return .{
-        .text = try std.fmt.allocPrint(arena, "Device {d}: {s}{s}", .{ id, device.name orelse "Unknown", try utils.versions(arena, device, .all) }),
-        .style = theme.header_style,
-        .softwrap = false,
-        .overflow = .clip,
-    };
-}
-
 /// Creates a Chart pre-filled with history data and standard defaults.
 pub fn historyChart(
     ctx: vxfw.DrawContext,
     state: *const data.SystemState,
     id: u16,
-    reading: smi.Common,
+    reading: model.Common,
     kind: data.Metric,
     opts: struct {
         title: ?[]const u8 = null,
@@ -90,7 +79,7 @@ pub fn metric(
 
 pub fn memoryPercent(
     arena: std.mem.Allocator,
-    reading: smi.Common,
+    reading: model.Common,
 ) std.mem.Allocator.Error![]const u8 {
     const used = reading.mem_used_bytes orelse return "N/A";
     const total = reading.mem_total_bytes orelse return "N/A";
@@ -100,19 +89,17 @@ pub fn memoryPercent(
 
 pub fn memoryInfo(
     arena: std.mem.Allocator,
-    reading: smi.Common,
+    reading: model.Common,
     prefix: []const u8,
     suffix: []const u8,
 ) std.mem.Allocator.Error![]const u8 {
-    const used = if (reading.mem_used_bytes) |bytes|
-        try std.fmt.allocPrint(arena, "{d}", .{utils.bytesToMb(bytes)})
-    else
-        "N/A";
-    const total = if (reading.mem_total_bytes) |bytes|
-        try std.fmt.allocPrint(arena, "{d}", .{utils.bytesToMb(bytes)})
-    else
-        "N/A";
-    return std.fmt.allocPrint(arena, "{s}{s} / {s} MB{s}", .{ prefix, used, total, suffix });
+    return std.fmt.allocPrint(arena, "{s}{s} / {s} MB{s}", .{
+        prefix, try memoryLabel(arena, reading.mem_used_bytes), try memoryLabel(arena, reading.mem_total_bytes), suffix,
+    });
+}
+
+pub fn memoryLabel(arena: std.mem.Allocator, memory: ?u64) std.mem.Allocator.Error![]const u8 {
+    return metric(arena, if (memory) |bytes| utils.bytesToMb(bytes) else null, "");
 }
 
 pub fn watts(arena: std.mem.Allocator, milliwatts: ?u64) std.mem.Allocator.Error![]const u8 {

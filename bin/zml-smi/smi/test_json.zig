@@ -1,16 +1,16 @@
 const std = @import("std");
-const smi = @import("smi.zig");
-const json = @import("json.zig");
+const model = @import("zml-smi/model");
+const json = @import("zml-smi/formats").json;
 
 test "snapshot JSON preserves target shape, nulls, zeroes, and process fields" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    const devices = [_]smi.Device{.{ .target = .tpu, .remote = true, .name = "TPU" }};
-    const samples = [_]smi.Sample{.{ .tpu = .{
+    const devices = [_]model.Device{.{ .target = .tpu, .remote = true, .name = "TPU" }};
+    const samples = [_]model.Sample{.{ .tpu = .{
         .util_percent = 0,
         .mem_total_bytes = 4096,
     } }};
-    const processes = [_]smi.ProcessInfo{.{
+    const processes = [_]model.ProcessInfo{.{
         .pid = 42,
         .dev_util_percent = 0,
         .username = "alice",
@@ -18,11 +18,11 @@ test "snapshot JSON preserves target shape, nulls, zeroes, and process fields" {
         .remote = true,
     }};
 
-    try json.write(&output.writer, &devices, .{
+    try json.write(&output.writer, .{
+        .devices = &devices,
         .samples = &samples,
         .processes = &processes,
         .host = .{},
-        .histories = &.{},
     });
     try std.testing.expectEqualStrings(
         "{\"devices\":[{\"device\":{\"target\":\"tpu\",\"remote\":true,\"name\":\"TPU\"," ++

@@ -1,9 +1,9 @@
 const std = @import("std");
-const smi = @import("smi.zig");
-const prometheus = @import("prometheus.zig");
+const model = @import("zml-smi/model");
+const prometheus = @import("zml-smi/formats").prometheus;
 
 test "snapshot output preserves family order, missing values, labels and unit conversions" {
-    const devices = [_]smi.Device{
+    const devices = [_]model.Device{
         .{
             .target = .cuda,
             .name = "GPU",
@@ -12,7 +12,7 @@ test "snapshot output preserves family order, missing values, labels and unit co
         },
         .{ .target = .furiosa, .name = "N\"PU" },
     };
-    const samples = [_]smi.Sample{
+    const samples = [_]model.Sample{
         .{ .cuda = .{
             .util_percent = 0,
             .encoder_util_percent = 0,
@@ -29,10 +29,10 @@ test "snapshot output preserves family order, missing values, labels and unit co
     };
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try prometheus.write(&output.writer, &devices, .{
+    try prometheus.write(&output.writer, .{
+        .devices = &devices,
         .samples = &samples,
         .processes = &.{},
-        .histories = &.{},
         .host = .{ .mem_available_kib = 2, .load_1 = 1.25, .system_power_mw = 1_001 },
     });
 

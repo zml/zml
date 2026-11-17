@@ -1,7 +1,13 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const smi = @import("zml-smi");
+const Collector = @import("zml-smi/collector").Collector;
+const formats = @import("zml-smi/formats");
+const Host = @import("zml-smi/host").Host;
+const model = @import("zml-smi/model");
+const output = @import("zml-smi/output");
+const Remote = @import("zml-smi/remote").Remote;
+const source = @import("zml-smi/source");
 const tui = @import("zml-smi/tui");
 
 const platforms = @import("platforms.zig");
@@ -55,14 +61,16 @@ pub fn main(init: std.process.Init) !void {
     const interval: std.Io.Duration = .fromMilliseconds(args.poll_interval);
 
     const serving = args.prometheus_listen != null or args.api;
-    var collector: smi.Collector = .init(arena, gpa, io, .{
+    var host_data: model.HostData = .{};
+    var host: Host = .init(arena, gpa, io, &host_data);
+    var collector: Collector = .init(arena, gpa, io, .from(&host), host_data, .{
         .poll_interval_ms = args.poll_interval,
         .history = args.top and !serving,
     });
     defer collector.deinit();
 
     inline for (platforms.all) |Platform| {
-        collector.open(Platform, .{}) catch |err| {
+        openSource(&collector, Platform, .{}) catch |err| {
             if (err == error.OutOfMemory) return err;
             log.warn("{s} skipped: {t}", .{ @typeName(Platform), err });
         };
@@ -70,10 +78,10 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.remotes) |hosts| {
         var it = std.mem.splitScalar(u8, hosts, ',');
-        while (it.next()) |host| {
-            collector.open(smi.Remote, .{ host, interval }) catch |err| {
+        while (it.next()) |peer| {
+            openSource(&collector, Remote, .{ peer, interval }) catch |err| {
                 if (err == error.OutOfMemory) return err;
-                log.warn("{s} skipped: {t}", .{ host, err });
+                log.warn("{s} skipped: {t}", .{ peer, err });
             };
         }
     }
@@ -93,12 +101,12 @@ pub fn main(init: std.process.Init) !void {
         defer servers.cancel(io);
         if (args.prometheus_listen) |listen| {
             log.info("serving prometheus metrics on {s}", .{listen});
-            try servers.concurrent(io, smi.api.serve, .{ gpa, io, try .parseLiteral(listen), &collector, .prometheus });
+            try servers.concurrent(io, output.serve, .{ &collector, try .parseLiteral(listen), .prometheus });
         }
         if (args.api) {
             log.info("serving api metrics on port {d}", .{args.api_port});
             const address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = args.api_port } };
-            try servers.concurrent(io, smi.api.serve, .{ gpa, io, address, &collector, .json });
+            try servers.concurrent(io, output.serve, .{ &collector, address, .json });
         }
         try servers.await(io);
         return;
@@ -107,12 +115,12 @@ pub fn main(init: std.process.Init) !void {
     if (args.csv or args.json) {
         var buffer: [4096]u8 = undefined;
         var stdout = std.Io.File.stdout().writer(io, &buffer);
-        try smi.write(&stdout.interface, &collector, if (args.csv) smi.csv.write else smi.json.write);
+        try output.write(&stdout.interface, &collector, if (args.csv) formats.csv.write else formats.json.write);
         return stdout.interface.flush();
     }
 
     var state: tui.data.SystemState = .{
-        .collector = &collector,
+        .provider = .{ .context = &collector, .capture = captureTui },
         .tui_refresh_rate = args.tui_refresh_rate,
     };
 
@@ -121,4 +129,18 @@ pub fn main(init: std.process.Init) !void {
     } else {
         try tui.print.run(arena, io, init.environ_map, &state);
     }
+}
+
+fn openSource(collector: *Collector, comptime Backend: type, args: anytype) !void {
+    if (@hasDecl(Backend, "detect") and !Backend.detect(collector.io)) return;
+    const backend = try collector.arena.create(Backend);
+    backend.* = try @call(.auto, Backend.open, .{ collector.arena, collector.gpa, collector.io } ++ args);
+    const reader = source.Source.from(backend);
+    errdefer reader.close(reader.context);
+    try collector.add(reader);
+}
+
+fn captureTui(context: *anyopaque, frame: std.mem.Allocator) std.mem.Allocator.Error!model.Frame {
+    const collector: *Collector = @ptrCast(@alignCast(context));
+    return collector.capture(frame, true);
 }

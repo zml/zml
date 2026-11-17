@@ -58,7 +58,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
     const content_w: u16 = @min(@as(u16, @intCast(vx.screen.width)), Overview.host_line_width + 2);
 
     var viewing_device: ?u16 = null;
-    var overview = try Overview.init(allocator, state, null, &viewing_device);
+    var overview: Overview = .{ .state = state, .viewing_device = &viewing_device };
     defer overview.deinit(allocator);
 
     const draw_ctx: vxfw.DrawContext = .{
@@ -72,6 +72,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
     };
 
     try state.capture(draw_ctx.arena);
+    try overview.prepare(allocator);
     const surface = try overview.draw(draw_ctx);
 
     try silentResize(&vx, allocator, .{

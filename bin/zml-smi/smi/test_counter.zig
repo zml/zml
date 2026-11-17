@@ -1,5 +1,5 @@
 const std = @import("std");
-const counter = @import("counter.zig");
+const counter = @import("zml-smi/native").testing.counters;
 
 const Counter = counter.Counter;
 const Growth = counter.Growth;

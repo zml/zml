@@ -1,6 +1,6 @@
 const std = @import("std");
-const hwmon = @import("hwmon.zig");
-const sysfs = @import("sysfs.zig");
+const hwmon = @import("zml-smi/native").hwmon;
+const sysfs = @import("zml-smi/native").sysfs;
 
 const resolve = hwmon.resolve;
 const pwmPercent = hwmon.pwmPercent;

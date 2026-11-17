@@ -8,9 +8,9 @@ _SRCS = [
     "lib/ui.zig",
     "lib/utils.zig",
     "pages/detail.zig",
-    "pages/detail/cards.zig",
     "pages/detail/detail_common.zig",
     "pages/overview.zig",
+    "presentation.zig",
     "print.zig",
     "theme.zig",
     "top.zig",
@@ -38,7 +38,7 @@ _ASSETS = [
 
 _DEPS = [
     "//bazel/stamp:zig",
-    "//bin/zml-smi/smi",
+    "//bin/zml-smi/smi:model",
     "//zml:logo",
     "@libvaxis//:vaxis",
 ]

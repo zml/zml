@@ -1,5 +1,5 @@
 const std = @import("std");
-const scale = @import("units.zig").scale;
+const scale = @import("zml-smi/native").units.scale;
 
 test scale {
     try std.testing.expectEqual(2, scale(1500, .micro, .milli));

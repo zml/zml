@@ -1,25 +1,27 @@
 //! AWS Neuron cores, through the bundled libnrt and sysfs.
 const std = @import("std");
 const c = @import("c");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const source = @import("zml-smi/source");
+const native = @import("zml-smi/native");
+const telemetry = @import("zml-smi/telemetry");
 
 const Neuron = @This();
 const log = std.log.scoped(.@"zml-smi/neuron");
 
-devices: []const smi.Device,
+devices: []const model.Device,
 io: std.Io,
 nrt: Private,
 chips: []const Chip,
 /// Busy nanoseconds of each process on each core.
-busy: smi.Counters(Key),
+busy: native.Counters(Key),
 
 /// A Neuron device. Each of its cores is a device of the platform.
 const Chip = struct {
     handle: *c.ndl_device_t,
-    name: ?[]const u8 = null,
     mem_total_bytes: ?u64,
     /// stats/memory_usage/device_mem of each core.
-    memory: []const ?smi.sysfs.Dir,
+    memory: []const ?native.sysfs.Dir,
 };
 
 /// A process and the position of a core in `devices`.
@@ -42,9 +44,7 @@ const Private = struct {
     nds_get_nc_counter: Checked(c.nds_get_nc_counter),
 };
 
-fn Checked(comptime function: anytype) type {
-    return smi.dynlib.Checked(function, check);
-}
+const Checked = native.dynlib.CheckedBy(check);
 
 /// The libnrt functions that report a status, exported or not, return 0 on success.
 fn check(status: i64) error{NrtError}!void {
@@ -52,11 +52,11 @@ fn check(status: i64) error{NrtError}!void {
 }
 
 pub fn detect(io: std.Io) bool {
-    return smi.sysfs.exists(io, c.NEURON_DEVICE_PREFIX ++ "0");
+    return native.sysfs.exists(io, c.NEURON_DEVICE_PREFIX ++ "0");
 }
 
 pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuron {
-    const api = try smi.dynlib.openBundled(Api, io, "libnrt.so.1");
+    const api = try native.dynlib.openBundled(Api, io, "libnrt.so.1");
     const nrt = try findPrivate(io, api.nrt_get_version.function);
     const core_count = try api.nrt_get_total_nc_count.get(.{});
 
@@ -79,20 +79,23 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuro
     // The devices share the cores evenly.
     const cores_per_chip = core_count / @max(1, opened.items.len);
     const chips = try arena.alloc(Chip, opened.items.len);
-    var initialized: usize = 0;
-    errdefer for (chips[0..initialized]) |chip| {
-        for (chip.memory) |memory| if (memory) |dir| dir.close();
-    };
-    var devices: std.ArrayList(smi.Device) = try .initCapacity(arena, chips.len * cores_per_chip);
-    for (chips, opened.items) |*chip, entry| {
-        const index, const handle = entry;
-        chip.* = try openChip(arena, io, index, handle, cores_per_chip);
-        initialized += 1;
-        for (chip.memory) |_| devices.appendAssumeCapacity(.{ .target = .neuron, .name = chip.name, .driver_version = driver_version });
+    const devices = try arena.alloc(model.Device, chips.len * cores_per_chip);
+    const memory = try arena.alloc(?native.sysfs.Dir, devices.len);
+    @memset(memory, null);
+    errdefer closeMemory(memory);
+
+    for (chips, opened.items, 0..) |*chip, entry, index| {
+        const device_index, const handle = entry;
+        const first = index * cores_per_chip;
+        const cores = memory[first..][0..cores_per_chip];
+        const name = try openMemory(arena, io, device_index, cores);
+        chip.* = .{ .handle = handle, .mem_total_bytes = memoryTotal(handle.device_type), .memory = cores };
+        const device: model.Device = .{ .target = .neuron, .name = name, .driver_version = driver_version };
+        @memset(devices[first..][0..cores_per_chip], device);
     }
 
     return .{
-        .devices = devices.items,
+        .devices = devices,
         .io = io,
         .nrt = nrt,
         .chips = chips,
@@ -100,44 +103,41 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuro
     };
 }
 
-/// A chip's memory total from its device type, and its name and the memory directory of each core from sysfs.
-fn openChip(arena: std.mem.Allocator, io: std.Io, index: c_int, handle: *c.ndl_device_t, cores: usize) !Chip {
-    const memory = try arena.alloc(?smi.sysfs.Dir, cores);
-    @memset(memory, null);
-    errdefer for (memory) |entry| if (entry) |dir| dir.close();
-    var chip: Chip = .{ .handle = handle, .mem_total_bytes = memoryTotal(handle.device_type), .memory = memory };
-
+/// Opens the memory directory of each core and reads the chip's name.
+fn openMemory(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    index: c_int,
+    memory: []?native.sysfs.Dir,
+) !?[]const u8 {
     var path: [64]u8 = undefined;
-    const dir = smi.sysfs.Dir.open(io, try std.fmt.bufPrint(&path, "/sys/devices/virtual/neuron_device/neuron{d}", .{index})) catch return chip;
+    const device_path = try std.fmt.bufPrint(&path, "/sys/devices/virtual/neuron_device/neuron{d}", .{index});
+    const dir = native.sysfs.Dir.open(io, device_path) catch return null;
     defer dir.close();
     for (memory, 0..) |*core, core_index| {
         core.* = dir.openDir(try std.fmt.bufPrint(&path, "neuron_core{d}/stats/memory_usage/device_mem", .{core_index})) catch null;
     }
     var buffer: [128]u8 = undefined;
-    chip.name = try arena.dupe(u8, dir.read("info/architecture/device_name", &buffer) catch return chip);
-    return chip;
+    return try arena.dupe(u8, dir.read("info/architecture/device_name", &buffer) catch return null);
 }
 
 /// Device memory by device type: Inferentia, then Inferentia2 and Trainium, Trainium2, Trainium3.
 fn memoryTotal(device_type: u8) ?u64 {
     const gib: u64 = 1 << 30;
-    return switch (device_type) {
-        1 => 8 * gib,
-        2 => 32 * gib,
-        3 => 96 * gib,
-        4 => 144 * gib,
-        else => null,
-    };
+    const totals = [_]?u64{ null, 8 * gib, 32 * gib, 96 * gib, 144 * gib };
+    return if (device_type < totals.len) totals[device_type] else null;
+}
+
+fn closeMemory(memory: []const ?native.sysfs.Dir) void {
+    for (memory) |entry| if (entry) |dir| dir.close();
 }
 
 pub fn close(self: *Neuron) void {
-    for (self.chips) |chip| {
-        for (chip.memory) |memory| if (memory) |dir| dir.close();
-    }
+    for (self.chips) |chip| closeMemory(chip.memory);
     self.busy.deinit();
 }
 
-const memory_poll = .{
+const pollMemory = telemetry.Bind(model.Neuron, .{
     .read = readCategory,
     .fields = .{
         .nc_tensors = "tensors",
@@ -152,13 +152,13 @@ const memory_poll = .{
         .nc_notifications = "notifications",
         .nc_uncategorized = "uncategorized",
     },
-};
+}).poll;
 
-fn readCategory(dir: smi.sysfs.Dir, comptime category: []const u8) ?u64 {
+fn readCategory(dir: native.sysfs.Dir, comptime category: []const u8) ?u64 {
     return dir.int(u64, category ++ "/total") catch null;
 }
 
-pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *source.Reading) !void {
     const samples = reading.samples;
     defer self.busy.sweep();
     var read_any = false;
@@ -173,14 +173,12 @@ pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *smi.Reading) !v
             const core = &sample.neuron;
             core.mem_used_bytes = mem_used;
             core.mem_total_bytes = chip.mem_total_bytes;
-            if (memory) |dir| core.poll(.{dir}, memory_poll);
+            if (memory) |dir| pollMemory(core, .{dir});
         }
 
-        self.scan(scratch, chip.handle, @intCast(first), cores, reading) catch |err| {
-            if (err == error.OutOfMemory) return err;
-            continue;
-        };
-        read_any = true;
+        if (self.scan(scratch, chip.handle, @intCast(first), cores, reading)) |_| {
+            read_any = true;
+        } else |err| if (err == error.OutOfMemory) return err;
     }
     if (!read_any) return error.Unavailable;
     for (reading.processes.items) |*row| {
@@ -188,7 +186,7 @@ pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *smi.Reading) !v
     }
 }
 
-fn memoryInUse(memory: []const ?smi.sysfs.Dir) ?u64 {
+fn memoryInUse(memory: []const ?native.sysfs.Dir) ?u64 {
     var total: u64 = 0;
     for (memory) |dir| total += (dir orelse return null).int(u64, "total") catch return null;
     return total;
@@ -196,14 +194,21 @@ fn memoryInUse(memory: []const ?smi.sysfs.Dir) ?u64 {
 
 /// Reads the busy time of every process on one chip: the utilization of each core,
 /// and a row per process and core it has used, if it holds device memory.
-fn scan(self: *Neuron, scratch: std.mem.Allocator, handle: *c.ndl_device_t, first: u16, cores: []smi.Sample, reading: *smi.Reading) !void {
+fn scan(
+    self: *Neuron,
+    scratch: std.mem.Allocator,
+    handle: *c.ndl_device_t,
+    first: u16,
+    cores: []model.Sample,
+    reading: *source.Reading,
+) !void {
     var list: ?[*]c.struct_neuron_app_info = null;
     var count: usize = 0;
     try self.nrt.ndl_get_all_apps_info.call(.{ handle, &list, &count, c.APP_INFO_ALL });
     defer std.c.free(list);
     const apps: []const c.struct_neuron_app_info = if (list) |items| items[0..count] else &.{};
 
-    const busy = try scratch.alloc(?smi.Growth, cores.len);
+    const busy = try scratch.alloc(?native.Growth, cores.len);
     @memset(busy, null);
     for (apps) |app| {
         if (app.pid <= 0) continue;
@@ -213,7 +218,8 @@ fn scan(self: *Neuron, scratch: std.mem.Allocator, handle: *c.ndl_device_t, firs
         for (busy, 0..) |*sum, core| {
             const micros = self.nrt.nds_get_nc_counter.get(.{ nds, @intCast(core), c.NDS_NC_COUNTER_TIME_IN_USE }) catch continue;
             const key: Key = .{ .pid = @intCast(app.pid), .core = first + @as(u16, @intCast(core)) };
-            if (try self.busy.advance(key, self.io, smi.units.scale(micros, .micro, .nano))) |growth| smi.Growth.add(sum, growth);
+            const nanos = native.units.scale(micros, .micro, .nano);
+            if (try self.busy.advance(key, self.io, nanos)) |growth| native.Growth.add(sum, growth);
 
             const mem_kib = app.device_mem_size / 1024;
             if (micros > 0 and mem_kib > 0) try reading.addProcess(.{ .pid = key.pid, .device_idx = key.core, .dev_mem_kib = mem_kib });
@@ -241,17 +247,17 @@ fn findPrivate(io: std.Io, known: *const anyopaque) !Private {
     const info = @typeInfo(Private).@"struct";
     var private: Private = undefined;
     inline for (info.field_names, info.field_types) |field, Field| {
-        const address = symbol_blk: {
-            for (sections) |section| {
-                if (section.type != .SYMTAB) continue;
-                const strings = image[sections[section.link].offset..][0..sections[section.link].size];
-                for (std.mem.bytesAsSlice(elf.Sym, image[section.offset..][0..section.size])) |symbol| {
-                    if (symbol.value == 0) continue;
-                    if (std.mem.eql(u8, std.mem.sliceTo(strings[symbol.name..], 0), field)) {
-                        break :symbol_blk @intFromPtr(library.fbase) + symbol.value;
-                    }
+        const address = symbol_blk: for (sections) |section| {
+            if (section.type != .SYMTAB) continue;
+            const strings = image[sections[section.link].offset..][0..sections[section.link].size];
+            const symbols = std.mem.bytesAsSlice(elf.Sym, image[section.offset..][0..section.size]);
+            for (symbols) |symbol| {
+                if (symbol.value == 0) continue;
+                if (std.mem.eql(u8, std.mem.sliceTo(strings[symbol.name..], 0), field)) {
+                    break :symbol_blk @intFromPtr(library.fbase) + symbol.value;
                 }
             }
+        } else {
             log.warn("libnrt has no symbol {s}", .{field});
             return error.MissingSymbol;
         };

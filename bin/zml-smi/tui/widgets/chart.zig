@@ -37,43 +37,28 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const content_h: u16 = self.chart_height + x_axis_h + time_labels_h + info_line_h;
 
     // ── Y-axis label widths ──────────────────────────────────
-    const y_labels = [3]struct { row: u16, val: u32 }{
-        .{ .row = 0, .val = self.y_max },
-        .{ .row = self.chart_height / 2, .val = (self.y_min + self.y_max) / 2 },
-        .{ .row = self.chart_height, .val = self.y_min },
-    };
-    var y_strs: [3][]const u8 = undefined;
-    var y_str_widths: [3]u16 = undefined;
+    var y_labels: [3]struct { text: []const u8, width: u16 } = undefined;
+    const y_values = [3]u32{ self.y_max, (self.y_min + self.y_max) / 2, self.y_min };
     var y_label_w: u16 = 0;
-    for (&y_strs, &y_str_widths, y_labels) |*s, *sw, lbl| {
-        s.* = try std.fmt.allocPrint(ctx.arena, "{d}{s}", .{ lbl.val, self.y_unit });
-        sw.* = @intCast(ctx.stringWidth(s.*));
-        y_label_w = @max(y_label_w, sw.*);
+    for (&y_labels, y_values) |*label, value| {
+        const text = try std.fmt.allocPrint(ctx.arena, "{d}{s}", .{ value, self.y_unit });
+        label.* = .{ .text = text, .width = @intCast(ctx.stringWidth(text)) };
+        y_label_w = @max(y_label_w, label.width);
     }
 
     // ── Column layout ────────────────────────────────────────
     const chart_start: u16 = y_label_w + 1;
-    const chart_w: u16 = if (max_w > chart_start) max_w - chart_start else 0;
+    const chart_w = max_w -| chart_start;
 
     var surface = try vxfw.Surface.init(ctx.arena, ui.drawWidget(self, drawContent), .{ .width = max_w, .height = content_h });
-    if (chart_w == 0) {
-        return surface;
-    }
+    if (chart_w == 0) return surface;
 
     // ── Y-axis labels + axis line ────────────────────────────
-    for (y_strs, y_str_widths, y_labels) |text, sw, lbl| {
-        writeStr(&surface, y_label_w - sw, lbl.row, text, theme.dim_style);
+    for (y_labels, [3]u16{ 0, self.chart_height / 2, self.chart_height }) |label, row| {
+        writeLabel(&surface, y_label_w - label.width, row, label.text);
     }
-    for (0..self.chart_height + 1) |r| {
-        const row: u16 = @intCast(r);
-        const ch: []const u8 = if (row == self.chart_height)
-            "\u{2514}"
-        else
-            "\u{2502}";
-        surface.writeCell(y_label_w, row, .{
-            .char = .{ .grapheme = ch, .width = 1 },
-            .style = theme.dim_style,
-        });
+    for (0..self.chart_height + 1) |row| {
+        writeGlyph(&surface, y_label_w, @intCast(row), if (row == self.chart_height) "\u{2514}" else "\u{2502}");
     }
 
     // ── Braille data area ────────────────────────────────────
@@ -83,13 +68,9 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     // ── X-axis line ──────────────────────────────────────────
     const tick_mid: u16 = chart_w / 2;
     const tick_right: u16 = chart_w -| 1;
-    for (0..chart_w) |c| {
-        const col: u16 = @intCast(c);
-        const is_tick = (col == 0 or col == tick_mid or col == tick_right);
-        surface.writeCell(chart_start + col, self.chart_height, .{
-            .char = .{ .grapheme = if (is_tick) "\u{252C}" else "\u{2500}", .width = 1 },
-            .style = theme.dim_style,
-        });
+    for (0..chart_w) |col| {
+        const is_tick = col == 0 or col == tick_mid or col == tick_right;
+        writeGlyph(&surface, chart_start + @as(u16, @intCast(col)), self.chart_height, if (is_tick) "\u{252C}" else "\u{2500}");
     }
 
     // ── X-axis time labels ───────────────────────────────────
@@ -100,42 +81,42 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const left_str = try fmtTime(ctx.arena, total_s);
     const mid_str = try fmtTime(ctx.arena, mid_s);
 
-    writeStr(&surface, chart_start, label_row, left_str, theme.dim_style);
+    writeLabel(&surface, chart_start, label_row, left_str);
 
     const mid_w: u16 = @intCast(ctx.stringWidth(mid_str));
-    writeStr(&surface, chart_start + tick_mid -| (mid_w / 2), label_row, mid_str, theme.dim_style);
+    writeLabel(&surface, chart_start + tick_mid -| (mid_w / 2), label_row, mid_str);
 
     const right_str: []const u8 = "now";
     const right_w: u16 = @intCast(ctx.stringWidth(right_str));
-    writeStr(&surface, chart_start + tick_right + 1 -| right_w, label_row, right_str, theme.dim_style);
+    writeLabel(&surface, chart_start + tick_right + 1 -| right_w, label_row, right_str);
 
     // ── Info line ────────────────────────────────────────────
     if (self.info_line) |info| {
-        writeStr(&surface, chart_start, self.chart_height + x_axis_h + time_labels_h, info, theme.dim_style);
+        writeLabel(&surface, chart_start, self.chart_height + x_axis_h + time_labels_h, info);
     }
 
     return surface;
 }
 
-fn writeStr(surface: *vxfw.Surface, col: u16, row: u16, text: []const u8, style: vaxis.Cell.Style) void {
-    var c = col;
-    var i: usize = 0;
-    while (i < text.len and c < surface.size.width) {
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + len, text.len);
-        surface.writeCell(c, row, .{
-            .char = .{ .grapheme = text[i..end], .width = 1 },
-            .style = style,
-        });
-        c += 1;
-        i = end;
+fn writeGlyph(surface: *vxfw.Surface, col: u16, row: u16, glyph: []const u8) void {
+    surface.writeCell(col, row, .{
+        .char = .{ .grapheme = glyph, .width = 1 },
+        .style = theme.dim_style,
+    });
+}
+
+fn writeLabel(surface: *vxfw.Surface, start_col: u16, row: u16, text: []const u8) void {
+    var col = start_col;
+    var index: usize = 0;
+    while (index < text.len and col < surface.size.width) : (col += 1) {
+        const len = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
+        const end = @min(index + len, text.len);
+        writeGlyph(surface, col, row, text[index..end]);
+        index = end;
     }
 }
 
 fn fmtTime(arena: std.mem.Allocator, seconds: u64) std.mem.Allocator.Error![]const u8 {
-    if (seconds >= 120) {
-        return std.fmt.allocPrint(arena, "-{d}m", .{seconds / 60});
-    } else {
-        return std.fmt.allocPrint(arena, "-{d}s", .{seconds});
-    }
+    if (seconds >= 120) return std.fmt.allocPrint(arena, "-{d}m", .{seconds / 60});
+    return std.fmt.allocPrint(arena, "-{d}s", .{seconds});
 }

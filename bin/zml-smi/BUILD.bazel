@@ -80,7 +80,13 @@ zig_binary(
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "//bin/zml-smi/smi",
+        "//bin/zml-smi/smi:collector",
+        "//bin/zml-smi/smi:formats",
+        "//bin/zml-smi/smi:host",
+        "//bin/zml-smi/smi:model",
+        "//bin/zml-smi/smi:output",
+        "//bin/zml-smi/smi:remote",
+        "//bin/zml-smi/smi:source",
         "//bin/zml-smi/tui",
         "//stdx",
     ] + select({

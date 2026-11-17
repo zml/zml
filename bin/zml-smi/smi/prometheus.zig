@@ -1,5 +1,5 @@
 const std = @import("std");
-const smi = @import("smi.zig");
+const model = @import("zml-smi/model");
 
 /// Multiply by factor, then move the decimal point; conversions remain exact.
 const Metric = struct {
@@ -88,14 +88,14 @@ fn neuron(comptime name: []const u8, comptime title: []const u8) DeviceMetric {
 
 comptime {
     for (device_metrics) |entry| {
-        const exists = for (@typeInfo(smi.Target).@"enum".field_names) |target| {
-            if (@hasField(@FieldType(smi.Sample, target), entry.field)) break true;
+        const exists = for (@typeInfo(model.Target).@"enum".field_names) |target| {
+            if (@hasField(@FieldType(model.Sample, target), entry.field)) break true;
         } else false;
         if (!exists) @compileError("unknown exported metric field: " ++ entry.field);
     }
 }
 
-const HostMetrics = std.enums.EnumFieldStruct(std.meta.FieldEnum(smi.HostData), ?Metric, null);
+const HostMetrics = std.enums.EnumFieldStruct(std.meta.FieldEnum(model.HostData), ?Metric, null);
 const host: HostMetrics = .{
     .hostname = null,
     .kernel = null,
@@ -111,13 +111,9 @@ const host: HostMetrics = .{
     .system_power_mw = .{ .name = "zml_host_system_power_watts", .help = "System power draw in watts", .decimals = 3 },
 };
 
-pub fn write(
-    writer: *std.Io.Writer,
-    devices: []const smi.Device,
-    snapshot: smi.Collector.Snapshot,
-) !void {
+pub fn write(writer: *std.Io.Writer, frame: model.Frame) !void {
     try writer.writeAll("# HELP zml_device_info Device metadata\n# TYPE zml_device_info gauge\n");
-    for (devices, 0..) |device, i| {
+    for (frame.devices, 0..) |device, i| {
         try writer.print("zml_device_info{{device=\"{d}\",type=\"{t}\"", .{ i, device.target });
         if (device.name) |name| try label(writer, "name", name);
         if (device.driver_version) |driver| try label(writer, "driver", driver);
@@ -129,8 +125,8 @@ pub fn write(
     inline for (device_metrics) |entry| {
         const family = entry.metric;
         var written = false;
-        for (devices, 0..) |device, i| {
-            const value: u64 = switch (snapshot.samples[i]) {
+        for (frame.devices, frame.samples, 0..) |device, sample, i| {
+            const value: u64 = switch (sample) {
                 inline else => |fields| if (@hasField(@TypeOf(fields), entry.field))
                     @field(fields, entry.field)
                 else
@@ -147,9 +143,9 @@ pub fn write(
         if (written) try writer.writeAll("\n");
     }
 
-    inline for (@typeInfo(smi.HostData).@"struct".field_names) |field| {
+    inline for (@typeInfo(model.HostData).@"struct".field_names) |field| {
         if (comptime @field(host, field)) |family| {
-            if (@field(snapshot.host, field)) |value| {
+            if (@field(frame.host, field)) |value| {
                 try header(writer, family);
                 try writer.print("{s} ", .{family.name});
                 try number(writer, family, value);

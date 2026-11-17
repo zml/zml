@@ -1,12 +1,15 @@
 //! NVIDIA GPUs, through libnvidia-ml.
 const std = @import("std");
 const c = @import("c");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const native = @import("zml-smi/native");
+const source = @import("zml-smi/source");
+const telemetry = @import("zml-smi/telemetry");
 
 const Nvml = @This();
 const log = std.log.scoped(.@"zml-smi/nvml");
 
-devices: []const smi.Device,
+devices: []const model.Device,
 api: Api,
 gpus: []Gpu,
 tick: u8 = 0,
@@ -48,9 +51,7 @@ const Api = struct {
     nvmlDeviceGetGraphicsRunningProcesses_v3: Checked(c.nvmlDeviceGetGraphicsRunningProcesses_v3),
     nvmlDeviceGetProcessUtilization: Checked(c.nvmlDeviceGetProcessUtilization),
 
-    fn Checked(comptime function: anytype) type {
-        return smi.dynlib.Checked(function, check);
-    }
+    const Checked = native.dynlib.CheckedBy(check);
 
     fn check(status: c.nvmlReturn_t) error{ Unsupported, NvmlError }!void {
         return switch (status) {
@@ -62,11 +63,11 @@ const Api = struct {
 };
 
 pub fn detect(io: std.Io) bool {
-    return smi.sysfs.exists(io, "/dev/nvidiactl");
+    return native.sysfs.exists(io, "/dev/nvidiactl");
 }
 
 pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
-    const api = try smi.dynlib.open(Api, &.{ "libnvidia-ml.so.1", "libnvidia-ml.so" });
+    const api = try native.dynlib.open(Api, &.{ "libnvidia-ml.so.1", "libnvidia-ml.so" });
 
     // The first call says why the library cannot be used.
     const status = api.nvmlInit_v2.function();
@@ -82,7 +83,7 @@ pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
         try arena.dupe(u8, std.mem.sliceTo(&version, 0))
     else |_|
         null;
-    const details: []const smi.Device.Detail = if (api.nvmlSystemGetCudaDriverVersion_v2.get(.{})) |cuda| try arena.dupe(smi.Device.Detail, &.{.{
+    const details: []const model.Device.Detail = if (api.nvmlSystemGetCudaDriverVersion_v2.get(.{})) |cuda| try arena.dupe(model.Device.Detail, &.{.{
         .key = "cuda_version",
         .label = "CUDA",
         .value = try std.fmt.allocPrint(arena, "{d}.{d}", .{ @divTrunc(cuda, 1000), @divTrunc(@mod(cuda, 1000), 10) }),
@@ -91,7 +92,7 @@ pub fn open(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
 
     const count = try api.nvmlDeviceGetCount_v2.get(.{});
     var gpus: std.ArrayList(Gpu) = try .initCapacity(arena, count);
-    var devices: std.ArrayList(smi.Device) = try .initCapacity(arena, count);
+    var devices: std.ArrayList(model.Device) = try .initCapacity(arena, count);
     for (0..count) |index| {
         // A GPU that fell off the bus is skipped; the others still show.
         const handle = api.nvmlDeviceGetHandleByIndex_v2.get(.{@intCast(index)}) catch continue;
@@ -116,8 +117,8 @@ pub fn close(self: *Nvml) void {
     _ = self.api.nvmlShutdown();
 }
 
-const poll_plan = .{
-    .read = smi.dynlib.readScalar,
+const pollGpu = telemetry.Bind(model.Gpu, .{
+    .read = native.dynlib.readScalar,
     .fields = .{
         .power_mw = .{ .nvmlDeviceGetPowerUsage, .{} },
         .power_limit_mw = .{ .nvmlDeviceGetEnforcedPowerLimit, .{} },
@@ -133,14 +134,14 @@ const poll_plan = .{
         .pcie_link_width = .{ .nvmlDeviceGetCurrPcieLinkWidth, .{} },
     },
     .query = readMemory,
-};
+}).poll;
 
 fn readMemory(api: *const Api, handle: c.nvmlDevice_t) struct { mem_used_bytes: ?u64 = null, mem_total_bytes: ?u64 = null } {
     const memory = api.nvmlDeviceGetMemoryInfo.get(.{handle}) catch return .{};
     return .{ .mem_used_bytes = memory.used, .mem_total_bytes = memory.total };
 }
 
-pub fn poll(self: *Nvml, scratch: std.mem.Allocator, reading: *smi.Reading) !void {
+pub fn poll(self: *Nvml, scratch: std.mem.Allocator, reading: *source.Reading) !void {
     const api = &self.api;
     // PCIe throughput blocks while it measures (#766).
     const read_pcie = self.tick % 4 == 0;
@@ -149,7 +150,7 @@ pub fn poll(self: *Nvml, scratch: std.mem.Allocator, reading: *smi.Reading) !voi
     for (self.gpus, reading.samples) |*gpu, *sample| {
         const fields = &sample.cuda;
         const handle = gpu.handle;
-        fields.poll(.{ api, handle }, poll_plan);
+        pollGpu(fields, .{ api, handle });
 
         fields.util_percent = if (api.nvmlDeviceGetUtilizationRates.get(.{handle})) |rates| rates.gpu else |_| null;
 

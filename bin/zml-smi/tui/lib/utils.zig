@@ -1,5 +1,5 @@
 const std = @import("std");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
 
 pub fn bytesToMb(val: ?u64) u64 {
     return if (val) |v| v / (1024 * 1024) else 0;
@@ -40,7 +40,7 @@ pub fn normalizeRange(
 }
 
 /// " (driver, CUDA 13.4)": the driver version and the details, all of them or those shown in titles.
-pub fn versions(arena: std.mem.Allocator, device: smi.Device, comptime details: enum { in_title, all }) std.mem.Allocator.Error![]const u8 {
+pub fn versions(arena: std.mem.Allocator, device: model.Device, comptime details: enum { in_title, all }) std.mem.Allocator.Error![]const u8 {
     var text: std.Io.Writer.Allocating = .init(arena);
     const writer = &text.writer;
     if (device.driver_version) |driver| writer.writeAll(driver) catch return error.OutOfMemory;

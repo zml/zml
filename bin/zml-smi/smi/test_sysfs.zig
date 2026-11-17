@@ -1,5 +1,5 @@
 const std = @import("std");
-const sysfs = @import("sysfs.zig");
+const sysfs = @import("zml-smi/native").sysfs;
 
 const Dir = sysfs.Dir;
 const fieldValue = sysfs.fieldValue;

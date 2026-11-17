@@ -1,5 +1,5 @@
 const std = @import("std");
-const proc = @import("proc.zig");
+const proc = @import("zml-smi/native").proc;
 
 const FdHolders = proc.FdHolders;
 

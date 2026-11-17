@@ -1,5 +1,5 @@
 const std = @import("std");
-const fdinfo = @import("fdinfo.zig");
+const fdinfo = @import("zml-smi/native").fdinfo;
 
 test "i915 engines and regions" {
     const info = fdinfo.parse(

@@ -1,6 +1,8 @@
 const std = @import("std");
 const c = @import("c");
-const smi = @import("zml-smi");
+const model = @import("zml-smi/model");
+const source = @import("zml-smi/source");
+const native = @import("zml-smi/native");
 const Neuron = @import("Neuron.zig");
 
 const Api = Neuron.testing.Api;
@@ -8,7 +10,7 @@ const findPrivate = Neuron.testing.findPrivate;
 
 test findPrivate {
     const io = std.testing.io;
-    const api = try smi.dynlib.openBundled(Api, io, "libnrt.so.1");
+    const api = try native.dynlib.openBundled(Api, io, "libnrt.so.1");
     const nrt = try findPrivate(io, api.nrt_get_version.function);
     // Listing devices works without any, so the call checks the address.
     var indices: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
@@ -49,7 +51,7 @@ test "utilization and process rows" {
         }
     };
 
-    const devices: [4]smi.Device = @splat(.{ .target = .neuron });
+    const devices: [4]model.Device = @splat(.{ .target = .neuron });
     var neuron: Neuron = .{
         .devices = &devices,
         .io = std.testing.io,
@@ -71,8 +73,8 @@ test "utilization and process rows" {
     defer neuron.busy.deinit();
     var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer scratch.deinit();
-    var samples: [4]smi.Sample = @splat(.init(.neuron));
-    var reading: smi.Reading = .{ .samples = &samples, .allocator = std.testing.allocator };
+    var samples: [4]model.Sample = @splat(.init(.neuron));
+    var reading: source.Reading = .{ .samples = &samples, .allocator = std.testing.allocator };
     defer reading.processes.deinit(std.testing.allocator);
 
     // The first reading has no growth; the second grows by far more than the time between them.
@@ -84,9 +86,14 @@ test "utilization and process rows" {
         try std.testing.expectEqual(null, samples[0].neuron.util_percent);
         try std.testing.expectEqual(util, samples[2].neuron.util_percent);
         try std.testing.expectEqual(0, samples[3].neuron.util_percent);
-        const row: smi.ProcessInfo = .{ .pid = 7, .device_idx = 2, .dev_util_percent = util, .dev_mem_kib = 1024 };
+        const row: model.ProcessInfo = .{
+            .pid = 7,
+            .device_idx = 2,
+            .dev_util_percent = util,
+            .dev_mem_kib = 1024,
+        };
         try std.testing.expectEqualDeep(
-            @as([]const smi.ProcessInfo, &.{row}),
+            @as([]const model.ProcessInfo, &.{row}),
             reading.processes.items,
         );
         fake.busy_us += 1_000_000_000;
