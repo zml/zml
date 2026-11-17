@@ -7,17 +7,14 @@ const Metrics = contract.Metrics;
 
 /// A backend supplies a probe for each device. The hooks run before any probes
 /// and after all device measurements, respectively.
-pub fn PerDevice(comptime Backend: type) type {
-    return struct {
-        pub fn poll(self: *Backend, scratch: std.mem.Allocator, reading: *source.Reading) !void {
-            if (@hasDecl(Backend, "begin")) self.begin();
-            for (reading.samples, 0..) |*sample, index| {
-                const probe: Backend.Probe = self.probe(index);
-                project(sample, &probe);
-            }
-            if (@hasDecl(Backend, "readProcesses")) try self.readProcesses(scratch, reading);
-        }
-    };
+pub fn perDevice(backend: anytype, scratch: std.mem.Allocator, reading: *source.Reading) !void {
+    const Backend = @TypeOf(backend.*);
+    if (@hasDecl(Backend, "begin")) backend.begin();
+    for (reading.samples, 0..) |*sample, index| {
+        const probe = backend.probe(index);
+        project(sample, &probe);
+    }
+    if (@hasDecl(Backend, "readProcesses")) try backend.readProcesses(scratch, reading);
 }
 
 /// Specialize a sequence of direct calls from a probe's public methods.

@@ -9,6 +9,7 @@ test {
 
 const Fake = struct {
     devices: []const contract.Device,
+    power: source.HostPower = .{},
     polls: u64 = 0,
     closes: usize = 0,
 
@@ -22,10 +23,7 @@ const Fake = struct {
         const samples = reading.samples;
         self.polls += 1;
         samples[0].put(.util_percent, self.polls);
-        if (self.polls == 1 and samples.len > 1) {
-            samples[1].put(.util_percent, 100);
-            reading.host.hostname = try reading.allocator.dupe(u8, "device host");
-        }
+        if (self.polls == 1 and samples.len > 1) samples[1].put(.util_percent, 100);
         try reading.addProcess(.{ .device_idx = @intCast(samples.len) });
         try reading.addProcess(.{
             .pid = 42,
@@ -35,17 +33,22 @@ const Fake = struct {
             .username = try reading.allocator.dupe(u8, if (self.polls == 1) "alice" else "carol"),
         });
         if (self.polls % 2 == 0) return error.Unavailable;
-        reading.host.cpu_power_mw = self.polls;
+        reading.host_power = self.power;
     }
 };
 
 const FakeHost = struct {
+    power: source.HostPower = .{},
+
     pub fn read(
-        _: *FakeHost,
+        self: *FakeHost,
         _: std.mem.Allocator,
         _: []contract.ProcessInfo,
-        _: *contract.HostData,
-    ) void {}
+        data: *contract.HostData,
+    ) void {
+        data.cpu_power_mw = self.power.cpu_power_mw;
+        data.system_power_mw = self.power.system_power_mw;
+    }
 };
 
 test "source publication keeps readings, history, and owned process rows together" {
@@ -53,15 +56,18 @@ test "source publication keeps readings, history, and owned process rows togethe
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var host: FakeHost = .{};
+    var host: FakeHost = .{ .power = .{ .cpu_power_mw = 90, .system_power_mw = 120 } };
     const host_reader: source.HostReader = .from(&host);
     var collector: Collector = .init(arena.allocator(), gpa, io, host_reader, .{ .hostname = "local" }, .{
         .history = true,
     });
     defer collector.deinit();
     const devices: []const contract.Device = &.{ .{ .target = .cuda }, .{ .target = .cuda } };
-    var first: Fake = .{ .devices = devices };
-    var second: Fake = .{ .devices = devices[0..1] };
+    var first: Fake = .{
+        .devices = devices,
+        .power = .{ .cpu_power_mw = 10, .system_power_mw = 20 },
+    };
+    var second: Fake = .{ .devices = devices[0..1], .power = .{ .cpu_power_mw = 0 } };
     try collector.add(.from(&first));
     try collector.add(.from(&second));
     try std.testing.expect(collector.two_readings);
@@ -73,8 +79,9 @@ test "source publication keeps readings, history, and owned process rows togethe
     try std.testing.expectEqual(1, frame.samples[0].get(.util_percent));
     try std.testing.expectEqual(100, frame.samples[1].get(.util_percent));
     try std.testing.expectEqual(1, frame.samples[2].get(.util_percent));
-    try std.testing.expectEqual(1, frame.host.cpu_power_mw);
-    try std.testing.expectEqualStrings("device host", frame.host.hostname.?);
+    try std.testing.expectEqual(0, frame.host.cpu_power_mw);
+    try std.testing.expectEqual(20, frame.host.system_power_mw);
+    try std.testing.expectEqualStrings("local", frame.host.hostname.?);
     try std.testing.expectEqual(2, frame.processes.len);
     try std.testing.expectEqual(2, frame.processes[1].device_idx);
     try std.testing.expectEqual(1, frame.history.?.points[0].len);
@@ -84,7 +91,8 @@ test "source publication keeps readings, history, and owned process rows togethe
     const next = try collector.capture(arena.allocator(), true);
     try std.testing.expectEqual(2, next.samples[0].get(.util_percent));
     try std.testing.expectEqual(null, next.samples[1].get(.util_percent));
-    try std.testing.expectEqual(null, next.host.cpu_power_mw);
+    try std.testing.expectEqual(90, next.host.cpu_power_mw);
+    try std.testing.expectEqual(120, next.host.system_power_mw);
     try std.testing.expectEqualStrings("local", next.host.hostname.?);
     try std.testing.expectEqual(0, next.processes.len);
     try std.testing.expectEqual(2, next.history.?.points[0].len);
@@ -92,7 +100,8 @@ test "source publication keeps readings, history, and owned process rows togethe
     collector.round();
     const latest = try collector.capture(arena.allocator(), false);
     try std.testing.expectEqual(null, latest.samples[1].get(.util_percent));
-    try std.testing.expectEqualStrings("device host", frame.host.hostname.?);
+    try std.testing.expectEqual(0, frame.host.cpu_power_mw);
+    try std.testing.expectEqual(20, frame.host.system_power_mw);
     try std.testing.expectEqualStrings("alice", frame.processes[1].username);
 }
 

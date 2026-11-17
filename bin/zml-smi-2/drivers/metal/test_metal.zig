@@ -58,7 +58,7 @@ test "a GPU of this Mac" {
     for (0..2) |round| {
         samples[0] = .{};
         reading.processes.clearRetainingCapacity();
-        reading.host = .{};
+        reading.host_power = .{};
         if (round > 0) try io.sleep(.fromMilliseconds(100), .awake);
         try metal.poll(scratch.allocator(), &reading);
     }
@@ -66,7 +66,7 @@ test "a GPU of this Mac" {
     try std.testing.expect(gpu.get(.util_percent).? <= 100);
     try std.testing.expect(gpu.get(.mem_used_bytes).? < gpu.get(.mem_total_bytes).?);
     try std.testing.expect(gpu.get(.clock_graphics_mhz).? <= gpu.get(.clock_graphics_max_mhz).?);
-    try std.testing.expect(gpu.get(.power_mw) != null and reading.host.cpu_power_mw != null);
+    try std.testing.expect(gpu.get(.power_mw) != null and reading.host_power.cpu_power_mw != null);
     // WindowServer draws the screen with the GPU.
     try std.testing.expect(reading.processes.items.len > 0);
 }

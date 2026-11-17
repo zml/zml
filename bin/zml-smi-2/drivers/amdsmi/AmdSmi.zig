@@ -99,7 +99,7 @@ pub fn close(self: *AmdSmi) void {
     self.busy.deinit();
 }
 
-pub const poll = polling.PerDevice(@This()).poll;
+pub const poll = polling.perDevice;
 
 pub const Probe = struct {
     api: *const Api,

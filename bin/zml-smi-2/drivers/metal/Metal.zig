@@ -144,11 +144,11 @@ pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *source.Reading) 
         gpu.put(.mem_used_bytes, self.numberAt(stats, .@"In use system memory"));
     }
 
-    self.readReport(gpu, &reading.host);
+    self.readReport(gpu, &reading.host_power);
     if (self.smc) |smc| {
         gpu.put(.temperature, smc.temperature());
         gpu.put(.fan_speed_percent, smc.fanPercent());
-        reading.host.system_power_mw = smc.systemPower();
+        reading.host_power.system_power_mw = smc.systemPower();
     }
 
     // One row per process with GPU time, which has no GPU memory of its own.
@@ -218,7 +218,7 @@ fn gpuTime(self: *Metal, client: iokit.Object) u64 {
 }
 
 /// Takes a sample and reads its delta against the last one: GPU, ANE and CPU power, and the GPU clock.
-fn readReport(self: *Metal, gpu: *contract.Metrics, host: *contract.HostData) void {
+fn readReport(self: *Metal, gpu: *contract.Metrics, power: *source.HostPower) void {
     const report = &self.ioreport;
     const sample = report.IOReportCreateSamples(self.subscription.?, self.channels.?, null) orelse return;
     const previous = self.last;
@@ -259,7 +259,7 @@ fn readReport(self: *Metal, gpu: *contract.Metrics, host: *contract.HostData) vo
     // Whole-CPU totals, else the clusters: an OS with both would count them twice.
     const cpu = Energy.preferred(&energy, .cpu, .cpu_cluster);
     if (cpu == 0 and pmp_cpu_mw > 0) self.cpu_from_pmp = true;
-    host.cpu_power_mw = if (self.cpu_from_pmp) pmp_cpu_mw else cpu;
+    power.cpu_power_mw = if (self.cpu_from_pmp) pmp_cpu_mw else cpu;
     gpu.put(.power_mw, Energy.preferred(&energy, .gpu, .gpu_alias));
     gpu.put(.ane_power_mw, Energy.preferred(&energy, .ane_block, .ane));
 }

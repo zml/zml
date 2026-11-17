@@ -186,7 +186,7 @@ pub fn close(self: *Furiosa) void {
     self.class.close();
 }
 
-pub const poll = polling.PerDevice(@This()).poll;
+pub const poll = polling.perDevice;
 
 pub const Probe = struct {
     backend: *const Furiosa,

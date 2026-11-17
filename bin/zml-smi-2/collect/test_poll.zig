@@ -7,7 +7,7 @@ const Fixture = struct {
     devices: []const contract.Device = &.{.{ .target = .cuda }},
     reads: usize = 0,
 
-    pub const poll = polling.PerDevice(@This()).poll;
+    pub const poll = polling.perDevice;
 
     pub const Probe = struct {
         reads: *usize,

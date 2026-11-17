@@ -4,7 +4,23 @@ const spec = @import("spec.zig");
 
 const implementation = @This();
 
-pub const Metric = enum { util, memory, temperature, power };
+pub const Metric = enum {
+    util,
+    memory,
+    temperature,
+    power,
+
+    /// Read a live sample or a compact history sample, preserving the raw memory ratio.
+    pub fn read(self: Metric, readings: anytype) ?u128 {
+        const scalar = switch (self) {
+            .util => readings.get(.util_percent),
+            .memory => return memoryRatio(readings),
+            .temperature => readings.get(.temperature),
+            .power => readings.get(.power_mw),
+        } orelse return null;
+        return scalar;
+    }
+};
 
 /// Captures readings into a frame allocator. Device indices stay stable across captures.
 pub const FrameProvider = struct {
@@ -45,25 +61,18 @@ pub const SystemState = struct {
                 history_data.interval_ms,
                 count,
             ) orelse continue;
-            values[index] = switch (metric) {
-                .util => point.values.get(.util_percent),
-                .memory => memoryPercent(point.values.get(.mem_used_bytes), point.values.get(.mem_total_bytes)),
-                .temperature => point.values.get(.temperature),
-                .power => point.values.get(.power_mw),
-            };
+            values[index] = if (metric.read(&point.values)) |value|
+                @intCast(if (metric == .memory) @min(value, 100) else value)
+            else
+                null;
         }
         return values;
     }
 };
 
-pub fn memoryPercent(used_bytes: ?u64, total_bytes: ?u64) ?u64 {
-    const ratio = memoryRatio(used_bytes, total_bytes) orelse return null;
-    return @intCast(@min(ratio, 100));
-}
-
-pub fn memoryRatio(used_bytes: ?u64, total_bytes: ?u64) ?u128 {
-    const used = used_bytes orelse return null;
-    const total = total_bytes orelse return null;
+fn memoryRatio(readings: anytype) ?u128 {
+    const used = readings.get(.mem_used_bytes) orelse return null;
+    const total = readings.get(.mem_total_bytes) orelse return null;
     if (total == 0) return null;
     return @as(u128, used) * 100 / total;
 }

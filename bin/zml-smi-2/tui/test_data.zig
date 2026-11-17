@@ -5,7 +5,6 @@ const spec = @import("spec.zig");
 
 const Metric = data.Metric;
 const historyIndex = data.testing.historyIndex;
-const memoryPercent = data.memoryPercent;
 
 const fixture_devices: []const spec.DeviceView = &.{.{
     .title = "Fixture device",
@@ -75,10 +74,23 @@ test "history buckets follow collection timestamps" {
     try std.testing.expectEqual(null, historyIndex(now, now, 500, 0));
 }
 
-test "missing memory is distinct from zero utilization" {
-    try std.testing.expectEqual(null, memoryPercent(null, 100));
-    try std.testing.expectEqual(@as(?u64, 0), memoryPercent(0, 100));
-    try std.testing.expectEqual(@as(?u64, 100), memoryPercent(std.math.maxInt(u64), 1));
+test "live and captured metrics use the same raw readings" {
+    var sample: contract.Metrics = .{};
+    sample.put(.util_percent, 0);
+    sample.put(.mem_used_bytes, 3);
+    sample.put(.mem_total_bytes, 2);
+    sample.put(.power_mw, std.math.maxInt(u64));
+    const history = contract.historyMetrics(&sample);
+    const expected: std.EnumArray(Metric, ?u128) = .init(.{
+        .util = 0,
+        .memory = 150,
+        .power = std.math.maxInt(u64),
+        .temperature = null,
+    });
+    for (std.enums.values(Metric)) |kind| {
+        try std.testing.expectEqual(expected.get(kind), kind.read(&sample));
+        try std.testing.expectEqual(expected.get(kind), kind.read(&history));
+    }
 }
 
 test "captured history keeps failed and absent observations as gaps" {
@@ -90,6 +102,7 @@ test "captured history keeps failed and absent observations as gaps" {
                 .util_percent = 0,
                 .mem_used_bytes = 0,
                 .mem_total_bytes = 100,
+                .power_mw = 100_000,
             }),
             .at = .fromNanoseconds(500 * std.time.ns_per_ms),
         },
@@ -109,12 +122,14 @@ test "captured history keeps failed and absent observations as gaps" {
         } },
         .tui_refresh_rate = 100,
     };
-    for ([_]Metric{ .util, .memory, .temperature }) |metric| {
+    for (std.enums.values(Metric)) |metric| {
         const values = try state.history(arena.allocator(), 0, metric);
-        const expected: []const ?u64 = if (metric == .temperature)
-            &.{ null, null, null, null }
-        else
-            &.{ null, 0, null, null };
+        const value: ?u64 = switch (metric) {
+            .util, .memory => 0,
+            .temperature => null,
+            .power => 100_000,
+        };
+        const expected: []const ?u64 = &.{ null, value, null, null };
         try std.testing.expectEqualSlices(?u64, expected, values);
     }
 }

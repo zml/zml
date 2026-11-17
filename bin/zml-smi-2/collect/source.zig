@@ -1,12 +1,17 @@
 const std = @import("std");
 const contract = @import("zml-smi-2/contract");
 
+pub const HostPower = struct {
+    cpu_power_mw: ?u64 = null,
+    system_power_mw: ?u64 = null,
+};
+
 /// One backend poll fills its samples and may append processes or measure host power.
 pub const Reading = struct {
     samples: []contract.Metrics,
     allocator: std.mem.Allocator,
     processes: std.ArrayList(contract.ProcessInfo) = .empty,
-    host: contract.HostData = .{},
+    host_power: HostPower = .{},
 
     /// Any strings in the row must live in the publication's allocator.
     pub fn addProcess(self: *Reading, row: contract.ProcessInfo) std.mem.Allocator.Error!void {
@@ -26,7 +31,8 @@ pub const Source = struct {
         const Backend = @TypeOf(backend.*);
         const Adapter = struct {
             fn poll(context: *anyopaque, scratch: std.mem.Allocator, reading: *Reading) !void {
-                return Backend.poll(@ptrCast(@alignCast(context)), scratch, reading);
+                const typed: *Backend = @ptrCast(@alignCast(context));
+                return Backend.poll(typed, scratch, reading);
             }
 
             fn close(context: *anyopaque) void {

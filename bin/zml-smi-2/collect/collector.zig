@@ -174,8 +174,7 @@ pub const Collector = struct {
             &.{};
         @memset(histories, &.{});
         var processes: std.ArrayList(contract.ProcessInfo) = .empty;
-        var host: contract.HostData = .{};
-        const host_fields = @typeInfo(contract.HostData).@"struct".field_names;
+        var power: source.HostPower = .{};
         for (self.sources.items) |publication| {
             const front = &publication.readings.lock(self.io).value;
             defer publication.readings.unlock(self.io);
@@ -188,14 +187,8 @@ pub const Collector = struct {
                 copy.comm = try arena.dupe(u8, row.comm);
                 try processes.append(arena, copy);
             }
-            inline for (host_fields) |field| {
-                if (@field(front.host, field)) |value| {
-                    @field(host, field) = if (@TypeOf(value) == []const u8)
-                        try arena.dupe(u8, value)
-                    else
-                        value;
-                }
-            }
+            power.cpu_power_mw = front.host_power.cpu_power_mw orelse power.cpu_power_mw;
+            power.system_power_mw = front.host_power.system_power_mw orelse power.system_power_mw;
 
             if (with_history and publication.count != 0) {
                 const oldest = publication.next + history_capacity - publication.count;
@@ -212,9 +205,9 @@ pub const Collector = struct {
 
         const enriched = &self.host.lock(self.io).value;
         defer self.host.unlock(self.io);
-        inline for (host_fields) |field| {
-            if (@field(host, field) == null) @field(host, field) = @field(enriched.data, field);
-        }
+        var host = enriched.data;
+        host.cpu_power_mw = power.cpu_power_mw orelse host.cpu_power_mw;
+        host.system_power_mw = power.system_power_mw orelse host.system_power_mw;
         for (processes.items) |*row| {
             if (row.remote) continue;
             const details = enriched.processes.get(row.pid) orelse continue;

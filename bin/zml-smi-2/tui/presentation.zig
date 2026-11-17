@@ -12,6 +12,7 @@ const Chart = @import("widgets/chart.zig");
 const OverviewDevice = struct { card: MetricCard, gauges: [2]Gauge };
 const AllocError = std.mem.Allocator.Error;
 const Metrics = contract.Metrics;
+const Metric = data.Metric;
 
 pub fn overviewDevice(
     arena: std.mem.Allocator,
@@ -21,8 +22,6 @@ pub fn overviewDevice(
     const device = state.devices[index];
     const reading = &state.frame.samples[index];
     const style = device.profile;
-    const used = reading.get(.mem_used_bytes);
-    const total = reading.get(.mem_total_bytes);
     return .{
         .card = .{
             .title = device.title,
@@ -30,17 +29,17 @@ pub fn overviewDevice(
             .title_right = if (device.remote) "remote" else null,
         },
         .gauges = .{
-            .{
-                .label = style.util_label,
-                .value = if (reading.get(.util_percent)) |value| @intCast(@min(value, 100)) else null,
-                .suffix = try overviewSuffix(arena, style, reading),
-            },
-            .{
-                .label = "MEM",
-                .value = if (data.memoryPercent(used, total)) |value| @intCast(value) else null,
-                .suffix = try memoryInfo(arena, reading, "", "", true),
-            },
+            gauge(reading, .util, style.util_label, try overviewSuffix(arena, style, reading)),
+            gauge(reading, .memory, "MEM", try memoryInfo(arena, reading, "", "", true)),
         },
+    };
+}
+
+fn gauge(sample: *const Metrics, kind: Metric, label: []const u8, suffix: []const u8) Gauge {
+    return .{
+        .label = label,
+        .value = if (kind.read(sample)) |value| @intCast(@min(value, 100)) else null,
+        .suffix = suffix,
     };
 }
 
@@ -50,8 +49,8 @@ fn overviewSuffix(
     reading: *const Metrics,
 ) AllocError![]const u8 {
     if (style.environment == .hidden) return "";
-    const temperature = try metric(arena, reading.get(.temperature), "\u{00b0}C");
-    const power = reading.get(.power_mw);
+    const temperature = try metric(arena, Metric.temperature.read(reading), "\u{00b0}C");
+    const power = Metric.power.read(reading);
     if (style.environment == .tenths) return std.fmt.allocPrint(arena, "{s} | {s}", .{
         temperature, try watts(arena, power, "", " W"),
     });
@@ -66,7 +65,7 @@ fn overviewSuffix(
     });
 }
 
-const axes: std.EnumArray(data.Metric, struct { title: []const u8, unit: []const u8 }) = .init(.{
+const axes: std.EnumArray(Metric, struct { title: []const u8, unit: []const u8 }) = .init(.{
     .util = .{ .title = "Utilization", .unit = "%" },
     .memory = .{ .title = "Memory", .unit = "%" },
     .temperature = .{ .title = "Temperature", .unit = "\u{00b0}C" },
@@ -78,10 +77,11 @@ pub fn historyChart(
     arena: std.mem.Allocator,
     state: *const data.SystemState,
     index: u16,
-    kind: data.Metric,
+    kind: Metric,
 ) AllocError!Chart {
     const profile = state.devices[index].profile;
     const reading = &state.frame.samples[index];
+    const value = kind.read(reading);
     const axis = axes.get(kind);
     const history = try state.history(arena, index, kind);
     const minimum: u32 = if (kind == .temperature) 20 else 0;
@@ -89,8 +89,8 @@ pub fn historyChart(
     const maximum: u32 = if (kind == .power) maximum_blk: {
         var ceiling = limit orelse 0;
         if (ceiling == 0) {
-            ceiling = reading.get(.power_mw) orelse 0;
-            for (history) |value| ceiling = @max(ceiling, value orelse 0);
+            ceiling = @intCast(value orelse 0);
+            for (history) |sample| ceiling = @max(ceiling, sample orelse 0);
         }
         const whole_watts = @divCeil(ceiling, 1000);
         break :maximum_blk std.math.lossyCast(u32, @max(2, whole_watts));
@@ -101,12 +101,10 @@ pub fn historyChart(
     return .{
         .title = if (kind == .util) profile.util_title else axis.title,
         .data = try utils.normalizeRange(arena, history, minimum, @as(u64, maximum) * scale),
-        .value_label = switch (kind) {
-            .util => try metric(arena, reading.get(.util_percent), axis.unit),
-            .memory => try memoryPercent(arena, reading.get(.mem_used_bytes), reading.get(.mem_total_bytes)),
-            .temperature => try metric(arena, reading.get(.temperature), axis.unit),
-            .power => try watts(arena, reading.get(.power_mw), "", "W"),
-        },
+        .value_label = if (kind == .power)
+            try watts(arena, value, "", "W")
+        else
+            try metric(arena, value, axis.unit),
         .info_line = note orelse if (kind == .power)
             try watts(arena, if ((limit orelse 0) > 0) limit else null, "Limit ", "W")
         else
@@ -121,14 +119,6 @@ pub fn historyChart(
 fn metric(arena: std.mem.Allocator, value: anytype, suffix: []const u8) AllocError![]const u8 {
     const number = value orelse return "N/A";
     return std.fmt.allocPrint(arena, "{d}{s}", .{ number, suffix });
-}
-
-pub fn memoryPercent(
-    arena: std.mem.Allocator,
-    used_bytes: ?u64,
-    total_bytes: ?u64,
-) std.mem.Allocator.Error![]const u8 {
-    return metric(arena, data.memoryRatio(used_bytes, total_bytes), "%");
 }
 
 fn memoryInfo(
@@ -151,7 +141,7 @@ fn memoryInfo(
 
 fn watts(
     arena: std.mem.Allocator,
-    milliwatts: ?u64,
+    milliwatts: anytype,
     comptime prefix: []const u8,
     comptime suffix: []const u8,
 ) std.mem.Allocator.Error![]const u8 {
@@ -163,7 +153,7 @@ pub fn detailLabel(
     arena: std.mem.Allocator,
     reading: *const Metrics,
     style: *const spec.Profile,
-    kind: data.Metric,
+    kind: Metric,
 ) AllocError!?[]const u8 {
     switch (kind) {
         .memory => {
