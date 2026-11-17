@@ -2202,12 +2202,12 @@ pub const Tensor = struct {
             const start = if (s.start < 0) d + s.start else s.start;
             const end = if (s.singleton)
                 start + 1
+            else if (s.len != to_the_end)
+                start + s.len
             else if (s.end == to_the_end)
                 d
             else if (s.end < 0)
                 d + s.end
-            else if (s.len != to_the_end)
-                start + s.len
             else
                 s.end;
             const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };

@@ -18,21 +18,21 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     input_file: ?[]const u8 = null,
     seqlen: u32 = 2048,
-    topk: u32 = 4,
+    topk: ?u32 = null,
     backend: ?enum { stablehlo, cute, nki, metal } = null,
     profile: bool = false,
 
     pub const help =
         \\ Use llm --model=<path> [options]
         \\
-        \\ Run text generation with a model selected from `model_type` in the `config.json`.
+        \\ Run text generation or Nemotron WAV transcription, selected from `config.json`.
         \\
         \\ Options:
         \\   --model=<path>       Path to the model repository (required)
         \\   --prompt=<string>    Prompt to use for generation (default: none)
-        \\   --input-file=<path>  Text prompt file or WAV audio for Nemotron (default: none)
+        \\   --input-file=<path>  Text file or WAV for Nemotron (default: none)
         \\   --seqlen=<number>    Sequence length (default: 2048)
-        \\   --topk=<number>      Top-k sampling cutoff (default: 4)
+        \\   --topk=<number>      Top-k sampling cutoff (default: text 4, audio 1)
         \\   --backend=<text>     Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
         \\   --profile            Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+
     if (args.prompt != null and args.input_file != null) {
         log.err("Use either --prompt or --input-file, not both", .{});
         return error.ConflictingPromptOptions;
@@ -118,22 +119,25 @@ pub fn main(init: std.process.Init) !void {
 
     const generation: models.GenerationOptions = .{
         .sampling_strategy = .{
-            .topk = args.topk,
+            .topk = args.topk orelse 4,
         },
     };
 
     var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
     defer model.deinit(allocator);
 
+    var audio_features: ?models.nemotron3_5.frontend.Features = null;
+    defer if (audio_features) |features|
+        features.deinit(allocator);
+
     switch (model) {
-        .nemotron => |nemotron| {
-            if (args.input_file) |path| {
+        .nemotron => |*nemotron| {
+            if (args.input_file != null and nemotron.parsed_config.value.perception != null) {
+                const path = args.input_file.?;
                 const audio = models.nemotron3_5.audio;
                 const frontend = models.nemotron3_5.frontend;
-                const perception_config = nemotron.parsed_config.value.perception orelse {
-                    log.err("Nemotron config.json is missing perception.preprocessor", .{});
-                    return error.MissingAudioPreprocessorConfig;
-                };
+                const perception_config = nemotron.parsed_config.value.perception.?;
+
                 const bytes = try readInputFile(allocator, io, path);
                 defer allocator.free(bytes);
 
@@ -151,12 +155,18 @@ pub fn main(init: std.process.Init) !void {
 
                 log.info("Prepared audio: {d} frames at {d} Hz (mono)", .{ prepared.frameCount(), prepared.sample_rate });
 
-                const features = frontend.compute(allocator, prepared, perception_config.preprocessor) catch |err| {
+                const coefficients = try frontend.Coefficients.load(allocator, io, store.view().withPrefix("perception.preprocessor.featurizer"), perception_config.preprocessor);
+                defer coefficients.deinit(allocator);
+
+                audio_features = frontend.compute(allocator, prepared, perception_config.preprocessor, coefficients) catch |err| {
                     log.err("Failed to compute log-mel features for '{s}': {}", .{ path, err });
                     return err;
                 };
-                defer features.deinit(allocator);
-                log.info("Computed log-mel features: {d} valid frames, {d} mel bins ({d} padded frames)", .{ features.validFrameCount, features.binCount, features.frameCount - features.validFrameCount });
+
+                if (args.topk == null)
+                    nemotron.inner.backbone.gen_options.sampling_strategy.topk = 1;
+
+                log.info("Computed log-mel features: {d} valid frames, {d} mel bins ({d} padded frames)", .{ audio_features.?.valid_frame_count, audio_features.?.bin_count, audio_features.?.frame_count - audio_features.?.valid_frame_count });
             }
         },
         else => {},
@@ -166,13 +176,16 @@ pub fn main(init: std.process.Init) !void {
     // Load the model and compile it
     //
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    errdefer progress.end();
+    var progress_active = true;
+    defer if (progress_active)
+        progress.end();
 
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
     var compiled_model = try allocator.create(models.CompiledModel);
     defer allocator.destroy(compiled_model);
+
     compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, meshes, args.seqlen, &progress);
     defer compiled_model.deinit();
 
@@ -180,7 +193,48 @@ pub fn main(init: std.process.Init) !void {
     var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress);
     defer model.unloadBuffers(&model_buffers, allocator);
 
-    progress.end();
+    if (audio_features) |features| {
+        var profiler: ?zml.Platform.Profiler = null;
+        defer if (profiler) |*p| p.deinit();
+
+        if (args.profile) {
+            var id_buffer: [64]u8 = undefined;
+            const id = try std.fmt.bufPrint(&id_buffer, "llm-transcribe-{d}", .{@as(u64, @intCast(std.Io.Clock.now(.real, io).toNanoseconds()))});
+            profiler = try platform.profiler(allocator, io, .{ .session_id = id });
+            try profiler.?.start();
+        }
+
+        const transcribe = models.nemotron3_5.transcribe;
+        const mdl = &model.nemotron.inner;
+
+        const options = transcribe.EncodingOptions{
+            .config = mdl.config,
+            .meshes = meshes,
+            .output_dtype = mdl.backbone.embed_tokens.weight.dtype(),
+            .seqlen = args.seqlen,
+        };
+
+        var encoded = try transcribe.encode(allocator, io, platform, &store, features, options, &progress);
+        defer encoded.deinit();
+
+        var audio_session = try compiled_model.newSession(allocator, io, platform, &model_buffers, tokenizer);
+        defer audio_session.deinit();
+
+        progress.end();
+        progress_active = false;
+
+        // Just for style
+        try printZmlLogo(io, init.environ_map);
+
+        var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
+        try transcribe.run(&audio_session.inner.nemotron, &encoded, &stdout.interface);
+        _ = if (profiler) |*p| try p.stop() else null;
+
+        return;
+    } else {
+        progress.end();
+        progress_active = false;
+    }
 
     //
     // We're ready to go! Let's start a chat...
@@ -188,14 +242,17 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(io, init.environ_map);
 
     const interactive = args.prompt == null and args.input_file == null;
+
     const prompt = if (args.prompt) |prompt_arg| b: {
         break :b try allocator.dupe(u8, prompt_arg);
     } else if (args.input_file) |path| b: {
         break :b try readInputFile(allocator, io, path);
     } else b: {
         chat.initHistory();
+
         const line = c.linenoise(chat.prompt_prefix) orelse return;
         defer c.linenoiseFree(line);
+
         chat.rememberPrompt(line);
         break :b try allocator.dupe(u8, std.mem.sliceTo(line, 0));
     };
@@ -236,11 +293,14 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
+
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Loaded tokenizer [{f}]", .{now.untilNow(io, .awake)});
+
     const bytes = b: {
         const file = try dir.openFile(io, "tokenizer.json", .{});
         defer file.close(io);
+
         var reader = file.reader(io, &.{});
         break :b try reader.interface.readAlloc(allocator, try file.length(io));
     };

@@ -4,5 +4,7 @@ pub const inference = @import("nemotron3_5/inference.zig");
 pub const model = @import("nemotron3_5/model.zig");
 pub const Buffers = model.Buffers;
 pub const LoadedModel = model.LoadedModel;
+pub const perception = @import("nemotron3_5/perception.zig");
 pub const session = @import("nemotron3_5/session.zig");
 pub const Session = session.Session;
+pub const transcribe = @import("nemotron3_5/transcribe.zig");

@@ -4,20 +4,22 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const common = @import("../common.zig");
-const frontend = @import("frontend.zig");
 const inference = @import("inference.zig");
+const perception = @import("perception.zig");
 
 const log = std.log.scoped(.nemotron3_5);
 
 pub const Config = struct {
     llm_config: TextConfig,
     eos_token_id: ?EosTokenIds = null,
-    perception: ?struct {
-        preprocessor: frontend.Config,
-    } = null,
+    perception: ?perception.Config = null,
+    pe_encoder_config: ?perception.ParallelConfig = null,
+    diarization_model_cfg: ?perception.DiarizationConfig = null,
 
     pub fn isEosToken(self: Config, token_id: u32) bool {
-        if (self.eos_token_id) |ids| return ids.contains(token_id);
+        if (self.eos_token_id) |ids|
+            return ids.contains(token_id);
+
         return token_id == self.llm_config.eos_token_id;
     }
 };
@@ -35,7 +37,9 @@ pub const EosTokenIds = union(enum) {
             .integer, .number_string => .{ .single = try std.json.innerParseFromValue(u32, allocator, value, options) },
             .array => blk: {
                 const ids = try std.json.innerParseFromValue([]const u32, allocator, value, options);
-                if (ids.len == 0) return error.LengthMismatch;
+                if (ids.len == 0)
+                    return error.LengthMismatch;
+
                 break :blk .{ .multiple = ids };
             },
             else => error.UnexpectedToken,
@@ -112,15 +116,18 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !std.
     const parsed = try common.parseConfig(std.json.Value, allocator, io, repo);
     errdefer parsed.deinit();
 
-    if (parsed.value != .object) return error.UnexpectedToken;
+    if (parsed.value != .object)
+        return error.UnexpectedToken;
 
     const arena = parsed.arena.allocator();
     var normalized = parsed.value;
+
     if (!parsed.value.object.contains("llm_config")) {
-        // Nemotron-H stores the backbone config at the root; SpeechLM nests it.
+        // Nemotron-H stores config at the root whereas SpeechLM nests it in llm_config
         normalized = .{ .object = .empty };
         try normalized.object.put(arena, "llm_config", parsed.value);
-        for ([_][]const u8{ "eos_token_id", "perception" }) |field| {
+
+        for ([_][]const u8{ "eos_token_id", "perception", "pe_encoder_config", "diarization_model_cfg" }) |field| {
             if (parsed.value.object.get(field)) |value| {
                 try normalized.object.put(arena, field, value);
             }
@@ -133,28 +140,69 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !std.
     };
 }
 
-fn withProjectionQuantization(store: zml.io.TensorStore.View, projection: zml.nn.Linear) !zml.nn.Linear {
+// Keep static activation quantization local to this decoder: nn.Linear's
+// fp8_per_tensor fallback currently dequantizes weights without rounding inputs.
+const Linear = struct {
+    weight: zml.Tensor,
+    bias: ?zml.Tensor = null,
+    tag: zml.Shape.Tag,
+    quantization: ?zml.Quantization = null,
+
+    pub fn init(weight: zml.Tensor, bias: ?zml.Tensor, tag: anytype) Linear {
+        return .{ .weight = weight, .bias = bias, .tag = zml.Shape.toTag(tag) };
+    }
+
+    pub fn forward(self: Linear, x: zml.Tensor, out_dtype: zml.DataType) zml.Tensor {
+        if (self.quantization) |q| {
+            if (q.scheme == .fp8_per_tensor) {
+                // ModelOpt stores the quantization divisor as a dequantization multiplier.
+                const input_scale = q.input_scale.?.asMultiplier().asScalar();
+                const quantized = quantizeFp8(x, input_scale);
+                var result = quantized.convert(.f32).dot(self.weight.convert(.f32), self.tag)
+                    .mul(input_scale.mul(q.scales.asScalar().convert(.f32)));
+
+                if (self.bias) |bias|
+                    result = result.add(bias.convert(.f32).broad(result.shape()));
+
+                return result.convert(out_dtype);
+            }
+        }
+
+        const linear: zml.nn.Linear = .{ .weight = self.weight, .bias = self.bias, .tag = self.tag, .quantization = self.quantization };
+        return linear.forward(x, out_dtype);
+    }
+};
+
+fn quantizeFp8(x: zml.Tensor, input_scale: zml.Tensor) zml.Tensor {
+    return x.convert(.f32).div(input_scale).clamp(.scalar(-448, .f32), .scalar(448, .f32)).convert(.f8e4m3fn);
+}
+
+fn withProjectionQuantization(store: zml.io.TensorStore.View, projection: Linear) !Linear {
     const shape = projection.weight.shape();
-    if (!shape.dtype().isFloat() or shape.dtype().bitSizeOf() != 8) return projection;
+    if (!shape.dtype().isFloat() or shape.dtype().bitSizeOf() != 8)
+        return projection;
 
     const scale_shape = store.getShape("weight_scale") orelse {
         log.err("FP8 projection '{s}weight' is missing weight_scale", .{store.prefix() orelse ""});
         return error.MissingProjectionScale;
     };
+
     if (!scale_shape.dtype().isFloat() or zml.Quantization.Scheme.classify(shape, scale_shape) != .fp8_per_tensor) {
         log.err("Unsupported FP8 weight/scale shapes at '{s}': {f}, {f}", .{ store.prefix() orelse "", shape, scale_shape });
         return error.UnsupportedProjectionQuantization;
     }
 
+    const input_shape = store.getShape("input_scale") orelse return error.MissingProjectionScale;
+    if (!input_shape.dtype().isFloat() or input_shape.count() != 1)
+        return error.UnsupportedProjectionQuantization;
+
     var result = projection;
     result.quantization = .{
         .scheme = .fp8_per_tensor,
         .scales = store.createReplicatedTensor("weight_scale", null),
-        .input_scale = if (store.getShape("input_scale")) |input_shape| blk: {
-            if (!input_shape.dtype().isFloat() or input_shape.count() != 1) return error.UnsupportedProjectionQuantization;
-            break :blk .{ .value = store.createReplicatedTensor("input_scale", null), .operation = .multiply };
-        } else null,
+        .input_scale = .{ .value = store.createReplicatedTensor("input_scale", null), .operation = .multiply },
     };
+
     return result;
 }
 
@@ -175,6 +223,7 @@ fn partitionCachedKv(tensor: zml.Tensor, kv_head_sharding: zml.Sharding.DimShard
             if (heads.factor != 1) {
                 kv = kv.stutter1d(kv.axis(.h), heads.factor);
             }
+
             break :blk kv.withPartitioning(.model, .{ .k = .replicated, .h = .model, .hd = .replicated });
         },
         .replicated => kv.withPartitioning(.model, .{ .k = .replicated, .h = .replicated, .hd = .replicated }),
@@ -233,9 +282,12 @@ pub const LoadedModel = struct {
 
         var packing_exes: std.ArrayList(zml.Exe) = .empty;
         defer {
-            for (packing_exes.items) |*exe| exe.deinit();
+            for (packing_exes.items) |*exe|
+                exe.deinit();
+
             packing_exes.deinit(allocator);
         }
+
         for (self.inner.backbone.layers, buffers.backbone.layers) |layer, *layer_buffers| {
             switch (layer.mixer) {
                 .moe => |moe| {
@@ -277,6 +329,7 @@ pub const LoadedModel = struct {
             log.err("Attention backend {} is not available on {}", .{ backend, platform.target });
             return error.UnsupportedAttentionBackend;
         }
+
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, meshes);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
@@ -331,6 +384,7 @@ pub const Sampler = struct {
         const logits = self.lm_head.forward(x.withPartialTags(.{.d}), x.dtype()).rename(.{ .dout = .voc });
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng);
         const tokens = next_tokens.convert(.u32);
+
         return .{
             .tokens = if (input.tokens.dim(.s) == 1) tokens.reuseBuffer(input.tokens) else tokens,
             .rng = new_rng,
@@ -396,9 +450,11 @@ pub const Backbone = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(Backbone), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
+
         for (self.layers) |*layer| {
             BackboneLayer.unloadBuffers(layer);
         }
+
         allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
         zml.nn.Linear.unloadBuffers(&self.lm_head);
@@ -423,16 +479,17 @@ pub const BackboneLayer = struct {
 
     pub const SelfAttnInput = struct {
         layer: BackboneLayer,
+        layer_index: zml.Tensor,
         hidden: zml.Tensor,
         token_index: zml.Tensor,
-        cache: KvCache.SelfAttnCache,
+        cache: KvCache,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
     };
 
     pub const SelfAttnOutput = struct {
         hidden: zml.Tensor,
-        cache: KvCache.SelfAttnCache,
+        cache: KvCache,
     };
 
     pub const MambaInput = struct {
@@ -488,11 +545,12 @@ pub const BackboneLayer = struct {
         const x0 = input.hidden;
         const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const normalized_x0 = self.norm.forward(x0_replicated);
+
         const self_attn = switch (self.mixer) {
             .attn => |attn| attn,
             .moe, .mamba => unreachable,
         };
-        const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, input.token_index, input.cache, input.attention_metadata, input.attention_parameters);
+        const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, input.token_index, input.cache, input.layer_index, input.attention_metadata, input.attention_parameters);
 
         return .{
             .hidden = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
@@ -505,6 +563,7 @@ pub const BackboneLayer = struct {
         const x0 = input.hidden;
         const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const normalized_x0 = self.norm.forward(x0_replicated);
+
         const mamba = switch (self.mixer) {
             .mamba => |mamba| mamba,
             .attn, .moe => unreachable,
@@ -535,16 +594,16 @@ pub const BackboneLayer = struct {
 };
 
 pub const SelfAttn = struct {
-    q_proj: zml.nn.Linear,
-    k_proj: zml.nn.Linear,
-    v_proj: zml.nn.Linear,
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
 
     num_heads: i64,
     num_kv_heads: i64,
     head_dim: i64,
-    o_proj: zml.nn.Linear,
+    o_proj: Linear,
 
-    fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) !zml.nn.Linear {
+    fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) !Linear {
         return withProjectionQuantization(store, .init(
             store.createTensor("weight", .{ .dout, .d }, .model, partitions),
             store.maybeCreateTensor("bias", .{.dout}, .model, bias_partitions),
@@ -576,6 +635,7 @@ pub const SelfAttn = struct {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         const k = self.k_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
         const v = self.v_proj.forward(x, x.dtype()).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
+
         return .{ k, v };
     }
 
@@ -583,10 +643,11 @@ pub const SelfAttn = struct {
         self: SelfAttn,
         x: zml.Tensor,
         token_index: zml.Tensor,
-        kv_cache: KvCache.SelfAttnCache,
+        kv_cache: KvCache,
+        layer_index: zml.Tensor,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
-    ) struct { zml.Tensor, KvCache.SelfAttnCache } {
+    ) struct { zml.Tensor, KvCache } {
         const tp = zml.Compiler.current().mesh(.model);
         const x_qkv = x.withPartitioning(tp, .{ .d = .replicated });
         var q = self.projectQ(x_qkv);
@@ -598,9 +659,9 @@ pub const SelfAttn = struct {
         v = partitionProjectedKv(v, kv_head_sharding);
 
         const dtype = q.dtype();
-        const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
-        k = new_kv_cache.keys().convert(dtype);
-        v = new_kv_cache.values().convert(dtype);
+        const new_kv_cache = kv_cache.updateAt(k, v, token_index.convert(.u32), layer_index);
+        k = new_kv_cache.keysAt(layer_index).convert(dtype);
+        v = new_kv_cache.valuesAt(layer_index).convert(dtype);
         q = q.rename(.{ .s = .q }).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated });
         k = partitionCachedKv(k, kv_head_sharding);
         v = partitionCachedKv(v, kv_head_sharding);
@@ -616,12 +677,14 @@ pub const SelfAttn = struct {
                 .metal, .nki => true,
             },
         };
+
         if (unbatched) {
             stdx.debug.assert(q.dim(.b) == 1, "Nemotron Metal/NKI attention requires batch size 1", .{});
             q = q.squeeze(.b);
             k = k.squeeze(.b);
             v = v.squeeze(.b);
         }
+
         const output = zml.attention.attention(
             q,
             k,
@@ -642,20 +705,24 @@ pub const SelfAttn = struct {
 };
 
 pub const Mlp = struct {
-    up_proj: zml.nn.Linear,
-    down_proj: zml.nn.Linear,
+    up_proj: Linear,
+    down_proj: Linear,
 
     pub fn init(store: zml.io.TensorStore.View, config: TextConfig) !Mlp {
-        if (config.mlp_bias or !std.mem.eql(u8, config.mlp_hidden_act, "relu2")) return error.UnsupportedMoeConfiguration;
+        if (config.mlp_bias or !std.mem.eql(u8, config.mlp_hidden_act, "relu2"))
+            return error.UnsupportedMoeConfiguration;
+
         return .{
             .up_proj = try initProjection(store.withPrefix("up_proj")),
             .down_proj = try initProjection(store.withPrefix("down_proj")),
         };
     }
 
-    fn initProjection(store: zml.io.TensorStore.View) !zml.nn.Linear {
+    fn initProjection(store: zml.io.TensorStore.View) !Linear {
         const shape = store.getShape("weight") orelse return error.MissingMoeTensor;
-        if (shape.rank() != 2) return error.InvalidMoeShape;
+        if (shape.rank() != 2)
+            return error.InvalidMoeShape;
+
         return withProjectionQuantization(store, .init(store.createReplicatedTensor("weight", .{ .dout, .d }), null, .d));
     }
 
@@ -671,73 +738,107 @@ const Router = struct {
     e_score_correction_bias: zml.Tensor,
     num_experts_per_tok: u32,
     norm_topk_prob: bool,
-    routed_scaling_factor: f32,
 
     pub fn init(store: zml.io.TensorStore.View, config: TextConfig) !Router {
         const weight_shape = store.getShape("weight") orelse return error.MissingMoeTensor;
         const bias_shape = store.getShape("e_score_correction_bias") orelse return error.MissingMoeTensor;
-        if (weight_shape.rank() != 2 or weight_shape.dim(0) != config.n_routed_experts or weight_shape.dim(1) != config.hidden_size or bias_shape.rank() != 1 or bias_shape.dim(0) != config.n_routed_experts) return error.InvalidMoeShape;
+        if (weight_shape.rank() != 2 or
+            weight_shape.dim(0) != config.n_routed_experts or
+            weight_shape.dim(1) != config.hidden_size or
+            bias_shape.rank() != 1 or
+            bias_shape.dim(0) != config.n_routed_experts)
+            return error.InvalidMoeShape;
+
         return .{
             .router = .init(store.createReplicatedTensor("weight", .{ .expert, .d }), null, .d),
             .e_score_correction_bias = store.createReplicatedTensor("e_score_correction_bias", .{.expert}),
             .num_experts_per_tok = config.num_experts_per_tok,
             .norm_topk_prob = config.norm_topk_prob,
-            .routed_scaling_factor = config.routed_scaling_factor,
         };
     }
 
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const scores = self.router.forward(x.convert(.f32), .f32).sigmoid();
+
         // The correction bias selects experts; their contribution uses the unbiased scores.
         const choices = scores.add(self.e_score_correction_bias.convert(.f32).broad(scores.shape()));
         const topk_ids = choices.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{}).indices.convert(.i32);
         var weights = scores.gather(.{ .expert = topk_ids }, .{});
-        if (self.norm_topk_prob) weights = weights.div(weights.sum(.topk).addConstant(1e-20).broad(weights.shape()));
-        return .{ weights.scale(self.routed_scaling_factor), topk_ids };
+
+        if (self.norm_topk_prob)
+            weights = weights.div(weights.sum(.topk).addConstant(1e-20).broad(weights.shape()));
+
+        return .{ weights, topk_ids };
     }
 };
 
 const PackedExpertProjection = struct {
     weight: zml.Tensor,
-    scales: ?zml.Tensor,
+    fp8: ?struct {
+        weight_scales: zml.Tensor,
+        input_scales: zml.Tensor,
+    },
 
     fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, comptime projection: []const u8, num_experts: i64, input_dim: i64, output_dim: i64) !PackedExpertProjection {
         var scratch: std.heap.ArenaAllocator = .init(allocator);
         defer scratch.deinit();
         const arena = scratch.allocator();
+
         const first_shape = store.withLayer(0).withPrefix(projection).getShape("weight") orelse return error.MissingMoeTensor;
-        if (first_shape.rank() != 2 or first_shape.dim(0) != output_dim or first_shape.dim(1) != input_dim) return error.InvalidMoeShape;
-        if (!first_shape.dtype().isFloat()) return error.UnsupportedProjectionQuantization;
+        if (first_shape.rank() != 2 or first_shape.dim(0) != output_dim or first_shape.dim(1) != input_dim)
+            return error.InvalidMoeShape;
+
+        if (!first_shape.dtype().isFloat())
+            return error.UnsupportedProjectionQuantization;
+
         const fp8 = first_shape.dtype().bitSizeOf() == 8;
         const sources = try arena.alloc([]const u8, @intCast(num_experts));
         const scale_sources = try arena.alloc([]const u8, sources.len);
-        for (sources, scale_sources, 0..) |*source, *scale_source, i| {
+        const input_scale_sources = try arena.alloc([]const u8, sources.len);
+
+        for (sources, scale_sources, input_scale_sources, 0..) |*source, *scale_source, *input_scale_source, i| {
             const expert = store.withLayer(i).withPrefix(projection);
             const shape = expert.getShape("weight") orelse return error.MissingMoeTensor;
-            if (!shape.eql(first_shape)) return error.InvalidMoeShape;
+            if (!shape.eql(first_shape))
+                return error.InvalidMoeShape;
+
             source.* = try std.fmt.allocPrint(arena, "{d}." ++ projection ++ ".weight", .{i});
+
             if (fp8) {
                 const scale_shape = expert.getShape("weight_scale") orelse return error.MissingProjectionScale;
-                if (!scale_shape.dtype().isFloat() or zml.Quantization.Scheme.classify(shape, scale_shape) != .fp8_per_tensor) return error.UnsupportedProjectionQuantization;
-                if (expert.getShape("input_scale")) |input_shape| {
-                    if (!input_shape.dtype().isFloat() or input_shape.count() != 1) return error.UnsupportedProjectionQuantization;
-                }
+                if (!scale_shape.dtype().isFloat() or zml.Quantization.Scheme.classify(shape, scale_shape) != .fp8_per_tensor)
+                    return error.UnsupportedProjectionQuantization;
+
+                const input_shape = expert.getShape("input_scale") orelse return error.MissingProjectionScale;
+                if (!input_shape.dtype().isFloat() or input_shape.count() != 1)
+                    return error.UnsupportedProjectionQuantization;
+
                 scale_source.* = try std.fmt.allocPrint(arena, "{d}." ++ projection ++ ".weight_scale", .{i});
+                input_scale_source.* = try std.fmt.allocPrint(arena, "{d}." ++ projection ++ ".input_scale", .{i});
             }
         }
+
         return .{
             .weight = store.maybeCreateBinding(sources, .init(.{ .expert = num_experts, .dout = output_dim, .d = input_dim }, first_shape.dtype())) orelse return error.MissingMoeTensor,
-            .scales = if (fp8) store.maybeCreateBinding(scale_sources, .init(.{ .expert = num_experts }, .f32)) orelse return error.MissingProjectionScale else null,
+            .fp8 = if (fp8) .{
+                .weight_scales = store.maybeCreateBinding(scale_sources, .init(.{ .expert = num_experts }, .f32)) orelse return error.MissingProjectionScale,
+                .input_scales = store.maybeCreateBinding(input_scale_sources, .init(.{ .expert = num_experts }, .f32)) orelse return error.MissingProjectionScale,
+            } else null,
         };
     }
 
-    fn gather(self: PackedExpertProjection, ids: zml.Tensor, dtype: zml.DataType) zml.Tensor {
-        // Select in the checkpoint dtype, then dequantize only the routed experts.
+    fn forward(self: PackedExpertProjection, x: zml.Tensor, ids: zml.Tensor) zml.Tensor {
         const selected = self.weight.gather(.{ .expert = ids }, .{});
-        const scales = self.scales orelse return selected.convert(dtype);
-        const weight = selected.convert(.f32);
-        const scale = scales.gather(.{ .expert = ids }, .{});
-        return weight.mul(scale.broad(weight.shape())).convert(dtype);
+
+        if (self.fp8) |fp8| {
+            const input_scale = fp8.input_scales.max(.expert).asScalar();
+            const quantized = quantizeFp8(x, input_scale);
+            const result = quantized.convert(.f32).dot(selected.convert(.f32), .d);
+            const scale = fp8.weight_scales.gather(.{ .expert = ids }, .{}).mul(input_scale);
+            return result.mul(scale.broad(result.shape())).convert(x.dtype());
+        }
+
+        return x.dot(selected.convert(x.dtype()), .d);
     }
 
     fn packWeights(inputs: []const zml.Tensor) zml.Tensor {
@@ -747,14 +848,20 @@ const PackedExpertProjection = struct {
     fn packScales(inputs: []const zml.Tensor) zml.Tensor {
         const arena = zml.Compiler.current().arena.allocator();
         const scales = arena.alloc(zml.Tensor, inputs.len) catch @panic("OOM");
-        for (inputs, scales) |input, *scale| scale.* = input.asScalar().convert(.f32);
+
+        for (inputs, scales) |input, *scale|
+            scale.* = input.asScalar().convert(.f32);
+
         return zml.Tensor.stack(scales, 0, .expert);
     }
 
     fn loadBuffers(self: PackedExpertProjection, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, loader: *zml.io.Loader, store: *const zml.io.TensorStore, buffers: *zml.Bufferized(PackedExpertProjection), exes: *std.ArrayList(zml.Exe), progress: *std.Progress.Node) !void {
         try loadPackedTensor(allocator, io, platform, loader, store, self.weight, &buffers.weight, exes, progress);
-        if (self.scales) |scales| {
-            try loadPackedTensor(allocator, io, platform, loader, store, scales, &buffers.scales.?, exes, progress);
+
+        if (self.fp8) |fp8| {
+            const fp8_buffers = &buffers.fp8.?;
+            try loadPackedTensor(allocator, io, platform, loader, store, fp8.weight_scales, &fp8_buffers.weight_scales, exes, progress);
+            try loadPackedTensor(allocator, io, platform, loader, store, fp8.input_scales, &fp8_buffers.input_scales, exes, progress);
         }
     }
 
@@ -762,26 +869,34 @@ const PackedExpertProjection = struct {
         var scratch: std.heap.ArenaAllocator = .init(allocator);
         defer scratch.deinit();
         const arena = scratch.allocator();
+
         const sources = (store.getSourcesById(tensor.id) orelse return error.MissingMoeTensor).tensors;
         const inputs = try arena.alloc(zml.Tensor, sources.len);
-        for (sources, inputs) |source, *input| input.* = .fromShape(source.shape);
+        for (sources, inputs) |source, *input|
+            input.* = .fromShape(source.shape);
 
         // All MoE layers normally share shapes, so reuse their packing executables.
         const exe = find: {
             for (exes.items) |*candidate| {
-                if (!candidate.output_shapes[0].eql(tensor.shape()) or candidate.input_shapes.len != inputs.len) continue;
+                if (!candidate.output_shapes[0].eql(tensor.shape()) or candidate.input_shapes.len != inputs.len)
+                    continue;
+
                 for (candidate.input_shapes, inputs) |shape, input| {
-                    if (!shape.eql(input.shape())) break;
+                    if (!shape.eql(input.shape()))
+                        break;
                 } else break :find candidate;
             }
+
             const compiled = if (tensor.rank() == 3)
                 try platform.compileFn(allocator, io, packWeights, .{@as([]const zml.Tensor, inputs)}, .{})
             else
                 try platform.compileFn(allocator, io, packScales, .{@as([]const zml.Tensor, inputs)}, .{});
             errdefer compiled.deinit();
+
             try exes.append(allocator, compiled);
             break :find &exes.items[exes.items.len - 1];
         };
+
         try loader.loadExecute(arena, io, tensor, buffer, store, exe, .{ .progress = progress });
     }
 };
@@ -791,38 +906,91 @@ pub const Moe = struct {
     down_proj: PackedExpertProjection,
     shared_experts: Mlp,
     router: Router,
+    routed_scaling_factor: f32,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Moe {
         const cfg = config.llm_config;
-        if (cfg.n_routed_experts <= 0 or cfg.n_shared_experts != 1 or cfg.num_experts_per_tok == 0 or cfg.num_experts_per_tok > cfg.n_routed_experts or cfg.n_group != 1 or cfg.topk_group != 1 or cfg.moe_latent_size != null or cfg.mlp_bias or !std.mem.eql(u8, cfg.mlp_hidden_act, "relu2")) return error.UnsupportedMoeConfiguration;
+        if (cfg.n_routed_experts <= 0 or cfg.n_shared_experts != 1 or
+            cfg.num_experts_per_tok == 0 or cfg.num_experts_per_tok > cfg.n_routed_experts or
+            cfg.n_group != 1 or cfg.topk_group != 1 or cfg.moe_latent_size != null or
+            cfg.mlp_bias or !std.mem.eql(u8, cfg.mlp_hidden_act, "relu2"))
+            return error.UnsupportedMoeConfiguration;
+
         const experts_store = store.withPrefix("experts");
         const shared_experts = try Mlp.init(store.withPrefix("shared_experts"), cfg);
         try validateExpert(shared_experts, cfg.hidden_size, cfg.moe_shared_expert_intermediate_size);
+
         return .{
             .up_proj = try .init(allocator, experts_store, "up_proj", cfg.n_routed_experts, cfg.hidden_size, cfg.moe_intermediate_size),
             .down_proj = try .init(allocator, experts_store, "down_proj", cfg.n_routed_experts, cfg.moe_intermediate_size, cfg.hidden_size),
             .shared_experts = shared_experts,
             .router = try Router.init(store.withPrefix("gate"), cfg),
+            .routed_scaling_factor = cfg.routed_scaling_factor,
         };
     }
 
     fn validateExpert(expert: Mlp, hidden_size: i64, intermediate_size: i64) !void {
-        if (expert.up_proj.weight.dim(.d) != hidden_size or expert.up_proj.weight.dim(.dout) != intermediate_size or expert.down_proj.weight.dim(.d) != intermediate_size or expert.down_proj.weight.dim(.dout) != hidden_size) return error.InvalidMoeShape;
+        if (expert.up_proj.weight.dim(.d) != hidden_size or
+            expert.up_proj.weight.dim(.dout) != intermediate_size or
+            expert.down_proj.weight.dim(.d) != intermediate_size or
+            expert.down_proj.weight.dim(.dout) != hidden_size)
+            return error.InvalidMoeShape;
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
+        // Routing is independent per token. Bound the gathered expert weights
+        // rather than materializing [batch, sequence, topk, dout, din] at once.
+        const chunk_size = 64;
+        if (x.dim(.s) <= chunk_size)
+            return self.forwardChunk(x);
+
+        const padding = @mod(-x.dim(.s), chunk_size);
+        const input = x.pad(0, .{ .s = zml.Tensor.Pad{ .high = padding } });
+        const loop: PrefillChunks = .{ .moe = self, .input = input, .chunk_size = chunk_size };
+        const result = zml.ops.@"while"(PrefillChunks, loop, .{
+            .output = zml.Tensor.zeroes(input.shape()),
+            .offset = .scalar(0, .i64),
+        });
+
+        return result.output.slice(.s, .{ .end = x.dim(.s) });
+    }
+
+    const PrefillChunks = struct {
+        moe: Moe,
+        input: zml.Tensor,
+        chunk_size: i64,
+
+        pub const State = struct {
+            output: zml.Tensor,
+            offset: zml.Tensor,
+        };
+
+        pub fn cond(self: PrefillChunks, state: State) zml.Tensor {
+            return state.offset.cmp(.LT, .scalar(self.input.dim(.s), .i64));
+        }
+
+        pub fn body(self: PrefillChunks, state: State) State {
+            const chunk = self.input.slice(.s, .dyn(state.offset, self.chunk_size));
+            const output = self.moe.forwardChunk(chunk);
+            return .{
+                .output = state.output.dynamicUpdateSlice(.{ .s = state.offset }, output),
+                .offset = state.offset.addConstant(self.chunk_size),
+            };
+        }
+    };
+
+    fn forwardChunk(self: Moe, x: zml.Tensor) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
+
         // The shared fused MoE kernels do not support ReLU-squared yet.
-        const up = self.up_proj.gather(topk_ids, x.dtype());
-        const activated = x.dot(up, .d).relu();
-        const hidden = activated.mul(activated).rename(.{ .dout = .ff });
-        const down = self.down_proj.gather(topk_ids, x.dtype())
-            .rename(.{ .d = .ff })
-            .rename(.{ .dout = .d });
-        const projected = hidden.dot(down, .ff);
+        const activated = self.up_proj.forward(x, topk_ids).relu();
+        const hidden = activated.mul(activated).rename(.{ .dout = .d });
+        const projected = self.down_proj.forward(hidden, topk_ids).rename(.{ .dout = .d });
         const routed = projected.convert(.f32).mul(routing_scores.broad(projected.shape().withDtype(.f32)))
-            .sum(.topk).squeeze(.topk).convert(x.dtype());
+            // Match vLLM: round the reduction to BF16 before routed scaling.
+            .sum(.topk).squeeze(.topk).convert(x.dtype()).scale(self.routed_scaling_factor);
         const shared = self.shared_experts.forward(x).rename(.{ .dout = .d });
+
         return routed.add(shared);
     }
 
@@ -853,118 +1021,78 @@ pub const RmsNorm = struct {
 };
 
 pub const KvCache = struct {
-    self_attn: SelfAttnCache,
+    k: zml.Tensor,
+    v: zml.Tensor,
 
-    pub const SelfAttnCache = struct {
-        k: zml.Tensor,
-        v: zml.Tensor,
-        layer_index: zml.Tensor,
+    pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, mesh: *const zml.Mesh) KvCache {
+        const kv_shape = zml.Shape.init(.{
+            .b = batch_dim,
+            .layer = countAttentionLayers(config.llm_config.layers_block_type),
+            .s = max_seq_len,
+            .h = config.llm_config.num_key_value_heads,
+            .hd = config.llm_config.head_dim,
+        }, dtype);
+        const kv_head_sharding = mesh.shardableDim(kv_shape.dim(.h), .model, config.llm_config.num_attention_heads);
+        const sharded_kv_shape = switch (kv_head_sharding) {
+            .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(mesh, .{ .h = .model }),
+            .replicated => kv_shape.withPartitioning(mesh, .{ .h = .replicated }),
+        };
 
-        pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_meshe: *const zml.Mesh) SelfAttnCache {
-            const kv_shape = zml.Shape.init(.{
-                .b = batch_dim,
-                .layer = countAttentionLayers(config.llm_config.layers_block_type),
-                .s = max_seq_len,
-                .h = config.llm_config.num_key_value_heads,
-                .hd = config.llm_config.head_dim,
-            }, dtype);
-            const kv_head_sharding = model_meshe.shardableDim(kv_shape.dim(.h), .model, config.llm_config.num_attention_heads);
-            const sharded_kv_shape = switch (kv_head_sharding) {
-                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(model_meshe, .{ .h = .model }),
-                .replicated => kv_shape.withPartitioning(model_meshe, .{ .h = .replicated }),
-            };
-            return .{
-                .k = zml.Tensor.fromShape(sharded_kv_shape),
-                .v = zml.Tensor.fromShape(sharded_kv_shape),
-                .layer_index = .init(.{}, .u32),
-            };
-        }
-
-        pub fn initBuffer(self: SelfAttnCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(SelfAttnCache) {
-            return .{
-                .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
-                .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
-                .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
-            };
-        }
-
-        pub fn deinitBuffer(self: *zml.Bufferized(SelfAttnCache)) void {
-            self.k.deinit();
-            self.v.deinit();
-            self.layer_index.deinit();
-        }
-
-        pub fn keys(self: SelfAttnCache) zml.Tensor {
-            return self.k.slice(.layer, .dynSingle(self.layer_index));
-        }
-
-        pub fn values(self: SelfAttnCache) zml.Tensor {
-            return self.v.slice(.layer, .dynSingle(self.layer_index));
-        }
-
-        pub fn update(self: SelfAttnCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) SelfAttnCache {
-            const k_shape = self.k.shape().drop(.layer);
-            var layer = self.layer_index;
-            layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
-
-            return if (token_index) |idx| .{
-                .k = self.k.scatterSlices(
-                    .{ .layer = layer, .s = idx },
-                    new_k.convert(self.k.dtype()).transpose(k_shape),
-                    .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-                ).reuseBuffer(self.k),
-                .v = self.v.scatterSlices(
-                    .{ .layer = layer, .s = idx },
-                    new_v.convert(self.v.dtype()).transpose(k_shape),
-                    .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-                ).reuseBuffer(self.v),
-                .layer_index = self.layer_index,
-            } else .{
-                .k = self.k.scatterSlices(
-                    .{ .layer = layer },
-                    new_k.convert(self.k.dtype()).transpose(k_shape),
-                    .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-                ).reuseBuffer(self.k),
-                .v = self.v.scatterSlices(
-                    .{ .layer = layer },
-                    new_v.convert(self.v.dtype()).transpose(k_shape),
-                    .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-                ).reuseBuffer(self.v),
-                .layer_index = self.layer_index,
-            };
-        }
-    };
-
-    pub fn init(
-        config: Config,
-        batch_dim: i64,
-        max_seq_len: i64,
-        cache_dtype: zml.DataType,
-        model_meshe: *const zml.Mesh,
-    ) KvCache {
         return .{
-            .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_meshe),
+            .k = .fromShape(sharded_kv_shape),
+            .v = .fromShape(sharded_kv_shape),
         };
     }
 
     pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
+        var k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{});
+        errdefer k.deinit();
+
         return .{
-            .self_attn = try self.self_attn.initBuffer(io, platform),
+            .k = k,
+            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
         };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(KvCache)) void {
-        SelfAttnCache.deinitBuffer(&self.self_attn);
+        zml.Buffer.deinitAll(KvCache, self);
+    }
+
+    pub fn keysAt(self: KvCache, layer_index: zml.Tensor) zml.Tensor {
+        return self.k.slice(.layer, .dynSingle(layer_index));
+    }
+
+    pub fn valuesAt(self: KvCache, layer_index: zml.Tensor) zml.Tensor {
+        return self.v.slice(.layer, .dynSingle(layer_index));
+    }
+
+    pub fn updateAt(self: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, layer_index: zml.Tensor) KvCache {
+        const k_shape = self.k.shape().drop(.layer);
+        const layer = layer_index.broad(token_index.shape());
+        return .{
+            .k = self.k.scatterSlices(
+                .{ .layer = layer, .s = token_index },
+                new_k.convert(self.k.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
+            ).reuseBuffer(self.k),
+            .v = self.v.scatterSlices(
+                .{ .layer = layer, .s = token_index },
+                new_v.convert(self.v.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
+            ).reuseBuffer(self.v),
+        };
     }
 
     fn countAttentionLayers(layer_types: []const LayerType) i64 {
         var count: i64 = 0;
+
         for (layer_types) |layer_type| {
             switch (layer_type) {
                 .attention => count += 1,
                 else => {},
             }
         }
+
         return count;
     }
 };
@@ -993,19 +1121,20 @@ pub const GroupedRmsNormGated = struct {
         const normalized = zml.nn.rmsNorm(groups, .element, self.eps)
             .merge(.{ .d = .{ .group, .element } })
             .convert(x.dtype());
+
         return normalized.mul(self.weight.convert(x.dtype()).broad(normalized.shape()));
     }
 };
 
 pub const Mamba2 = struct {
-    in_proj: zml.nn.Linear,
-    out_proj: zml.nn.Linear,
+    in_proj: Linear,
+    out_proj: Linear,
 
     conv1d_weight: zml.Tensor,
     conv1d_bias: ?zml.Tensor,
 
     dt_bias: zml.Tensor,
-    aLog: zml.Tensor,
+    a_log: zml.Tensor,
     d: zml.Tensor,
 
     norm: GroupedRmsNormGated,
@@ -1026,7 +1155,9 @@ pub const Mamba2 = struct {
             const cfg = config.llm_config;
             validateConfig(cfg);
             stdx.debug.assert(batch_dim > 0, "Mamba2 batch size must be positive", .{});
+
             const conv_dim = cfg.mamba_num_heads * cfg.mamba_head_dim + 2 * cfg.n_groups * cfg.ssm_state_size;
+
             return .{
                 .conv_state = .init(.{ .b = batch_dim, .s = cfg.conv_kernel - 1, .mix = conv_dim }, conv_dtype),
                 .recurrent_state = .init(.{ .b = batch_dim, .h = cfg.mamba_num_heads, .p = cfg.mamba_head_dim, .n = cfg.ssm_state_size }, .f32),
@@ -1036,6 +1167,7 @@ pub const Mamba2 = struct {
         pub fn initBuffer(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !Cache.Buffers {
             var conv_state = try zeroBuffer(allocator, io, platform, self.conv_state.shape());
             errdefer conv_state.deinit();
+
             return .{
                 .conv_state = conv_state,
                 .recurrent_state = try zeroBuffer(allocator, io, platform, self.recurrent_state.shape()),
@@ -1056,6 +1188,7 @@ pub const Mamba2 = struct {
         fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
             const bytes = try allocator.alloc(u8, shape.byteSize());
             defer allocator.free(bytes);
+
             @memset(bytes, 0);
             return zml.Buffer.fromBytes(io, platform, shape, bytes);
         }
@@ -1069,6 +1202,7 @@ pub const Mamba2 = struct {
     pub fn init(store: zml.io.TensorStore.View, config: Config) !Mamba2 {
         const cfg = config.llm_config;
         validateConfig(cfg);
+
         const conv_store = store.withPrefix("conv1d");
         const result: Mamba2 = .{
             // The fused [gate | x | B | C | dt] layout cannot be naively flat-sharded
@@ -1077,7 +1211,7 @@ pub const Mamba2 = struct {
             .conv1d_weight = conv_store.createReplicatedTensor("weight", .{ .out, .in, .kernel_size }),
             .conv1d_bias = if (cfg.use_conv_bias) conv_store.createReplicatedTensor("bias", .{.out}) else null,
             .dt_bias = initStateParameter(store, "dt_bias"),
-            .aLog = initStateParameter(store, "A_log"),
+            .a_log = initStateParameter(store, "A_log"),
             .d = initStateParameter(store, "D"),
             .norm = .init(store.withPrefix("norm"), cfg.layer_norm_epsilon, cfg.n_groups),
             .num_heads = cfg.mamba_num_heads,
@@ -1086,10 +1220,12 @@ pub const Mamba2 = struct {
             .state_size = cfg.ssm_state_size,
             .conv_kernel_size = cfg.conv_kernel,
         };
+
         const inner_dim = cfg.mamba_num_heads * cfg.mamba_head_dim;
         const conv_dim = inner_dim + 2 * cfg.n_groups * cfg.ssm_state_size;
         stdx.debug.assert(result.in_proj.weight.dim(.d) == cfg.hidden_size and result.in_proj.weight.dim(.dout) == inner_dim + conv_dim + cfg.mamba_num_heads, "Mamba2 input projection shape does not match config", .{});
         stdx.debug.assert(result.out_proj.weight.dim(.d) == inner_dim and result.out_proj.weight.dim(.dout) == cfg.hidden_size, "Mamba2 output projection shape does not match config", .{});
+
         return result;
     }
 
@@ -1101,7 +1237,7 @@ pub const Mamba2 = struct {
         stdx.debug.assert(cfg.layer_norm_epsilon > 0, "Mamba2 normalization epsilon must be positive", .{});
     }
 
-    fn initProj(store: zml.io.TensorStore.View, use_bias: bool) !zml.nn.Linear {
+    fn initProj(store: zml.io.TensorStore.View, use_bias: bool) !Linear {
         return withProjectionQuantization(store, .init(
             store.createReplicatedTensor("weight", .{ .dout, .d }),
             if (use_bias) store.createReplicatedTensor("bias", .{.dout}) else null,
@@ -1151,7 +1287,10 @@ pub const Mamba2 = struct {
             .outputs = .zeroes(x.shape().withDtype(.f32)),
             .step = .scalar(0, .i64),
         };
-        if (x.dim(.s) == 0) return .{ .outputs = initial.outputs, .state = initial.ssm };
+
+        if (x.dim(.s) == 0)
+            return .{ .outputs = initial.outputs, .state = initial.ssm };
+
         const final = if (x.dim(.s) == 1) blk: {
             // Avoid the while-loop overhead for token-by-token decoding.
             const next = scan.body(initial);
@@ -1162,6 +1301,7 @@ pub const Mamba2 = struct {
                 .step = run.select(next.step, initial.step),
             };
         } else zml.ops.@"while"(SelectiveScan, scan, initial);
+
         return .{ .outputs = final.outputs, .state = final.ssm };
     }
 
@@ -1210,11 +1350,13 @@ pub const Mamba2 = struct {
         const b = self.expandGroups(mixed.slice(.mix, .{ .start = inner_dim, .end = inner_dim + bc_dim }));
         const c = self.expandGroups(mixed.slice(.mix, .{ .start = inner_dim + bc_dim, .end = conv_dim }));
         const dt = zml.nn.softplus(dt_raw.convert(.f32).add(self.dt_bias.convert(.f32).broad(dt_raw.shape().withDtype(.f32))), .{});
-        const a = self.aLog.convert(.f32).exp().negate();
+        const a = self.a_log.convert(.f32).exp().negate();
+
         const scan = selectiveScan(values, b, c, dt, a, self.d, cache.recurrent_state, length);
         const hidden = scan.outputs.convert(x.dtype()).merge(.{ .d = .{ .h, .p } });
         const normalized = self.norm.forward(hidden, gate);
         const projected_output = self.out_proj.forward(normalized, x.dtype()).rename(.{ .dout = .d });
+
         const positions = zml.Tensor.iota(zml.Shape.init(.{ .s = x.dim(.s) }, .i32), .s).convert(.i64);
         const valid = positions.cmp(.LT, length.broad(positions.shape()));
         const output = valid.broad(projected_output.shape()).select(projected_output, zml.Tensor.zeroes(projected_output.shape()));
@@ -1263,11 +1405,13 @@ const SelectiveScan = struct {
         const b = self.b.slice(.s, .dynSingle(state.step));
         const c = self.c.slice(.s, .dynSingle(state.step));
         const dt = self.dt.slice(.s, .dynSingle(state.step));
+
         const decay = dt.mul(self.a.broad(dt.shape())).exp();
         const delta_x = x.mul(dt.broad(x.shape()));
         const write = delta_x.broad(state.ssm.shape()).mul(b.broad(state.ssm.shape()));
         const next_state = state.ssm.mul(decay.broad(state.ssm.shape())).add(write);
         const y = next_state.dot(c, .n).add(x.mul(self.d.broad(x.shape())));
+
         return .{
             .ssm = next_state,
             .outputs = state.outputs.dynamicUpdateSlice(.{ .s = state.step }, y),
