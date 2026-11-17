@@ -432,8 +432,6 @@
     "https://bcr.bazel.build/modules/rules_swift/3.1.2/MODULE.bazel": "72c8f5cf9d26427cee6c76c8e3853eb46ce6b0412a081b2b6db6e8ad56267400",
     "https://bcr.bazel.build/modules/rules_swift/3.6.1/MODULE.bazel": "5a68bb05b6b8044f8a7bd7184d56150189e7eca05522ce525517c234fed50ed8",
     "https://bcr.bazel.build/modules/rules_swift/3.6.1/source.json": "9af2e521ffdb41961b6b9ac05293bd6519ee2fb52849a2be658a20b0221cb8db",
-    "https://bcr.bazel.build/modules/rules_zig/0.17.0/MODULE.bazel": "2c1c08adc986cfdb5fee97e21982cac846f8a20a6a8054ae9cab8b02721c2011",
-    "https://bcr.bazel.build/modules/rules_zig/0.17.0/source.json": "488f71f57c596ed9b7635ebeb28066b23c6fc1802c30749d06bdad261d7b04a2",
     "https://bcr.bazel.build/modules/stardoc/0.5.0/MODULE.bazel": "f9f1f46ba8d9c3362648eea571c6f9100680efc44913618811b58cc9c02cd678",
     "https://bcr.bazel.build/modules/stardoc/0.5.1/MODULE.bazel": "1a05d92974d0c122f5ccf09291442580317cdd859f07a8655f1db9a60374f9f8",
     "https://bcr.bazel.build/modules/stardoc/0.5.3/MODULE.bazel": "c7f6948dae6999bf0db32c1858ae345f112cacf98f174c7a8bb707e41b974f1c",
@@ -930,13 +928,13 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "hPjDj28qKZsSFAE45ZtQPcgDkeRXAcwxiuAQyeEF7ng=",
-        "usagesDigest": "FDLiNUluzC0WBatQ/5WFpxzyQP4ubA/DUgTwOzYLGw4=",
+        "bzlTransitiveDigest": "QLLkYf0ibqVYPxqX+GH/8BUR3KUq+O7f0fjrMytdEdA=",
+        "usagesDigest": "TV3s84/yXaPvGDrzx8WM5RiqkXnMrvMbtw1Zx3pyo94=",
         "recordedInputs": [
           "REPO_MAPPING:rules_zig+,bazel_skylib bazel_skylib+",
           "REPO_MAPPING:rules_zig+,bazel_tools bazel_tools",
           "FILE:@@//bazel/zig_index.json 387d1ab130896456fb092fb08bfaf0c57ccba854121955c752052600d1643d37",
-          "FILE:@@rules_zig+//zig/private/versions.json a33370258a702099b35362d4220fe8f02c869c2b845abcbf0aa78200abab097a"
+          "FILE:@@rules_zig+//zig/private/versions.json aa9bbb78592885654561638a5b82d8a608845c1ff7a0d4bfde168cc76097fc3e"
         ],
         "generatedRepoSpecs": {
           "zig_0.17.0_aarch64-linux": {
@@ -1194,6 +1192,14 @@
                 "0.17.0",
                 "0.17.0"
               ],
+              "exec_platforms": [
+                "aarch64-linux",
+                "aarch64-macos",
+                "aarch64-windows",
+                "x86_64-linux",
+                "x86_64-macos",
+                "x86_64-windows"
+              ],
               "exec_lengths": [
                 3,
                 3,
@@ -1248,21 +1254,90 @@
     "@@rules_zig+//zig/zls:extensions.bzl%zls": {
       "general": {
         "bzlTransitiveDigest": "8UokkNRK4sShFNMJ3aDabiCS4Q/ldgChV/NYNszfmCg=",
-        "usagesDigest": "kOrP52crJGijpHNzo4S7msXvbGpfmzvkE4tuhpRWTsI=",
+        "usagesDigest": "oEWmmJyAiE4ix5Zx/RAVNWKKiz+OWAtPj3K05HgPq9Y=",
         "recordedInputs": [
           "REPO_MAPPING:rules_zig+,bazel_skylib bazel_skylib+",
           "REPO_MAPPING:rules_zig+,bazel_tools bazel_tools",
-          "FILE:@@rules_zig+//zig/zls/private/versions.json 127803289dfd79b5255db5f74be1d9a2f790f03292d6147009af702d888aba69"
+          "FILE:@@rules_zig+//zig/zls/private/versions.json b5996e4d1b21e46f7d219ed0b94bf312257d425e3baa13826e448c608b7a6041"
         ],
         "generatedRepoSpecs": {
+          "zls_0.17.0_Phermetic.1_aarch64-linux": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://github.com/hermeticbuild/zls-prebuilt/releases/download/0.17.0%2Bhermetic.1/zls-aarch64-linux-0.17.0%2Bhermetic.1.tar.xz",
+              "mirrors": [],
+              "sha256": "76ed3c47b0cff3a5ff69a33bbb4b310d0005134d9506ae074628ab34033905c4",
+              "zls_version": "0.17.0+hermetic.1",
+              "platform": "aarch64-linux"
+            }
+          },
+          "zls_0.17.0_Phermetic.1_aarch64-macos": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://github.com/hermeticbuild/zls-prebuilt/releases/download/0.17.0%2Bhermetic.1/zls-aarch64-macos-0.17.0%2Bhermetic.1.tar.xz",
+              "mirrors": [],
+              "sha256": "d4a11884562c9a0a12ee7794eb93adf99ef27454a509090e9265a5ce69c0f2f5",
+              "zls_version": "0.17.0+hermetic.1",
+              "platform": "aarch64-macos"
+            }
+          },
+          "zls_0.17.0_Phermetic.1_x86_64-linux": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://github.com/hermeticbuild/zls-prebuilt/releases/download/0.17.0%2Bhermetic.1/zls-x86_64-linux-0.17.0%2Bhermetic.1.tar.xz",
+              "mirrors": [],
+              "sha256": "957c2b9355ffbdab6990d67497e4c9efb9bfc01899fa8071ce020a63c3a6fe70",
+              "zls_version": "0.17.0+hermetic.1",
+              "platform": "x86_64-linux"
+            }
+          },
+          "zls_0.17.0_Phermetic.1_x86_64-macos": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://github.com/hermeticbuild/zls-prebuilt/releases/download/0.17.0%2Bhermetic.1/zls-x86_64-macos-0.17.0%2Bhermetic.1.tar.xz",
+              "mirrors": [],
+              "sha256": "9653e9cea0125322d7675558e9e3137d73699aea5c1aa2a2674c8a356265212f",
+              "zls_version": "0.17.0+hermetic.1",
+              "platform": "x86_64-macos"
+            }
+          },
           "zls_toolchains": {
             "repoRuleId": "@@rules_zig+//zig/zls/private/repo:toolchains_repo.bzl%toolchains_repo",
             "attributes": {
-              "names": [],
-              "labels": [],
-              "zig_versions": [],
-              "exec_lengths": [],
-              "exec_constraints": []
+              "names": [
+                "0.17.0_Phermetic.1_for_0.17.0_aarch64-linux",
+                "0.17.0_Phermetic.1_for_0.17.0_aarch64-macos",
+                "0.17.0_Phermetic.1_for_0.17.0_x86_64-linux",
+                "0.17.0_Phermetic.1_for_0.17.0_x86_64-macos"
+              ],
+              "labels": [
+                "@zls_0.17.0_Phermetic.1_aarch64-linux//:zls_toolchain",
+                "@zls_0.17.0_Phermetic.1_aarch64-macos//:zls_toolchain",
+                "@zls_0.17.0_Phermetic.1_x86_64-linux//:zls_toolchain",
+                "@zls_0.17.0_Phermetic.1_x86_64-macos//:zls_toolchain"
+              ],
+              "zig_versions": [
+                "0.17.0",
+                "0.17.0",
+                "0.17.0",
+                "0.17.0"
+              ],
+              "exec_lengths": [
+                2,
+                2,
+                2,
+                2
+              ],
+              "exec_constraints": [
+                "@platforms//os:linux",
+                "@platforms//cpu:aarch64",
+                "@platforms//os:macos",
+                "@platforms//cpu:aarch64",
+                "@platforms//os:linux",
+                "@platforms//cpu:x86_64",
+                "@platforms//os:macos",
+                "@platforms//cpu:x86_64"
+              ]
             }
           }
         }
