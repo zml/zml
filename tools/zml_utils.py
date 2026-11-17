@@ -113,11 +113,11 @@ class ActivationCollector:
             return
 
         assert out is not None
-        outs = [o.detach().cpu() for o in _flatten(out)]
-        inputs = [i.detach().cpu() for i in _flatten(input)]
+        outs = [o.detach().to("cpu", copy=True) for o in _flatten(out)]
+        inputs = [i.detach().to("cpu", copy=True) for i in _flatten(input)]
 
         kwargs = inspect.stack()[1].frame.f_locals["kwargs"]
-        extra_inputs = [i.detach().cpu() for i in _flatten(kwargs)]
+        extra_inputs = [i.detach().to("cpu", copy=True) for i in _flatten(kwargs)]
 
         self.outs[id(module)] = (name, outs, inputs + extra_inputs)
         if 0 < self.max_layers < self.count:
@@ -160,7 +160,7 @@ def _flatten(out):
 
 def named_modules(model):
     if hasattr(model, "named_modules"):
-        return model.named_modules()
+        yield from model.named_modules()
 
     else:
         root_modules = [
