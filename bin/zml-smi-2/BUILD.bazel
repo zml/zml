@@ -1,0 +1,114 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+_LOGOS = [
+    "assets/amd.png",
+    "assets/intel.png",
+    "assets/logo.png",
+    "assets/neuron.png",
+    "assets/nvidia.png",
+    "assets/tpu.png",
+]
+
+run_binary(
+    name = "libnrt.stripped",
+    srcs = ["@aws-neuronx-runtime-lib//:libnrt.patchelf"],
+    outs = ["libnrt.so.1"],
+    args = [
+        "--strip-debug",
+        "-o",
+        "$(location libnrt.so.1)",
+        "$(location @aws-neuronx-runtime-lib//:libnrt.patchelf)",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    tool = "@llvm//tools:llvm-strip",
+)
+
+run_binary(
+    name = "libncfw.stripped",
+    srcs = ["@aws-neuronx-runtime-lib//:libncfw.patchelf"],
+    outs = ["libncfw.so.2"],
+    args = [
+        "--strip-debug",
+        "-o",
+        "$(location libncfw.so.2)",
+        "$(location @aws-neuronx-runtime-lib//:libncfw.patchelf)",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    tool = "@llvm//tools:llvm-strip",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = select({
+        "@platforms//os:macos": [],
+        "@llvm//platforms/config:linux_x86_64": [
+            ":libncfw.stripped",
+            ":libnrt.stripped",
+            "//platforms/rocm:zmlxrocm",
+            "@amdrocm-amdsmi//:libamd_smi",
+            "@amdrocm-sysdeps//:system_libs",
+            "@libzml_rocm//:amdgpu_ids",
+        ],
+        "@llvm//platforms/config:linux_aarch64": [],
+    }),
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "amdgpu.ids": "share/libdrm/amdgpu.ids",
+        "platforms/rocm": "lib",
+        "libnrt.so.1": "lib/libnrt.so.1",
+        "libncfw.so.2": "lib/libncfw.so.2",
+    },
+    visibility = ["//bin/zml-smi-2:__subpackages__"],
+)
+
+zig_binary(
+    name = "zml-smi-2",
+    srcs = [
+        "display.zig",
+        "output.zig",
+        "platforms.zig",
+    ],
+    data = [":sandbox"],
+    extra_srcs = _LOGOS,
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi-2/collect:collector",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+        "//bin/zml-smi-2/drivers:host",
+        "//bin/zml-smi-2/tui",
+        "//bin/zml-smi-2/wire:formats",
+        "//bin/zml-smi-2/wire:remote",
+        "//stdx",
+    ] + select({
+        "@llvm//platforms/config:linux_x86_64": [
+            "//bin/zml-smi-2/drivers/amdsmi",
+            "//bin/zml-smi-2/drivers/furiosa",
+            "//bin/zml-smi-2/drivers/neuron",
+            "//bin/zml-smi-2/drivers/nvml",
+            "//bin/zml-smi-2/drivers/oneapi",
+            "//bin/zml-smi-2/drivers/tpu",
+        ],
+        "@llvm//platforms/config:linux_aarch64": [
+            "//bin/zml-smi-2/drivers/nvml",
+        ],
+        "@llvm//platforms/config:macos_aarch64": [
+            "//bin/zml-smi-2/drivers/metal",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+zig_test(
+    name = "test_display",
+    srcs = ["display.zig"],
+    extra_srcs = _LOGOS,
+    main = "test_display.zig",
+    deps = [
+        "//bin/zml-smi-2/contract",
+        "//bin/zml-smi-2/tui",
+    ],
+)

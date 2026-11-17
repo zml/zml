@@ -1,0 +1,57 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+_SRCS = [
+    "data.zig",
+    "image_cache.zig",
+    "lib/compose.zig",
+    "lib/image.zig",
+    "lib/ui.zig",
+    "lib/utils.zig",
+    "pages/detail.zig",
+    "pages/overview.zig",
+    "presentation.zig",
+    "print.zig",
+    "spec.zig",
+    "theme.zig",
+    "top.zig",
+    "widgets/braille_chart.zig",
+    "widgets/chart.zig",
+    "widgets/column_layout.zig",
+    "widgets/device_card.zig",
+    "widgets/gauge.zig",
+    "widgets/info_lines.zig",
+    "widgets/logo.zig",
+    "widgets/metric_card.zig",
+    "widgets/process_table.zig",
+    "widgets/status_line.zig",
+    "widgets/titled_border.zig",
+]
+
+_DEPS = [
+    "//bin/zml-smi-2/contract",
+    "//zml:logo",
+    "@libvaxis//:vaxis",
+]
+
+zig_library(
+    name = "tui",
+    srcs = _SRCS,
+    import_name = "zml-smi-2/tui",
+    main = "tui.zig",
+    visibility = ["//visibility:public"],
+    deps = _DEPS,
+)
+
+zig_test(
+    name = "test",
+    srcs = _SRCS + [
+        "lib/test_image.zig",
+        "lib/test_utils.zig",
+        "test_data.zig",
+        "test_presentation.zig",
+        "tui.zig",
+        "widgets/test_gauge.zig",
+    ],
+    main = "test_tui.zig",
+    deps = _DEPS,
+)

@@ -20,7 +20,7 @@
     "C_Cpp.formatting": "clangFormat",
     "C_Cpp.clang_format_style": "Microsoft",
     "zig.formattingProvider": "zls",
-    "zig.path": "x",
+    "zig.path": "${workspaceFolder}/tools/zig.sh",
     "zig.zls.path": "${workspaceFolder}/tools/zls.sh",
     "[zig]": {
         "editor.suggest.insertMode": "replace",

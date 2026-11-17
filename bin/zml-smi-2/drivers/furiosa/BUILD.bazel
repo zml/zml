@@ -1,0 +1,33 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "furiosa",
+    import_name = "zml-smi-2/drivers/furiosa",
+    main = "Furiosa.zig",
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    visibility = ["//bin/zml-smi-2:__subpackages__"],
+    deps = [
+        "//bin/zml-smi-2/collect:poll",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+        "//bin/zml-smi-2/drivers:native",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "test_furiosa.zig",
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":furiosa",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+        "//bin/zml-smi-2/drivers:native",
+    ],
+)

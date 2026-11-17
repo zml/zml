@@ -36,10 +36,11 @@ zls_completion(
     visibility = ["//visibility:public"],
     deps = [
         "//bin/zml-smi",
+        "//bin/zml-smi-2",
+        "//examples/io:playground",
         "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
-        "//examples/io:playground",
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",

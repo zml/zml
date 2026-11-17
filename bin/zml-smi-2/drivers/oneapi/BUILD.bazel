@@ -1,0 +1,23 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "oneapi",
+    import_name = "zml-smi-2/drivers/oneapi",
+    main = "OneApi.zig",
+    visibility = ["//bin/zml-smi-2:__subpackages__"],
+    deps = [
+        "//bin/zml-smi-2/collect:poll",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+        "//bin/zml-smi-2/drivers:native",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "test_oneapi.zig",
+    deps = [
+        ":oneapi",
+        "//bin/zml-smi-2/drivers:native",
+    ],
+)

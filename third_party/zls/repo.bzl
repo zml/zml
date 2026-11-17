@@ -1,17 +1,20 @@
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 def repo():
-    # ZLS 0.17 development revision; dependencies match its build.zig.zon.
+    # ZLS 0.17.0 and the dependencies pinned in its build.zig.zon.
     git_repository(
         name = "zls",
         remote = "https://github.com/zigtools/zls.git",
-        commit = "eab2be0fd74443a27662da809b771c4ad0d2afcf",
+        commit = "542462c4ddf045493fa9ca028ee6bc3f38b2754a",
         build_file = Label("//third_party/zls:zls.bazel"),
+        # Bazel's module paths are absolute, including generated and external files.
+        patch_args = ["-p1"],
+        patches = [Label("//third_party/zls:absolute-build-paths.patch")],
     )
     git_repository(
         name = "zls_lsp",
         remote = "https://github.com/zigtools/lsp-kit.git",
-        commit = "d148676ace1eaecf3c703ce7d350d0e94e502ed7",
+        commit = "3e1058db66079911fdde82f833fdce6856e0a706",
         build_file = Label("//third_party/zls:lsp.bazel"),
     )
     git_repository(

@@ -1,0 +1,56 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+package(default_visibility = ["//bin/zml-smi-2:__subpackages__"])
+
+_FORMATS = [
+    "csv.zig",
+    "json.zig",
+    "prometheus.zig",
+]
+
+zig_library(
+    name = "snapshot",
+    import_name = "zml-smi-2/snapshot",
+    main = "snapshot.zig",
+    visibility = ["//visibility:private"],
+    deps = ["//bin/zml-smi-2/contract"],
+)
+
+zig_library(
+    name = "formats",
+    srcs = _FORMATS,
+    import_name = "zml-smi-2/formats",
+    main = "formats.zig",
+    deps = [
+        ":snapshot",
+        "//bin/zml-smi-2/contract",
+    ],
+)
+
+zig_library(
+    name = "remote",
+    import_name = "zml-smi-2/remote",
+    main = "remote.zig",
+    deps = [
+        ":snapshot",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+    ],
+)
+
+zig_test(
+    name = "test",
+    srcs = _FORMATS + [
+        "remote.zig",
+        "test_csv.zig",
+        "test_json.zig",
+        "test_prometheus.zig",
+        "test_remote.zig",
+    ],
+    main = "test_wire.zig",
+    deps = [
+        ":snapshot",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+    ],
+)

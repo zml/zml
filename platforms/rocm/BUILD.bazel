@@ -13,6 +13,7 @@ zig_shared_library(
     target_compatible_with = ["@platforms//os:linux"],
     visibility = [
         "//bin/zml-smi:__pkg__",
+        "//bin/zml-smi-2:__pkg__",
         "@libzml_rocm//:__subpackages__",
     ],
     # Use Clang's compiler-rt, but disable stack checking

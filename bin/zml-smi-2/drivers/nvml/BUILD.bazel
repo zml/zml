@@ -1,0 +1,23 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "nvml",
+    import_name = "zml-smi-2/drivers/nvml",
+    main = "Nvml.zig",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//bin/zml-smi-2:__subpackages__"],
+    deps = [
+        "//bin/zml-smi-2/collect:poll",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+        "//bin/zml-smi-2/drivers:native",
+    ] + select({
+        "@llvm//platforms/config:linux_x86_64": ["@cuda_nvml_dev_linux_x86_64//:nvml"],
+        "@llvm//platforms/config:linux_aarch64": ["@cuda_nvml_dev_linux_sbsa//:nvml"],
+    }),
+)
+
+zig_test(
+    name = "test",
+    deps = [":nvml"],
+)

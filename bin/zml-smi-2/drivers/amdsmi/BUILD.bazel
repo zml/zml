@@ -1,0 +1,22 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "amdsmi",
+    import_name = "zml-smi-2/drivers/amdsmi",
+    main = "AmdSmi.zig",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//bin/zml-smi-2:__subpackages__"],
+    deps = [
+        "//bin/zml-smi-2/collect:poll",
+        "//bin/zml-smi-2/collect:source",
+        "//bin/zml-smi-2/contract",
+        "//bin/zml-smi-2/drivers:native",
+        "@amdrocm-amdsmi//:amdsmi",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "test_amdsmi.zig",
+    deps = [":amdsmi"],
+)

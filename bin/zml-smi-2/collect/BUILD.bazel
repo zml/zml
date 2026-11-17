@@ -1,0 +1,55 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+package(default_visibility = ["//bin/zml-smi-2:__subpackages__"])
+
+zig_library(
+    name = "source",
+    import_name = "zml-smi-2/source",
+    main = "source.zig",
+    deps = ["//bin/zml-smi-2/contract"],
+)
+
+zig_library(
+    name = "poll",
+    import_name = "zml-smi-2/poll",
+    main = "poll.zig",
+    deps = [
+        ":source",
+        "//bin/zml-smi-2/contract",
+    ],
+)
+
+zig_library(
+    name = "collector",
+    srcs = ["double_buffer.zig"],
+    import_name = "zml-smi-2/collector",
+    main = "collector.zig",
+    deps = [
+        ":source",
+        "//bin/zml-smi-2/contract",
+    ],
+)
+
+zig_test(
+    name = "poll_test",
+    main = "test_poll.zig",
+    deps = [
+        ":poll",
+        ":source",
+        "//bin/zml-smi-2/contract",
+    ],
+)
+
+zig_test(
+    name = "collector_test",
+    srcs = [
+        "collector.zig",
+        "double_buffer.zig",
+        "test_double_buffer.zig",
+    ],
+    main = "test_collector.zig",
+    deps = [
+        ":source",
+        "//bin/zml-smi-2/contract",
+    ],
+)

@@ -1,0 +1,58 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+package(default_visibility = ["//bin/zml-smi-2:__subpackages__"])
+
+zig_library(
+    name = "native",
+    srcs = [
+        "shared/counter.zig",
+        "shared/dynlib.zig",
+        "shared/fdinfo.zig",
+        "shared/hwmon.zig",
+        "shared/pci.zig",
+        "shared/proc.zig",
+        "shared/sandbox.zig",
+        "shared/sysfs.zig",
+        "shared/units.zig",
+    ],
+    import_name = "zml-smi-2/native",
+    main = "shared/native.zig",
+    deps = ["@rules_zig//zig/runfiles"],
+)
+
+zig_library(
+    name = "host",
+    srcs = [
+        "host/linux.zig",
+        "host/macos.zig",
+    ],
+    import_name = "zml-smi-2/host",
+    main = "host.zig",
+    deps = [
+        ":native",
+        "//bin/zml-smi-2/contract",
+    ],
+)
+
+zig_test(
+    name = "test",
+    srcs = [
+        "host/macos.zig",
+        "host/test_macos.zig",
+        "shared/test_counter.zig",
+        "shared/test_dynlib.zig",
+        "shared/test_fdinfo.zig",
+        "shared/test_hwmon.zig",
+        "shared/test_pci.zig",
+        "shared/test_proc.zig",
+        "shared/test_sandbox.zig",
+        "shared/test_sysfs.zig",
+        "shared/test_units.zig",
+    ],
+    data = ["//bin/zml-smi-2:sandbox"],
+    main = "test_native.zig",
+    deps = [
+        ":native",
+        "//bin/zml-smi-2/contract",
+    ],
+)

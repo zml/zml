@@ -10,7 +10,7 @@ genrule(
     name = "generate_version_data",
     srcs = ["src/tools/langref.html.in"],
     outs = ["version_data.zig"],
-    cmd = "$(location :config_gen) --langref-version master --langref-path $(<) --generate-version-data $(@)",
+    cmd = "$(location :config_gen) --langref-version 0.17.0 --langref-path $(<) --generate-version-data $(@)",
     tools = [":config_gen"],
 )
 

@@ -1,0 +1,10 @@
+--- a/src/bsp.zig
++++ b/src/bsp.zig
+@@ -679,6 +679,7 @@ fn resolveLazyPath(
+         .relative => |relative| {
+             const base_path = base_paths.get(relative.flags.base) orelse return null;
+             const sub_path = relative.sub_path.slice(c);
++            if (Dir.path.isAbsolute(sub_path)) return sub_path;
+             if (sub_path.len == 0) return base_path;
+             return try Dir.path.join(arena, &.{ base_path, sub_path });
+         },
