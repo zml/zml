@@ -66,7 +66,6 @@ copy_to_directory(
 zig_binary(
     name = "zml-smi-2",
     srcs = [
-        "display.zig",
         "output.zig",
         "platforms.zig",
     ],
@@ -104,7 +103,7 @@ zig_binary(
 
 zig_test(
     name = "test_display",
-    srcs = ["display.zig"],
+    srcs = ["platforms.zig"],
     extra_srcs = _LOGOS,
     main = "test_display.zig",
     deps = [

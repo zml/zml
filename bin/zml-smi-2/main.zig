@@ -5,13 +5,11 @@ const Collector = @import("zml-smi-2/collector").Collector;
 const formats = @import("zml-smi-2/formats");
 const Host = @import("zml-smi-2/host").Host;
 const contract = @import("zml-smi-2/contract");
-const display = @import("display.zig");
 const output = @import("output.zig");
+const platforms = @import("platforms.zig");
 const Remote = @import("zml-smi-2/remote").Remote;
 const source = @import("zml-smi-2/source");
 const tui = @import("zml-smi-2/tui");
-
-const platforms = @import("platforms.zig");
 
 pub const std_options: std.Options = .{
     .log_scope_levels = &.{
@@ -70,8 +68,9 @@ pub fn main(init: std.process.Init) !void {
     });
     defer collector.deinit();
 
-    inline for (platforms.all) |Platform| {
-        if (platforms.available(Platform, io)) {
+    inline for (std.enums.values(contract.Target)) |tag| {
+        const Platform = @field(platforms.native_catalog, @tagName(tag));
+        if (Platform != void and platforms.available(Platform, io)) {
             try addSource(&collector, Platform, @typeName(Platform), .{});
         }
     }
@@ -116,8 +115,8 @@ pub fn main(init: std.process.Init) !void {
 
     var state: tui.data.SystemState = .{
         .provider = .{ .context = &collector, .capture = captureTui },
-        .devices = try display.devices(arena, collector.devices.items),
-        .logos = display.logos,
+        .devices = try platforms.devices(arena, collector.devices.items),
+        .logos = platforms.logos,
         .tui_refresh_rate = args.tui_refresh_rate,
     };
 

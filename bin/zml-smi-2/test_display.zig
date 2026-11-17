@@ -1,7 +1,7 @@
 const std = @import("std");
 const contract = @import("zml-smi-2/contract");
 const tui = @import("zml-smi-2/tui");
-const display = @import("display.zig");
+const platforms = @import("platforms.zig");
 
 const presentation = tui.presentation;
 
@@ -19,7 +19,7 @@ test "detail profiles render normalized device metrics and host power" {
     samples[2].put(.power_mw, 0);
     samples[3].put(.nc_tensors, 3 << 20);
 
-    const devices = try display.devices(allocator, &.{
+    const devices = try platforms.devices(allocator, &.{
         .{ .target = .cuda },   .{ .target = .furiosa }, .{ .target = .metal },
         .{ .target = .neuron }, .{ .target = .tpu },
     });
@@ -68,7 +68,7 @@ test "overview aligns memory and preserves the power units of each profile" {
     samples[1].put(.power_mw, 35_256);
     const state: tui.data.SystemState = .{
         .provider = undefined,
-        .devices = try display.devices(allocator, &.{ .{ .target = .furiosa }, .{ .target = .metal } }),
+        .devices = try platforms.devices(allocator, &.{ .{ .target = .furiosa }, .{ .target = .metal } }),
         .frame = .{ .samples = &samples },
         .tui_refresh_rate = 100,
     };
