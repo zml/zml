@@ -24,21 +24,35 @@ const Gpu = struct {
     last_seen: u64 = 0,
 };
 
-const Api = native.dynlib.Bindings(c, check, &.{
+const scalar_bindings = .{
+    .nvmlDeviceGetPowerUsage = .{ .power_mw = .{} },
+    .nvmlDeviceGetEnforcedPowerLimit = .{ .power_limit_mw = .{} },
+    .nvmlDeviceGetTemperature = .{ .temperature = .{c.NVML_TEMPERATURE_GPU} },
+    .nvmlDeviceGetFanSpeed = .{ .fan_speed_percent = .{} },
+    .nvmlDeviceGetClockInfo = .{
+        .clock_graphics_mhz = .{c.NVML_CLOCK_GRAPHICS},
+        .clock_sm_mhz = .{c.NVML_CLOCK_SM},
+        .clock_mem_mhz = .{c.NVML_CLOCK_MEM},
+    },
+    .nvmlDeviceGetMaxClockInfo = .{
+        .clock_graphics_max_mhz = .{c.NVML_CLOCK_GRAPHICS},
+        .clock_mem_max_mhz = .{c.NVML_CLOCK_MEM},
+    },
+    .nvmlDeviceGetMemoryBusWidth = .{ .mem_bus_width = .{} },
+    .nvmlDeviceGetCurrPcieLinkGeneration = .{ .pcie_link_gen = .{} },
+};
+
+const Api = native.dynlib.Bindings(c, check, .{
     "nvmlInit_v2",                              "nvmlShutdown",
     "nvmlErrorString",                          "nvmlSystemGetDriverVersion",
     "nvmlSystemGetCudaDriverVersion_v2",        "nvmlDeviceGetCount_v2",
     "nvmlDeviceGetHandleByIndex_v2",            "nvmlDeviceGetName",
-    "nvmlDeviceGetPowerUsage",                  "nvmlDeviceGetEnforcedPowerLimit",
-    "nvmlDeviceGetTemperature",                 "nvmlDeviceGetFanSpeed",
     "nvmlDeviceGetUtilizationRates",            "nvmlDeviceGetEncoderUtilization",
-    "nvmlDeviceGetDecoderUtilization",          "nvmlDeviceGetClockInfo",
-    "nvmlDeviceGetMaxClockInfo",                "nvmlDeviceGetMemoryInfo",
-    "nvmlDeviceGetMemoryBusWidth",              "nvmlDeviceGetPcieThroughput",
-    "nvmlDeviceGetPcieSpeed",                   "nvmlDeviceGetCurrPcieLinkGeneration",
+    "nvmlDeviceGetDecoderUtilization",          "nvmlDeviceGetMemoryInfo",
+    "nvmlDeviceGetPcieThroughput",              "nvmlDeviceGetPcieSpeed",
     "nvmlDeviceGetCurrPcieLinkWidth",           "nvmlDeviceGetComputeRunningProcesses_v3",
     "nvmlDeviceGetGraphicsRunningProcesses_v3", "nvmlDeviceGetProcessUtilization",
-});
+} ++ std.meta.fieldNames(@TypeOf(scalar_bindings)));
 
 fn check(status: c.nvmlReturn_t) error{ Unsupported, NvmlError }!void {
     return switch (status) {
@@ -107,20 +121,7 @@ pub const Probe = struct {
     gpu: *Gpu,
     refresh_pcie: bool,
 
-    const Scalar = native.dynlib.Scalar;
-    pub const power_mw = Scalar(Probe, .{ .nvmlDeviceGetPowerUsage, .{} });
-    pub const power_limit_mw = Scalar(Probe, .{ .nvmlDeviceGetEnforcedPowerLimit, .{} });
-    pub const temperature = Scalar(Probe, .{ .nvmlDeviceGetTemperature, .{c.NVML_TEMPERATURE_GPU} });
-    pub const fan_speed_percent = Scalar(Probe, .{ .nvmlDeviceGetFanSpeed, .{} });
-    pub const clock_graphics_mhz =
-        Scalar(Probe, .{ .nvmlDeviceGetClockInfo, .{c.NVML_CLOCK_GRAPHICS} });
-    pub const clock_sm_mhz = Scalar(Probe, .{ .nvmlDeviceGetClockInfo, .{c.NVML_CLOCK_SM} });
-    pub const clock_mem_mhz = Scalar(Probe, .{ .nvmlDeviceGetClockInfo, .{c.NVML_CLOCK_MEM} });
-    pub const clock_graphics_max_mhz =
-        Scalar(Probe, .{ .nvmlDeviceGetMaxClockInfo, .{c.NVML_CLOCK_GRAPHICS} });
-    pub const clock_mem_max_mhz = Scalar(Probe, .{ .nvmlDeviceGetMaxClockInfo, .{c.NVML_CLOCK_MEM} });
-    pub const mem_bus_width = Scalar(Probe, .{ .nvmlDeviceGetMemoryBusWidth, .{} });
-    pub const pcie_link_gen = Scalar(Probe, .{ .nvmlDeviceGetCurrPcieLinkGeneration, .{} });
+    pub const scalars = native.dynlib.Scalars(Probe, scalar_bindings).read;
 
     pub fn memory(self: *const Probe) contract.Reply(&.{ .mem_used_bytes, .mem_total_bytes }) {
         const data = self.api.nvmlDeviceGetMemoryInfo.get(.{self.handle}) catch return .{};

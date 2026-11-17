@@ -41,51 +41,58 @@ pub fn openBundled(comptime Api: type, io: std.Io, name: []const u8) !Api {
     return open(Api, &.{buffer[0 .. directory.len + suffix.len :0]});
 }
 
-/// Specializes a native scalar binding as a receiver-only probe method.
-pub fn Scalar(comptime Probe: type, comptime spec: anytype) fn (*const Probe) ?u64 {
+/// Each symbol maps metric names to the arguments between the handle and output pointer.
+pub fn Scalars(comptime Probe: type, comptime bindings: anytype) type {
+    const symbols = std.meta.fieldNames(@TypeOf(bindings));
+    var names: []const [:0]const u8 = &.{};
+    for (symbols) |symbol| names = names ++ std.meta.fieldNames(@TypeOf(@field(bindings, symbol)));
+    const types: [names.len]type = @splat(?u64);
+    const Reply = @Struct(.auto, null, names, &types, &@splat(.{}));
+
     return struct {
-        fn read(probe: *const Probe) ?u64 {
-            const getter = @field(probe.api.*, @tagName(spec[0]));
-            const value = getter.get(.{probe.handle} ++ spec[1]) catch return null;
-            return std.math.cast(u64, value);
+        pub fn read(probe: *const Probe) Reply {
+            var reply: Reply = undefined;
+            inline for (symbols) |symbol| {
+                const getter = @field(probe.api.*, symbol);
+                const metrics = @field(bindings, symbol);
+                inline for (comptime std.meta.fieldNames(@TypeOf(metrics))) |metric| {
+                    const value = getter.get(.{probe.handle} ++ @field(metrics, metric)) catch null;
+                    @field(reply, metric) = if (value) |scalar| std.math.cast(u64, scalar) else null;
+                }
+            }
+            return reply;
         }
-    }.read;
+    };
 }
 
 /// Uses translated C signatures for a library's required symbol table.
 pub fn Bindings(comptime C: type, comptime check: anytype, comptime names: []const [:0]const u8) type {
-    const Checked = CheckedBy(check);
     var types: [names.len]type = undefined;
-    for (names, &types) |name, *Field| Field.* = Checked(@TypeOf(@field(C, name)));
+    for (names, &types) |name, *Field| Field.* = Checked(check, @TypeOf(@field(C, name)));
     return @Struct(.auto, null, names, &types, &@splat(.{}));
 }
 
-/// Binds a library's status check to wrappers for its C functions.
-pub fn CheckedBy(comptime check: anytype) fn (comptime anytype) type {
+/// Wraps a native function with its library's status check.
+pub fn Checked(comptime check: anytype, comptime Function: type) type {
     const checker = @typeInfo(@TypeOf(check)).@"fn";
     const Error = @typeInfo(checker.return_type.?).error_union.error_set;
     return struct {
-        fn Checked(comptime function: anytype) type {
-            const Function = if (@TypeOf(function) == type) function else @TypeOf(function);
-            return struct {
-                function: *const Function,
+        function: *const Function,
 
-                const Args = std.meta.ArgsTuple(Function);
-                const params = @typeInfo(Args).@"struct".field_types;
-                const Result = @typeInfo(params[params.len - 1]).pointer.child;
-                const Inputs = @Tuple(params[0 .. params.len - 1]);
+        const Args = std.meta.ArgsTuple(Function);
+        const params = @typeInfo(Args).@"struct".field_types;
+        const Result = @typeInfo(params[params.len - 1]).pointer.child;
+        const Inputs = @Tuple(params[0 .. params.len - 1]);
 
-                pub fn call(self: @This(), args: Args) Error!void {
-                    return check(@call(.auto, self.function, args));
-                }
-
-                /// For a function whose only result is its last parameter: returns that result.
-                pub fn get(self: @This(), args: Inputs) Error!Result {
-                    var result: Result = std.mem.zeroes(Result);
-                    try self.call(args ++ .{&result});
-                    return result;
-                }
-            };
+        pub fn call(self: @This(), args: Args) Error!void {
+            return check(@call(.auto, self.function, args));
         }
-    }.Checked;
+
+        /// For a function whose only result is its last parameter: returns that result.
+        pub fn get(self: @This(), args: Inputs) Error!Result {
+            var result: Result = std.mem.zeroes(Result);
+            try self.call(args ++ .{&result});
+            return result;
+        }
+    };
 }

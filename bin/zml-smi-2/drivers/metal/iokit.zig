@@ -3,6 +3,8 @@
 const std = @import("std");
 const native = @import("zml-smi-2/native");
 
+const Checked = native.dynlib.Checked;
+
 /// An io_object_t: a service, an iterator or a connection. 0 is none.
 pub const Object = std.c.mach_port_t;
 const Status = std.c.kern_return_t;
@@ -15,9 +17,9 @@ pub const Api = struct {
     IOServiceMatching: *const fn ([*:0]const u8) callconv(.c) ?*anyopaque,
     IOServiceNameMatching: *const fn ([*:0]const u8) callconv(.c) ?*anyopaque,
     IOServiceGetMatchingService: *const fn (std.c.mach_port_t, ?*anyopaque) callconv(.c) Object,
-    IOServiceOpen: Checked(fn (Object, std.c.mach_port_t, u32, *Object) callconv(.c) Status),
+    IOServiceOpen: Checked(check, fn (Object, std.c.mach_port_t, u32, *Object) callconv(.c) Status),
     IOServiceClose: *const fn (Object) callconv(.c) Status,
-    IOConnectCallStructMethod: Checked(fn (
+    IOConnectCallStructMethod: Checked(check, fn (
         Object,
         u32,
         *const anyopaque,
@@ -25,7 +27,10 @@ pub const Api = struct {
         *anyopaque,
         *usize,
     ) callconv(.c) Status),
-    IORegistryEntryGetChildIterator: Checked(fn (Object, [*:0]const u8, *Object) callconv(.c) Status),
+    IORegistryEntryGetChildIterator: Checked(
+        check,
+        fn (Object, [*:0]const u8, *Object) callconv(.c) Status,
+    ),
     /// Returns a CoreFoundation object the caller releases.
     IORegistryEntryCreateCFProperty: *const fn (
         Object,
@@ -41,8 +46,6 @@ pub const Api = struct {
 pub fn open() !Api {
     return native.dynlib.open(Api, &.{"/System/Library/Frameworks/IOKit.framework/IOKit"});
 }
-
-const Checked = native.dynlib.CheckedBy(check);
 
 fn check(status: Status) error{IoKitError}!void {
     if (status != 0) return error.IoKitError;

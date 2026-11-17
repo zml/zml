@@ -26,17 +26,23 @@ const Gpu = struct {
 
 pub const two_readings = true;
 
-const Api = native.dynlib.Bindings(c, check, &.{
-    "amdsmi_init",                 "amdsmi_status_code_to_string",
-    "amdsmi_get_socket_handles",   "amdsmi_get_processor_handles",
-    "amdsmi_get_gpu_asic_info",    "amdsmi_get_gpu_driver_info",
-    "amdsmi_get_gpu_bdf_id",       "amdsmi_get_gpu_metrics_info",
-    "amdsmi_get_power_info",       "amdsmi_get_temp_metric",
-    "amdsmi_get_gpu_fan_speed",    "amdsmi_get_gpu_activity",
-    "amdsmi_get_clock_info",       "amdsmi_get_gpu_memory_total",
-    "amdsmi_get_gpu_memory_usage", "amdsmi_get_pcie_info",
-    "amdsmi_get_gpu_process_list",
-});
+const scalar_bindings = .{
+    .amdsmi_get_temp_metric = .{
+        .temperature = .{ c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT },
+    },
+    .amdsmi_get_gpu_memory_usage = .{ .mem_used_bytes = .{c.AMDSMI_MEM_TYPE_VRAM} },
+    .amdsmi_get_gpu_memory_total = .{ .mem_total_bytes = .{c.AMDSMI_MEM_TYPE_VRAM} },
+};
+
+const Api = native.dynlib.Bindings(c, check, .{
+    "amdsmi_init",               "amdsmi_status_code_to_string",
+    "amdsmi_get_socket_handles", "amdsmi_get_processor_handles",
+    "amdsmi_get_gpu_asic_info",  "amdsmi_get_gpu_driver_info",
+    "amdsmi_get_gpu_bdf_id",     "amdsmi_get_gpu_metrics_info",
+    "amdsmi_get_power_info",     "amdsmi_get_gpu_fan_speed",
+    "amdsmi_get_gpu_activity",   "amdsmi_get_clock_info",
+    "amdsmi_get_pcie_info",      "amdsmi_get_gpu_process_list",
+} ++ std.meta.fieldNames(@TypeOf(scalar_bindings)));
 
 fn check(status: c.amdsmi_status_t) error{ Unsupported, AmdSmiError }!void {
     return switch (status) {
@@ -105,14 +111,7 @@ pub const Probe = struct {
     api: *const Api,
     handle: c.amdsmi_processor_handle,
 
-    const Scalar = native.dynlib.Scalar;
-    pub const temperature = Scalar(Probe, .{
-        .amdsmi_get_temp_metric, .{ c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT },
-    });
-    pub const mem_used_bytes =
-        Scalar(Probe, .{ .amdsmi_get_gpu_memory_usage, .{c.AMDSMI_MEM_TYPE_VRAM} });
-    pub const mem_total_bytes =
-        Scalar(Probe, .{ .amdsmi_get_gpu_memory_total, .{c.AMDSMI_MEM_TYPE_VRAM} });
+    pub const scalars = native.dynlib.Scalars(Probe, scalar_bindings).read;
 
     pub fn power_mw(self: *const Probe) ?u64 {
         // Watts: the current power where the GPU has it, else the average.
