@@ -190,8 +190,7 @@ pub const poll = polling.perDevice;
 
 pub const Probe = struct {
     backend: *const Furiosa,
-    chip: *Chip,
-    hwmon: ?*const Hwmon,
+    device: *Chip,
 
     pub const temperature = native.hwmon.Scalar(Probe, .{ .temperature, .milli, .one });
     pub const ambient_temperature = native.hwmon.Scalar(Probe, .{ .ambient, .milli, .one });
@@ -203,7 +202,7 @@ pub const Probe = struct {
     });
 
     pub fn workload(self: *const Probe) Workload {
-        const chip = self.chip;
+        const chip = self.device;
         chip.util = @splat(0);
         chip.mem_used = @splat(0);
         var reply: Workload = .{ .mem_total_bytes = chip.model.memory_bytes };
@@ -217,7 +216,7 @@ pub const Probe = struct {
     const Management = contract.Reply(&.{ .governor, .liveness, .throttle_reasons });
 
     pub fn management(self: *const Probe) Management {
-        const dir = self.chip.mgmt;
+        const dir = self.device.mgmt;
         var buffer: [256]u8 = undefined;
         var reply: Management = .{};
         // The governor name ends the first line.
@@ -241,12 +240,7 @@ pub const Probe = struct {
 };
 
 pub fn probe(self: *Furiosa, index: usize) Probe {
-    const chip = &self.chips[index];
-    return .{
-        .backend = self,
-        .chip = chip,
-        .hwmon = if (chip.hwmon) |*hwmon| hwmon else null,
-    };
+    return .{ .backend = self, .device = &self.chips[index] };
 }
 
 pub fn readProcesses(self: *Furiosa, scratch: std.mem.Allocator, reading: *source.Reading) !void {

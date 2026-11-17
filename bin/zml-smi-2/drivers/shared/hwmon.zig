@@ -40,7 +40,7 @@ pub fn resolve(arena: std.mem.Allocator, dir: sysfs.Dir, candidates: []const Can
 pub fn Scalar(comptime Probe: type, comptime binding: anytype) fn (*const Probe) ?u64 {
     return struct {
         fn read(probe: *const Probe) ?u64 {
-            const sensors = probe.hwmon orelse return null;
+            const sensors = if (probe.device.hwmon) |*hwmon| hwmon else return null;
             const file = @field(sensors.*, @tagName(binding[0])) orelse return null;
             return sensors.dir.scaled(file, binding[1], binding[2]) catch null;
         }

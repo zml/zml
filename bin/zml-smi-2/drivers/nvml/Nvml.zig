@@ -52,7 +52,7 @@ const Api = native.dynlib.Bindings(c, check, .{
     "nvmlDeviceGetPcieThroughput",              "nvmlDeviceGetPcieSpeed",
     "nvmlDeviceGetCurrPcieLinkWidth",           "nvmlDeviceGetComputeRunningProcesses_v3",
     "nvmlDeviceGetGraphicsRunningProcesses_v3", "nvmlDeviceGetProcessUtilization",
-} ++ std.meta.fieldNames(@TypeOf(scalar_bindings)));
+} ++ @typeInfo(@TypeOf(scalar_bindings)).@"struct".field_names);
 
 fn check(status: c.nvmlReturn_t) error{ Unsupported, NvmlError }!void {
     return switch (status) {
@@ -236,16 +236,15 @@ fn readList(
 ) ![]const Item {
     const running = Item == c.nvmlProcessInfo_t;
     var count: c_uint = 0;
-    const status = if (running)
-        query.function(handle, &count, null)
+    var args: @TypeOf(query).Args = if (running)
+        .{ handle, &count, null }
     else
-        query.function(handle, null, &count, since);
+        .{ handle, null, &count, since };
+    const status = @call(.auto, query.function, args);
     if (status == c.NVML_SUCCESS) return &.{};
     if (status != c.NVML_ERROR_INSUFFICIENT_SIZE) try check(status);
     const list = try scratch.alloc(Item, count);
-    try query.call(if (running)
-        .{ handle, &count, list.ptr }
-    else
-        .{ handle, list.ptr, &count, since });
+    args[if (running) 2 else 1] = list.ptr;
+    try query.call(args);
     return list[0..count];
 }

@@ -42,24 +42,22 @@ const Hwmon = struct {
 };
 
 const SensorProbe = struct {
-    gpu: *Gpu,
-    hwmon: ?*const Hwmon,
-    io: std.Io,
+    device: *Gpu,
 
     pub const temperature = native.hwmon.Scalar(SensorProbe, .{ .temperature, .milli, .one });
     pub const power_limit_mw = native.hwmon.Scalar(SensorProbe, .{ .power_limit, .micro, .milli });
 
     pub fn power_mw(self: *const SensorProbe) ?u64 {
-        const hwmon = self.hwmon orelse return null;
+        const hwmon = if (self.device.hwmon) |*sensors| sensors else return null;
         const file = hwmon.energy orelse return null;
         // Energy is a running total: its growth per second is microwatts.
         const microjoules = hwmon.dir.int(u64, file) catch return null;
-        const growth = self.gpu.energy.advance(self.io, microjoules) orelse return null;
+        const growth = self.device.energy.advance(self.device.dir.io, microjoules) orelse return null;
         return native.units.scale(growth.perSecond(), .micro, .milli);
     }
 
     pub fn fan_speed_percent(self: *const SensorProbe) ?u64 {
-        const hwmon = self.hwmon orelse return null;
+        const hwmon = if (self.device.hwmon) |*sensors| sensors else return null;
         const fan = hwmon.fan orelse return null;
         return fan.percent(hwmon.dir);
     }
@@ -197,11 +195,7 @@ pub fn poll(self: *OneApi, scratch: std.mem.Allocator, reading: *source.Reading)
         sample.put(.pcie_link_width, link.width);
         sample.put(.pcie_bandwidth_mbps, link.mbps());
 
-        polling.project(sample, &SensorProbe{
-            .gpu = gpu,
-            .hwmon = if (gpu.hwmon) |*hwmon| hwmon else null,
-            .io = self.io,
-        });
+        polling.project(sample, &SensorProbe{ .device = gpu });
     }
 
     // Read each DRM client once; its observation supplies both totals and process rows.

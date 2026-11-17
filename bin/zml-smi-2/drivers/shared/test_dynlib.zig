@@ -46,7 +46,8 @@ test "one scalar symbol supplies several metrics with independent results" {
         .value = .{@as(i32, 3)},
         .negative = .{@as(i32, -5)},
     } };
-    const Api = dynlib.Bindings(Driver, Libc.checkLibc, std.meta.fieldNames(@TypeOf(bindings)));
+    const names = @typeInfo(@TypeOf(bindings)).@"struct".field_names;
+    const Api = dynlib.Bindings(Driver, Libc.checkLibc, names);
     const Probe = struct {
         api: *const Api,
         handle: u32,

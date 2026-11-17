@@ -42,7 +42,7 @@ const Api = native.dynlib.Bindings(c, check, .{
     "amdsmi_get_power_info",     "amdsmi_get_gpu_fan_speed",
     "amdsmi_get_gpu_activity",   "amdsmi_get_clock_info",
     "amdsmi_get_pcie_info",      "amdsmi_get_gpu_process_list",
-} ++ std.meta.fieldNames(@TypeOf(scalar_bindings)));
+} ++ @typeInfo(@TypeOf(scalar_bindings)).@"struct".field_names);
 
 fn check(status: c.amdsmi_status_t) error{ Unsupported, AmdSmiError }!void {
     return switch (status) {

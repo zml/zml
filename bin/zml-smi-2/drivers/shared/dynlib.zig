@@ -43,11 +43,11 @@ pub fn openBundled(comptime Api: type, io: std.Io, name: []const u8) !Api {
 
 /// Each symbol maps metric names to the arguments between the handle and output pointer.
 pub fn Scalars(comptime Probe: type, comptime bindings: anytype) type {
-    const symbols = std.meta.fieldNames(@TypeOf(bindings));
+    const symbols = @typeInfo(@TypeOf(bindings)).@"struct".field_names;
     var names: []const [:0]const u8 = &.{};
-    for (symbols) |symbol| names = names ++ std.meta.fieldNames(@TypeOf(@field(bindings, symbol)));
-    const types: [names.len]type = @splat(?u64);
-    const Reply = @Struct(.auto, null, names, &types, &@splat(.{}));
+    for (symbols) |symbol| names = names ++
+        @typeInfo(@TypeOf(@field(bindings, symbol))).@"struct".field_names;
+    const Reply = @Struct(.auto, null, names, &@splat(?u64), &@splat(.{}));
 
     return struct {
         pub fn read(probe: *const Probe) Reply {
@@ -55,9 +55,9 @@ pub fn Scalars(comptime Probe: type, comptime bindings: anytype) type {
             inline for (symbols) |symbol| {
                 const getter = @field(probe.api.*, symbol);
                 const metrics = @field(bindings, symbol);
-                inline for (comptime std.meta.fieldNames(@TypeOf(metrics))) |metric| {
+                inline for (@typeInfo(@TypeOf(metrics)).@"struct".field_names) |metric| {
                     const value = getter.get(.{probe.handle} ++ @field(metrics, metric)) catch null;
-                    @field(reply, metric) = if (value) |scalar| std.math.cast(u64, scalar) else null;
+                    @field(reply, metric) = if (value) |raw| std.math.cast(u64, raw) else null;
                 }
             }
             return reply;
@@ -79,7 +79,7 @@ pub fn Checked(comptime check: anytype, comptime Function: type) type {
     return struct {
         function: *const Function,
 
-        const Args = std.meta.ArgsTuple(Function);
+        pub const Args = std.meta.ArgsTuple(Function);
         const params = @typeInfo(Args).@"struct".field_types;
         const Result = @typeInfo(params[params.len - 1]).pointer.child;
         const Inputs = @Tuple(params[0 .. params.len - 1]);
