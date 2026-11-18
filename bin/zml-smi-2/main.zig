@@ -68,10 +68,9 @@ pub fn main(init: std.process.Init) !void {
     });
     defer collector.deinit();
 
-    inline for (std.enums.values(contract.Target)) |tag| {
-        const Platform = platforms.lookup(tag, .native).driver;
-        if (Platform != void and platforms.available(Platform, io)) {
-            try addSource(&collector, Platform, @typeName(Platform), .{});
+    inline for (platforms.native_drivers) |Driver| {
+        if (platforms.available(Driver, io)) {
+            try addSource(&collector, Driver, @typeName(Driver), .{});
         }
     }
 

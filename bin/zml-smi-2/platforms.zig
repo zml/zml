@@ -54,10 +54,24 @@ const Entry = struct {
     logo: ?Logo = null,
 };
 
-const Platform = struct { display: Entry, driver: type };
+const Platform = struct { display: Entry, driver: ?type };
+
+pub const native_drivers = drivers_blk: {
+    const targets = std.enums.values(contract.Target);
+    var drivers: [targets.len]type = undefined;
+    var count: usize = 0;
+    for (targets) |target| {
+        const Driver = lookup(target, .native).driver orelse continue;
+        drivers[count] = Driver;
+        count += 1;
+    }
+    if (count == 0) @compileError("zml-smi-2 has no native drivers for " ++
+        @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag));
+    break :drivers_blk drivers[0..count].*;
+};
 
 /// Portable lookups supply display metadata without resolving any native driver.
-pub fn lookup(comptime target: contract.Target, comptime mode: enum { native, portable }) Platform {
+fn lookup(comptime target: contract.Target, comptime mode: enum { native, portable }) Platform {
     const linux = mode == .native and builtin.os.tag == .linux;
     const linux_nvml = linux and (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64);
     const linux_x86 = linux and builtin.cpu.arch == .x86_64;
@@ -125,7 +139,7 @@ pub fn lookup(comptime target: contract.Target, comptime mode: enum { native, po
             },
         } }, if (mac_arm) @import("zml-smi-2/drivers/metal") },
     };
-    return .{ .display = display, .driver = if (@TypeOf(backend) == type) backend else void };
+    return .{ .display = display, .driver = if (@TypeOf(backend) == type) backend else null };
 }
 
 fn row(label: []const u8, value: spec.Row.Value) spec.Row {
