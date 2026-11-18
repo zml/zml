@@ -702,6 +702,12 @@ pub const Platform = struct {
             },
         };
     }
+
+    /// Number of execution cores (such as GPU streaming multiprocessors or TPU tensor cores) available on a specific hardware device
+    pub fn coreCountPerDevice(platform: *const zml.Platform) ?u32 {
+        const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return null;
+        return if (attribute.int64 > 0) std.math.cast(u32, attribute.int64) else null;
+    }
 };
 
 pub const CreateOptions = struct {
@@ -859,12 +865,6 @@ pub const cuda = struct {
             return @as(u16, self.major) * 10 + self.minor;
         }
     };
-
-    /// SM count of an addressable CUDA device; unavailable attributes return null.
-    pub fn coreCount(platform: *const zml.Platform, device_index: usize) ?u32 {
-        const attribute = platform.devices[device_index].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return null;
-        return std.math.cast(u32, attribute.int64);
-    }
 
     pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
         if (platform.target != .cuda) return null;

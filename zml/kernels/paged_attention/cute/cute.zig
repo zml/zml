@@ -45,13 +45,6 @@ pub const Parameters = struct {
     }
 };
 
-// TODO(Corentin): This should be moved in the platform probably
-pub fn multiprocessorCount(platform: *const zml.Platform) usize {
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
-    if (attribute.int64 <= 0) return 1;
-    return @intCast(attribute.int64);
-}
-
 test {
     _ = kernel;
     _ = sm10x;
@@ -62,6 +55,10 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
     const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
     return cc.major > 8 or (cc.major == 8 and cc.minor >= 9);
+}
+
+pub fn multiprocessorCount(platform: *const zml.Platform) usize {
+    return platform.coreCountPerDevice() orelse 1;
 }
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) zml.Tensor {
