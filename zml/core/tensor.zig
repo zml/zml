@@ -3645,27 +3645,34 @@ pub const Tensor = struct {
         const a = x.axis(axis_);
         const dt: DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
 
-        // XLA-NPU does not implement the two-result reduce used below, so
-        // express argmax as a max reduce plus a reversed-index max reduce.
+        // XLA-NPU does not implement the two-result reduce used below. Emit a
+        // backend custom call implemented by aclnnArgMax instead.
         if (dt == .i32) {
             if (Compiler.currentOrNull()) |ctx| {
                 if (ctx.platform.target == .ascend) {
-                    const n: i32 = @intCast(x.dim(a));
                     const values = x.max(a);
-                    const max_values = values.broad(x.shape());
-                    const is_max = x.cmp(.EQ, max_values);
-                    const is_nan = x.cmp(.NE, x);
-                    const keep = is_max.logical(.OR, is_nan);
-                    const reversed = Tensor.arange(.{ .end = @as(i64, n) }, dt)
-                        .broadcast(x.shape(), &.{a})
-                        .negate()
-                        .addConstant(n - 1);
-                    const sentinel = Tensor.constant(.{ .i32 = -1 }).broad(x.shape());
-                    const indices = keep.select(reversed, sentinel)
-                        .max(a)
-                        .negate()
-                        .addConstant(n - 1);
-                    return .{ .values = values, .indices = indices };
+                    const out_shape = x.shape().setDim(a, 1).withDtype(dt);
+                    const out_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, out_shape);
+                    const config = std.fmt.allocPrint(
+                        ctx.arena.allocator(),
+                        "axis={d}",
+                        .{a},
+                    ) catch @panic("OOM");
+                    const op = stablehlo.custom_call(
+                        ctx.mlir_ctx,
+                        &.{x.value()},
+                        &.{out_type},
+                        .{
+                            .call_target_name = "npu$argmax",
+                            .has_side_effect = false,
+                            .backend_config = .{ .original = config },
+                        },
+                        ctx.location,
+                    ).appendTo(currentBlock());
+                    return .{
+                        .values = values,
+                        .indices = _result(out_shape, op.result(0)),
+                    };
                 }
             }
         }
