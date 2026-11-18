@@ -1,0 +1,14 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "ascend",
+    import_name = "platforms/ascend",
+    main = "ascend.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+        "//platforms:options",
+        "//stdx",
+    ],
+)
