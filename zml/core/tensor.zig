@@ -2064,6 +2064,84 @@ pub const Tensor = struct {
         try std.testing.expectEqual([2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } }, try res.getValue([2][5]f32, std.testing.io));
     }
 
+    /// Returns a Tensor containing the cumulative maximum of elements over the given axis.
+    /// Output shape is the same as input shape.
+    /// [-2, 1, 0, 4, 0, 3, 5, 1].cumulativeSum(0) -> [-2, 1, 1, 4, 4, 4, 5, 5]
+    /// The last value contains the max of all element in the array.
+    /// TODO(antoineprv): Refactor as this and the test share too much with cumulativeSum.
+    pub fn cumulativeMax(self: Tensor, axis_: anytype) Tensor {
+        const rk = self.rank();
+        const a = self.axis(axis_);
+
+        var window_dimensions = constants.ones_i64;
+        window_dimensions[a] = self.dim(a);
+        var padding: [constants.MAX_RANK][2]i64 = @splat(.{ 0, 0 });
+        padding[a] = .{ self.dim(a) - 1, 0 };
+
+        const dt = self.dtype();
+        const result = ops.reduceWindow(
+            1,
+            .{self},
+            .{.constant(dt.minValue())},
+            .{
+                .base_dilations = constants.ones_i64[0..rk],
+                .window_dilations = constants.ones_i64[0..rk],
+                .window_strides = constants.ones_i64[0..rk],
+                .window_dimensions = window_dimensions[0..rk],
+                .padding = padding[0..rk],
+            },
+            struct {
+                fn max(values: ops.ReduceArgs) [1]Tensor {
+                    return .{.maximum(values.left, values.right)};
+                }
+            }.max,
+        );
+        return result[0];
+    }
+
+    test cumulativeMax {
+        const zml = @import("core.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _cummax(input: Tensor) Tensor {
+                const x = input.withPartialTags(.{.n});
+                const y = x.cumulativeMax(.n);
+                // Check that tags are propagated
+                std.debug.assert(y.shape().eqlWithTags(x.shape()));
+                return y;
+            }
+        };
+
+        const x: Tensor = .init(.{ 2, 5 }, .f32);
+
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Local._cummax,
+            .{x},
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var x_buffer: zml.Buffer = try .fromBytes(
+            std.testing.io,
+            platform,
+            x.shape(),
+            @ptrCast(&[2][5]f32{ .{ -3, 1, 5, 0, 1 }, .{ 3, 1, 10, 2, 1 } }),
+        );
+        defer x_buffer.deinit();
+
+        var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
+        defer res.deinit();
+
+        try std.testing.expectEqual(
+            [2][5]f32{ .{ -3, 1, 5, 5, 5 }, .{3, 3, 10, 10, 10 } },
+            try res.getValue([2][5]f32, std.testing.io),
+        );
+    }
+
     /// Returns a transposed Tensor computed using the given axes.
     pub fn transpose(self: Tensor, axes_: anytype) Tensor {
         const axes__ = self.axes(axes_).constSlice();
