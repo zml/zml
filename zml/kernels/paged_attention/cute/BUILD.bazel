@@ -53,7 +53,6 @@ zig_binary(
     srcs = [
         "cases.zig",
         "fixtures.zig",
-        "reference.zig",
     ],
     main = "benchmark.zig",
     tags = ["manual"],

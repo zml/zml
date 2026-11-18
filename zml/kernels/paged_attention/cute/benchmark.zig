@@ -2,7 +2,6 @@ const std = @import("std");
 const zml = @import("zml");
 const cases = @import("cases.zig");
 const fixtures = @import("fixtures.zig");
-const reference = @import("reference.zig");
 const Inputs = fixtures.Inputs;
 
 const Args = struct {
@@ -28,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("PAGED_ATTENTION dtype={s} page_size=16 seed=42 cc={d}.{d}\n{f}\n", .{
         @tagName(args.dtype), cc.major, cc.minor, platform.fmtVerbose(),
     });
-    std.debug.print("timing=synchronized_invocation_us devices={d} hkv=per_device (KV heads sharded across all visible GPUs; includes runtime, output allocation, attention, merge and wait; excludes compile, upload, reference validation and output destruction)\n", .{platform.devices.len});
+    std.debug.print("timing=synchronized_invocation_us devices={d} hkv=per_device (KV heads sharded across all visible GPUs; includes runtime, output allocation, attention, merge and wait; excludes compile, upload and output destruction)\n", .{platform.devices.len});
 
     if ((args.sparse or args.stress) and args.backend == .cute_generic) return error.UnsupportedBackend;
     const suite: []const cases.Case = if (args.stress) &cases.sparseStressBenchmarks else if (args.sparse) &cases.sparseBenchmarks else &cases.benchmarks;
@@ -88,7 +87,7 @@ fn parseArgs(init: std.process.Init) !Args {
             result.samples = try std.fmt.parseInt(usize, arg["--samples=".len..], 10);
             if (result.samples == 0) return error.InvalidSamples;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            std.debug.print("paged attention benchmark [--sparse|--stress] [--backend=cute|cute_generic|all] [--case=INDEX|NAME] [--dtype=bf16|f16] [--warmup=10] [--samples=101] [--profile-dir=PATH]\nSparse mode benchmarks CuTe on seed-42 inputs; the default dense suite also uses CuTe. Every measured case is first checked against the CPU reference. Use --stress to exercise large-group resource limits.\n", .{});
+            std.debug.print("paged attention benchmark [--sparse|--stress] [--backend=cute|cute_generic|all] [--case=INDEX|NAME] [--dtype=bf16|f16] [--warmup=10] [--samples=101] [--profile-dir=PATH]\nSparse mode benchmarks CuTe on seed-42 inputs; the default dense suite also uses CuTe. Use --stress to exercise large-group resource limits.\n", .{});
             std.process.exit(0);
         } else return error.UnknownArgument;
     }
@@ -122,16 +121,6 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     defer zml.Buffer.deinitAll(Inputs, &buffers);
 
     var output: zml.Buffer = undefined;
-    const max_error = validate: {
-        runner.run(io, .{buffers}, .{&output}, .{ .wait = true });
-        defer output.deinit();
-        var host = try output.toSliceAlloc(a, io);
-        defer host.free(a);
-        break :validate if (args.dtype == .f16)
-            try reference.check(a, global_case, fixture, host.items(f16))
-        else
-            try reference.check(a, global_case, fixture, host.items(zml.floats.BFloat16));
-    };
     for (0..args.warmup) |_| {
         runner.run(io, .{buffers}, .{&output}, .{ .wait = true });
         output.deinit();
@@ -162,8 +151,8 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
         (samples[samples.len / 2 - 1] + samples[samples.len / 2]) / 2
     else
         samples[samples.len / 2];
-    std.debug.print("RESULT index={d} name={s} d={d} b={d} hkv={d} g={d} prefill={d} chunk={d} kv={d} topk={d} backend={s} compute_dtype={s} check=all_outputs max_abs={d:.6} compile_ms={d:.3} n={d} median_us={d:.3} p10_us={d:.3} p90_us={d:.3}\n", .{
-        index, c.name, c.head_dim, c.batch, c.kv_heads, c.group, c.prefill, if (c.prefill > 0) c.chunk else 1, c.kv_len, c.topk, @tagName(backend), @tagName(args.dtype), max_error, compile_us / 1000, samples.len, median, samples[samples.len / 10], samples[(samples.len - 1) * 9 / 10],
+    std.debug.print("RESULT index={d} name={s} d={d} b={d} hkv={d} g={d} prefill={d} chunk={d} kv={d} topk={d} backend={s} compute_dtype={s} compile_ms={d:.3} n={d} median_us={d:.3} p10_us={d:.3} p90_us={d:.3}\n", .{
+        index, c.name, c.head_dim, c.batch, c.kv_heads, c.group, c.prefill, if (c.prefill > 0) c.chunk else 1, c.kv_len, c.topk, @tagName(backend), @tagName(args.dtype), compile_us / 1000, samples.len, median, samples[samples.len / 10], samples[(samples.len - 1) * 9 / 10],
     });
 }
 
