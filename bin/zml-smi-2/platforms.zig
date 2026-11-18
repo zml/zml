@@ -62,25 +62,21 @@ pub const native_drivers = drivers_blk: {
 /// Display and native registration each resolve their own catalog column.
 fn lookup(comptime target: contract.Target) type {
     return struct {
-        const display = select(target, Entry) catch unreachable;
-        const driver: ?type = select(target, type) catch null;
+        const display = select(target, Entry);
+        const driver = select(target, ?type);
     };
 }
 
-/// A display read takes the metadata branch even when the host has a native driver.
-fn native(comptime Result: type, supported: bool) error{Unsupported}!bool {
-    return if (Result == Entry) false else if (supported) true else error.Unsupported;
-}
-
-fn select(comptime target: contract.Target, comptime Result: type) error{Unsupported}!Result {
-    const linux_x86 = native(Result, builtin.os.tag == .linux and builtin.cpu.arch == .x86_64);
-    const linux_nvml = if (builtin.os.tag == .linux and builtin.cpu.arch == .aarch64) native(Result, true) else linux_x86;
-    const mac_arm = native(Result, builtin.os.tag == .macos and builtin.cpu.arch == .aarch64);
-    return switch (target) {
-        .cuda => if (try linux_nvml) @import("zml-smi-2/drivers/nvml") else .{ .logo = .nvidia },
-        .rocm => if (try linux_x86) @import("zml-smi-2/drivers/amdsmi") else .{ .logo = .amd },
-        .oneapi => if (try linux_x86) @import("zml-smi-2/drivers/oneapi") else .{ .logo = .intel },
-        .neuron => if (try linux_x86) @import("zml-smi-2/drivers/neuron") else .{ .title_label = "NC", .logo = .neuron, .profile = &.{
+fn select(comptime target: contract.Target, comptime Result: type) Result {
+    const driver = Result == ?type;
+    const linux_x86 = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
+    const linux_nvml = linux_x86 or (builtin.os.tag == .linux and builtin.cpu.arch == .aarch64);
+    const mac_arm = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
+    const gpu_logo = switch (target) {
+        .cuda => if (driver and linux_nvml) return @import("zml-smi-2/drivers/nvml") else .nvidia,
+        .rocm => if (driver and linux_x86) return @import("zml-smi-2/drivers/amdsmi") else .amd,
+        .oneapi => if (driver and linux_x86) return @import("zml-smi-2/drivers/oneapi") else .intel,
+        .neuron => if (!driver) return .{ .title_label = "NC", .logo = .neuron, .profile = &.{
             .util_label = "Core",
             .util_title = "Core Utilization",
             .memory_prefix = "HBM ",
@@ -98,14 +94,14 @@ fn select(comptime target: contract.Target, comptime Result: type) error{Unsuppo
                 row("Notifications ", .{ .memory = .nc_notifications }),
                 row("Uncategorized ", .{ .memory = .nc_uncategorized }),
             } }},
-        } },
-        .tpu => if (try linux_x86) @import("zml-smi-2/drivers/tpu") else .{ .title_label = "TPU", .logo = .tpu, .profile = &.{
+        } } else if (linux_x86) return @import("zml-smi-2/drivers/neuron"),
+        .tpu => if (!driver) return .{ .title_label = "TPU", .logo = .tpu, .profile = &.{
             .util_label = "Duty",
             .util_title = "Duty Cycle",
             .memory_prefix = "HBM ",
             .environment = .hidden,
-        } },
-        .furiosa => if (try linux_x86) @import("zml-smi-2/drivers/furiosa") else .{ .title_label = "NPU", .profile = &.{
+        } } else if (linux_x86) return @import("zml-smi-2/drivers/tpu"),
+        .furiosa => if (!driver) return .{ .title_label = "NPU", .profile = &.{
             .util_label = "NPU",
             .util_title = "NPU Utilization",
             .memory_prefix = "DRAM ",
@@ -119,8 +115,8 @@ fn select(comptime target: contract.Target, comptime Result: type) error{Unsuppo
                 row("Governor ", .{ .named = named(.governor, contract.Governor) }),
                 row("Throttle ", .{ .flags = named(.throttle_reasons, contract.ThrottleReason) }),
             } }},
-        } },
-        .metal => if (try mac_arm) @import("zml-smi-2/drivers/metal") else .{ .profile = &.{
+        } } else if (linux_x86) return @import("zml-smi-2/drivers/furiosa"),
+        .metal => if (!driver) return .{ .profile = &.{
             .util_label = "GPU",
             .util_title = "GPU Utilization",
             .memory_prefix = "In use ",
@@ -137,8 +133,9 @@ fn select(comptime target: contract.Target, comptime Result: type) error{Unsuppo
                     row("System  ", .{ .host_watts = .system_power_mw }),
                 } },
             },
-        } },
+        } } else if (mac_arm) return @import("zml-smi-2/drivers/metal"),
     };
+    return if (driver) null else .{ .logo = gpu_logo };
 }
 
 fn row(label: []const u8, value: spec.Row.Value) spec.Row {
