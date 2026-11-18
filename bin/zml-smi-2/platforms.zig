@@ -49,29 +49,24 @@ const gpu: spec.Profile = .{
 };
 
 const Entry = struct {
-    profile: *const spec.Profile,
+    profile: *const spec.Profile = &gpu,
     title_label: []const u8 = "GPU",
     logo: ?Logo = null,
 };
 
-fn catalog(
-    comptime native: bool,
-) std.enums.EnumFieldStruct(contract.Target, if (native) type else Entry, null) {
-    const linux = builtin.os.tag == .linux;
+const Platform = struct { display: Entry, driver: type };
+
+/// Portable lookups supply display metadata without resolving any native driver.
+pub fn lookup(comptime target: contract.Target, comptime mode: enum { native, portable }) Platform {
+    const linux = mode == .native and builtin.os.tag == .linux;
     const linux_nvml = linux and (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64);
     const linux_x86 = linux and builtin.cpu.arch == .x86_64;
-    const mac_arm = builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
-    return .{
-        .cuda = if (!native)
-            .{ .profile = &gpu, .logo = .nvidia }
-        else if (linux_nvml) @import("zml-smi-2/drivers/nvml") else void,
-        .rocm = if (!native)
-            .{ .profile = &gpu, .logo = .amd }
-        else if (linux_x86) @import("zml-smi-2/drivers/amdsmi") else void,
-        .oneapi = if (!native)
-            .{ .profile = &gpu, .logo = .intel }
-        else if (linux_x86) @import("zml-smi-2/drivers/oneapi") else void,
-        .neuron = if (!native) .{ .title_label = "NC", .logo = .neuron, .profile = &.{
+    const mac_arm = mode == .native and builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
+    const display: Entry, const backend = switch (target) {
+        .cuda => .{ .{ .logo = .nvidia }, if (linux_nvml) @import("zml-smi-2/drivers/nvml") },
+        .rocm => .{ .{ .logo = .amd }, if (linux_x86) @import("zml-smi-2/drivers/amdsmi") },
+        .oneapi => .{ .{ .logo = .intel }, if (linux_x86) @import("zml-smi-2/drivers/oneapi") },
+        .neuron => .{ .{ .title_label = "NC", .logo = .neuron, .profile = &.{
             .util_label = "Core",
             .util_title = "Core Utilization",
             .memory_prefix = "HBM ",
@@ -89,14 +84,14 @@ fn catalog(
                 row("Notifications ", .{ .memory = .nc_notifications }),
                 row("Uncategorized ", .{ .memory = .nc_uncategorized }),
             } }},
-        } } else if (linux_x86) @import("zml-smi-2/drivers/neuron") else void,
-        .tpu = if (!native) .{ .title_label = "TPU", .logo = .tpu, .profile = &.{
+        } }, if (linux_x86) @import("zml-smi-2/drivers/neuron") },
+        .tpu => .{ .{ .title_label = "TPU", .logo = .tpu, .profile = &.{
             .util_label = "Duty",
             .util_title = "Duty Cycle",
             .memory_prefix = "HBM ",
             .environment = .hidden,
-        } } else if (linux_x86) @import("zml-smi-2/drivers/tpu") else void,
-        .furiosa = if (!native) .{ .title_label = "NPU", .profile = &.{
+        } }, if (linux_x86) @import("zml-smi-2/drivers/tpu") },
+        .furiosa => .{ .{ .title_label = "NPU", .profile = &.{
             .util_label = "NPU",
             .util_title = "NPU Utilization",
             .memory_prefix = "DRAM ",
@@ -110,8 +105,8 @@ fn catalog(
                 row("Governor ", .{ .named = named(.governor, contract.Governor) }),
                 row("Throttle ", .{ .flags = named(.throttle_reasons, contract.ThrottleReason) }),
             } }},
-        } } else if (linux_x86) @import("zml-smi-2/drivers/furiosa") else void,
-        .metal = if (!native) .{ .profile = &.{
+        } }, if (linux_x86) @import("zml-smi-2/drivers/furiosa") },
+        .metal => .{ .{ .profile = &.{
             .util_label = "GPU",
             .util_title = "GPU Utilization",
             .memory_prefix = "In use ",
@@ -128,13 +123,10 @@ fn catalog(
                     row("System  ", .{ .host_watts = .system_power_mw }),
                 } },
             },
-        } } else if (mac_arm) @import("zml-smi-2/drivers/metal") else void,
+        } }, if (mac_arm) @import("zml-smi-2/drivers/metal") },
     };
+    return .{ .display = display, .driver = if (@TypeOf(backend) == type) backend else void };
 }
-
-pub const native_catalog = catalog(true);
-// Remote devices have display profiles even when their native reader is unavailable.
-const presentations: std.EnumArray(contract.Target, Entry) = .init(catalog(false));
 
 fn row(label: []const u8, value: spec.Row.Value) spec.Row {
     return .{ .label = label, .value = value };
@@ -161,7 +153,9 @@ pub fn devices(
 ) std.mem.Allocator.Error![]const spec.DeviceView {
     const views = try arena.alloc(spec.DeviceView, inventory.len);
     for (inventory, views, 0..) |device, *view, index| {
-        const entry = presentations.get(device.target);
+        const entry = switch (device.target) {
+            inline else => |target| lookup(target, .portable).display,
+        };
         view.* = .{
             .title = title(arena, device, index, entry.title_label, .overview) catch
                 return error.OutOfMemory,
