@@ -15,11 +15,12 @@ gpus: []Gpu,
 /// The first poll wraps to phase zero and reads PCIe throughput.
 phase: u2 = 3,
 
+const Throughput = contract.Reply(&.{ .pcie_tx_kbps, .pcie_rx_kbps });
+
 const Gpu = struct {
     handle: c.nvmlDevice_t,
     /// PCIe throughput is read every fourth poll and kept in between.
-    pcie_tx_kbps: ?u64 = null,
-    pcie_rx_kbps: ?u64 = null,
+    throughput: Throughput = .{},
     /// The newest process utilization the GPU reported, so that a poll reads only newer ones.
     last_seen: u64 = 0,
 };
@@ -136,29 +137,25 @@ pub const Probe = struct {
     pub const encoder_util_percent = engineUtilization(.nvmlDeviceGetEncoderUtilization);
     pub const decoder_util_percent = engineUtilization(.nvmlDeviceGetDecoderUtilization);
 
-    const Pcie = contract.Reply(&.{
-        .pcie_link_width, .pcie_bandwidth_mbps, .pcie_tx_kbps, .pcie_rx_kbps,
-    });
-
-    pub fn pcie(self: *const Probe) Pcie {
-        const api = self.api;
-        const handle = self.handle;
-        const width: ?u64 = api.nvmlDeviceGetCurrPcieLinkWidth.get(.{handle}) catch null;
-        const lane_mbps: ?u64 = api.nvmlDeviceGetPcieSpeed.get(.{handle}) catch null;
-
-        // Throughput blocks while it measures (#766), so keep it between refreshes.
-        if (self.refresh_pcie) {
-            const query = api.nvmlDeviceGetPcieThroughput;
-            self.gpu.pcie_tx_kbps = query.get(.{ handle, c.NVML_PCIE_UTIL_TX_BYTES }) catch null;
-            self.gpu.pcie_rx_kbps = query.get(.{ handle, c.NVML_PCIE_UTIL_RX_BYTES }) catch null;
-        }
-        const bandwidth = if (width != null and lane_mbps != null) width.? * lane_mbps.? else null;
+    pub fn pcie(self: *const Probe) contract.Reply(&.{ .pcie_link_width, .pcie_bandwidth_mbps }) {
+        const width: ?u64 = self.api.nvmlDeviceGetCurrPcieLinkWidth.get(.{self.handle}) catch null;
+        const speed: ?u64 = self.api.nvmlDeviceGetPcieSpeed.get(.{self.handle}) catch null;
         return .{
             .pcie_link_width = width,
-            .pcie_bandwidth_mbps = bandwidth,
-            .pcie_tx_kbps = self.gpu.pcie_tx_kbps,
-            .pcie_rx_kbps = self.gpu.pcie_rx_kbps,
+            .pcie_bandwidth_mbps = if (width != null and speed != null) width.? * speed.? else null,
         };
+    }
+
+    pub fn pcieThroughput(self: *const Probe) Throughput {
+        // Throughput blocks while it measures (#766), so keep it between refreshes.
+        if (self.refresh_pcie) {
+            const query = self.api.nvmlDeviceGetPcieThroughput;
+            self.gpu.throughput = .{
+                .pcie_tx_kbps = query.get(.{ self.handle, c.NVML_PCIE_UTIL_TX_BYTES }) catch null,
+                .pcie_rx_kbps = query.get(.{ self.handle, c.NVML_PCIE_UTIL_RX_BYTES }) catch null,
+            };
+        }
+        return self.gpu.throughput;
     }
 
     fn engineUtilization(comptime function: anytype) fn (*const Probe) ?u64 {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const BoundedArray = @import("stdx").BoundedArray;
 const sysfs = @import("sysfs.zig");
 
 /// One /proc/<pid>/fdinfo/<fd> file of a DRM client. Its strings point into the text it was parsed from.
@@ -6,10 +7,8 @@ pub const Fdinfo = struct {
     /// The PCI address of the device: "0000:03:00.0".
     pdev: ?[]const u8 = null,
     client_id: ?u64 = null,
-    region_buffer: [8]Region = undefined,
-    region_count: u8 = 0,
-    engine_buffer: [16]Engine = undefined,
-    engine_count: u8 = 0,
+    regions: BoundedArray(Region, 8) = .empty,
+    engines: BoundedArray(Engine, 16) = .empty,
 
     /// Memory of one region, in bytes.
     pub const Region = struct {
@@ -25,14 +24,6 @@ pub const Fdinfo = struct {
         cycles: ?u64 = null,
         total_cycles: ?u64 = null,
     };
-
-    pub fn regions(self: *const Fdinfo) []const Region {
-        return self.region_buffer[0..self.region_count];
-    }
-
-    pub fn engines(self: *const Fdinfo) []const Engine {
-        return self.engine_buffer[0..self.engine_count];
-    }
 };
 
 /// Reads one fdinfo file into `buffer`, which the strings of the result point into.
@@ -62,8 +53,7 @@ pub fn parse(text: []const u8) Fdinfo {
             .{ "drm-cycles-", "cycles" },
         }) |binding| {
             if (std.mem.cutPrefix(u8, key, binding[0])) |class| {
-                const engine = slot(&info.engine_buffer, &info.engine_count, "class", class) orelse
-                    continue :lines_loop;
+                const engine = slot(&info.engines, "class", class) orelse continue :lines_loop;
                 @field(engine, binding[1]) = sysfs.firstNumber(value);
                 continue :lines_loop;
             }
@@ -73,7 +63,7 @@ pub fn parse(text: []const u8) Fdinfo {
         const name = total orelse std.mem.cutPrefix(u8, key, "drm-resident-") orelse
             std.mem.cutPrefix(u8, key, "drm-memory-") orelse
             std.mem.cutSuffix(u8, key, " mem") orelse continue;
-        const region = slot(&info.region_buffer, &info.region_count, "name", name) orelse continue;
+        const region = slot(&info.regions, "name", name) orelse continue;
         const property = if (total != null) &region.total else &region.resident;
         property.* = bytes(value);
     }
@@ -81,13 +71,11 @@ pub fn parse(text: []const u8) Fdinfo {
 }
 
 /// The entry called `name`, added when missing. Null past the capacity.
-fn slot(buffer: anytype, count: *u8, comptime key: []const u8, name: []const u8) ?@TypeOf(&buffer[0]) {
-    for (buffer[0..count.*]) |*item| {
+fn slot(list: anytype, comptime key: []const u8, name: []const u8) ?@TypeOf(&list.buffer[0]) {
+    for (list.slice()) |*item| {
         if (std.mem.eql(u8, @field(item, key), name)) return item;
     }
-    if (count.* == buffer.len) return null;
-    const item = &buffer[count.*];
-    count.* += 1;
+    const item = list.addOne() catch return null;
     item.* = .{};
     @field(item, key) = name;
     return item;

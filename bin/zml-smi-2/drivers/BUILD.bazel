@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 package(default_visibility = ["//bin/zml-smi-2:__subpackages__"])
@@ -17,7 +18,16 @@ zig_library(
     ],
     import_name = "zml-smi-2/native",
     main = "shared/native.zig",
-    deps = ["@rules_zig//zig/runfiles"],
+    deps = [
+        "//stdx",
+        "@rules_zig//zig/runfiles",
+    ],
+)
+
+cc_library(
+    name = "macos_host_headers",
+    hdrs = ["host/macos.h"],
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 zig_library(
@@ -31,13 +41,15 @@ zig_library(
     deps = [
         ":native",
         "//bin/zml-smi-2/contract",
-    ],
+    ] + select({
+        "@platforms//os:macos": [":macos_host_headers"],
+        "//conditions:default": [],
+    }),
 )
 
 zig_test(
     name = "test",
     srcs = [
-        "host/macos.zig",
         "host/test_macos.zig",
         "shared/test_counter.zig",
         "shared/test_dynlib.zig",
@@ -52,6 +64,7 @@ zig_test(
     data = ["//bin/zml-smi-2:sandbox"],
     main = "test_native.zig",
     deps = [
+        ":host",
         ":native",
         "//bin/zml-smi-2/contract",
     ],

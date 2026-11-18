@@ -1,6 +1,7 @@
 const std = @import("std");
-const Collector = @import("zml-smi-2/collector").Collector;
 const formats = @import("zml-smi-2/formats");
+const Host = @import("zml-smi-2/host").Host;
+const Collector = @import("zml-smi-2/collector").Collector(Host);
 
 const log = std.log.scoped(.@"zml-smi-2/api");
 

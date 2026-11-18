@@ -239,7 +239,7 @@ fn vramKib(self: *AmdSmi, pid: u32, address: []const u8) ?u64 {
     while (it.next(self.io) catch null) |entry| {
         const info = native.fdinfo.read(files, entry.name, &buffer) catch continue;
         if (!std.mem.eql(u8, info.pdev orelse continue, address)) continue;
-        for (info.regions()) |region| {
+        for (info.regions.constSlice()) |region| {
             if (std.mem.eql(u8, region.name, "vram")) bytes += region.resident orelse 0;
         }
     }

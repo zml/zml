@@ -9,7 +9,6 @@ const polling = @import("zml-smi-2/poll");
 const OneApi = @This();
 
 devices: []const contract.Device,
-io: std.Io,
 gpus: []Gpu,
 proc: ?native.sysfs.Dir,
 /// Busy nanoseconds (i915), or busy and total cycles (xe).
@@ -128,7 +127,6 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
 
     return .{
         .devices = devices.items,
-        .io = io,
         .gpus = gpus.items,
         .proc = native.sysfs.Dir.open(io, "/proc") catch null,
         .counters = .init(gpa),
@@ -209,7 +207,7 @@ pub fn poll(self: *OneApi, scratch: std.mem.Allocator, reading: *source.Reading)
     // A client shared through dup() or fork() is counted once.
     var clients: std.AutoHashMapUnmanaged(struct { u16, u64 }, void) = .empty;
 
-    var holders: native.proc.FdHolders = .init(self.io, &.{"/dev/dri/"});
+    var holders: native.proc.FdHolders = .init(proc.io, &.{"/dev/dri/"});
     defer holders.deinit();
     var buffer: [8192]u8 = undefined;
     while (holders.next()) |holder| {
@@ -228,7 +226,7 @@ pub fn poll(self: *OneApi, scratch: std.mem.Allocator, reading: *source.Reading)
             usage.mem_kib = (usage.mem_kib orelse 0) + kib;
             devices[device].total.mem_kib = (devices[device].total.mem_kib orelse 0) + kib;
         }
-        for (info.engines()) |engine| {
+        for (info.engines.constSlice()) |engine| {
             const xe = engine.total_cycles != null;
             const key: EngineKey = .{ .pid = holder.pid, .device = device, .class = if (xe) 0 else std.hash.Wyhash.hash(0, engine.class) };
             const totals = (try engines.getOrPutValue(scratch, key, .{ .kind = .of(engine.class) })).value_ptr;
@@ -243,9 +241,9 @@ pub fn poll(self: *OneApi, scratch: std.mem.Allocator, reading: *source.Reading)
         if (!device.engines.contains(engine.kind)) device.engines.put(engine.kind, null);
 
         // Both counters advance at every reading, even the first.
-        const busy = try self.counters.advance(.{ .engine = key, .metric = .busy }, self.io, engine.busy);
+        const busy = try self.counters.advance(.{ .engine = key, .metric = .busy }, proc.io, engine.busy);
         const cycles = if (engine.total) |total|
-            try self.counters.advance(.{ .engine = key, .metric = .cycles }, self.io, total)
+            try self.counters.advance(.{ .engine = key, .metric = .cycles }, proc.io, total)
         else
             null;
         const growth = busy orelse continue;
@@ -335,7 +333,7 @@ fn deviceOf(self: *const OneApi, pdev: []const u8) ?u16 {
 /// The memory of one client: its resident VRAM, else its VRAM, else what it holds resident, else in total.
 fn memoryBytes(info: *const native.fdinfo.Fdinfo) ?u64 {
     var sums: [2]struct { resident: u64 = 0, total: u64 = 0 } = @splat(.{});
-    for (info.regions()) |region| {
+    for (info.regions.constSlice()) |region| {
         const sum = &sums[@intFromBool(!std.mem.startsWith(u8, region.name, "vram"))];
         sum.resident += region.resident orelse 0;
         sum.total += region.total orelse 0;

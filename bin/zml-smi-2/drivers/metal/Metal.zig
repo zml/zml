@@ -34,6 +34,7 @@ const iokit = @import("iokit.zig");
 const Smc = @import("Smc.zig");
 
 const Metal = @This();
+const Call = iokit.CFunction;
 const log = std.log.scoped(.@"zml-smi-2/metal");
 
 devices: []const contract.Device = &.{},
@@ -41,15 +42,15 @@ io: std.Io,
 cf: CoreFoundation,
 io_kit: iokit.Api,
 ioreport: IoReport,
-keys: std.EnumArray(Key, ?*const String) = .initFill(null),
+keys: std.EnumArray(Key, ?StringRef) = .initFill(null),
 accelerator: iokit.Object = 0,
 smc: ?Smc = null,
 /// The GPU shares the host's memory.
 mem_total_bytes: ?u64,
 /// The frequency of each active GPU performance state, in MHz, in order.
 frequencies: []const u64 = &.{},
-channels: ?*Dictionary = null,
-subscription: ?*const Subscription = null,
+channels: ?MutableDictRef = null,
+subscription: ?Subscription = null,
 /// The sample the next poll makes its delta against.
 last: ?Reading = null,
 /// macOS 27 reads 0 for the CPU in the Energy Model. Once it does while the PMP
@@ -58,7 +59,7 @@ cpu_from_pmp: bool = false,
 /// GPU nanoseconds of each process.
 busy: native.Counters(u32),
 
-const Reading = struct { sample: *const Dictionary, at: std.Io.Timestamp };
+const Reading = struct { sample: DictRef, at: std.Io.Timestamp };
 
 pub const two_readings = true;
 
@@ -102,7 +103,7 @@ pub fn open(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal
 
     const channels = try self.copyChannels();
     self.channels = channels;
-    var subscribed: ?*Dictionary = null;
+    var subscribed: ?MutableDictRef = null;
     self.subscription = self.ioreport.IOReportCreateSubscription(null, channels, &subscribed, 0, null) orelse {
         log.warn("IOReport refused the subscription", .{});
         return error.IoReportUnavailable;
@@ -138,7 +139,7 @@ pub fn poll(self: *Metal, scratch: std.mem.Allocator, reading: *source.Reading) 
     const frequencies = self.frequencies;
     gpu.put(.clock_graphics_max_mhz, if (frequencies.len > 0) std.mem.max(u64, frequencies) else null);
     {
-        const stats = self.property(Dictionary, self.accelerator, .PerformanceStatistics);
+        const stats = self.property(DictRef, self.accelerator, .PerformanceStatistics);
         defer if (stats) |dictionary| self.cf.CFRelease(dictionary);
         gpu.put(.util_percent, self.numberAt(stats, .@"Device Utilization %"));
         gpu.put(.mem_used_bytes, self.numberAt(stats, .@"In use system memory"));
@@ -196,7 +197,7 @@ fn share(busy: native.Growth, total: u64, device: ?u64) u16 {
 
 /// The process that opened a GPU client, from its creator: "pid 682, WindowServer".
 fn clientPid(self: *Metal, client: iokit.Object) ?u32 {
-    const creator = self.property(String, client, .IOUserClientCreator) orelse return null;
+    const creator = self.property(StringRef, client, .IOUserClientCreator) orelse return null;
     defer self.cf.CFRelease(creator);
     var buffer: [128]u8 = undefined;
     const creator_text = self.text(creator, &buffer);
@@ -207,11 +208,11 @@ fn clientPid(self: *Metal, client: iokit.Object) ?u32 {
 
 /// The GPU nanoseconds of a client, summed over the APIs it used.
 fn gpuTime(self: *Metal, client: iokit.Object) u64 {
-    const uses = self.property(Array, client, .AppUsage) orelse return 0;
+    const uses = self.property(ArrayRef, client, .AppUsage) orelse return 0;
     defer self.cf.CFRelease(uses);
     var total: u64 = 0;
     for (0..@intCast(@max(0, self.cf.CFArrayGetCount(uses)))) |index| {
-        const use = self.as(Dictionary, self.cf.CFArrayGetValueAtIndex(uses, @intCast(index))) orelse continue;
+        const use = self.as(DictRef, self.cf.CFArrayGetValueAtIndex(uses, @intCast(index))) orelse continue;
         total +|= self.numberAt(use, .accumulatedGPUTime) orelse 0;
     }
     return total;
@@ -236,7 +237,7 @@ fn readReport(self: *Metal, gpu: *contract.Metrics, power: *source.HostPower) vo
     var energy: std.EnumArray(Energy, u64) = .initFill(0);
     var pmp_cpu_mw: u64 = 0;
     for (0..@intCast(@max(0, self.cf.CFArrayGetCount(channels)))) |index| {
-        const channel = self.as(Dictionary, self.cf.CFArrayGetValueAtIndex(channels, @intCast(index))) orelse continue;
+        const channel = self.as(DictRef, self.cf.CFArrayGetValueAtIndex(channels, @intCast(index))) orelse continue;
         var group_buffer: [64]u8 = undefined;
         var name_buffer: [128]u8 = undefined;
         const group = self.text(report.IOReportChannelGetGroup(channel), &group_buffer);
@@ -307,7 +308,7 @@ fn milliwatts(amount: u64, unit: []const u8, elapsed: std.Io.Duration) u64 {
 
 /// The mean frequency of the active GPU performance states, weighted by the time spent in each.
 /// 0 when the GPU was off or idle all along.
-fn clock(self: *Metal, channel: *const Dictionary) ?u64 {
+fn clock(self: *Metal, channel: DictRef) ?u64 {
     if (self.frequencies.len == 0) return null;
     var active: u64 = 0;
     var weighted: u128 = 0;
@@ -326,7 +327,7 @@ fn clock(self: *Metal, channel: *const Dictionary) ?u64 {
 
 /// The power of a CPU cluster from its histogram, whose states are named by watts ("   2W", " 0.250W"):
 /// the mean of the states weighted by the time spent in each, the lowest reading 0, where an idle cluster sits.
-fn histogramMilliwatts(self: *Metal, channel: *const Dictionary) u64 {
+fn histogramMilliwatts(self: *Metal, channel: DictRef) u64 {
     var total: u64 = 0;
     var weighted: f64 = 0;
     for (0..@intCast(@max(0, self.ioreport.IOReportStateGetCount(channel)))) |state| {
@@ -359,7 +360,7 @@ fn isPmpCpuPower(name: []const u8) bool {
 
 /// The channels Metal subscribes to: the Energy Model, the GPU performance states, and the
 /// power histograms of PMP, the CPU clusters' among them.
-fn copyChannels(self: *Metal) !*Dictionary {
+fn copyChannels(self: *Metal) !MutableDictRef {
     const energy = self.channelsIn("Energy Model", null) orelse {
         log.warn("IOReport has no Energy Model", .{});
         return error.IoReportUnavailable;
@@ -381,7 +382,7 @@ fn copyChannels(self: *Metal) !*Dictionary {
 }
 
 /// The channels of an IOReport group, or null when it has none.
-fn channelsIn(self: *Metal, group: [:0]const u8, subgroup: ?[:0]const u8) ?*const Dictionary {
+fn channelsIn(self: *Metal, group: [:0]const u8, subgroup: ?[:0]const u8) ?DictRef {
     const group_string = self.cf.CFStringCreateWithCString(null, group, utf8) orelse return null;
     defer self.cf.CFRelease(group_string);
     const subgroup_string = if (subgroup) |name| (self.cf.CFStringCreateWithCString(null, name, utf8) orelse return null) else null;
@@ -395,8 +396,8 @@ fn channelsIn(self: *Metal, group: [:0]const u8, subgroup: ?[:0]const u8) ?*cons
     return null;
 }
 
-fn channelsOf(self: *Metal, dictionary: *const Dictionary) ?*const Array {
-    return self.as(Array, self.cf.CFDictionaryGetValue(dictionary, self.keys.get(.IOReportChannels).?));
+fn channelsOf(self: *Metal, dictionary: DictRef) ?ArrayRef {
+    return self.as(ArrayRef, self.cf.CFDictionaryGetValue(dictionary, self.keys.get(.IOReportChannels).?));
 }
 
 /// The frequency of each GPU performance state, from the power manager's voltage states:
@@ -407,7 +408,7 @@ fn gpuFrequencies(self: *Metal, arena: std.mem.Allocator) ![]const u64 {
     defer _ = self.io_kit.IOObjectRelease(manager);
 
     for ([_]Key{ .@"voltage-states9-sram", .@"voltage-states9" }) |key| {
-        const data = self.property(Data, manager, key) orelse continue;
+        const data = self.property(DataRef, manager, key) orelse continue;
         defer self.cf.CFRelease(data);
         const bytes = self.cf.CFDataGetBytePtr(data)[0..@intCast(@max(0, self.cf.CFDataGetLength(data)))];
 
@@ -427,7 +428,7 @@ fn gpuFrequencies(self: *Metal, arena: std.mem.Allocator) ![]const u64 {
 
 /// A string property of the GPU, copied into `arena`.
 fn propertyText(self: *Metal, arena: std.mem.Allocator, key: Key) !?[]const u8 {
-    const value = self.property(String, self.accelerator, key) orelse return null;
+    const value = self.property(StringRef, self.accelerator, key) orelse return null;
     defer self.cf.CFRelease(value);
     var buffer: [128]u8 = undefined;
     const value_text = self.text(value, &buffer);
@@ -435,47 +436,48 @@ fn propertyText(self: *Metal, arena: std.mem.Allocator, key: Key) !?[]const u8 {
 }
 
 /// A property of a registry entry, which the caller releases.
-fn property(self: *Metal, comptime T: type, entry: iokit.Object, key: Key) ?*const T {
+fn property(self: *Metal, comptime Ref: type, entry: iokit.Object, key: Key) ?Ref {
     const value = self.io_kit.IORegistryEntryCreateCFProperty(entry, self.keys.get(key).?, null, 0) orelse return null;
-    if (self.as(T, value)) |typed| return typed;
+    if (self.as(Ref, value)) |typed| return typed;
     self.cf.CFRelease(value);
     return null;
 }
 
-/// `object` as a T, or null when it is another kind of object.
-fn as(self: *Metal, comptime T: type, object: ?*const anyopaque) ?*const T {
+/// The typed reference when the CoreFoundation object has the requested type.
+fn as(self: *Metal, comptime Ref: type, object: ?AnyRef) ?Ref {
     const value = object orelse return null;
-    const id = switch (T) {
-        String => self.cf.CFStringGetTypeID(),
-        Number => self.cf.CFNumberGetTypeID(),
-        Array => self.cf.CFArrayGetTypeID(),
-        Dictionary => self.cf.CFDictionaryGetTypeID(),
-        Data => self.cf.CFDataGetTypeID(),
-        else => @compileError("not a CoreFoundation type"),
-    };
+    const id = @field(self.cf, std.meta.Child(Ref).type_id)();
     return if (self.cf.CFGetTypeID(value) == id) @ptrCast(value) else null;
 }
 
-fn numberAt(self: *Metal, dictionary: ?*const Dictionary, key: Key) ?u64 {
+fn numberAt(self: *Metal, dictionary: ?DictRef, key: Key) ?u64 {
     const object = self.cf.CFDictionaryGetValue(dictionary orelse return null, self.keys.get(key).?);
-    const value = self.as(Number, object) orelse return null;
+    const value = self.as(NumberRef, object) orelse return null;
     var result: i64 = 0;
     if (self.cf.CFNumberGetValue(value, number_sint64, &result) == 0) return null;
     return std.math.cast(u64, result);
 }
 
 /// The text of a string, in `buffer`. Empty when there is none or it does not fit.
-fn text(self: *Metal, string: ?*const String, buffer: []u8) []const u8 {
+fn text(self: *Metal, string: ?StringRef, buffer: []u8) []const u8 {
     if (self.cf.CFStringGetCString(string orelse return "", buffer.ptr, @intCast(buffer.len), utf8) == 0) return "";
     return std.mem.sliceTo(buffer, 0);
 }
 
-const String = opaque {};
-const Number = opaque {};
-const Array = opaque {};
-const Dictionary = opaque {};
-const Data = opaque {};
-const Subscription = opaque {};
+const AnyRef = *const anyopaque;
+const StringRef = CfRef("String");
+const NumberRef = CfRef("Number");
+const ArrayRef = CfRef("Array");
+const DictRef = CfRef("Dictionary");
+const MutableDictRef = *std.meta.Child(DictRef);
+const DataRef = CfRef("Data");
+const Subscription = *const opaque {};
+
+fn CfRef(comptime class: []const u8) type {
+    return *const opaque {
+        const type_id = "CF" ++ class ++ "GetTypeID";
+    };
+}
 
 /// kCFStringEncodingUTF8.
 const utf8: u32 = 0x08000100;
@@ -484,67 +486,47 @@ const number_sint64: isize = 4;
 
 /// Create and Copy functions return an object the caller releases; Get functions borrow it.
 const CoreFoundation = struct {
-    CFRelease: *const fn (*const anyopaque) callconv(.c) void,
-    CFGetTypeID: *const fn (*const anyopaque) callconv(.c) usize,
-    CFStringGetTypeID: *const fn () callconv(.c) usize,
-    CFNumberGetTypeID: *const fn () callconv(.c) usize,
-    CFArrayGetTypeID: *const fn () callconv(.c) usize,
-    CFDictionaryGetTypeID: *const fn () callconv(.c) usize,
-    CFDataGetTypeID: *const fn () callconv(.c) usize,
-    CFStringCreateWithCString: *const fn (
-        ?*const anyopaque,
-        [*:0]const u8,
-        u32,
-    ) callconv(.c) ?*const String,
-    CFStringGetCString: *const fn (*const String, [*]u8, isize, u32) callconv(.c) u8,
-    CFNumberGetValue: *const fn (*const Number, isize, *anyopaque) callconv(.c) u8,
-    CFArrayGetCount: *const fn (*const Array) callconv(.c) isize,
-    CFArrayGetValueAtIndex: *const fn (*const Array, isize) callconv(.c) ?*const anyopaque,
-    CFDictionaryGetValue: *const fn (*const Dictionary, *const anyopaque) callconv(.c) ?*const anyopaque,
-    CFDictionaryCreateMutableCopy: *const fn (
-        ?*const anyopaque,
-        isize,
-        *const Dictionary,
-    ) callconv(.c) ?*Dictionary,
-    CFDataGetLength: *const fn (*const Data) callconv(.c) isize,
-    CFDataGetBytePtr: *const fn (*const Data) callconv(.c) [*]const u8,
+    CFRelease: Call(&.{AnyRef}, void),
+    CFGetTypeID: Call(&.{AnyRef}, usize),
+    CFStringGetTypeID: GetTypeId,
+    CFNumberGetTypeID: GetTypeId,
+    CFArrayGetTypeID: GetTypeId,
+    CFDictionaryGetTypeID: GetTypeId,
+    CFDataGetTypeID: GetTypeId,
+    CFStringCreateWithCString: Call(&.{ ?AnyRef, [*:0]const u8, u32 }, ?StringRef),
+    CFStringGetCString: Call(&.{ StringRef, [*]u8, isize, u32 }, u8),
+    CFNumberGetValue: Call(&.{ NumberRef, isize, *anyopaque }, u8),
+    CFArrayGetCount: Call(&.{ArrayRef}, isize),
+    CFArrayGetValueAtIndex: Call(&.{ ArrayRef, isize }, ?AnyRef),
+    CFDictionaryGetValue: Call(&.{ DictRef, AnyRef }, ?AnyRef),
+    CFDictionaryCreateMutableCopy: Call(&.{ ?AnyRef, isize, DictRef }, ?MutableDictRef),
+    CFDataGetLength: Call(&.{DataRef}, isize),
+    CFDataGetBytePtr: Call(&.{DataRef}, [*]const u8),
+
+    const GetTypeId = Call(&.{}, usize);
 };
 
 /// The private library behind powermetrics.
 const IoReport = struct {
-    IOReportCopyChannelsInGroup: *const fn (
-        ?*const String,
-        ?*const String,
-        u64,
-        u64,
-        u64,
-    ) callconv(.c) ?*const Dictionary,
+    IOReportCopyChannelsInGroup: Call(&.{ ?StringRef, ?StringRef, u64, u64, u64 }, ?DictRef),
     /// Adds the channels of the second argument to the first.
-    IOReportMergeChannels: *const fn (*Dictionary, *const Dictionary, ?*const anyopaque) callconv(.c) void,
-    IOReportCreateSubscription: *const fn (
-        ?*const anyopaque,
-        *Dictionary,
-        *?*Dictionary,
-        u64,
-        ?*const anyopaque,
-    ) callconv(.c) ?*const Subscription,
-    IOReportCreateSamples: *const fn (
-        *const Subscription,
-        *Dictionary,
-        ?*const anyopaque,
-    ) callconv(.c) ?*const Dictionary,
-    IOReportCreateSamplesDelta: *const fn (
-        *const Dictionary,
-        *const Dictionary,
-        ?*const anyopaque,
-    ) callconv(.c) ?*const Dictionary,
-    IOReportChannelGetGroup: *const fn (*const Dictionary) callconv(.c) ?*const String,
-    IOReportChannelGetChannelName: *const fn (*const Dictionary) callconv(.c) ?*const String,
-    IOReportChannelGetUnitLabel: *const fn (*const Dictionary) callconv(.c) ?*const String,
-    IOReportSimpleGetIntegerValue: *const fn (*const Dictionary, i32) callconv(.c) i64,
-    IOReportStateGetCount: *const fn (*const Dictionary) callconv(.c) i32,
-    IOReportStateGetNameForIndex: *const fn (*const Dictionary, i32) callconv(.c) ?*const String,
-    IOReportStateGetResidency: *const fn (*const Dictionary, i32) callconv(.c) i64,
+    IOReportMergeChannels: Call(&.{ MutableDictRef, DictRef, ?AnyRef }, void),
+    IOReportCreateSubscription: Call(
+        &.{ ?AnyRef, MutableDictRef, *?MutableDictRef, u64, ?AnyRef },
+        ?Subscription,
+    ),
+    IOReportCreateSamples: Call(&.{ Subscription, MutableDictRef, ?AnyRef }, ?DictRef),
+    IOReportCreateSamplesDelta: Call(&.{ DictRef, DictRef, ?AnyRef }, ?DictRef),
+    IOReportChannelGetGroup: ChannelString,
+    IOReportChannelGetChannelName: ChannelString,
+    IOReportChannelGetUnitLabel: ChannelString,
+    IOReportSimpleGetIntegerValue: IndexedInteger,
+    IOReportStateGetCount: Call(&.{DictRef}, i32),
+    IOReportStateGetNameForIndex: Call(&.{ DictRef, i32 }, ?StringRef),
+    IOReportStateGetResidency: IndexedInteger,
+
+    const ChannelString = Call(&.{DictRef}, ?StringRef);
+    const IndexedInteger = Call(&.{ DictRef, i32 }, i64);
 };
 
 pub const testing = if (builtin.is_test) struct {

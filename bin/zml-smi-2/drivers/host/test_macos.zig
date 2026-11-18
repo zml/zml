@@ -1,7 +1,7 @@
 const std = @import("std");
 const contract = @import("zml-smi-2/contract");
 
-const Host = @import("macos.zig").Host;
+const Host = @import("zml-smi-2/host").Host;
 const c = std.c;
 
 test "enrich" {

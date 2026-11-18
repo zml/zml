@@ -1,9 +1,9 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const Collector = @import("zml-smi-2/collector").Collector;
 const formats = @import("zml-smi-2/formats");
 const Host = @import("zml-smi-2/host").Host;
+const Collector = @import("zml-smi-2/collector").Collector(Host);
 const contract = @import("zml-smi-2/contract");
 const output = @import("output.zig");
 const platforms = @import("platforms.zig");
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
     var host_data: contract.HostData = .{};
     var host: Host = .init(arena, gpa, io, &host_data);
     defer host.deinit();
-    var collector: Collector = .init(arena, gpa, io, .from(&host), host_data, .{
+    var collector: Collector = .init(arena, gpa, io, &host, host_data, .{
         .poll_interval_ms = args.poll_interval,
         .history = args.top and !serving,
     });

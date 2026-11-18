@@ -48,24 +48,3 @@ pub const Source = struct {
         };
     }
 };
-
-pub const HostReader = struct {
-    context: *anyopaque,
-    read: *const fn (*anyopaque, std.mem.Allocator, []contract.ProcessInfo, *contract.HostData) void,
-
-    /// Borrows the host backend until the collector joins its workers.
-    pub fn from(host: anytype) HostReader {
-        const Backend = @TypeOf(host.*);
-        const Adapter = struct {
-            fn read(
-                context: *anyopaque,
-                arena: std.mem.Allocator,
-                rows: []contract.ProcessInfo,
-                data: *contract.HostData,
-            ) void {
-                Backend.read(@ptrCast(@alignCast(context)), arena, rows, data);
-            }
-        };
-        return .{ .context = host, .read = Adapter.read };
-    }
-};

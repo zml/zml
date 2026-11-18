@@ -1,7 +1,7 @@
 const std = @import("std");
 const contract = @import("zml-smi-2/contract");
 const source = @import("zml-smi-2/source");
-const Collector = @import("collector.zig").Collector;
+const Collector = @import("collector.zig").Collector(FakeHost);
 
 test {
     _ = @import("test_double_buffer.zig");
@@ -57,8 +57,7 @@ test "source publication keeps readings, history, and owned process rows togethe
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var host: FakeHost = .{ .power = .{ .cpu_power_mw = 90, .system_power_mw = 120 } };
-    const host_reader: source.HostReader = .from(&host);
-    var collector: Collector = .init(arena.allocator(), gpa, io, host_reader, .{ .hostname = "local" }, .{
+    var collector: Collector = .init(arena.allocator(), gpa, io, &host, .{ .hostname = "local" }, .{
         .history = true,
     });
     defer collector.deinit();
@@ -111,8 +110,7 @@ test "collector joins workers before deinit" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var host: FakeHost = .{};
-    const host_reader: source.HostReader = .from(&host);
-    var collector: Collector = .init(arena.allocator(), gpa, io, host_reader, .{}, .{
+    var collector: Collector = .init(arena.allocator(), gpa, io, &host, .{}, .{
         .poll_interval_ms = 1,
     });
     defer collector.deinit();
@@ -132,7 +130,7 @@ test "source registration transfers ownership only on success" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var host: FakeHost = .{};
-    var collector: Collector = .init(std.testing.failing_allocator, gpa, io, .from(&host), .{}, .{});
+    var collector: Collector = .init(std.testing.failing_allocator, gpa, io, &host, .{}, .{});
     defer collector.deinit();
 
     var empty: Fake = .{ .devices = &.{} };

@@ -4,7 +4,6 @@ const c = @import("c");
 const contract = @import("zml-smi-2/contract");
 const source = @import("zml-smi-2/source");
 const native = @import("zml-smi-2/native");
-const polling = @import("zml-smi-2/poll");
 
 const Dir = native.sysfs.Dir;
 const Neuron = @This();
@@ -131,29 +130,22 @@ pub fn close(self: *Neuron) void {
     self.busy.deinit();
 }
 
-const MemoryProbe = struct {
-    dir: Dir,
-
-    const Categories = contract.Reply(&.{
+fn readMemoryCategories(dir: Dir, sample: *contract.Metrics) void {
+    const categories = [_]contract.Metric{
         .nc_tensors,       .nc_constants, .nc_model_code, .nc_shared_scratchpad, .nc_nonshared_scratchpad,
         .nc_runtime,       .nc_driver,    .nc_dma_rings,  .nc_collectives,       .nc_notifications,
         .nc_uncategorized,
-    });
-
-    pub fn categories(self: *const MemoryProbe) Categories {
-        var values: Categories = .{};
-        inline for (@typeInfo(Categories).@"struct".field_names) |field| {
-            const name = comptime switch (@field(contract.Metric, field)) {
-                .nc_shared_scratchpad => "model_shared_scratchpad",
-                .nc_runtime => "runtime_memory",
-                .nc_driver => "driver_memory",
-                else => field["nc_".len..],
-            };
-            @field(values, field) = self.dir.int(u64, name ++ "/total") catch null;
-        }
-        return values;
+    };
+    inline for (categories) |metric| {
+        const name = comptime switch (metric) {
+            .nc_shared_scratchpad => "model_shared_scratchpad",
+            .nc_runtime => "runtime_memory",
+            .nc_driver => "driver_memory",
+            else => @tagName(metric)["nc_".len..],
+        };
+        sample.put(metric, dir.int(u64, name ++ "/total") catch null);
     }
-};
+}
 
 pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *source.Reading) !void {
     defer self.busy.sweep();
@@ -169,7 +161,7 @@ pub fn poll(self: *Neuron, scratch: std.mem.Allocator, reading: *source.Reading)
         for (cores, chip.memory) |*sample, memory| {
             sample.put(.mem_used_bytes, mem_used);
             sample.put(.mem_total_bytes, chip.mem_total_bytes);
-            if (memory) |dir| polling.project(sample, &MemoryProbe{ .dir = dir });
+            if (memory) |dir| readMemoryCategories(dir, sample);
         }
 
         // One scan supplies each core's busy time and the processes that hold memory on it.

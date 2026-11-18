@@ -1,7 +1,6 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 _DEPS = [
-    "//bin/zml-smi-2/collect:poll",
     "//bin/zml-smi-2/collect:source",
     "//bin/zml-smi-2/contract",
     "//bin/zml-smi-2/drivers:native",
