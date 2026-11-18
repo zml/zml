@@ -16,6 +16,7 @@ zig_library(
         "//bin/zml-smi/utils:double_buffer",
         "//bin/zml-smi/utils:dynlib",
         "//bin/zml-smi/utils:sandbox",
+        "//bin/zml-smi/utils:sysfs",
         "//stdx",
         "@amdrocm-amdsmi//:amdsmi",
     ],
