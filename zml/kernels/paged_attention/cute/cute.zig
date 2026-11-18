@@ -57,6 +57,10 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major > 8 or (cc.major == 8 and cc.minor >= 9);
 }
 
+pub fn multiprocessorCount(platform: *const zml.Platform) usize {
+    return platform.coreCountPerDevice() orelse 1;
+}
+
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) zml.Tensor {
     stdx.debug.assert(isAvailable(zml.Compiler.current().platform), "CuTe paged attention requires SM89 or newer", .{});
     stdx.debug.assert(q.dtype() == k.dtype() and q.dtype() == v.dtype() and (q.dtype() == .bf16 or q.dtype() == .f16), "CuTe paged attention requires matching BF16 or FP16 Q/K/V", .{});
