@@ -52,6 +52,7 @@ pub const TensorStore = struct {
         self.arena.deinit();
     }
 
+    /// Record in the store which source back a tensor ID
     fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
         const gop = try self.id_to_sources.getOrPut(self.allocator, id);
         if (gop.found_existing) {
@@ -269,6 +270,33 @@ pub const TensorStore = struct {
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = true }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
+        }
+
+        /// Creates a tensor of `shape` backed by `sources`, in this order. Unlike
+        /// `maybeCreateBinding`, the sources need not be whole checkpoint tensors: see
+        /// `safetensors.Tensor.sliceFirstAxis`. A single source is copied by the loader as
+        /// stored; several are left for the caller to assemble.
+        pub fn createBindingFromSources(self: View, sources: []const safetensors.Tensor, shape: Shape) Tensor {
+            const arena = self.store.arena.allocator();
+
+            const tensors = arena.alloc(*safetensors.Tensor, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            for (sources, tensors) |source, *copy| {
+                copy.* = arena.create(safetensors.Tensor) catch |e| std.debug.panic("Not handling {} errors", .{e});
+                copy.*.* = source;
+            }
+
+            const tensor: Tensor = .fromShape(shape);
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = sources.len > 1 }) catch |e| std.debug.panic("Not handling {} errors", .{e});
+
+            return tensor;
+        }
+
+        /// The checkpoint tensor stored as `subkey`, null when the checkpoint has none.
+        pub fn getSource(self: View, subkey: []const u8) ?safetensors.Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+            const source = self.store.getPtrFromKey(key) orelse return null;
+            return source.*;
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
