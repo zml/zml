@@ -338,11 +338,16 @@ pub const paged = struct {
         stdx.debug.assert(indices.shape().hasTags(.{ .b, .topk }), "Sparse indices expect to have .b, .topk tags", .{});
         stdx.debug.assert(q.dtype() == k_cache.dtype() and q.dtype() == v_cache.dtype(), "Sparse attention requires matching query and KV dtypes", .{});
 
+        const cu_count = blk: {
+            const platform = zml.Compiler.current().platform;
+            break :blk platform.coreCountPerDevice() orelse 1;
+        };
+
         const config = selectSparseConfig(
             @intCast(opts.mask.indices.dim(.topk)),
             @intCast(parameters.block_table.dim(.b)),
             @intCast(q.dim(.hkv)),
-            getCuCount(),
+            cu_count,
             !parameters.options_.is_prefill,
         );
 

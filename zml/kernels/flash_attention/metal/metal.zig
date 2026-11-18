@@ -68,7 +68,7 @@ fn decode(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, positions: zml.Tensor, sc
         const platform = zml.Compiler.current().platform;
         break :blk platform.coreCountPerDevice() orelse std.debug.panic("Metal device has no core_count attribute", .{});
     };
-    const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), keys, core_count);
+    const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), keys, @intCast(core_count));
     const args: flash_attn.FaVec.HostArgs = .{ .num_heads = num_heads, .n_kv = num_kv_heads, .k_len = keys, .scale = scale };
 
     const dst = if (launch.splits == 1) q.shape() else zml.Shape.init(.{nrows * (head_dim * launch.splits + 2 * launch.splits)}, .f32);
