@@ -55,9 +55,9 @@ bazel_dep(name = "rules_zig", version = "0.17.0")
 # Zig 0.17 ZLS support is not yet released.
 archive_override(
     module_name = "rules_zig",
-    integrity = "sha256-wMnFx/sAqb+n+dpUEH1MTHrrZNGp9p1oR9Q61EpBGIg=",
-    strip_prefix = "rules_zig-6819f1f287b2dd51bb22edae2870d835226c4f3a",
-    urls = ["https://github.com/hermeticbuild/rules_zig/archive/6819f1f287b2dd51bb22edae2870d835226c4f3a.tar.gz"],
+    integrity = "sha256-VbmdSIShN+sogoD3yI7yrvdZNXEf2a0MNLtxLAo1vDo=",
+    strip_prefix = "rules_zig-fdad034e362e5de4190bd704cc8d17907117c57e",
+    urls = ["https://github.com/hermeticbuild/rules_zig/archive/fdad034e362e5de4190bd704cc8d17907117c57e.tar.gz"],
 )
 
 bazel_dep(name = "tar.bzl", version = "0.10.4")
