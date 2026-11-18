@@ -44,7 +44,7 @@ pub const RunArgs = struct {
 pub const CompiledModel = struct {
     loaded_model: *const model.LoadedModel,
     prefill: KernelExe,
-    decode: KernelExe,
+    decode: DecodeExe,
     params: CompilationParameters,
 
     pub fn init(
@@ -58,7 +58,7 @@ pub const CompiledModel = struct {
     ) !CompiledModel {
         const prefill = try compileKernel(allocator, io, platform, mdl, parameters, parameters.seqlen, "prefill", progress);
         errdefer prefill.deinit();
-        const decode = try compileKernel(allocator, io, platform, mdl, parameters, 1, "decode", progress);
+        const decode = try compileDecode(allocator, io, platform, mdl, parameters, progress);
         return .{
             .loaded_model = loaded_model,
             .prefill = prefill,
@@ -88,6 +88,138 @@ pub const KernelExe = struct {
         self.sample.deinit();
     }
 };
+
+const DecodeForward = struct {
+    pub const Input = struct {
+        weights: model.Model,
+        tokens: zml.Tensor,
+        token_index: zml.Tensor,
+        active_length: zml.Tensor,
+        kv_cache: model.KvCache,
+        mamba_caches: []model.Mamba2.Cache,
+        rng: zml.Tensor.Rng,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
+    };
+
+    pub const Output = struct {
+        tokens: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: model.KvCache,
+        mamba_caches: []model.Mamba2.Cache,
+        rng: zml.Tensor.Rng,
+    };
+
+    pub fn forward(input: Input) Output {
+        std.debug.assert(input.tokens.dim(.s) == 1);
+        var hidden = model.EmbedTokens.forward(.{
+            .embedding = input.weights.backbone.embed_tokens,
+            .tokens = input.tokens,
+        }).hidden;
+        var kv_cache = input.kv_cache;
+        const mamba_caches = zml.Compiler.current().arena.allocator().dupe(model.Mamba2.Cache, input.mamba_caches) catch @panic("OOM");
+        var attention_index: u32 = 0;
+        var mamba_index: usize = 0;
+
+        for (input.weights.backbone.layers) |layer| {
+            switch (layer.mixer) {
+                .attn => {
+                    const result = model.BackboneLayer.forwardSelfAttn(.{
+                        .layer = layer,
+                        .layer_index = .scalar(attention_index, .u32),
+                        .hidden = hidden,
+                        .token_index = input.token_index,
+                        .cache = kv_cache,
+                        .attention_metadata = input.attention_metadata,
+                        .attention_parameters = input.attention_parameters,
+                    });
+                    hidden = result.hidden;
+                    kv_cache = result.cache;
+                    attention_index += 1;
+                },
+                .mamba => {
+                    const result = model.BackboneLayer.forwardMamba(.{
+                        .layer = layer,
+                        .hidden = hidden,
+                        .cache = mamba_caches[mamba_index],
+                        .active_length = input.active_length,
+                    });
+                    hidden = result.hidden;
+                    mamba_caches[mamba_index] = result.cache;
+                    mamba_index += 1;
+                },
+                .moe => {
+                    hidden = model.BackboneLayer.forwardMoe(.{
+                        .layer = layer,
+                        .hidden = hidden,
+                    }).hidden;
+                },
+            }
+        }
+        std.debug.assert(attention_index == input.kv_cache.k.dim(.layer));
+        std.debug.assert(mamba_index == mamba_caches.len);
+
+        const result = model.Sampler.sampleTokens(.{
+            .sampler = input.weights.backbone.sampler(),
+            .hidden = hidden,
+            .tokens = input.tokens,
+            .active_length = input.active_length,
+            .rng = input.rng,
+            .token_index = input.token_index,
+        });
+        return .{
+            .tokens = result.tokens,
+            .token_index = result.token_index,
+            .kv_cache = .{
+                .k = kv_cache.k.reuseBuffer(input.kv_cache.k),
+                .v = kv_cache.v.reuseBuffer(input.kv_cache.v),
+            },
+            .mamba_caches = mamba_caches,
+            // Greedy sampling returns the unchanged RNG; still replace its donated handle.
+            .rng = .{
+                ._state = result.rng._state.reuseBuffer(input.rng._state),
+                .algorithm = result.rng.algorithm,
+            },
+        };
+    }
+};
+
+pub const DecodeExe = zml.FnExe(DecodeForward.forward);
+
+pub const DecodeRunner = struct {
+    forward: DecodeExe.Runner(.{.weights}),
+
+    pub fn init(allocator: std.mem.Allocator, exe: *const DecodeExe, buffers: *const model.Buffers) !DecodeRunner {
+        // Baking only retains borrowed runtime buffer handles, not weight constants.
+        return .{ .forward = try .init(exe, allocator, .{ .weights = buffers.* }) };
+    }
+
+    pub fn deinit(self: *DecodeRunner, allocator: std.mem.Allocator) void {
+        self.forward.deinit(allocator);
+    }
+};
+
+pub fn runDecode(runner: *DecodeRunner, args: RunArgs) void {
+    var mamba_cache_buffers = args.mamba_cache_buffers;
+    runner.forward.run(args.io, .{
+        .inputs = .{
+            .tokens = args.tokens_buffer.*,
+            .token_index = args.token_index_buffer.*,
+            .active_length = args.active_length_buffer.*,
+            .kv_cache = args.kv_cache_buffers.*,
+            .mamba_caches = mamba_cache_buffers,
+            .rng = args.rng_buffers.*,
+            .attention_metadata = args.attention_metadata_buffers.*,
+        },
+        .outputs = .{
+            .tokens = args.next_token_buffer,
+            .token_index = args.token_index_buffer,
+            .kv_cache = args.kv_cache_buffers,
+            .mamba_caches = &mamba_cache_buffers,
+            .rng = args.rng_buffers,
+        },
+    }, .{});
+}
 
 pub const LayerRunner = union(enum) {
     full_attention: zml.FnExe(model.BackboneLayer.forwardSelfAttn).Runner(.{ .layer, .layer_index }),
@@ -250,6 +382,38 @@ pub fn runHidden(runner: *KernelRunner, args: RunArgs, hidden_buffer: *zml.Buffe
             .token_index = args.token_index_buffer,
         },
     }, .{});
+}
+
+fn compileDecode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    mdl: model.Model,
+    parameters: CompilationParameters,
+    progress: *std.Progress.Node,
+) !DecodeExe {
+    var mamba_count: usize = 0;
+    for (mdl.backbone.layers) |layer| {
+        if (layer.mixer == .mamba)
+            mamba_count += 1;
+    }
+    const mamba_caches = try allocator.alloc(model.Mamba2.Cache, mamba_count);
+    defer allocator.free(mamba_caches);
+
+    for (mamba_caches) |*cache|
+        cache.* = .init(mdl.config, 1, mdl.backbone.embed_tokens.weight.dtype());
+
+    return compileExe(allocator, io, platform, DecodeForward.forward, .{.{
+        .weights = mdl,
+        .tokens = .init(.{ .b = 1, .s = 1 }, .u32),
+        .token_index = .init(.{}, .u32),
+        .active_length = .init(.{}, .u32),
+        .kv_cache = parameters.kv_cache,
+        .mamba_caches = mamba_caches,
+        .rng = parameters.rng,
+        .attention_metadata = parameters.attention_metadata,
+        .attention_parameters = parameters.attention_parameters,
+    }}, parameters, progress, "decode", "full model");
 }
 
 fn compileKernel(

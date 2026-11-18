@@ -291,20 +291,89 @@ pub const EncoderAttention = struct {
         q = self.applyRope(q).rename(.{ .s = .q });
         k = self.applyRope(k).rename(.{ .s = .k });
 
-        const positions = zml.Tensor.iota(zml.Shape.init(.{ .b = x.dim(.b), .k = x.dim(.s) }, .u32), .k).convert(.u32);
-        const valid_keys = positions.cmp(.LT, lengths.broad(positions.shape()));
         const has_keys = lengths.cmp(.GT, .scalar(0, .u32));
-
-        const safe_keys = has_keys.broad(valid_keys.shape()).select(valid_keys, positions.cmp(.EQ, .scalar(0, .u32)));
-        const mask = safe_keys.select(.scalar(0, .f32), .scalar(-std.math.inf(f32), .f32));
-
-        const attended = zml.nn.sdpa(q.convert(.f32), k.convert(.f32), v.convert(.f32), .{ .attn_mask = mask }).convert(v.dtype());
+        const attended = fullAttention(q, k, v, lengths).convert(v.dtype());
         const nonempty_output = has_keys.broad(attended.shape()).select(attended, .zeroes(attended.shape()));
         const combined = nonempty_output.transpose(.{ .b, .q, .h, .hd })
             .merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
         return self.out_proj.forward(combined, x.dtype()).rename(.{ .dout = .d });
     }
+
+    fn fullAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, lengths: zml.Tensor) zml.Tensor {
+        const compiler = zml.Compiler.current();
+        const head_dim = q.dim(.hd);
+        const supported_head_dim = head_dim == 32 or head_dim == 64 or head_dim == 128 or head_dim == 256 or head_dim == 512;
+        const supported_dtype = (q.dtype() == .bf16 or q.dtype() == .f16) and q.dtype() == k.dtype() and q.dtype() == v.dtype();
+        const supported_lengths = q.dim(.b) > 0 and q.dim(.q) <= @divTrunc(std.math.maxInt(i32), q.dim(.b));
+
+        if (supported_head_dim and supported_dtype and supported_lengths and zml.paged_attention.Backend.cute.isAvailable(compiler.platform)) {
+            return zml.ops.manualComputation(
+                FullAttention.forward,
+                .{
+                    .q = q,
+                    .k = k,
+                    .v = v,
+                    .lengths = lengths,
+                },
+                q.shape(),
+                compiler.mesh(.replicated),
+                .{
+                    .in_specs = .{
+                        .q = .replicated,
+                        .k = .replicated,
+                        .v = .replicated,
+                        .lengths = .replicated,
+                    },
+                    .out_specs = .replicated,
+                },
+            );
+        }
+
+        const positions = zml.Tensor.iota(zml.Shape.init(.{ .b = q.dim(.b), .k = k.dim(.k) }, .u32), .k).convert(.u32);
+        const valid_keys = positions.cmp(.LT, lengths.broad(positions.shape()));
+        const has_keys = lengths.cmp(.GT, .scalar(0, .u32));
+        const safe_keys = has_keys.broad(valid_keys.shape()).select(valid_keys, positions.cmp(.EQ, .scalar(0, .u32)));
+        const mask = safe_keys.select(.scalar(0, .f32), .scalar(-std.math.inf(f32), .f32));
+
+        return zml.nn.sdpa(q.convert(.f32), k.convert(.f32), v.convert(.f32), .{ .attn_mask = mask });
+    }
+
+    const FullAttention = struct {
+        q: zml.Tensor,
+        k: zml.Tensor,
+        v: zml.Tensor,
+        lengths: zml.Tensor,
+
+        fn forward(args: FullAttention, _: zml.Shape) zml.Tensor {
+            const batch = args.q.dim(.b);
+            const frames = args.q.dim(.q);
+            // One page per recording: paging is only a layout adapter, not chunked attention.
+            // Keep every query, including padded queries, but exclude padded keys from softmax.
+            const parameters: zml.paged_attention.cute.Parameters = .{
+                .block_table = zml.Tensor.arange(.{ .end = batch }, .i32).reshape(.{ .b = batch, .p = 1 }),
+                .seq_lens = args.lengths.minimum(.scalar(frames, .u32)).maximum(.scalar(1, .u32)).convert(.i32),
+                .query_start_len = zml.Tensor.arange(.{ .end = batch + 1 }, .i32).mul(.scalar(frames, .i32)).withTags(.{.b}),
+                .options_ = .{
+                    .batch_size = @intCast(batch),
+                    .max_num_pages = 1,
+                    .max_seqlen_q = @intCast(frames),
+                    .is_prefill = true,
+                },
+            };
+            const packed_q = args.q.transpose(.{ .b, .q, .h, .hd })
+                .merge(.{ .b = .{ .b, .q } }).splitAxis(.h, .{ .hkv = args.q.dim(.h), .hg = 1 });
+            const k_pages = args.k.rename(.{ .b = .page, .k = .k_chunk, .h = .hkv });
+            const v_pages = args.v.rename(.{ .b = .page, .k = .k_chunk, .h = .hkv });
+
+            // Preserve native Q/K/V precision; do not downcast FP32 inputs to enter this path.
+            // As in the SDPA fallback, an empty recording temporarily attends to its first key;
+            // forward masks its attention output to zero before the (possibly biased) projection.
+            const attended = zml.paged_attention.cute.pagedAttention(parameters, packed_q, k_pages, v_pages, .{ .mask = .{ .standard = .{ .causal = false } } });
+            return attended.merge(.{ .h = .{ .hkv, .hg } })
+                .splitAxis(.b, .{ .b = batch, .q = frames }).transpose(args.q.shape());
+        }
+    };
 
     fn applyRope(self: EncoderAttention, x: zml.Tensor) zml.Tensor {
         const rotated = zml.nn.rope(x.slice(.hd, .{ .end = self.rotary_dim }), null, .{

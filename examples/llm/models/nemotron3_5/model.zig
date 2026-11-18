@@ -841,6 +841,55 @@ const PackedExpertProjection = struct {
         return x.dot(selected.convert(x.dtype()), .d);
     }
 
+    fn supportsTriton(self: PackedExpertProjection) bool {
+        const platform = zml.Compiler.current().platform;
+        if (platform.target != .cuda)
+            return false;
+
+        const capability = zml.platform.cuda.computeCapability(platform) orelse return false;
+        if (capability.major < 8)
+            return false;
+
+        if (self.weight.dim(.d) <= 0 or @mod(self.weight.dim(.d), 16) != 0 or
+            self.weight.dim(.dout) <= 0 or @mod(self.weight.dim(.dout), 16) != 0)
+            return false;
+
+        if (self.fp8 != null)
+            return self.weight.dtype() == .f8e4m3fn and (capability.major > 8 or capability.minor >= 9);
+
+        return self.weight.dtype() == .bf16;
+    }
+
+    fn forwardRouted(
+        self: PackedExpertProjection,
+        x: zml.Tensor,
+        routing: zml.moe.triton.Routing,
+        launch_config: @FieldType(zml.moe.triton.GemmOptions, "launch_config"),
+        top_k: usize,
+    ) zml.Tensor {
+        var input = x;
+        var input_scale: ?zml.Tensor = null;
+        var weight_scale: ?zml.Tensor = null;
+        if (self.fp8) |fp8| {
+            input_scale = fp8.input_scales.max(.expert).asScalar().convert(.f32);
+            input = quantizeFp8(x, input_scale.?);
+            weight_scale = fp8.weight_scales.convert(.f32);
+        }
+
+        return zml.moe.triton.gemm(.{
+            .input = input,
+            .weight = self.weight.withTags(.{ .expert, .out, .in }),
+            .input_scale = input_scale,
+            .weight_scale = weight_scale,
+            .routing = routing,
+            .expert_ids = routing.expert_ids,
+            .launch_config = launch_config,
+            .quant_scheme = if (self.fp8 != null) .fp8_per_tensor else null,
+            .top_k = top_k,
+            .output_shape = .init(.{ .token = routing.num_assignments, .out = self.weight.dim(.dout) }, .bf16),
+        });
+    }
+
     fn packWeights(inputs: []const zml.Tensor) zml.Tensor {
         return zml.Tensor.stack(inputs, 0, .expert).withTags(.{ .expert, .dout, .d });
     }
@@ -938,6 +987,10 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
+        if (x.dtype() == .bf16 and x.dim(.b) * x.dim(.s) > 0 and
+            self.up_proj.supportsTriton() and self.down_proj.supportsTriton())
+            return self.forwardTriton(x);
+
         // Routing is independent per token. Bound the gathered expert weights
         // rather than materializing [batch, sequence, topk, dout, din] at once.
         const chunk_size = 64;
@@ -979,13 +1032,38 @@ pub const Moe = struct {
         }
     };
 
+    fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
+        const routing_scores, const topk_ids = self.router.forward(x);
+        const num_tokens = x.dim(.b) * x.dim(.s);
+        const topk = topk_ids.dim(.topk);
+        const input = x.transpose(.{ .b, .s, .d }).reshape(.{ .token = num_tokens, .in = x.dim(.d) });
+        const ids = topk_ids.transpose(.{ .b, .s, .topk }).reshape(.{ .token = num_tokens, .topk = topk });
+
+        const launch_config: @FieldType(zml.moe.triton.GemmOptions, "launch_config") = .{
+            .block_size_m = if (num_tokens <= 128) 16 else 64,
+            .block_size_n = if (num_tokens <= 4) 32 else 128,
+            .block_size_k = 64,
+            .group_size_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        };
+        const routing = zml.moe.triton.prepareRouting(ids, self.up_proj.weight.dim(.expert), @intCast(launch_config.block_size_m));
+        const activated = self.up_proj.forwardRouted(input, routing, launch_config, @intCast(topk)).relu();
+        const hidden = activated.mul(activated);
+        const projected = self.down_proj.forwardRouted(hidden, routing, launch_config, 1)
+            .reshape(.{ .b = x.dim(.b), .s = x.dim(.s), .topk = topk, .d = x.dim(.d) });
+        return self.combineExperts(x, projected, routing_scores);
+    }
+
     fn forwardChunk(self: Moe, x: zml.Tensor) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
-
-        // The shared fused MoE kernels do not support ReLU-squared yet.
         const activated = self.up_proj.forward(x, topk_ids).relu();
         const hidden = activated.mul(activated).rename(.{ .dout = .d });
         const projected = self.down_proj.forward(hidden, topk_ids).rename(.{ .dout = .d });
+        return self.combineExperts(x, projected, routing_scores);
+    }
+
+    fn combineExperts(self: Moe, x: zml.Tensor, projected: zml.Tensor, routing_scores: zml.Tensor) zml.Tensor {
         const routed = projected.convert(.f32).mul(routing_scores.broad(projected.shape().withDtype(.f32)))
             // Match vLLM: round the reduction to BF16 before routed scaling.
             .sum(.topk).squeeze(.topk).convert(x.dtype()).scale(self.routed_scaling_factor);
@@ -1254,8 +1332,8 @@ pub const Mamba2 = struct {
         zml.Buffer.deinitAll(Mamba2, self);
     }
 
-    /// FP32 reference scan. B/C are already expanded to heads; dt is already positive
-    /// A is already -exp(A_log). Both outputs and final state are FP32
+    /// FP32 selective scan with chunk-parallel SSD prefill and a single-step decode path.
+    /// B/C are expanded to heads, dt is positive, and A is already -exp(A_log).
     pub fn selectiveScan(
         x: zml.Tensor,
         b: zml.Tensor,
@@ -1291,18 +1369,88 @@ pub const Mamba2 = struct {
         if (x.dim(.s) == 0)
             return .{ .outputs = initial.outputs, .state = initial.ssm };
 
-        const final = if (x.dim(.s) == 1) blk: {
-            // Avoid the while-loop overhead for token-by-token decoding.
-            const next = scan.body(initial);
-            const run = scan.cond(initial);
-            break :blk SelectiveScan.State{
-                .ssm = run.broad(initial.ssm.shape()).select(next.ssm, initial.ssm),
-                .outputs = run.broad(initial.outputs.shape()).select(next.outputs, initial.outputs),
-                .step = run.select(next.step, initial.step),
-            };
-        } else zml.ops.@"while"(SelectiveScan, scan, initial);
+        if (x.dim(.s) > 1)
+            return selectiveScanPrefill(scan, initial.ssm);
 
-        return .{ .outputs = final.outputs, .state = final.ssm };
+        const next = scan.body(initial);
+        const run = scan.cond(initial);
+        return .{
+            .outputs = run.broad(initial.outputs.shape()).select(next.outputs, initial.outputs),
+            .state = run.broad(initial.ssm.shape()).select(next.ssm, initial.ssm),
+        };
+    }
+
+    fn selectiveScanPrefill(scan: SelectiveScan, initial_state: zml.Tensor) ScanOutput {
+        const seqlen = scan.x.dim(.s);
+        const chunk_size = @min(seqlen, 128);
+        const padding = @mod(-seqlen, chunk_size);
+        const chunk_count = @divExact(seqlen + padding, chunk_size);
+        const positions = zml.Tensor.iota(zml.Shape.init(.{ .s = seqlen }, .i64), .s).convert(.i64);
+        const valid = positions.cmp(.LT, scan.active_length.broad(positions.shape()));
+
+        const x = valid.broad(scan.x.shape()).select(scan.x, .zeroes(scan.x.shape()));
+        const b = valid.broad(scan.b.shape()).select(scan.b, .zeroes(scan.b.shape()));
+        const c = valid.broad(scan.c.shape()).select(scan.c, .zeroes(scan.c.shape()));
+        const dt = valid.broad(scan.dt.shape()).select(scan.dt, .zeroes(scan.dt.shape()));
+        const log_steps = dt.mul(scan.a.broad(dt.shape()));
+        const masked_log_steps = valid.broad(log_steps.shape()).select(log_steps, .zeroes(log_steps.shape()));
+
+        const chunks: struct { chunk: i64, t: i64 } = .{ .chunk = chunk_count, .t = chunk_size };
+        const log_decay = masked_log_steps.pad(0, .{ .s = zml.Tensor.Pad{ .high = padding } })
+            .splitAxis(.s, chunks).transpose(.{ .b, .h, .chunk, .t });
+        const bx = b.pad(0, .{ .s = zml.Tensor.Pad{ .high = padding } })
+            .splitAxis(.s, chunks).transpose(.{ .b, .h, .chunk, .t, .n });
+        const cx = c.pad(0, .{ .s = zml.Tensor.Pad{ .high = padding } })
+            .splitAxis(.s, chunks).transpose(.{ .b, .h, .chunk, .t, .n });
+        const dx = x.mul(dt.broad(x.shape())).pad(0, .{ .s = zml.Tensor.Pad{ .high = padding } })
+            .splitAxis(.s, chunks).transpose(.{ .b, .h, .chunk, .t, .p });
+
+        const segment_shape = log_decay.shape().append(.{ .u = chunk_size });
+        const segments = log_decay.broad(segment_shape).triangular(.{ .t, .u }, -1).cumulativeSum(.t);
+        const local_decay = segments.exp().triangular(.{ .t, .u }, 0);
+        const cb = cx.dot(bx.rename(.{ .t = .u }), .n);
+        const local_output = cb.mul(local_decay).dot(dx.rename(.{ .t = .u }), .u);
+
+        const prefix_decay = log_decay.cumulativeSum(.t).exp();
+        const suffix_decay = log_decay.reverse(.{.t}).pad(0, .{ .t = zml.Tensor.Pad{ .low = 1 } })
+            .slice(.t, .{ .start = 0, .len = chunk_size }).cumulativeSum(.t).reverse(.{.t}).exp();
+        const chunk_writes = dx.dot(bx.mul(suffix_decay.broad(bx.shape())), .t);
+        const chunk_decay = log_decay.sum(.t).squeeze(.t).exp();
+
+        var writes = chunk_writes;
+        var decays = chunk_decay;
+        var distance: i64 = 1;
+        while (distance < chunk_count) : (distance *= 2) {
+            const earlier_writes = writes.slice(.chunk, .{ .start = 0, .len = chunk_count - distance });
+            const later_writes = writes.slice(.chunk, .{ .start = distance, .len = chunk_count - distance });
+            const earlier_decays = decays.slice(.chunk, .{ .start = 0, .len = chunk_count - distance });
+            const later_decays = decays.slice(.chunk, .{ .start = distance, .len = chunk_count - distance });
+            writes = zml.Tensor.concatenate(&.{
+                writes.slice(.chunk, .{ .start = 0, .len = distance }),
+                later_writes.add(earlier_writes.mul(later_decays.broad(earlier_writes.shape()))),
+            }, .chunk);
+            decays = zml.Tensor.concatenate(&.{
+                decays.slice(.chunk, .{ .start = 0, .len = distance }),
+                later_decays.mul(earlier_decays),
+            }, .chunk);
+        }
+
+        const end_states = writes.add(initial_state.broad(writes.shape()).mul(decays.broad(writes.shape())));
+        const initial_chunk = initial_state.insertAxes(2, .{.chunk});
+        const incoming = if (chunk_count == 1) initial_chunk else zml.Tensor.concatenate(&.{
+            initial_chunk,
+            end_states.slice(.chunk, .{ .start = 0, .len = chunk_count - 1 }),
+        }, .chunk);
+        const state_output = cx.mul(prefix_decay.broad(cx.shape())).dot(incoming, .n);
+        const recurrent_output = local_output.add(state_output).transpose(.{ .b, .chunk, .t, .h, .p })
+            .merge(.{ .s = .{ .chunk, .t } }).slice(.s, .{ .start = 0, .len = seqlen });
+        const output = recurrent_output.add(x.mul(scan.d.broad(x.shape())));
+        const final_state = end_states.slice(.chunk, .single(chunk_count - 1));
+        const has_tokens = scan.active_length.cmp(.GT, .scalar(0, .i64));
+        return .{
+            .outputs = valid.broad(output.shape()).select(output, .zeroes(output.shape())),
+            .state = has_tokens.broad(final_state.shape()).select(final_state, initial_state),
+        };
     }
 
     pub fn forward(self: Mamba2, x: zml.Tensor, cache: Cache, active_length: zml.Tensor) struct { zml.Tensor, Cache } {

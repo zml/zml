@@ -11,7 +11,7 @@ pub const Session = struct {
     platform: *const zml.Platform,
     compiled_model: *inference.CompiledModel,
     prefill: inference.KernelRunner,
-    decode: inference.KernelRunner,
+    decode: inference.DecodeRunner,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     attention_index_buffers: []zml.Buffer,
@@ -80,7 +80,7 @@ pub const Session = struct {
 
         var prefill = try inference.KernelRunner.init(allocator, &compiled_model.prefill, model_buffers, attention_index_buffers);
         errdefer prefill.deinit(allocator);
-        const decode = try inference.KernelRunner.init(allocator, &compiled_model.decode, model_buffers, attention_index_buffers);
+        const decode = try inference.DecodeRunner.init(allocator, &compiled_model.decode, model_buffers);
 
         return .{
             .allocator = allocator,
@@ -326,6 +326,22 @@ pub const Session = struct {
             if (self.compiled_model.loaded_model.inner.config.isEosToken(token_id))
                 break :generation;
 
+            // Queue GPU work before detokenization and IO
+            const has_next = self.decode_position + 1 < self.seqlen;
+            if (has_next) {
+                inference.runDecode(&self.decode, .{
+                    .io = self.io,
+                    .tokens_buffer = &current_token_buffer,
+                    .next_token_buffer = &current_token_buffer,
+                    .token_index_buffer = &token_index_buffer,
+                    .active_length_buffer = &active_length_buffer,
+                    .kv_cache_buffers = &self.kv_cache_buffers,
+                    .rng_buffers = &self.rng_buffers,
+                    .attention_metadata_buffers = &attention_metadata_buffers,
+                    .mamba_cache_buffers = self.mamba_cache_buffers,
+                });
+            }
+
             const token = try decoder.feedOne(token_id, out_tokens_buffer);
             if (self.think_start) |think_start|
                 if (token_id == think_start)
@@ -341,20 +357,9 @@ pub const Session = struct {
 
             try all_tokens.append(self.allocator, token_id);
             self.decode_position += 1;
-            if (self.decode_position >= self.seqlen)
+            if (!has_next)
                 break :generation;
 
-            inference.run(&self.decode, .{
-                .io = self.io,
-                .tokens_buffer = &current_token_buffer,
-                .next_token_buffer = &current_token_buffer,
-                .token_index_buffer = &token_index_buffer,
-                .active_length_buffer = &active_length_buffer,
-                .kv_cache_buffers = &self.kv_cache_buffers,
-                .rng_buffers = &self.rng_buffers,
-                .attention_metadata_buffers = &attention_metadata_buffers,
-                .mamba_cache_buffers = self.mamba_cache_buffers,
-            });
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 

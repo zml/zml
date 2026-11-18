@@ -43,9 +43,18 @@ pub fn run(language_session: *session.Session, audio: *const EncodedAudio, write
     var generated: std.ArrayList(u32) = .empty;
     defer generated.deinit(allocator);
 
+    const decode_start: std.Io.Timestamp = .now(io, .awake);
     try language_session.runDecode(&generated, writer);
     try writer.writeAll("\n");
     try writer.flush();
+
+    const decode_duration = decode_start.untilNow(io, .awake);
+    const decode_ns = decode_duration.toNanoseconds();
+    const tokens_per_second = if (decode_ns > 0)
+        @as(f64, @floatFromInt(generated.items.len)) * 1e9 / @as(f64, @floatFromInt(decode_ns))
+    else
+        0;
+    log.info("Audio decode [{f}, {d} tokens, {:.1} tok/s]", .{ decode_duration, generated.items.len, tokens_per_second });
 }
 
 pub fn encode(
@@ -113,6 +122,7 @@ pub fn encode(
     defer runner.deinit(allocator);
 
     var output: zml.Bufferized(perception.Output) = undefined;
+    const perception_start: std.Io.Timestamp = .now(io, .awake);
     runner.run(io, .{
         .inputs = .{ .input = inputs },
         .outputs = .{ .hidden = &output.hidden, .lengths = &output.lengths },
@@ -121,6 +131,7 @@ pub fn encode(
     errdefer zml.Buffer.deinitAll(perception.Output, &output);
 
     try output.hidden.await(io);
+    log.info("Audio perception [{f}]", .{perception_start.untilNow(io, .awake)});
 
     const length = try output.lengths.getValue(u32, io);
     if (length != audio_length)
