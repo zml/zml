@@ -57,17 +57,13 @@ const Entry = struct {
 const Platform = struct { display: Entry, driver: ?type };
 
 pub const native_drivers = drivers_blk: {
-    const targets = std.enums.values(contract.Target);
-    var drivers: [targets.len]type = undefined;
-    var count: usize = 0;
-    for (targets) |target| {
-        const Driver = lookup(target, .native).driver orelse continue;
-        drivers[count] = Driver;
-        count += 1;
+    var drivers: []const type = &.{};
+    for (std.enums.values(contract.Target)) |target| {
+        if (lookup(target, .native).driver) |Driver| drivers = drivers ++ &[_]type{Driver};
     }
-    if (count == 0) @compileError("zml-smi-2 has no native drivers for " ++
+    if (drivers.len == 0) @compileError("zml-smi-2 has no native drivers for " ++
         @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag));
-    break :drivers_blk drivers[0..count].*;
+    break :drivers_blk drivers;
 };
 
 /// Portable lookups supply display metadata without resolving any native driver.
