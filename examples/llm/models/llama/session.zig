@@ -198,7 +198,7 @@ pub const Session = struct {
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
                 .next_token_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .token_index_buf = if (self.platform.target == .ascend) &self.token_index_buffers[all_tokens.items.len - 1] else &self.token_index_buffers[all_tokens.items.len],
                 .active_length_buf = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
