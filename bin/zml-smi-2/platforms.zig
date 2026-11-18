@@ -7,14 +7,11 @@ const spec = @import("zml-smi-2/tui").spec;
 const Logo = enum { logo, nvidia, amd, intel, neuron, tpu };
 
 /// Slot zero is the ZML logo used in the overview header.
-pub const logos: []const []const u8 = &logo_pngs;
-
-const logo_pngs = pngs_blk: {
-    var pngs: [std.enums.values(Logo).len][]const u8 = undefined;
-    for (std.enums.values(Logo)) |logo| {
-        pngs[@backingInt(logo)] = @embedFile("assets/" ++ @tagName(logo) ++ ".png");
-    }
-    break :pngs_blk pngs;
+pub const logos: []const []const u8 = logos_blk: {
+    var pngs: []const []const u8 = &.{};
+    for (@typeInfo(Logo).@"enum".field_names) |name|
+        pngs = pngs ++ .{@embedFile("assets/" ++ name ++ ".png")};
+    break :logos_blk pngs;
 };
 
 const graphics_clock = row("Graphics ", .{ .clock_pair = .{
@@ -54,29 +51,36 @@ const Entry = struct {
     logo: ?Logo = null,
 };
 
-const Platform = struct { display: Entry, driver: ?type };
-
 pub const native_drivers = drivers_blk: {
     var drivers: []const type = &.{};
-    for (std.enums.values(contract.Target)) |target| {
-        if (lookup(target, .native).driver) |Driver| drivers = drivers ++ &[_]type{Driver};
-    }
-    if (drivers.len == 0) @compileError("zml-smi-2 has no native drivers for " ++
+    for (std.enums.values(contract.Target)) |target|
+        drivers = drivers ++ .{lookup(target).driver orelse continue};
+    break :drivers_blk if (drivers.len != 0) drivers else @compileError("zml-smi-2 has no native drivers for " ++
         @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag));
-    break :drivers_blk drivers;
 };
 
-/// Portable lookups supply display metadata without resolving any native driver.
-fn lookup(comptime target: contract.Target, comptime mode: enum { native, portable }) Platform {
-    const linux = mode == .native and builtin.os.tag == .linux;
-    const linux_nvml = linux and (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64);
-    const linux_x86 = linux and builtin.cpu.arch == .x86_64;
-    const mac_arm = mode == .native and builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
-    const display: Entry, const backend = switch (target) {
-        .cuda => .{ .{ .logo = .nvidia }, if (linux_nvml) @import("zml-smi-2/drivers/nvml") },
-        .rocm => .{ .{ .logo = .amd }, if (linux_x86) @import("zml-smi-2/drivers/amdsmi") },
-        .oneapi => .{ .{ .logo = .intel }, if (linux_x86) @import("zml-smi-2/drivers/oneapi") },
-        .neuron => .{ .{ .title_label = "NC", .logo = .neuron, .profile = &.{
+/// Display and native registration each resolve their own catalog column.
+fn lookup(comptime target: contract.Target) type {
+    return struct {
+        const display = select(target, Entry) catch unreachable;
+        const driver: ?type = select(target, type) catch null;
+    };
+}
+
+/// A display read takes the metadata branch even when the host has a native driver.
+fn native(comptime Result: type, supported: bool) error{Unsupported}!bool {
+    return if (Result == Entry) false else if (supported) true else error.Unsupported;
+}
+
+fn select(comptime target: contract.Target, comptime Result: type) error{Unsupported}!Result {
+    const linux_x86 = native(Result, builtin.os.tag == .linux and builtin.cpu.arch == .x86_64);
+    const linux_nvml = if (builtin.os.tag == .linux and builtin.cpu.arch == .aarch64) native(Result, true) else linux_x86;
+    const mac_arm = native(Result, builtin.os.tag == .macos and builtin.cpu.arch == .aarch64);
+    return switch (target) {
+        .cuda => if (try linux_nvml) @import("zml-smi-2/drivers/nvml") else .{ .logo = .nvidia },
+        .rocm => if (try linux_x86) @import("zml-smi-2/drivers/amdsmi") else .{ .logo = .amd },
+        .oneapi => if (try linux_x86) @import("zml-smi-2/drivers/oneapi") else .{ .logo = .intel },
+        .neuron => if (try linux_x86) @import("zml-smi-2/drivers/neuron") else .{ .title_label = "NC", .logo = .neuron, .profile = &.{
             .util_label = "Core",
             .util_title = "Core Utilization",
             .memory_prefix = "HBM ",
@@ -94,14 +98,14 @@ fn lookup(comptime target: contract.Target, comptime mode: enum { native, portab
                 row("Notifications ", .{ .memory = .nc_notifications }),
                 row("Uncategorized ", .{ .memory = .nc_uncategorized }),
             } }},
-        } }, if (linux_x86) @import("zml-smi-2/drivers/neuron") },
-        .tpu => .{ .{ .title_label = "TPU", .logo = .tpu, .profile = &.{
+        } },
+        .tpu => if (try linux_x86) @import("zml-smi-2/drivers/tpu") else .{ .title_label = "TPU", .logo = .tpu, .profile = &.{
             .util_label = "Duty",
             .util_title = "Duty Cycle",
             .memory_prefix = "HBM ",
             .environment = .hidden,
-        } }, if (linux_x86) @import("zml-smi-2/drivers/tpu") },
-        .furiosa => .{ .{ .title_label = "NPU", .profile = &.{
+        } },
+        .furiosa => if (try linux_x86) @import("zml-smi-2/drivers/furiosa") else .{ .title_label = "NPU", .profile = &.{
             .util_label = "NPU",
             .util_title = "NPU Utilization",
             .memory_prefix = "DRAM ",
@@ -115,8 +119,8 @@ fn lookup(comptime target: contract.Target, comptime mode: enum { native, portab
                 row("Governor ", .{ .named = named(.governor, contract.Governor) }),
                 row("Throttle ", .{ .flags = named(.throttle_reasons, contract.ThrottleReason) }),
             } }},
-        } }, if (linux_x86) @import("zml-smi-2/drivers/furiosa") },
-        .metal => .{ .{ .profile = &.{
+        } },
+        .metal => if (try mac_arm) @import("zml-smi-2/drivers/metal") else .{ .profile = &.{
             .util_label = "GPU",
             .util_title = "GPU Utilization",
             .memory_prefix = "In use ",
@@ -133,9 +137,8 @@ fn lookup(comptime target: contract.Target, comptime mode: enum { native, portab
                     row("System  ", .{ .host_watts = .system_power_mw }),
                 } },
             },
-        } }, if (mac_arm) @import("zml-smi-2/drivers/metal") },
+        } },
     };
-    return .{ .display = display, .driver = if (@TypeOf(backend) == type) backend else null };
 }
 
 fn row(label: []const u8, value: spec.Row.Value) spec.Row {
@@ -143,9 +146,8 @@ fn row(label: []const u8, value: spec.Row.Value) spec.Row {
 }
 
 fn named(metric: contract.Metric, comptime Tag: type) spec.Named {
-    comptime for (std.enums.values(Tag), 0..) |tag, index| {
+    comptime for (std.enums.values(Tag), 0..) |tag, index|
         if (@backingInt(tag) != index) @compileError("expected dense enum: " ++ @typeName(Tag));
-    };
     return .{ .metric = metric, .labels = @typeInfo(Tag).@"enum".field_names };
 }
 
@@ -164,12 +166,12 @@ pub fn devices(
     const views = try arena.alloc(spec.DeviceView, inventory.len);
     for (inventory, views, 0..) |device, *view, index| {
         const entry = switch (device.target) {
-            inline else => |target| lookup(target, .portable).display,
+            inline else => |target| lookup(target).display,
         };
         view.* = .{
-            .title = title(arena, device, index, entry.title_label, .overview) catch
+            .title = title(arena, device, index, entry.title_label) catch
                 return error.OutOfMemory,
-            .heading = title(arena, device, index, "Device", .detail) catch return error.OutOfMemory,
+            .heading = title(arena, device, index, null) catch return error.OutOfMemory,
             .remote = device.remote,
             .profile = entry.profile,
             .logo = if (entry.logo) |logo| @backingInt(logo) else null,
@@ -182,20 +184,18 @@ fn title(
     arena: std.mem.Allocator,
     device: contract.Device,
     index: usize,
-    label: []const u8,
-    comptime page: enum { overview, detail },
+    overview_label: ?[]const u8,
 ) std.Io.Writer.Error![]const u8 {
     var text: std.Io.Writer.Allocating = .init(arena);
     errdefer text.deinit();
     const writer = &text.writer;
-    try writer.print("{s} {d}: {s}", .{ label, index, device.name orelse "Unknown" });
+    try writer.print("{s} {d}: {s}", .{ overview_label orelse "Device", index, device.name orelse "Unknown" });
     const name_end = text.written().len;
-    if (device.driver_version) |driver| {
-        if (driver.len != 0) try writer.print(" ({s}", .{driver});
-    }
+    const driver = device.driver_version orelse "";
+    if (driver.len != 0) try writer.print(" ({s}", .{driver});
     for (device.details) |attribute| {
         const display = detail_labels.get(attribute.key) orelse DetailLabel{ .label = attribute.key };
-        if (page == .overview and !display.in_title) continue;
+        if (overview_label != null and !display.in_title) continue;
         const separator = if (text.written().len == name_end) " (" else ", ";
         try writer.print("{s}{s} {s}", .{ separator, display.label, attribute.value });
     }
