@@ -136,7 +136,7 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
             break :blk platform.coreCountPerDevice() orelse std.debug.panic("Metal device has no core_count attribute", .{});
         };
 
-        const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), span, core_count);
+        const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), span, @intCast(core_count));
 
         const cfg: paged_attn.FaVecPaged.Cfg = .{
             .head_dim = head_dim,
