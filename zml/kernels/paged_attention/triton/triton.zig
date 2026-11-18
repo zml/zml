@@ -60,8 +60,50 @@ fn isCudaComputeCapability(expected: zml.platform.cuda.ComputeCapability) bool {
 /// Triton codegen bug is not diagnosed; this only keeps us out of it.
 const max_query_tile_elements: usize = 16 * 1024;
 
-fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
+const PrefillTile = struct {
+    query_rows: usize,
+    kv_rows: usize,
+};
+
+fn fitOneapiPrefillTile(args: struct {
+    preferred: PrefillTile,
+    min_query_rows: usize,
+    head_bytes: usize,
+    shared_bytes: usize,
+}) ?PrefillTile {
+    // The single-stage kernel stages Q [M, H], K [H, N] and V [N, H]
+    // in shared local memory. H is the padded head width. With M = N = 64
+    // and 512-wide BF16 heads, (M + 2 * N) * H * 2 is 192 KiB, above
+    // the B70's 128 KiB limit. Keep the query tile while a 16-key tile
+    // fits, then reduce both dimensions as needed to fit the device.
+    const shared_rows = args.shared_bytes / args.head_bytes;
+    const min_kv_rows: usize = @min(args.preferred.kv_rows, 16);
+    const query_rows = @min(args.preferred.query_rows, std.math.floorPowerOfTwo(usize, shared_rows -| 2 * min_kv_rows));
+    if (query_rows < args.min_query_rows) return null;
+    const kv_rows = @min(args.preferred.kv_rows, std.math.floorPowerOfTwo(usize, (shared_rows - query_rows) / 2));
+    return .{ .query_rows = query_rows, .kv_rows = kv_rows };
+}
+
+test "OneAPI prefill tiles fit B70 shared memory for wide heads" {
+    for ([_]struct { head_dim: usize, query_rows: usize, expected: PrefillTile }{
+        .{ .head_dim = 256, .query_rows = 64, .expected = .{ .query_rows = 64, .kv_rows = 64 } },
+        .{ .head_dim = 512, .query_rows = 64, .expected = .{ .query_rows = 64, .kv_rows = 32 } },
+        .{ .head_dim = 512, .query_rows = 16, .expected = .{ .query_rows = 16, .kv_rows = 32 } },
+        .{ .head_dim = 1024, .query_rows = 64, .expected = .{ .query_rows = 32, .kv_rows = 16 } },
+        .{ .head_dim = 1024, .query_rows = 16, .expected = .{ .query_rows = 16, .kv_rows = 16 } },
+    }) |case| {
+        try std.testing.expectEqual(@as(?PrefillTile, case.expected), fitOneapiPrefillTile(.{
+            .preferred = .{ .query_rows = case.query_rows, .kv_rows = 64 },
+            .min_query_rows = 8,
+            .head_bytes = case.head_dim * zml.DataType.bf16.sizeOf(),
+            .shared_bytes = 128 * 1024,
+        }));
+    }
+}
+
+fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Config2D {
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
+    const long_prefill = options.max_seqlen_q >= 256;
 
     // Until we test on other platforms, gate the fix to GB300
     const is_gb300 = isCudaComputeCapability(.{ .major = 10, .minor = 3 });
@@ -70,7 +112,7 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
 
     var block_m = options.block_m;
     var block_q = options.block_q;
-    if (options.max_seqlen_q >= 256) {
+    if (long_prefill) {
         if (options.head_dim >= 256) {
             block_m = 64;
             tile_size = 16;
@@ -87,10 +129,27 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
         }
         num_stages_2d = 1;
         num_warps = 4;
-        if (isOneapiTarget() and options.head_dim >= 256) {
+    }
+    const platform = zml.Compiler.current().platform;
+    if (platform.target == .oneapi) {
+        if (long_prefill and options.head_dim >= 256) {
             tile_size = 64;
             num_warps = 32;
         }
+        var shared_bytes: usize = std.math.maxInt(usize);
+        for (platform.devices) |device| {
+            const limit = device.pjrt_desc.attribute(platform.pjrt_api, "shared_memory_per_block_optin") orelse
+                stdx.debug.panic("OneAPI device did not report its shared local memory limit", .{});
+            shared_bytes = @min(shared_bytes, @as(usize, @intCast(limit.int64)));
+        }
+        const tile = fitOneapiPrefillTile(.{
+            .preferred = .{ .query_rows = block_m, .kv_rows = tile_size },
+            .min_query_rows = options.numQueriesPerKv(),
+            .head_bytes = std.math.ceilPowerOfTwoAssert(usize, options.head_dim) * element_bytes,
+            .shared_bytes = shared_bytes,
+        }) orelse stdx.debug.panic("OneAPI prefill tiles for head width {d} exceed the {d}-byte shared local memory limit", .{ options.head_dim, shared_bytes });
+        block_m = tile.query_rows;
+        tile_size = tile.kv_rows;
     }
     block_q = block_m / options.numQueriesPerKv();
     const total_q_blocks = options.num_tokens / block_q + options.batch_size;
@@ -536,7 +595,9 @@ pub const paged = struct {
     }
 
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        const config = select2dConfig(paged_attention_opts);
+        // FP8 cache tiles can be dequantized to the query dtype before the dot.
+        const element_bytes = @max(q.dtype().sizeOf(), k_cache.dtype().sizeOf(), v_cache.dtype().sizeOf());
+        const config = select2dConfig(paged_attention_opts, element_bytes);
         const k_strides = k_cache.shape().computeElementStrides().constSlice();
         const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
