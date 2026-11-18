@@ -471,7 +471,15 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
         .indices = .{ .ptr = cute.DType.i32 },
         .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else dt },
     });
-    if (c.sharedBytes() > 48 * 1024) b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", .int(b.ctx, .i32, c.sharedBytes()))})));
+    const shared = if (c.sharedBytes() > 48 * 1024) blk: {
+        // Static shared memory is limited to 48 KiB even when the launch opts
+        // into a larger allocation. Storage objects use dynamic shared memory.
+        b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
+        b.setFunctionAttribute(.named(b.ctx, "smem.partition_num", .int(b.ctx, .i32, 1)));
+        const field = try std.fmt.allocPrint(b.arena.allocator(), "storage:{d}:0", .{c.sharedBytes()});
+        const storage = b.allocSmemStorage(.i8, 128, b.layoutType(b.layoutSpec(.{c.sharedBytes()}, .{1})), 0, &.{field});
+        break :blk b.getIter(storage, b.ptrTy(.i8, .smem, 128) catch @panic("bad shared memory pointer")).value();
+    } else b.allocSmem(.i8, c.sharedBytes(), 128);
     const token = b.blockIdx().x;
     const first_row = b.blockIdx().y.rem(c.headTiles()).mul(c.head_rows);
     const head = b.blockIdx().y.div(c.headTiles());
@@ -516,7 +524,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             .indices = b.ptrToInt(a.indices, .i64),
             .sink = b.ptrToInt(a.sink, .i64),
             .out = b.ptrToInt(a.out, .i64),
-            .shared = b.ptrToInt(b.allocSmem(.i8, c.sharedBytes(), 128), .i32),
+            .shared = b.ptrToInt(shared, .i32),
             .tid = tid,
             .lane = tid.rem(32),
             .warp = tid.div(32),
@@ -1002,4 +1010,30 @@ test "indexed grouped attention emits single warp D32 D64 D128" {
         try std.testing.expect(std.mem.indexOf(u8, ir, "mma.sync.aligned.m16n8k16") != null);
         try std.testing.expect(std.mem.indexOf(u8, ir, "ldmatrix.sync.aligned.m8n8.x2.trans") != null);
     };
+}
+
+test "indexed wide heads use dynamic shared memory above 48 KiB" {
+    for ([_]i64{ 4, 8 }) |warps| {
+        const cfg: Config = .{
+            .head_dim = 512,
+            .tokens = 1,
+            .batch = 1,
+            .kv_heads = 1,
+            .group = 16,
+            .pages_per_seq = 129,
+            .page_size = 16,
+            .topk = 1025,
+            .dtype = .bf16,
+            .kv_tile = 32,
+            .warps = warps,
+            .scale = 1 / @sqrt(@as(f32, 512)),
+            .sink = true,
+            .splits = 33,
+        };
+        try std.testing.expect(cfg.sharedBytes() > 48 * 1024);
+        const ir = try Kernel.emit(std.testing.allocator, cfg, .{ @intCast(warps * 32), 1, 1 });
+        defer std.testing.allocator.free(ir);
+        try std.testing.expect(std.mem.indexOf(u8, ir, "smem.struct_fields") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ir, "arch.alloc_smem") == null);
+    }
 }
