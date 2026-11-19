@@ -262,15 +262,14 @@ pub fn main(init: std.process.Init) !void {
     // Encode → denoise → decode
     // =============================================================================
 
-    const vae_loaded = try vae_model.startLoad(&run, &vae_ckpt.store);
-    defer vae_loaded.deinit(allocator, io);
-    const audio_loaded = try audio_model.startLoad(&run, &audio_ckpt.store);
-    defer audio_loaded.deinit(allocator, io);
-
     var text = try enc_model.encodeText(&run, &enc_ckpt.store, tokens);
     defer text.deinit();
     var latents = try dit_model.denoise(&run, &dit_ckpt.store, geo, text, @intCast(tokens.len), packed_run, args.seed);
     defer latents.deinit();
+    const vae_loaded = try vae_model.startLoad(&run, &vae_ckpt.store);
+    defer vae_loaded.deinit(allocator, io);
+    const audio_loaded = try audio_model.startLoad(&run, &audio_ckpt.store);
+    defer audio_loaded.deinit(allocator, io);
     const rgb = try vae_model.decodeVideo(&run, geo, latents.video, vae_loaded);
     defer allocator.free(rgb);
     const pcm_f32 = try audio_model.decodeAudio(&run, latents.audio, audio_loaded);
