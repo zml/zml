@@ -609,14 +609,9 @@ pub const SelfAttn = struct {
     }
 
     fn partitionCachedKv(tensor: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
-        var cache_tensor = tensor.rename(.{ .s = .k });
+        const cache_tensor = tensor.rename(.{ .s = .k });
         return switch (kv_head_sharding) {
-            .sharded => |heads| blk: {
-                if (heads.factor != 1) {
-                    cache_tensor = cache_tensor.stutter1d(cache_tensor.axis(.h), heads.factor);
-                }
-                break :blk cache_tensor.withPartitioning(.model, .{ .k = .replicated, .h = .model, .hd = .replicated });
-            },
+            .sharded => cache_tensor.withPartitioning(.model, .{ .k = .replicated, .h = .model, .hd = .replicated }),
             .replicated => cache_tensor.withPartitioning(.model, .{ .k = .replicated, .h = .replicated, .hd = .replicated }),
         };
     }
@@ -647,8 +642,6 @@ pub const SelfAttn = struct {
         const cos, const sin = self.rotary_embed.getCosAndSin(position_ids, dtype);
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
-        k = partitionProjectedKv(k, kv_head_sharding);
-        v = partitionProjectedKv(v, kv_head_sharding);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
