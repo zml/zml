@@ -159,7 +159,7 @@ const SnakeBeta = struct {
         const shaped = alpha.broad(xf.shape());
         const mag = zml.Tensor.scalar(1.0, .f32).div(beta.addConstant(1e-9)).broad(xf.shape());
         const s = xf.mul(shaped).sin();
-        return xf.add(mag.mul(s.mul(s))).convert(x.dtype());
+        return xf.add(s.mul(s).mul(mag)).convert(x.dtype()); // Fixed for TCL/Furiosa lowering: keep dense operand first so mag broadcast fuses into the multyply. Now: s * s * mag.
     }
 };
 
