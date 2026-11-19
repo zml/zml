@@ -596,6 +596,11 @@ pub const Tensor = struct {
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
 
+    /// Returns a Tensor containing booleans indicating if each element of the input Tensor is a NaN.
+    pub fn isNaN(self: Tensor) Tensor {
+        return self.cmp(.NE, self);
+    }
+
     /// Returns a Tensor containing the element-wise number of bits set in the input Tensor.
     pub fn popcnt(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isInteger(), "popcnt expects tensor type to be an integer, got {}", .{self.dtype()});
