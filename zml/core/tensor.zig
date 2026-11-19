@@ -1,3 +1,4 @@
+// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -289,7 +290,7 @@ pub const Tensor = struct {
                 res._shape._sharding = self._shape._sharding;
                 return res;
             },
-            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa, .musa => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -356,7 +357,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return flat_tensors,
-            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa, .musa => {},
         }
 
         var copy = flat_tensors;
@@ -374,7 +375,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa, .musa => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -393,7 +394,7 @@ pub const Tensor = struct {
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
             .cpu, .neuron, .metal => return,
-            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa, .musa => {},
         }
 
         meta.visit(struct {
@@ -3871,7 +3872,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .musa => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice(a, .{ .end = k });
@@ -4828,7 +4829,7 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {}, ctx.platform.replicated_mesh, .{ .in_specs = .{ .input = .replicated } });
             },
-            .oneapi, .neuron, .furiosa => {},
+            .oneapi, .neuron, .furiosa, .musa => {},
         }
     }
 

@@ -1,3 +1,4 @@
+# Merge cleanup: keep the MUSA hardware regression test and its compatibility constraint.
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
@@ -22,4 +23,18 @@ zig_library(
 zig_test(
     name = "test",
     deps = [":paged_attention"],
+)
+
+zig_test(
+    name = "musa_test",
+    main = "musa_test.zig",
+    tags = ["requires-gpu"],
+    target_compatible_with = select({
+        "//platforms:musa.enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":paged_attention",
+        "//zml/core",
+    ],
 )

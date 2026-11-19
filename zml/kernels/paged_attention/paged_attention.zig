@@ -1,3 +1,4 @@
+// Merge cleanup: keep the MUSA backend selection and attention option checks.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -36,7 +37,7 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu => .stablehlo,
+            .cpu, .musa => .stablehlo,
             .furiosa => .tcl,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
@@ -49,7 +50,7 @@ pub const Backend = enum {
             .tcl => platform.target == .furiosa,
             .triton => switch (platform.target) {
                 .cuda, .rocm, .oneapi => true,
-                .cpu, .tpu, .neuron, .metal, .furiosa => false,
+                .cpu, .tpu, .neuron, .metal, .furiosa, .musa => false,
             },
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
@@ -205,6 +206,9 @@ pub const Partitioning = zml.ops.ManualPartitioning(Attention.forward);
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions, mesh: *const zml.Mesh, partitioning: Partitioning) zml.Tensor {
     _ = k;
     _ = v;
+    if (zml.Compiler.current().platform.target == .musa and (!opts.mask.isCausal() or opts.sink != null)) {
+        @panic("MUSA paged attention requires a causal mask and has no attention sink");
+    }
     const args: Attention = .{ .parameters = parameters, .q = q, .kv_cache = kv_cache, .opts = opts };
     return zml.ops.manualComputation(Attention.forward, args, q.shape(), mesh, partitioning);
 }

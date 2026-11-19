@@ -1,0 +1,15 @@
+# Cleanup: keep this file. The runfiles tree preserves mcc and library symlinks.
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@zml//platforms/musa:musa.bzl", "musa_sandbox")
+
+musa_sandbox(
+    name = "sandbox",
+    src = "archive.tar.zst",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "libzml_musa",
+    data = [":sandbox"],
+    visibility = ["//visibility:public"],
+)

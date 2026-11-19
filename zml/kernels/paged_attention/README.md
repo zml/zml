@@ -1,3 +1,4 @@
+<!-- Merge cleanup: keep the MUSA backend entry. -->
 # Paged attention semantics
 
 [paged_attention.zig](paged_attention.zig) evaluates attention over a KV cache
@@ -181,4 +182,4 @@ limitations:
 - [Triton](triton/README.md) — CUDA, ROCm, and oneAPI.
 - [Mosaic TPU](mosaic_tpu/README.md) — TPU.
 - [Metal](metal/README.md) — Metal.
-- [StableHLO](stablehlo/README.md) — CPU and Furiosa fallback.
+- [StableHLO](stablehlo/README.md) — CPU and MUSA by default. Also available as a Furiosa fallback.

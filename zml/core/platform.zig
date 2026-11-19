@@ -1,3 +1,4 @@
+// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -40,7 +41,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa, .musa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -89,7 +90,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu, .furiosa => {
+            .cuda, .rocm, .oneapi, .tpu, .furiosa, .musa => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -225,7 +226,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .musa => device.id(),
     };
 }
 
@@ -257,6 +258,7 @@ pub const State = union(Target) {
     oneapi: void,
     metal: void,
     furiosa: void,
+    musa: void,
 
     pub const CudaState = struct {
         flashinfer_cutlass_moe_runners: ?*flashinfer_cutlass_runtime.Runners = null,
@@ -279,6 +281,7 @@ pub const State = union(Target) {
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
             .furiosa => .{ .furiosa = {} },
+            .musa => .{ .musa = {} },
         };
     }
 
@@ -412,6 +415,7 @@ pub const Platform = struct {
             .oneapi,
             .metal,
             .furiosa,
+            .musa,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -692,7 +696,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .musa => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -733,6 +737,7 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
+    musa: struct {} = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,

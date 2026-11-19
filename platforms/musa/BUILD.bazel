@@ -1,0 +1,21 @@
+# Cleanup: keep the platform loader and its opt-in SDK runfiles.
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+exports_files(["libzml_musa.BUILD.bazel"])
+
+zig_library(
+    name = "musa",
+    import_name = "platforms/musa",
+    main = "musa.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//platforms:options",
+        "//stdx",
+    ] + select({
+        "//platforms:musa.enabled": ["@libzml_musa"],
+        "//conditions:default": [],
+    }),
+)

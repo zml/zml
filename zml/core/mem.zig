@@ -1,3 +1,4 @@
+// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
@@ -22,7 +23,7 @@ pub const DmaAllocator = union(enum) {
     pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
         return switch (device.platform.target) {
             .cuda => .{ .dmam = .init(parent, device.platform) },
-            .rocm, .oneapi, .tpu, .furiosa => .{ .uib = .init(device.memory(.host_pinned).?) },
+            .rocm, .oneapi, .tpu, .furiosa, .musa => .{ .uib = .init(device.memory(.host_pinned).?) },
             .cpu, .neuron, .metal => .{ .passthrough = parent },
         };
     }

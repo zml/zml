@@ -1,9 +1,11 @@
+// Cleanup: keep the MUSA target and loader registration.
 const std = @import("std");
 
 const cpu = @import("platforms/cpu");
 const cuda = @import("platforms/cuda");
 const furiosa = @import("platforms/furiosa");
 const metal = @import("platforms/metal");
+const musa = @import("platforms/musa");
 const neuron = @import("platforms/neuron");
 const oneapi = @import("platforms/oneapi");
 const pjrt = @import("pjrt");
@@ -22,6 +24,7 @@ pub const Platform = enum {
     oneapi,
     metal,
     furiosa,
+    musa,
 
     pub fn selectFirstAcceleratorEnabled() error{Unavailable}!Platform {
         inline for (@typeInfo(Platform).@"enum".field_names) |field| {

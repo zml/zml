@@ -1,3 +1,4 @@
+// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 const std = @import("std");
 
 const meta = @import("zml/meta");
@@ -691,7 +692,7 @@ pub const MemoryWriter = union(enum) {
         memory: Memory.Kind,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .rocm, .oneapi, .furiosa => .{
+            .cuda, .rocm, .oneapi, .furiosa, .musa => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory),
             },
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)

@@ -1,3 +1,4 @@
+// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 const std = @import("std");
 
 const zml = @import("zml");
@@ -63,7 +64,7 @@ pub const Meshes = struct {
                     .experts = try platform.registerMeshWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
                 };
             },
-            .cuda, .rocm, .oneapi, .neuron, .metal, .cpu, .furiosa => return .{
+            .cuda, .rocm, .oneapi, .neuron, .metal, .cpu, .furiosa, .musa => return .{
                 .model = try platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })),
                 .experts = try platform.registerMesh("experts", .mesh(.{ .experts = .high_bandwidth })),
             },

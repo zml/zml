@@ -1,6 +1,7 @@
+<!-- Merge cleanup: keep the MUSA dispatch and supported-configuration documentation. -->
 # StableHLO paged attention
 
-This fallback is automatically selected for CPU and Furiosa. See the
+CPU and MUSA select StableHLO by default. Furiosa can select it explicitly. See the
 [parent README](../README.md) for the general attention equation, packed
 sequence metadata, and page addressing contract.
 
@@ -15,7 +16,8 @@ the final output to the query dtype. Query-key dot products use the input dtype.
   implementation accesses `.split`. Latent caches are rejected by dispatch.
 - Attention is always causal: `causal = false` is currently ignored. Sliding
   windows and explicit key indices are rejected. `opts.sink` is ignored; custom
-  scale is supported.
+  scale is supported. On MUSA the public entry point rejects non-causal masks and
+  attention sinks.
 - Multi-query chunks are processed a full page at a time, and the packed output
   cursor advances by the page size. Use page-multiple query chunks; arbitrary
   partial query chunks are not covered by this implementation. Single-query

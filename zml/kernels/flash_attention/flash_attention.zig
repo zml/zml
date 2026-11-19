@@ -1,3 +1,4 @@
+// Merge cleanup: keep the MUSA availability checks until a MUSA flash-attention kernel exists.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -18,7 +19,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
         .neuron => true,
         .metal => true,
         .cuda => if (cute.isAvailable(platform)) true else false,
-        .cpu, .rocm, .tpu, .oneapi, .furiosa => false,
+        .cpu, .rocm, .tpu, .oneapi, .furiosa, .musa => false,
     };
 }
 
@@ -32,7 +33,7 @@ pub const Backend = enum {
             .neuron => .nki,
             .metal => .metal,
             .cuda => .cute,
-            .cpu, .rocm, .tpu, .oneapi, .furiosa => stdx.debug.panic("Flash attention is not available on the {} platform", .{platform.target}),
+            .cpu, .rocm, .tpu, .oneapi, .furiosa, .musa => stdx.debug.panic("Flash attention is not available on the {} platform", .{platform.target}),
         };
     }
 

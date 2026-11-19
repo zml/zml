@@ -1,3 +1,4 @@
+// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 //! Explain how to split a buffer across different devices.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -193,6 +194,8 @@ pub const Partitioner = union(enum) {
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .furiosa => .shardy,
+            // SDK 5.1 supports GSPMD’s shape-preserving manual computation boundaries on one card.
+            .musa => .gspmd,
         };
     }
 };
@@ -1041,7 +1044,7 @@ pub const PhysicalMesh = struct {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
-            .cpu, .metal, .furiosa => &.{.bus},
+            .cpu, .metal, .furiosa, .musa => &.{.bus},
             .oneapi => &.{ .link, .bus },
         };
     }
@@ -1243,7 +1246,7 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
-            .oneapi, .metal, .furiosa => cpu(allocator, platform_devices),
+            .oneapi, .metal, .furiosa, .musa => cpu(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 

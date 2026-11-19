@@ -1,3 +1,4 @@
+// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -1212,7 +1213,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
     const ctx = Compiler.current();
     switch (ctx.platform.target) {
         .neuron => {},
-        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => {
+        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .musa => {
             stdx.debug.panic("neuronNki is only available on Neuron, got {s}", .{@tagName(ctx.platform.target)});
         },
     }
@@ -2335,7 +2336,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveIntegerScalarBroadcast(self: Tensor, output_shape: Shape) ?Tensor {
         switch (Compiler.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => return null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .musa => return null,
         }
 
         if (self.rank() != 0 or output_shape.rank() == 0 or !self.dtype().isInteger()) return null;
@@ -2354,7 +2355,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveGatherFillSemantics(indices: []Tensor) void {
         switch (Compiler.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => return,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .musa => return,
         }
 
         const active_lanes = activeLanesForFillDropIndices(indices) orelse return;
@@ -2366,7 +2367,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveScatterDropSemantics(indices: []Tensor, updates: anytype, opts: Tensor.ScatterOpts, update_values: *[updates.len]*const mlir.Value) void {
         const active_lanes: ?Tensor = switch (Compiler.current().platform.target) {
             .neuron => if (opts.update_fn == Tensor.ScatterOpts.increment) activeLanesForFillDropIndices(indices) else null,
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .musa => null,
         };
 
         if (active_lanes) |active| replaceInactiveIndirectIndices(indices, active);
