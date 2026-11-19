@@ -1521,6 +1521,16 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
+    /// Returns a Tensor containing the element-wise lower bound clamping operation of the input Tensor.
+    pub fn clampMin(self: Tensor, min_: Tensor) Tensor {
+        return self.clamp(min_, .constant(self.dtype().maxValue()));
+    }
+
+    /// Returns a Tensor containing the element-wise upper bound clamping operation of the input Tensor.
+    pub fn clampMax(self: Tensor, max_: Tensor) Tensor {
+        return self.clamp(.constant(self.dtype().minValue()), max_);
+    }
+
     /// Matrix multiplication, where contracting axes are specified using their tags.
     /// eg dot(.{ .a, .b, .c }, .{ .a, .c, .d }, .c) -> .{ .a, .b, .d }
     /// Axes with the same tag on both sides, and which aren't contracting,
@@ -2142,7 +2152,7 @@ pub const Tensor = struct {
         defer res.deinit();
 
         try std.testing.expectEqual(
-            [2][5]f32{ .{ -3, 1, 5, 5, 5 }, .{3, 3, 10, 10, 10 } },
+            [2][5]f32{ .{ -3, 1, 5, 5, 5 }, .{ 3, 3, 10, 10, 10 } },
             try res.getValue([2][5]f32, std.testing.io),
         );
     }
