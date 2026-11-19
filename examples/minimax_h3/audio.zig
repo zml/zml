@@ -50,6 +50,11 @@ fn loadWn(store: zml.io.TensorStore.View, layout: WnLayout) struct { v: zml.Tens
 /// `v * g / ||v||`. ZML `sum` keeps reduced axes at 1, matching `g`.
 fn weightNorm(v: zml.Tensor, g: zml.Tensor, comptime ax0: anytype, comptime ax1: anytype) zml.Tensor {
     const vf = v.convert(.f32);
+    if (zml.Compiler.current().platform.target == .furiosa) { // TODO: See if we can have this for all platforms rather than just Furiosa
+        const flat = vf.merge(.{ .norm = .{ ax1, ax0 } });
+        const sq = flat.mul(flat).sum(.norm).addConstant(1e-9);
+        return flat.mul(g.convert(.f32).reshape(sq.shape()).mul(sq.rsqrt())).reshape(vf.shape());
+    }
     const sq = vf.mul(vf).sum(ax0).sum(ax1).addConstant(1e-9);
     return vf.mul(g.convert(.f32).mul(sq.rsqrt()));
 }
