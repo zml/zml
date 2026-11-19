@@ -84,16 +84,24 @@ const VitAttn = struct {
 
     pub fn forward(self: VitAttn, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
         const heads = .{ .h = self.num_heads, .hd = self.head_dim };
-        const q = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.q, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
-        const k = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.k, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
-        const v = applyLinear(self.v, x).splitAxis(.dout, heads);
-        // Portable SDPA. DiT uses the shared non causal attention API for the long packed sequence.
-        return applyLinear(self.out, zml.nn.sdpa(
-            q.rename(.{ .s = .q }),
-            k.rename(.{ .s = .k }),
-            v.rename(.{ .s = .k }),
-            .{},
-        ).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } })).rename(.{ .dout = .d });
+        const q = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.q, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin).rename(.{ .s = .q });
+        const k = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.k, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin).rename(.{ .s = .k });
+        const v = applyLinear(self.v, x).splitAxis(.dout, heads).rename(.{ .s = .k });
+        const compiler = zml.Compiler.current();
+        const mesh = compiler.mesh(.model);
+        const backend: zml.attention.Backend = .auto(compiler.platform);
+        const metadata: zml.attention.Metadata = .init(.fromBackend(backend));
+        const parameters: zml.attention.Parameters = .init(.fromBackend(backend));
+        const batch: zml.Sharding.Partitioning.Logical = .parse(.{ .b = .model });
+
+        const attn = if (@mod(q.dim(.b), mesh.numPartitionsForLogicalAxis(.model)) == 0)
+            zml.attention.attentionOpts(q, k, v, .scalar(0, .i32), metadata, parameters, .{ .causal = false }, mesh, .{
+                .in_specs = .{ .q = batch, .k = batch, .v = batch },
+                .out_specs = batch,
+            })
+        else
+            zml.nn.sdpa(q, k, v, .{});
+        return applyLinear(self.out, attn.rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } })).rename(.{ .dout = .d });
     }
 };
 
