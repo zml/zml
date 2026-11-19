@@ -247,48 +247,30 @@ pub const Sampler = struct {
     lm_head: zml.nn.Linear,
     gen_options: Model.GenOptions,
 
-    pub const Input = struct {
-        sampler: Sampler,
+    pub fn sampleTokens(
+        self: Sampler,
         hidden: zml.Tensor,
-        tokens: zml.Tensor,
+        tokens_: zml.Tensor,
         active_length: zml.Tensor,
         rng: zml.Tensor.Rng,
         token_index: zml.Tensor,
-    };
-
-    pub const Output = struct {
-        tokens: zml.Tensor,
-        rng: zml.Tensor.Rng,
-        token_index: zml.Tensor,
-    };
-
-    pub fn sampleTokens(input: Input) Output {
-        const self = input.sampler;
-        const last_index = input.active_length.convert(.i32).addConstant(-1);
-        const x = self.norm.forward(input.hidden.slice(.s, .dyn(last_index, 1)));
+    ) struct { zml.Tensor, zml.Tensor.Rng, zml.Tensor } {
+        const last_index = active_length.convert(.i32).addConstant(-1);
+        const x = self.norm.forward(hidden.slice(.s, .dyn(last_index, 1)));
         const logits = self.lm_head.forward(x.withPartialTags(.{.d}), x.dtype()).rename(.{ .dout = .voc });
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng);
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
         const tokens = next_tokens.convert(.u32);
         return .{
-            .tokens = if (input.tokens.dim(.s) == 1) tokens.reuseBuffer(input.tokens) else tokens,
-            .rng = new_rng,
-            .token_index = input.token_index.addConstant(1).reuseBuffer(input.token_index),
+            if (tokens_.dim(.s) == 1) tokens.reuseBuffer(tokens_) else tokens,
+            new_rng,
+            token_index.addConstant(1).reuseBuffer(token_index),
         };
     }
 };
 
 pub const EmbedTokens = struct {
-    pub const Input = struct {
-        embedding: zml.nn.TokenEmbedding,
-        tokens: zml.Tensor,
-    };
-
-    pub const Output = struct {
-        hidden: zml.Tensor,
-    };
-
-    pub fn forward(input: Input) Output {
-        return .{ .hidden = input.embedding.forward(input.tokens) };
+    pub fn forward(embedding: zml.nn.TokenEmbedding, tokens: zml.Tensor) zml.Tensor {
+        return embedding.forward(tokens);
     }
 };
 
@@ -359,25 +341,15 @@ pub const TextModel = struct {
         rng: zml.Tensor.Rng,
         moe_backend: zml.moe.Backend,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        var hidden_states = EmbedTokens.forward(.{
-            .embedding = self.embed_tokens,
-            .tokens = tokens,
-        }).hidden;
+        var hidden_states = EmbedTokens.forward(self.embed_tokens, tokens);
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
             hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, active_length, updated_kv_cache.atLayer(i), config, moe_backend);
         }
 
-        const result = Sampler.sampleTokens(.{
-            .sampler = self.sampler(),
-            .hidden = hidden_states,
-            .tokens = tokens,
-            .active_length = active_length,
-            .rng = rng,
-            .token_index = token_index,
-        });
-        return .{ result.tokens, updated_kv_cache.reuseBuffer(kv_cache), result.rng };
+        const next_tokens, const new_rng, _ = self.sampler().sampleTokens(hidden_states, tokens, active_length, rng, token_index);
+        return .{ next_tokens, updated_kv_cache.reuseBuffer(kv_cache), new_rng };
     }
 };
 
@@ -391,34 +363,6 @@ pub const TransformerLayer = struct {
     attn: Attn,
     moe: Moe,
     post_attention_layernorm: RmsNorm,
-
-    pub const SelfAttnInput = struct {
-        layer: TransformerLayer,
-        hidden: zml.Tensor,
-        token_index: zml.Tensor,
-        cache: KvCache.SelfAttnCache,
-        config: Config,
-        moe_backend: zml.moe.Backend,
-    };
-
-    pub const SelfAttnOutput = struct {
-        hidden: zml.Tensor,
-        cache: KvCache.SelfAttnCache,
-    };
-
-    pub const LinearAttnInput = struct {
-        layer: TransformerLayer,
-        hidden: zml.Tensor,
-        active_length: zml.Tensor,
-        cache: KvCache.GatedDeltaNetCache,
-        config: Config,
-        moe_backend: zml.moe.Backend,
-    };
-
-    pub const LinearAttnOutput = struct {
-        hidden: zml.Tensor,
-        cache: KvCache.GatedDeltaNetCache,
-    };
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, layer_index: usize) !TransformerLayer {
         const is_full_attention = config.text_config.layer_types[layer_index] == .full_attention;
@@ -447,10 +391,16 @@ pub const TransformerLayer = struct {
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
     }
 
-    pub fn forwardSelfAttn(input: SelfAttnInput) SelfAttnOutput {
-        const self = input.layer;
-        const x0 = input.hidden;
-        _ = input.config;
+    pub fn forwardSelfAttn(
+        self: TransformerLayer,
+        hidden: zml.Tensor,
+        token_index: zml.Tensor,
+        cache: KvCache.SelfAttnCache,
+        config: Config,
+        moe_backend: zml.moe.Backend,
+    ) struct { zml.Tensor, KvCache.SelfAttnCache } {
+        const x0 = hidden;
+        _ = config;
         const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
@@ -458,23 +408,29 @@ pub const TransformerLayer = struct {
             .self_attn => |self_attn| self_attn,
             .linear_attn => unreachable,
         };
-        const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, input.token_index, input.cache);
+        const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, token_index, cache);
 
         const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, input.moe_backend);
+        const moe_output = self.moe.forward(normalized_hidden, moe_backend);
 
         return .{
-            .hidden = moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
-            .cache = updated_kv_cache,
+            moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
+            updated_kv_cache,
         };
     }
 
-    pub fn forwardLinearAttn(input: LinearAttnInput) LinearAttnOutput {
-        const self = input.layer;
-        const x0 = input.hidden;
-        _ = input.config;
+    pub fn forwardLinearAttn(
+        self: TransformerLayer,
+        hidden: zml.Tensor,
+        active_length: zml.Tensor,
+        cache: KvCache.GatedDeltaNetCache,
+        config: Config,
+        moe_backend: zml.moe.Backend,
+    ) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
+        const x0 = hidden;
+        _ = config;
         const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
@@ -482,16 +438,16 @@ pub const TransformerLayer = struct {
             .linear_attn => |linear_attn| linear_attn,
             .self_attn => unreachable,
         };
-        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, input.cache, input.active_length);
+        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, cache, active_length);
 
         const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, input.moe_backend);
+        const moe_output = self.moe.forward(normalized_hidden, moe_backend);
 
         return .{
-            .hidden = moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
-            .cache = updated_kv_cache,
+            moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
+            updated_kv_cache,
         };
     }
 
