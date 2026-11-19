@@ -401,20 +401,6 @@ pub fn resolveMesh(compiler: *const Compiler, logical_axes: anytype) *const Shar
     , .{ logical_axes, stdx.fmt.slice(compiler.meshes) });
 }
 
-pub fn Typed(comptime func_: anytype) type {
-    return struct {
-        pub fn compile(
-            allocator: std.mem.Allocator,
-            io: std.Io,
-            platform: *const Platform,
-            opts: Options,
-            args: std.meta.ArgsTuple(@TypeOf(func_)),
-        ) Error!Exe {
-            return Compiler.compile(allocator, io, platform, func_, args, opts);
-        }
-    };
-}
-
 pub fn compile(
     allocator: std.mem.Allocator,
     io: std.Io,

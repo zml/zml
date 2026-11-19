@@ -556,7 +556,7 @@ pub const Platform = struct {
             std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(model_), @tagName(func)))),
         ),
         opts: zml.Compiler.Options,
-    ) !Exe {
+    ) zml.Compiler.Error!Exe {
         return self.compileFn(
             allocator,
             io,
@@ -574,7 +574,7 @@ pub const Platform = struct {
         model: stdx.meta.Head(std.meta.ArgsTuple(@TypeOf(func))),
         args: stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(func))),
         opts: zml.Compiler.Options,
-    ) !Exe {
+    ) zml.Compiler.Error!Exe {
         return self.compileFn(allocator, io, func, .{model} ++ args, opts);
     }
 
@@ -585,7 +585,7 @@ pub const Platform = struct {
         comptime func: anytype,
         args: std.meta.ArgsTuple(@TypeOf(func)),
         opts: zml.Compiler.Options,
-    ) !Exe {
+    ) zml.Compiler.Error!Exe {
         return zml.Compiler.compile(allocator, io, self, func, args, opts);
     }
 

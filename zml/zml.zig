@@ -23,7 +23,6 @@ pub const Data = core.Data;
 pub const DataType = core.DataType;
 pub const exe = core.exe;
 pub const Exe = core.Exe;
-pub const FnExe = core.FnExe;
 pub const floats = core.floats;
 pub const io = core.io;
 pub const kernel = core.kernel;
