@@ -92,64 +92,58 @@ pub const CompiledModel = struct {
 pub const Inference = CompiledModel;
 
 const Forward = struct {
-    pub const Input = struct {
+    pub fn forward(
         weights: model.Model,
         tokens: zml.Tensor,
         token_index: zml.Tensor,
         active_length: zml.Tensor,
-        kv_cache: model.KvCache,
+        kv_cache_: model.KvCache,
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
-    };
-
-    pub const Output = struct {
-        tokens: zml.Tensor,
-        kv_cache: model.KvCache,
-        rng: zml.Tensor.Rng,
-    };
-
-    pub fn forward(input: Input) Output {
+    ) struct { zml.Tensor, model.KvCache, zml.Tensor.Rng } {
         var hidden = model.EmbedTokens.forward(.{
-            .embedding = .{ .embed_tokens = input.weights.model.embed_tokens },
-            .tokens = input.tokens,
+            .embedding = .{ .embed_tokens = weights.model.embed_tokens },
+            .tokens = tokens,
         }).hidden;
-        var kv_cache = input.kv_cache;
-        for (input.weights.model.layers, 0..) |layer, index| {
+        var kv_cache = kv_cache_;
+        for (weights.model.layers, 0..) |layer, index| {
             const result = model.TransformerLayer.forward(.{
                 .layer = layer,
                 .hidden = hidden,
-                .token_index = input.token_index,
+                .token_index = token_index,
                 .kv_cache = kv_cache,
                 .kv_cache_index = .scalar(@as(u32, @intCast(index)), .u32),
-                .attention_metadata = input.attention_metadata,
-                .attention_parameters = input.attention_parameters,
+                .attention_metadata = attention_metadata,
+                .attention_parameters = attention_parameters,
             });
             hidden = result.hidden;
             kv_cache = result.kv_cache;
         }
         // LmHead owns final normalization; Llama.forward would apply it twice.
         const result = model.LmHead.forward(.{
-            .lm_head = .init(input.weights),
+            .lm_head = .init(weights),
             .hidden = hidden,
-            .active_length = input.active_length,
-            .rng = input.rng,
+            .active_length = active_length,
+            .rng = rng,
         });
         return .{
-            .tokens = if (input.tokens.dim(.s) == 1) result.tokens.reuseBuffer(input.tokens) else result.tokens,
-            .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
-            .rng = .{ ._state = result.rng._state.reuseBuffer(input.rng._state) },
+            if (tokens.dim(.s) == 1) result.tokens.reuseBuffer(tokens) else result.tokens,
+            kv_cache.reuseBuffer(kv_cache_),
+            .{ ._state = result.rng._state.reuseBuffer(rng._state) },
         };
     }
 };
 
-pub const KernelExe = zml.FnExe(Forward.forward);
+pub const KernelExe = zml.Exe;
 
 pub const KernelRunner = struct {
-    forward: KernelExe.Runner(.{.weights}),
+    forward: zml.Exe.Runner,
 
     pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
-        return .{ .forward = try .init(exe, allocator, .{ .weights = buffers.* }) };
+        var forward = try exe.runner(allocator);
+        forward.args.bake(buffers.*);
+        return .{ .forward = forward };
     }
 
     pub fn deinit(self: *KernelRunner, allocator: std.mem.Allocator) void {
@@ -159,20 +153,13 @@ pub const KernelRunner = struct {
 
 pub fn run(runner: *KernelRunner, args: Args) void {
     runner.forward.run(args.io, .{
-        .inputs = .{
-            .tokens = args.tokens_buf.*,
-            .token_index = args.token_index_buf.*,
-            .active_length = args.active_length_buf.*,
-            .kv_cache = args.kv_cache_buffers.*,
-            .rng = args.rng_buffers.*,
-            .attention_metadata = args.attention_metadata_buffers.*,
-        },
-        .outputs = .{
-            .tokens = args.next_token_buf,
-            .kv_cache = args.kv_cache_buffers,
-            .rng = args.rng_buffers,
-        },
-    }, .{});
+        args.tokens_buf.*,
+        args.token_index_buf.*,
+        args.active_length_buf.*,
+        args.kv_cache_buffers.*,
+        args.rng_buffers.*,
+        args.attention_metadata_buffers.*,
+    }, .{ args.next_token_buf, args.kv_cache_buffers, args.rng_buffers }, .{});
 }
 
 fn compileKernel(
@@ -193,17 +180,17 @@ fn compileKernel(
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "forward", io, from);
 
-    return KernelExe.compile(allocator, io, platform, .{
+    return platform.compileFn(allocator, io, Forward.forward, .{
+        llama_model,
+        zml.Tensor.init(.{ .s = seqlen }, .u32),
+        parameters.token_index,
+        .init(.{}, .u32),
+        parameters.kv_cache,
+        parameters.rng,
+        parameters.attention_metadata,
+        attention_parameters,
+    }, .{
         .meshes = &parameters.meshes.all(),
         .program_name = phase.programName("llama", "forward"),
-    }, .{.{
-        .weights = llama_model,
-        .tokens = zml.Tensor.init(.{ .s = seqlen }, .u32),
-        .token_index = parameters.token_index,
-        .active_length = .init(.{}, .u32),
-        .kv_cache = parameters.kv_cache,
-        .rng = parameters.rng,
-        .attention_metadata = parameters.attention_metadata,
-        .attention_parameters = attention_parameters,
-    }});
+    });
 }
