@@ -1,19 +1,21 @@
 const zml = @import("../../../zml.zig");
-const kernel = @import("attention.zig");
+const bf16 = @import("attention_bf16.zig");
+const fp32 = @import("attention_f32.zig");
 const Tensor = zml.Tensor;
 
 test {
     _ = @import("tests.zig");
 }
 
-/// Dense noncausal BF16 attention with head widths 32, 64 or 128.
+/// Dense noncausal BF16/FP32 attention with head widths 32, 64 or 128.
+/// FP32 requires at least 128 queries.
 /// Other shared-API cases retain SDPA semantics.
 pub fn attention(q: Tensor, k: Tensor, v: Tensor, token_index: Tensor, causal: bool) Tensor {
     const supportedWidth = switch (q.dim(.hd)) {
         32, 64, 128 => true,
         else => false,
     };
-    const supportedDtype = q.dtype() == .bf16;
+    const supportedDtype = q.dtype() == .bf16 or (q.dtype() == .f32 and q.dim(.q) >= fp32.queryChunk);
     if (!supportedWidth or !supportedDtype or causal or k.dtype() != q.dtype() or v.dtype() != q.dtype() or q.dim(.h) != k.dim(.h)) {
         const mask: ?Tensor = if (causal)
             zml.nn.causalAttnMask(.{ .q = k.dim(.k), .k = k.dim(.k) }, q.dtype(), null)
@@ -32,6 +34,6 @@ pub fn attention(q: Tensor, k: Tensor, v: Tensor, token_index: Tensor, causal: b
     const qb = if (batched) q.transpose(.{ .b, .q, .h, .hd }) else q.transpose(.{ .q, .h, .hd }).insertAxes(0, .{.b});
     const kb = if (batched) k.transpose(.{ .b, .k, .h, .hd }) else k.transpose(.{ .k, .h, .hd }).insertAxes(0, .{.b});
     const vb = if (batched) v.transpose(.{ .b, .k, .h, .hd }) else v.transpose(.{ .k, .h, .hd }).insertAxes(0, .{.b});
-    const out = kernel.attention(qb, kb, vb);
+    const out = if (q.dtype() == .f32) fp32.attention(qb, kb, vb) else bf16.attention(qb, kb, vb);
     return (if (batched) out else out.squeeze(.b)).transpose(q.shape());
 }
