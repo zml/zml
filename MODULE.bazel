@@ -250,7 +250,7 @@ use_repo(furiosa, "libzml_furiosa")
 musa_archive = use_repo_rule("//platforms/musa:musa.bzl", "musa_archive")
 musa_archive(
     name = "libzml_musa",
-    sha256 = "f37b6d04385c8963c91c786b8d9eaefa9c1bfcd22103a73718422d7522ffa023",
+    sha256 = "b2b68eba0fa7d5a9f56c65fb626c4d656b4935f84e354d261ef5fd0aa7a53321",
 )
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")

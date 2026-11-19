@@ -1,3 +1,4 @@
+# Cleanup: keep the checkpoint-backed llama_block_test target for master.
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
@@ -25,6 +26,18 @@ zig_binary(
     name = "llama_tests",
     srcs = glob(["**/*.zig"]),
     main = "models/llama_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "llama_block_test",
+    srcs = [
+        "models/common.zig",
+        "models/llama/inference.zig",
+        "models/llama/model.zig",
+    ],
+    main = "models/llama_block_test.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
