@@ -192,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
         platform.devices.len,
     });
 
-    var progress = std.Progress.start(io, .{ .root_name = args.model });
+    var progress = std.Progress.start(io, .{});
     defer progress.end();
     const run = ops.Run.init(allocator, io, platform, shardings, &progress);
 
