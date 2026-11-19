@@ -201,14 +201,12 @@ defer layer_buffers.bias.?.deinit();
 
 ### Calling / running the Model
 
-Before being able to run our _Executable_ there is still two steps:
-- create the input buffer
-- create and fill the _Args_ and _Results_ structs
+Before being able to run our _Executable_ we still need to create the input buffer.
+We already know how to do it, as we did it for the _Module_ buffers.
 
-To create the `input` we already know how to do it, as we did it for the _Module_ 
-buffers.
-
-To create the _Args_ and _Results_, the _Executable_ exposes two conveniences.
+The executable is typed after the function it was compiled from: `executable` is a
+`zml.Exe(Layer.forward)`. Its inputs are the bufferized arguments of `forward`, here
+`.{ zml.Bufferized(Layer), zml.Buffer }`, and passing anything else is a compile error.
 
 ```zig
 // create the input buffer
@@ -216,21 +214,8 @@ const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16
 var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
 defer input_buffer.deinit();
 
-// create the Args and Results structs
-var args = try executable.args(allocator);
-defer args.deinit(allocator);
-
-var results = try executable.results(allocator);
-defer results.deinit(allocator);
-
-// fill the Args
-args.set(.{ layer_buffers, input_buffer });
-
-// call our executable 
-executable.call(io, args, &results, .{});
-
-// Retrieve the resulting buffer
-var result = results.get(zml.Buffer);
+// run our executable and wait for the resulting buffer
+var result = try executable.eval(allocator, io, .{ layer_buffers, input_buffer });
 defer result.deinit();
 
 // fetch the result buffer to CPU memory
@@ -247,14 +232,29 @@ Note that the result of a computation is usually residing in the memory of the
 computation device, so with `.toSliceAlloc()` we bring it back to CPU memory in
 the form of a `Slice`. After that, we can print it.
 
-`call(io, args, &results, .{})` enqueues execution and returns immediately. Use
-`call(io, args, &results, .{ .wait = true })` to wait for execution to finish before returning.
-Here, `toSliceAlloc()` waits for the result before reading it.
+`eval` waits for execution to finish and returns the bufferized result of `forward`.
+To run the same executable repeatedly, create a runner once and give it output
+destinations, a `*zml.Buffer` here:
 
-Raw calls leave input buffer handles owned by the caller, including inputs donated
-with `reuseBuffer()`. Deinit their original handles after calling. Runners and
-`eval` destroy donated input handles automatically. With runners, use output
-destinations pointing to those buffers to replace them with the returned outputs.
+```zig
+var runner = try executable.runner(allocator);
+defer runner.deinit(allocator);
+
+var result: zml.Buffer = undefined;
+runner.run(io, .{ layer_buffers, input_buffer }, &result, .{});
+defer result.deinit();
+```
+
+`run(..., .{})` enqueues execution and returns immediately; `.{ .wait = true }`
+waits for execution to finish. Here, `toSliceAlloc()` waits for the result before
+reading it. Leading arguments that don't change between calls, such as the model
+weights, can be baked into the runner: `zml.Exe(Layer.forward).Runner(.{.@"0"})`
+takes `layer_buffers` at init, and `run` then only takes `.{input_buffer}`.
+
+Runners and `eval` destroy the handles of inputs donated with `reuseBuffer()`.
+With runners, use output destinations pointing to those buffers to replace them
+with the returned outputs. The untyped `executable.raw` exposes the underlying
+`args()`, `call()` and `results()`, which leave every input handle to the caller.
 
 And that's it! Now, let's have a look at building and actually running this
 example!
@@ -383,21 +383,8 @@ pub fn main(init: std.process.Init) !void {
     var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
     defer input_buffer.deinit();
 
-    // create the Args and Results structs
-    var args = try executable.args(allocator);
-    defer args.deinit(allocator);
-
-    var results = try executable.results(allocator);
-    defer results.deinit(allocator);
-
-    // fill the Args
-    args.set(.{ layer_buffers, input_buffer });
-
-    // call our executable
-    executable.call(io, args, &results, .{});
-
-    // Retrieve the resulting buffer
-    var result = results.get(zml.Buffer);
+    // run our executable and wait for the resulting buffer
+    var result = try executable.eval(allocator, io, .{ layer_buffers, input_buffer });
     defer result.deinit();
 
     // fetch the result buffer to CPU memory

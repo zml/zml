@@ -53,27 +53,22 @@ pub fn main(init: std.process.Init) !void {
     var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), random);
     defer b_buffer.deinit();
 
-    var exe_args = try exe.args(allocator);
-    defer exe_args.deinit(allocator);
-
-    var exe_results = try exe.results(allocator);
-    defer exe_results.deinit(allocator);
-
-    exe_args.set(.{ a_buffer, b_buffer });
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
 
     log.info("⏱️ Running benchmark...", .{});
 
     // Ignore first run
     {
-        exe.call(io, exe_args, &exe_results, .{});
-        var result = exe_results.get(zml.Buffer);
+        var result: zml.Buffer = undefined;
+        runner.run(io, .{ a_buffer, b_buffer }, &result, .{});
         defer result.deinit();
     }
 
     // call our executable module
     const run_start: std.Io.Timestamp = .now(io, .awake);
-    exe.call(io, exe_args, &exe_results, .{});
-    var result = exe_results.get(zml.Buffer);
+    var result: zml.Buffer = undefined;
+    runner.run(io, .{ a_buffer, b_buffer }, &result, .{});
     _ = try result.await(io);
     defer result.deinit();
     const elapsed = run_start.untilNow(io, .awake);

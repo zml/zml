@@ -159,19 +159,16 @@ pub const KernelRunner = struct {
 
 pub fn run(runner: *KernelRunner, args: Args) void {
     runner.forward.run(args.io, .{
-        .inputs = .{
-            .tokens = args.tokens_buf.*,
-            .token_index = args.token_index_buf.*,
-            .active_length = args.active_length_buf.*,
-            .kv_cache = args.kv_cache_buffers.*,
-            .rng = args.rng_buffers.*,
-            .attention_metadata = args.attention_metadata_buffers.*,
-        },
-        .outputs = .{
-            .tokens = args.next_token_buf,
-            .kv_cache = args.kv_cache_buffers,
-            .rng = args.rng_buffers,
-        },
+        .tokens = args.tokens_buf.*,
+        .token_index = args.token_index_buf.*,
+        .active_length = args.active_length_buf.*,
+        .kv_cache = args.kv_cache_buffers.*,
+        .rng = args.rng_buffers.*,
+        .attention_metadata = args.attention_metadata_buffers.*,
+    }, .{
+        .tokens = args.next_token_buf,
+        .kv_cache = args.kv_cache_buffers,
+        .rng = args.rng_buffers,
     }, .{});
 }
 

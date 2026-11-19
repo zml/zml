@@ -10,6 +10,7 @@ pub const DataType = dtype.DataType;
 pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
 pub const FnExe = exe.FnExe;
+pub const RawExe = exe.RawExe;
 pub const floats = @import("floats.zig");
 pub const io = @import("io.zig");
 pub const kernel = @import("kernel/kernel.zig");
@@ -53,7 +54,7 @@ pub const module = struct {
         args: std.meta.ArgsTuple(@TypeOf(func)),
         platform_: *const Platform,
         opts: Compiler.Options,
-    ) Compiler.Error!Exe {
+    ) Compiler.Error!Exe(func) {
         return Compiler.compile(allocator, io_, platform_, func, args, opts);
     }
 };

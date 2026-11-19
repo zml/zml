@@ -441,17 +441,17 @@ pub fn testLayer(
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
-    const output_count = exe.output_shapes.len;
+    const output_count = exe.raw.output_shapes.len;
     const store_output = activation_store.withPrefix(output_name);
     const expected_output_count = countWithPrefix(store_output, output_name);
     if (output_count != expected_output_count) {
         log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ expected_output_count, output_count });
     }
 
-    var exe_args = try exe.args(allocator);
+    var exe_args = try exe.raw.args(allocator);
     defer exe_args.deinit(allocator);
 
-    var exe_results = try exe.results(allocator);
+    var exe_results = try exe.raw.results(allocator);
     defer exe_results.deinit(allocator);
 
     var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
@@ -466,7 +466,7 @@ pub fn testLayer(
     var results = try allocator.alloc(zml.Buffer, output_count);
     defer allocator.free(results);
 
-    exe.call(io, exe_args, &exe_results, .{ .wait = true });
+    exe.raw.call(io, exe_args, &exe_results, .{ .wait = true });
     exe_results.fill(.{results});
     defer for (results) |*result| result.deinit();
 

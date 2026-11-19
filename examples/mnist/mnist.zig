@@ -121,12 +121,6 @@ pub fn main(init: std.process.Init) !void {
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
 
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-
-    var results = try exe.results(allocator);
-    defer results.deinit(allocator);
-
     // Load a random digit image from the dataset.
     const dataset = try std.Io.Dir.openFile(.cwd(), io, t10kfilename, .{ .mode = .read_only });
     defer dataset.close(io);
@@ -146,9 +140,7 @@ pub fn main(init: std.process.Init) !void {
 
     printDigit(&sample);
 
-    args.set(.{ mnist_buffers, input_buffer });
-    exe.call(io, args, &results, .{});
-    var result: zml.Buffer = results.get(zml.Buffer);
+    var result = try exe.eval(allocator, io, .{ mnist_buffers, input_buffer });
     defer result.deinit();
 
     log.info(

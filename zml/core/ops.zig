@@ -713,7 +713,7 @@ test @"while" {
     var results: zml.Bufferized(While.State) = undefined;
     var runner = try exe.runner(std.testing.allocator);
     defer runner.deinit(std.testing.allocator);
-    runner.run(std.testing.io, .{ i_buffer, sum_buffer }, .{&results}, .{ .wait = true });
+    runner.run(std.testing.io, .{ i_buffer, sum_buffer }, .{ .i = &results.i, .sum = &results.sum }, .{ .wait = true });
     defer results.i.deinit();
     defer results.sum.deinit();
 
@@ -1338,7 +1338,7 @@ test "triton" {
     var results: [2]zml.Buffer = undefined;
     var runner = try exe.runner(std.testing.allocator);
     defer runner.deinit(std.testing.allocator);
-    runner.run(std.testing.io, .{ a_buffer, b_buffer }, .{&results}, .{ .wait = true });
+    runner.run(std.testing.io, .{ a_buffer, b_buffer }, .{ &results[0], &results[1] }, .{ .wait = true });
     defer results[0].deinit();
     defer results[1].deinit();
 

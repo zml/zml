@@ -245,14 +245,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("weight placement: {f}", .{w_buf});
     log.info("bias placement: {f}", .{b_buf});
 
-    var exe_args = try exe.args(allocator);
-    defer exe_args.deinit(allocator);
-    var exe_results = try exe.results(allocator);
-    defer exe_results.deinit(allocator);
-    exe_args.set(.{ w_buf, b_buf, input_buf });
-
-    exe.call(io, exe_args, &exe_results, .{});
-    var out = exe_results.get(zml.Buffer);
+    var out = try exe.eval(allocator, io, .{ .{ .w = w_buf, .b = b_buf }, input_buf });
     defer out.deinit();
 
     const out_slice = try out.toSliceAlloc(allocator, io);

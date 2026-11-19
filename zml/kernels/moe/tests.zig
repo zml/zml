@@ -33,13 +33,13 @@ const Case = struct {
         return shape.withPartitioning(c.expert_mesh, spec);
     }
 
-    pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
+    pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe(forward) {
         std.debug.assert(c.backend.isAvailable(platform));
         const x: Tensor = .fromShape(c.inputShape());
         return platform.compileFn(allocator, io, forward, .{ x, c }, .{ .meshes = &.{c.expert_mesh} });
     }
 
-    pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
+    pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe(forward)) !void {
         const x: Tensor = .fromShape(c.inputShape());
 
         var host = try zml.Slice.alloc(allocator, x.shape());
@@ -60,7 +60,7 @@ const Case = struct {
         var runner = try exe.runner(allocator);
         defer runner.deinit(allocator);
         var output: zml.Bufferized(Outputs) = undefined;
-        runner.run(io, .{input}, .{&output}, .{ .wait = true });
+        runner.run(io, .{input}, .{ .actual = &output.actual, .expected = &output.expected }, .{ .wait = true });
         defer zml.Buffer.deinitAll(Outputs, &output);
         try std.testing.expectEqualDeep(c.inputShape()._sharding, output.actual.shape()._sharding);
 
@@ -425,7 +425,7 @@ const CaseJob = struct {
 
 const ExecutableJob = struct {
     job: CaseJob,
-    exe: zml.Exe,
+    exe: zml.Exe(forward),
 };
 
 const Result = struct {

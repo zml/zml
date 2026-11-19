@@ -80,7 +80,7 @@ fn runCorrectness(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platfor
     defer zml.Buffer.deinitAll(Inputs, &buffers);
 
     var output: zml.Buffer = undefined;
-    runner.run(io, .{buffers}, .{&output}, .{ .wait = true });
+    runner.run(io, .{buffers}, &output, .{ .wait = true });
     defer output.deinit();
 
     var host = try output.toSliceAlloc(a, io);

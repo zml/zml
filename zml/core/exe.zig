@@ -14,7 +14,9 @@ const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 
-pub const Exe = struct {
+/// An untyped executable: inputs and outputs are flattened buffer lists.
+/// Prefer the typed `Exe(function)`; this is its `raw` field.
+pub const RawExe = struct {
     platform: *const Platform,
     exe: *pjrt.LoadedExecutable,
 
@@ -41,7 +43,7 @@ pub const Exe = struct {
         input_shapes: []const Shape,
         output_shapes: []const Shape,
         input_aliasing: []const ?u32,
-    ) !Exe {
+    ) !RawExe {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
 
@@ -72,17 +74,17 @@ pub const Exe = struct {
         };
     }
 
-    pub fn deinit(self: *const Exe) void {
+    pub fn deinit(self: *const RawExe) void {
         if (self.context) |context| context.deinit(self.platform.pjrt_api);
         self.exe.deinit(self.platform.pjrt_api);
         self.arena.deinit();
     }
 
-    pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
+    pub fn args(self: *const RawExe, allocator: std.mem.Allocator) !Arguments {
         return Arguments.init(allocator, self.input_shapes, self.num_devices);
     }
 
-    pub fn results(self: *const Exe, allocator: std.mem.Allocator) !Results {
+    pub fn results(self: *const RawExe, allocator: std.mem.Allocator) !Results {
         return Results.init(allocator, self.output_shapes, self.platform, self.num_devices);
     }
 
@@ -275,7 +277,7 @@ pub const Exe = struct {
 
     /// Executes a single-output executable and waits for its result.
     /// The caller owns the returned buffer. Donated inputs are consumed.
-    pub fn eval(self: *const Exe, allocator: std.mem.Allocator, io: std.Io, input_values: anytype) !Buffer {
+    pub fn eval(self: *const RawExe, allocator: std.mem.Allocator, io: std.Io, input_values: anytype) !Buffer {
         stdx.debug.assert(self.output_shapes.len == 1, "eval expects one output, got {d}; use a runner for multiple outputs", .{self.output_shapes.len});
         var result: Buffer = undefined;
         var r = try self.runner(allocator);
@@ -284,18 +286,18 @@ pub const Exe = struct {
         return result;
     }
 
-    pub fn runner(self: *const Exe, allocator: std.mem.Allocator) !Runner {
+    pub fn runner(self: *const RawExe, allocator: std.mem.Allocator) !Runner {
         return .init(self, allocator);
     }
 
     /// Reusable argument and result storage for a borrowed executable.
     /// The executable must outlive the runner, and the runner must not be used concurrently.
     pub const Runner = struct {
-        exe: *const Exe,
+        exe: *const RawExe,
         args: Arguments,
         results: Results,
 
-        pub fn init(exe: *const Exe, allocator: std.mem.Allocator) !Runner {
+        pub fn init(exe: *const RawExe, allocator: std.mem.Allocator) !Runner {
             var arguments = try exe.args(allocator);
             errdefer arguments.deinit(allocator);
             var results_ = try exe.results(allocator);
@@ -328,7 +330,7 @@ pub const Exe = struct {
         wait: bool = false,
     };
 
-    fn deinitDonatedInputs(self: *const Exe, arguments: Arguments) void {
+    fn deinitDonatedInputs(self: *const RawExe, arguments: Arguments) void {
         // Execution deletes donated inputs, but leaves their PJRT handles allocated.
         // Arguments retain the old handles even when outputs replace the caller's buffers.
         for (self.donated_input_indices) |input_index| {
@@ -341,7 +343,7 @@ pub const Exe = struct {
     /// Executes with optional waiting. The caller owns all input handles, including donated inputs.
     /// Donated input contents cannot be used after the call; output buffers have their own handles.
     /// Use a runner to destroy donated handles automatically and replace buffers through output destinations.
-    pub fn call(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+    pub fn call(self: *const RawExe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
         var span = tracer.span("zml.exe.call", .{
             .wait = opts.wait,
             .arg_count = arguments.expected_shapes.len,
@@ -395,50 +397,83 @@ pub const Exe = struct {
         }
     }
 
-    pub fn memoryStats(self: *const Exe) pjrt.ApiError!pjrt.CompiledMemoryStats {
+    pub fn memoryStats(self: *const RawExe) pjrt.ApiError!pjrt.CompiledMemoryStats {
         const exe = try self.exe.executable(self.platform.pjrt_api);
         return try exe.getCompiledMemoryStats(self.platform.pjrt_api);
     }
 };
 
+/// Deprecated alias of `Exe`.
+pub const FnExe = Exe;
+
 /// A typed executable whose input and output buffer structures are derived from
 /// the function used to compile it.
-pub fn FnExe(comptime function_: anytype) type {
-    const function_info = switch (@typeInfo(@TypeOf(function_))) {
+///
+/// A function taking a single named struct (`fn (inputs: Inputs) Outputs`) is called
+/// with `Bufferized(Inputs)`, and its leading fields can be baked by name:
+/// `Runner(.{ .weights })`.
+/// Any other function (`fn (self: Model, x: Tensor, cache: Cache) Outputs`) is called
+/// with the tuple `Bufferized(ArgsTuple(function))`. Arguments without tensors are
+/// dropped and the remaining ones renumbered, so `Runner(.{.@"0"})` bakes the first
+/// argument that holds tensors.
+///
+/// Use `raw` for untyped access, e.g. to store executables of different functions together.
+pub fn Exe(comptime function_: anytype) type {
+    const Function = @TypeOf(function_);
+    const function_info = switch (@typeInfo(Function)) {
         .@"fn" => |info| info,
-        else => @compileError("FnExe expects a function, got " ++ @typeName(@TypeOf(function_))),
+        else => @compileError("Exe expects a function, got " ++ @typeName(Function)),
     };
-    if (function_info.attrs.varargs or function_info.param_types.len != 1) {
-        @compileError("FnExe function must accept exactly one input struct");
+    if (function_info.attrs.varargs) {
+        @compileError("Exe function can't be variadic: " ++ @typeName(Function));
     }
-
-    const FunctionInput = typedFunctionInput(function_);
-    const FunctionOutput = typedFunctionOutput(function_);
+    const FunctionOutput = function_info.return_type orelse
+        @compileError("Exe function must have a concrete return type: " ++ @typeName(Function));
 
     return struct {
-        raw: Exe,
+        raw: RawExe,
 
-        pub const Input = mem.Bufferized(FunctionInput);
-        pub const Output = typedOutputDestinations(mem.Bufferized(FunctionOutput));
+        /// The function this executable was compiled from.
+        pub const function = function_;
+        /// Buffers passed to `eval` and `Runner.run`.
+        pub const Input = NonVoid(mem.Bufferized(FunctionInput(function_)));
+        /// Buffers returned by `eval`.
+        pub const Result = mem.Bufferized(FunctionOutput);
+        /// Destinations filled by `Runner.run`.
+        pub const Output = OutputDestinations(Result);
 
         const Self = @This();
-
-        pub fn init(raw: Exe) Self {
-            return .{ .raw = raw };
-        }
 
         pub fn compile(
             allocator: std.mem.Allocator,
             io: std.Io,
             platform: *const Platform,
             opts: Compiler.Options,
-            args: std.meta.ArgsTuple(@TypeOf(function_)),
+            args: std.meta.ArgsTuple(Function),
         ) Compiler.Error!Self {
-            return .{ .raw = try Compiler.Typed(function_).compile(allocator, io, platform, opts, args) };
+            return Compiler.compile(allocator, io, platform, function_, args, opts);
         }
 
         pub fn deinit(self: *const Self) void {
             self.raw.deinit();
+        }
+
+        pub fn memoryStats(self: *const Self) pjrt.ApiError!pjrt.CompiledMemoryStats {
+            return self.raw.memoryStats();
+        }
+
+        /// Executes and waits for the result. The caller owns the returned buffers.
+        /// Donated inputs are consumed.
+        pub fn eval(self: *const Self, allocator: std.mem.Allocator, io: std.Io, inputs: Input) !Result {
+            if (Output == Result) @compileError("Exe.eval can't size a slice result, use a runner: " ++ @typeName(Result));
+            var r = try self.runner(allocator);
+            defer r.deinit(allocator);
+            r.args.set(inputs);
+            self.raw.call(io, r.args, &r.results, .{ .wait = true });
+            self.raw.deinitDonatedInputs(r.args);
+            var result: Result = undefined;
+            r.results.fill(&result);
+            return result;
         }
 
         pub fn runner(self: *const Self, allocator: std.mem.Allocator) !Runner(.{}) {
@@ -446,19 +481,20 @@ pub fn FnExe(comptime function_: anytype) type {
         }
 
         /// Reusable argument and result storage for a borrowed executable.
+        /// `baked_fields` is an ordered prefix of `Input` field names, set once at init.
         /// The executable must outlive the runner, and the runner must not be used concurrently.
         pub fn Runner(comptime baked_fields: anytype) type {
-            const count = countBackedFields(Input, baked_fields);
+            const count = countBakedFields(Input, baked_fields);
 
             return struct {
-                exe: *const Exe,
-                args: Exe.Arguments,
-                results: Exe.Results,
+                exe: *const RawExe,
+                args: RawExe.Arguments,
+                results: RawExe.Results,
 
                 const RunnerSelf = @This();
 
                 pub const BakedInput = structFieldRange(Input, 0, count);
-                pub const NonBakedInput = structFieldRange(Input, count, @typeInfo(Input).@"struct".field_names.len);
+                pub const NonBakedInput = if (count == 0) Input else structFieldRange(Input, count, @typeInfo(Input).@"struct".field_names.len);
 
                 pub fn init(exe: *const Self, allocator: std.mem.Allocator, baked: BakedInput) !RunnerSelf {
                     var arguments = try exe.raw.args(allocator);
@@ -474,44 +510,88 @@ pub fn FnExe(comptime function_: anytype) type {
                     self.args.deinit(allocator);
                 }
 
-                pub const Call = struct {
-                    inputs: NonBakedInput,
-                    outputs: Output,
-                };
-
-                /// Destroys donated input handles before filling outputs; non-donated inputs remain caller-owned.
-                pub fn run(self: *RunnerSelf, io: std.Io, call: Call, opts: Exe.CallOpts) void {
-                    self.args.set(call.inputs);
+                /// Destroys donated input handles and fills the output destinations.
+                /// Use the donated buffer's address as its output destination to replace it safely.
+                /// Non-donated inputs remain owned by the caller.
+                pub fn run(self: *RunnerSelf, io: std.Io, inputs: NonBakedInput, outputs: Output, opts: RawExe.CallOpts) void {
+                    self.args.set(inputs);
                     self.exe.call(io, self.args, &self.results, opts);
                     self.exe.deinitDonatedInputs(self.args);
-                    self.results.fill(call.outputs);
+                    self.results.fill(outputs);
                 }
             };
         }
     };
 }
 
-fn countBackedFields(comptime Input: type, comptime baked_fields: anytype) usize {
+/// The value bufferized into an executable's input: the single named struct argument,
+/// or the arguments tuple otherwise.
+fn FunctionInput(comptime function_: anytype) type {
+    const Function = @TypeOf(function_);
+    const param_types = @typeInfo(Function).@"fn".param_types;
+    for (param_types) |Param| {
+        if (Param == null) @compileError("Exe function must have concrete parameter types: " ++ @typeName(Function));
+    }
+    if (param_types.len == 1 and isNamedInputStruct(param_types[0].?)) return param_types[0].?;
+    return std.meta.ArgsTuple(Function);
+}
+
+fn isNamedInputStruct(comptime T: type) bool {
+    if (T == Tensor) return false;
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| !info.is_tuple,
+        else => false,
+    };
+}
+
+/// Functions without tensor inputs are called with `.{}`.
+fn NonVoid(comptime T: type) type {
+    return if (T == void) @Tuple(&.{}) else T;
+}
+
+/// Destinations mirror the top level of the result: a struct or tuple of pointers to
+/// each field, an array of pointers to each element, the slice itself (pre-sized by the caller),
+/// or a pointer to the whole result otherwise (`*Buffer` for a `Tensor`).
+fn OutputDestinations(comptime Result: type) type {
+    if (Result == void) return @Tuple(&.{});
+    const info = switch (@typeInfo(Result)) {
+        .@"struct" => |info| if (Result == Buffer) return *Result else info,
+        .array => |info| return [info.len]*info.child,
+        .pointer => |info| if (info.size == .slice and !info.attrs.@"const") return Result else return *Result,
+        else => return *Result,
+    };
+    var field_types: [info.field_names.len]type = undefined;
+    var field_attrs: [info.field_names.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+    for (&field_types, &field_attrs, info.field_types) |*T, *attrs, Field| {
+        T.* = *Field;
+        attrs.* = .{ .@"align" = @alignOf(*Field) };
+    }
+    if (info.is_tuple) return @Tuple(&field_types);
+    return @Struct(.auto, null, info.field_names, &field_types, &field_attrs);
+}
+
+fn countBakedFields(comptime Input: type, comptime baked_fields: anytype) usize {
     const baked_info = switch (@typeInfo(@TypeOf(baked_fields))) {
         .@"struct" => |info| info,
-        else => @compileError("FnExe baked fields must be a tuple of enum literals"),
+        else => @compileError("Exe baked fields must be a tuple of enum literals"),
     };
     if (!baked_info.is_tuple) {
-        @compileError("FnExe baked fields must be a tuple of enum literals");
+        @compileError("Exe baked fields must be a tuple of enum literals");
     }
+    if (baked_info.field_names.len == 0) return 0;
 
     const input_info = @typeInfo(Input).@"struct";
     if (baked_info.field_names.len > input_info.field_names.len) {
-        @compileError("FnExe baked fields must be a prefix of its bufferized input fields");
+        @compileError("Exe baked fields must be a prefix of its bufferized input fields");
     }
 
     inline for (baked_info.field_names, 0..) |tuple_field_name, i| {
         const baked_field = @field(baked_fields, tuple_field_name);
         if (@TypeOf(baked_field) != @EnumLiteral()) {
-            @compileError("FnExe baked fields must be enum literals");
+            @compileError("Exe baked fields must be enum literals");
         }
         if (!std.mem.eql(u8, @tagName(baked_field), input_info.field_names[i])) {
-            @compileError("FnExe baked fields must be an ordered prefix of its bufferized input fields");
+            @compileError("Exe baked fields must be an ordered prefix of its bufferized input fields, expected ." ++ input_info.field_names[i] ++ ", got ." ++ @tagName(baked_field));
         }
     }
     return baked_info.field_names.len;
@@ -519,44 +599,11 @@ fn countBackedFields(comptime Input: type, comptime baked_fields: anytype) usize
 
 fn structFieldRange(comptime Struct: type, comptime start: usize, comptime end: usize) type {
     const info = @typeInfo(Struct).@"struct";
+    if (info.is_tuple) return @Tuple(info.field_types[start..end]);
     return @Struct(.auto, null, info.field_names[start..end], info.field_types[start..end], info.field_attrs[start..end]);
 }
 
-fn typedFunctionInput(comptime function_: anytype) type {
-    const Input = @typeInfo(@TypeOf(function_)).@"fn".param_types[0] orelse
-        @compileError("FnExe function must have a concrete input type");
-    validateFnExeStruct("input", Input);
-    return Input;
-}
-
-fn typedFunctionOutput(comptime function_: anytype) type {
-    const Output = @typeInfo(@TypeOf(function_)).@"fn".return_type orelse @compileError("FnExe function must return an output struct");
-    validateFnExeStruct("output", Output);
-    return Output;
-}
-
-fn validateFnExeStruct(comptime role: []const u8, comptime T: type) void {
-    const info = switch (@typeInfo(T)) {
-        .@"struct" => |info| info,
-        else => @compileError("FnExe " ++ role ++ " must be a struct, got " ++ @typeName(T)),
-    };
-    if (info.is_tuple) {
-        @compileError("FnExe " ++ role ++ " must use named fields");
-    }
-}
-
-fn typedOutputDestinations(comptime BufferizedOutput: type) type {
-    const output_info = @typeInfo(BufferizedOutput).@"struct";
-    var field_types: [output_info.field_names.len]type = undefined;
-    var field_attrs: [output_info.field_names.len]std.builtin.Type.Struct.FieldAttributes = undefined;
-    for (&field_types, &field_attrs, output_info.field_types) |*T, *attrs, Field| {
-        T.* = *Field;
-        attrs.* = .{ .@"align" = @alignOf(*Field) };
-    }
-    return @Struct(.auto, null, output_info.field_names, &field_types, &field_attrs);
-}
-
-test "FnExe derives baked and runtime calls from a function" {
+test "Exe derives baked and runtime calls from a struct function" {
     const Inputs = struct {
         weights: struct {
             tensor: Tensor,
@@ -581,7 +628,7 @@ test "FnExe derives baked and runtime calls from a function" {
         }
     };
 
-    const Model = FnExe(Functions.forward);
+    const Model = Exe(Functions.forward);
     try std.testing.expect(@hasField(Model.Input, "weights"));
     try std.testing.expect(@hasField(Model.Input, "bias"));
     try std.testing.expect(@hasField(Model.Input, "tokens"));
@@ -606,7 +653,50 @@ test "FnExe derives baked and runtime calls from a function" {
     try std.testing.expect(!@hasField(Model.Output, "metadata"));
 }
 
-test "Exe raw calls leave donated input handle cleanup to the caller" {
+test "Exe derives baked and runtime calls from a positional function" {
+    const Model = struct {
+        weight: Tensor,
+        scale: f32,
+    };
+    const Cache = struct { key: Tensor };
+    const Functions = struct {
+        fn forward(self: Model, token_count: usize, x: Tensor, cache: Cache) struct { Tensor, Cache } {
+            _ = self;
+            _ = token_count;
+            _ = x;
+            _ = cache;
+            return undefined;
+        }
+        fn single(x: Tensor) Tensor {
+            return x;
+        }
+        fn noInput(count: usize) Tensor {
+            _ = count;
+            return undefined;
+        }
+    };
+
+    const Forward = Exe(Functions.forward);
+    // `token_count` holds no tensor: it is dropped and the following arguments renumbered.
+    try std.testing.expectEqual(3, @typeInfo(Forward.Input).@"struct".field_names.len);
+    try std.testing.expectEqual(mem.Bufferized(Model), @FieldType(Forward.Input, "0"));
+    try std.testing.expectEqual(Buffer, @FieldType(Forward.Input, "1"));
+    try std.testing.expectEqual(mem.Bufferized(Cache), @FieldType(Forward.Input, "2"));
+
+    const Runner = Forward.Runner(.{.@"0"});
+    try std.testing.expectEqual(@Tuple(&.{mem.Bufferized(Model)}), Runner.BakedInput);
+    try std.testing.expectEqual(@Tuple(&.{ Buffer, mem.Bufferized(Cache) }), Runner.NonBakedInput);
+    try std.testing.expectEqual(@Tuple(&.{ *Buffer, *mem.Bufferized(Cache) }), Forward.Output);
+
+    const Single = Exe(Functions.single);
+    try std.testing.expectEqual(@Tuple(&.{Buffer}), Single.Input);
+    try std.testing.expectEqual(*Buffer, Single.Output);
+    try std.testing.expectEqual(Buffer, Single.Result);
+
+    try std.testing.expectEqual(@Tuple(&.{}), Exe(Functions.noInput).Input);
+}
+
+test "RawExe calls leave donated input handle cleanup to the caller" {
     const platform = @import("testing.zig").env();
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -619,20 +709,20 @@ test "Exe raw calls leave donated input handle cleanup to the caller" {
     const weight: Tensor = .init(.{2}, .i32);
     const exe = try platform.compileFn(allocator, io, Functions.forward, .{ value, weight }, .{});
     defer exe.deinit();
-    try std.testing.expectEqualSlices(u32, &.{0}, exe.donated_input_indices);
+    try std.testing.expectEqualSlices(u32, &.{0}, exe.raw.donated_input_indices);
 
     var weight_buffer = try Buffer.fromBytes(io, platform, weight.shape(), std.mem.asBytes(&[2]i32{ 10, 20 }));
     defer weight_buffer.deinit();
-    var args = try exe.args(allocator);
+    var args = try exe.raw.args(allocator);
     defer args.deinit(allocator);
-    var results = try exe.results(allocator);
+    var results = try exe.raw.results(allocator);
     defer results.deinit(allocator);
 
     for ([_]bool{ false, true }) |wait| {
         var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
         defer value_buffer.deinit();
         args.set(.{ value_buffer, weight_buffer });
-        exe.call(io, args, &results, .{ .wait = wait });
+        exe.raw.call(io, args, &results, .{ .wait = wait });
         var output = results.get(Buffer);
         defer output.deinit();
 
@@ -646,7 +736,7 @@ test "Exe raw calls leave donated input handle cleanup to the caller" {
     }
 }
 
-test "FnExe runner replaces donated buffers with and without waiting" {
+test "Exe runner replaces donated buffers with and without waiting" {
     const platform = @import("testing.zig").env();
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -655,7 +745,7 @@ test "FnExe runner replaces donated buffers with and without waiting" {
             return .{ .value = inputs.value.add(inputs.weight).reuseBuffer(inputs.value) };
         }
     };
-    const Model = FnExe(Functions.forward);
+    const Model = Exe(Functions.forward);
     const weight: Tensor = .init(.{2}, .i32);
     const value: Tensor = .init(.{2}, .i32);
     const exe = try Model.compile(allocator, io, platform, .{}, .{.{ .weight = weight, .value = value }});
@@ -668,20 +758,51 @@ test "FnExe runner replaces donated buffers with and without waiting" {
     var runner = try Model.Runner(.{.weight}).init(&exe, allocator, .{ .weight = weight_buffer });
     defer runner.deinit(allocator);
 
-    runner.run(io, .{
-        .inputs = .{ .value = value_buffer },
-        .outputs = .{ .value = &value_buffer },
-    }, .{});
+    runner.run(io, .{ .value = value_buffer }, .{ .value = &value_buffer }, .{});
     try std.testing.expectEqual([2]i32{ 11, 22 }, try value_buffer.getValue([2]i32, io));
 
-    runner.run(io, .{
-        .inputs = .{ .value = value_buffer },
-        .outputs = .{ .value = &value_buffer },
-    }, .{ .wait = true });
+    runner.run(io, .{ .value = value_buffer }, .{ .value = &value_buffer }, .{ .wait = true });
     try std.testing.expectEqual([2]i32{ 21, 42 }, try value_buffer.getValue([2]i32, io));
 }
 
-test "FnExe runner replaces unchanged donated buffers" {
+test "Exe runner bakes positional arguments" {
+    const platform = @import("testing.zig").env();
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Model = struct {
+        weight: Tensor,
+
+        pub fn forward(self: @This(), scale: i32, value: Tensor) struct { Tensor, Tensor } {
+            const sum = value.add(self.weight);
+            return .{ sum.reuseBuffer(value), sum.scale(scale) };
+        }
+    };
+    const model: Model = .{ .weight = .init(.{2}, .i32) };
+    const value: Tensor = .init(.{2}, .i32);
+    const exe = try platform.compile(allocator, io, model, .forward, .{ 3, value }, .{});
+    defer exe.deinit();
+
+    var weight_buffer = try Buffer.fromBytes(io, platform, model.weight.shape(), std.mem.asBytes(&[2]i32{ 10, 20 }));
+    defer weight_buffer.deinit();
+    var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
+    defer value_buffer.deinit();
+    var scaled: Buffer = undefined;
+
+    var runner = try @TypeOf(exe).Runner(.{.@"0"}).init(&exe, allocator, .{.{ .weight = weight_buffer }});
+    defer runner.deinit(allocator);
+    runner.run(io, .{value_buffer}, .{ &value_buffer, &scaled }, .{ .wait = true });
+    defer scaled.deinit();
+    try std.testing.expectEqual([2]i32{ 11, 22 }, try value_buffer.getValue([2]i32, io));
+    try std.testing.expectEqual([2]i32{ 33, 66 }, try scaled.getValue([2]i32, io));
+
+    var result = try exe.eval(allocator, io, .{ .{ .weight = weight_buffer }, value_buffer });
+    defer result[1].deinit();
+    value_buffer = result[0];
+    try std.testing.expectEqual([2]i32{ 21, 42 }, try value_buffer.getValue([2]i32, io));
+    try std.testing.expectEqual([2]i32{ 63, 126 }, try result[1].getValue([2]i32, io));
+}
+
+test "Exe runner replaces unchanged donated buffers" {
     const platform = @import("testing.zig").env();
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -690,7 +811,7 @@ test "FnExe runner replaces unchanged donated buffers" {
             return .{ .value = inputs.value.reuseBuffer(inputs.value) };
         }
     };
-    const Model = FnExe(Functions.forward);
+    const Model = Exe(Functions.forward);
     const value: Tensor = .init(.{2}, .i32);
     const exe = try Model.compile(allocator, io, platform, .{}, .{.{ .value = value }});
     defer exe.deinit();
@@ -702,10 +823,7 @@ test "FnExe runner replaces unchanged donated buffers" {
     defer runner.deinit(allocator);
 
     for ([_]bool{ false, true }) |wait| {
-        runner.run(io, .{
-            .inputs = .{ .value = value_buffer },
-            .outputs = .{ .value = &value_buffer },
-        }, .{ .wait = wait });
+        runner.run(io, .{ .value = value_buffer }, .{ .value = &value_buffer }, .{ .wait = wait });
         try std.testing.expectEqual([2]i32{ 1, 2 }, try value_buffer.getValue([2]i32, io));
     }
 }

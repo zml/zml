@@ -76,7 +76,7 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
 
     // Warmup
     for (0..5) |_| {
-        runner.run(io, .{buffers}, .{&output}, .{ .wait = true });
+        runner.run(io, .{buffers}, &output, .{ .wait = true });
         output.deinit();
     }
 
@@ -85,7 +85,7 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     var accumulated_us: f64 = 0;
     while (sample_count < samples.len and (sample_count < 21 or accumulated_us < 100_000)) {
         const call_start: std.Io.Timestamp = .now(io, .awake);
-        runner.run(io, .{buffers}, .{&output}, .{ .wait = true });
+        runner.run(io, .{buffers}, &output, .{ .wait = true });
         samples[sample_count] = elapsedUs(call_start, io);
         accumulated_us += samples[sample_count];
         sample_count += 1;

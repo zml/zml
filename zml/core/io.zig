@@ -9,7 +9,7 @@ pub const VFS = @import("vfs");
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("core.zig").Bufferized;
 const CreateOptions = @import("platform.zig").CreateOptions;
-const Exe = @import("exe.zig").Exe;
+const RawExe = @import("exe.zig").RawExe;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const pjrtx = @import("pjrtx.zig");
@@ -514,7 +514,7 @@ pub const Loader = struct {
         tensor: Tensor,
         buffer: *Buffer,
         store: *const TensorStore,
-        exe: *const Exe,
+        exe: *const RawExe,
         opts: LoadOpts,
     ) error{ NotFound, OutOfMemory, LoadFailed, Canceled }!void {
         const sources = (store.getSourcesById(tensor.id) orelse return error.NotFound).tensors;
@@ -589,10 +589,10 @@ test "Loader.loadExecute cleans up donated and non-donated inputs" {
         const tensor = store.view().maybeCreateBinding(&.{ "value", "weight" }, shape) orelse unreachable;
         const exe = try platform.compileFn(allocator, io, Functions.forward, .{ Tensor.fromShape(shape), Tensor.fromShape(shape) }, .{});
         defer exe.deinit();
-        try std.testing.expectEqual(@as(usize, @intFromBool(donate)), exe.donated_input_indices.len);
+        try std.testing.expectEqual(@as(usize, @intFromBool(donate)), exe.raw.donated_input_indices.len);
 
         var output: Buffer = undefined;
-        try loader.loadExecute(arena.allocator(), io, tensor, &output, &store, &exe, .{});
+        try loader.loadExecute(arena.allocator(), io, tensor, &output, &store, &exe.raw, .{});
         defer output.deinit();
         try std.testing.expectEqual([2]i32{ 11, 22 }, try output.getValue([2]i32, io));
         try std.testing.expect(loader.delivered.contains(tensor.id));

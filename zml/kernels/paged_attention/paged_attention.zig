@@ -343,11 +343,11 @@ test pagedAttention {
         .max_seqlen_q = 16 * 2,
     };
     const triton_parameters: Parameters = .init(.fromBackend(triton_options_args));
-    var q = try rng_q.eval(allocator, io, {});
+    var q = try rng_q.eval(allocator, io, .{});
     defer q.deinit();
-    var new_k = try rng_k.eval(allocator, io, {});
+    var new_k = try rng_k.eval(allocator, io, .{});
     defer new_k.deinit();
-    var new_v = try rng_k.eval(allocator, io, {});
+    var new_v = try rng_k.eval(allocator, io, .{});
     defer new_v.deinit();
 
     var kv_cache_d: zml.Bufferized(KvCache) = .{ .split = undefined };

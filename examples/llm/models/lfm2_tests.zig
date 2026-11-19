@@ -168,16 +168,10 @@ const TestContext = struct {
             try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
-        var args = try exe.args(self.allocator);
-        defer args.deinit(self.allocator);
-        args.set(.{ layer_buffers, in_buffer });
-
-        var res = try exe.results(self.allocator);
-        defer res.deinit(self.allocator);
-
-        exe.call(self.io, args, &res, .{});
-
-        var out_result = res.get(zml.Buffer);
+        var out_result = if (comptime @TypeOf(layer) == model.TokenEmbedding)
+            (try exe.eval(self.allocator, self.io, .{ .embedding = layer_buffers, .tokens = in_buffer })).hidden
+        else
+            try exe.eval(self.allocator, self.io, .{ layer_buffers, in_buffer });
         defer out_result.deinit();
 
         try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
@@ -219,7 +213,7 @@ const TestContext = struct {
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
-        const conv_cache: zml.Bufferized(model.ConvCache) = .{ .state = cache_buffer };
+        var conv_cache: zml.Bufferized(model.ConvCache) = .{ .state = cache_buffer };
 
         const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{actual_seq_len}));
         var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
@@ -234,9 +228,10 @@ const TestContext = struct {
         runner.run(
             self.io,
             .{ layer_buffers, in_buffer, cache_pos_buffer, actual_seq_len_buf, conv_cache, cache_index_buf },
-            .{ &in_buffer, &cache_buffer },
+            .{ &in_buffer, &conv_cache },
             .{},
         );
+        cache_buffer = conv_cache.state;
 
         try zml.testing.expectClose(self.io, in_buffer, out_buffer_expected, opts);
         std.log.info("Layer {s} passed!", .{name});
@@ -281,7 +276,7 @@ const TestContext = struct {
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
-        const kv_cache: zml.Bufferized(model.KvCache) = .{ .k = key_cache_buffer, .v = value_cache_buffer };
+        var kv_cache: zml.Bufferized(model.KvCache) = .{ .k = key_cache_buffer, .v = value_cache_buffer };
 
         var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform);
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
@@ -294,9 +289,11 @@ const TestContext = struct {
         runner.run(
             self.io,
             .{ layer_buffers, in_buffer, cache_pos_buffer, kv_cache, cache_index_buf, attention_metadata_buffers },
-            .{ &in_buffer, &key_cache_buffer, &value_cache_buffer },
+            .{ &in_buffer, &kv_cache },
             .{},
         );
+        key_cache_buffer = kv_cache.k;
+        value_cache_buffer = kv_cache.v;
 
         try zml.testing.expectClose(self.io, in_buffer, out_buffer_expected, opts);
         std.log.info("Layer {s} passed!", .{name});

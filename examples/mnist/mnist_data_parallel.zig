@@ -152,11 +152,8 @@ pub fn main(init: std.process.Init) !void {
     };
     defer zml.Buffer.deinitAll(Mnist, &mnist_buffers);
 
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-
-    var results = try exe.results(allocator);
-    defer results.deinit(allocator);
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
 
     // Load a random digit image from the dataset.
     const dataset = try std.Io.Dir.openFile(.cwd(), io, t10kfilename, .{ .mode = .read_only });
@@ -183,14 +180,12 @@ pub fn main(init: std.process.Init) !void {
 
     for (batch[0..]) |*sample| base.printDigit(sample);
 
-    args.set(.{ mnist_buffers, input_buffer });
-
+    var recognized_digits_d: zml.Buffer = undefined;
     try profiler.start();
-    exe.call(io, args, &results, .{});
+    runner.run(io, .{ mnist_buffers, input_buffer }, &recognized_digits_d, .{});
     if (try profiler.stop()) |report| {
         log.info("Wrote profiler files to {s} and {s}", .{ report.protobuf_path, report.perfetto_path });
     }
-    var recognized_digits_d: zml.Buffer = results.get(zml.Buffer);
     defer recognized_digits_d.deinit();
 
     const recognized_digits = try recognized_digits_d.getValue([bs]u8, io);

@@ -158,44 +158,35 @@ pub fn run(
 ) void {
     var hidden_buffer: zml.Buffer = undefined;
     runner.embed.run(args.io, .{
-        .inputs = .{
-            .tokens = args.tokens_buf.*,
-        },
-        .outputs = .{ .hidden = &hidden_buffer },
-    }, .{});
+        .tokens = args.tokens_buf.*,
+    }, .{ .hidden = &hidden_buffer }, .{});
     defer hidden_buffer.deinit();
 
     for (runner.layers) |*layer| {
         layer.run(args.io, .{
-            .inputs = .{
-                .hidden = hidden_buffer,
-                .tokens_position_offset = args.tokens_pos_buf.*,
-                .active_length = args.active_length_buf.*,
-                .cache = args.cache_buffers.*,
-                .conv_cache_index = conv_cache_index_buffer.*,
-                .kv_cache_index = kv_cache_index_buffer.*,
-                .attention_metadata = args.attention_metadata_buffers,
-            },
-            .outputs = .{
-                .hidden = &hidden_buffer,
-                .cache = args.cache_buffers,
-                .conv_cache_index = conv_cache_index_buffer,
-                .kv_cache_index = kv_cache_index_buffer,
-            },
+            .hidden = hidden_buffer,
+            .tokens_position_offset = args.tokens_pos_buf.*,
+            .active_length = args.active_length_buf.*,
+            .cache = args.cache_buffers.*,
+            .conv_cache_index = conv_cache_index_buffer.*,
+            .kv_cache_index = kv_cache_index_buffer.*,
+            .attention_metadata = args.attention_metadata_buffers,
+        }, .{
+            .hidden = &hidden_buffer,
+            .cache = args.cache_buffers,
+            .conv_cache_index = conv_cache_index_buffer,
+            .kv_cache_index = kv_cache_index_buffer,
         }, .{});
     }
 
     runner.sample.run(args.io, .{
-        .inputs = .{
-            .hidden = hidden_buffer,
-            .tokens = args.tokens_buf.*,
-            .active_length = args.active_length_buf.*,
-            .rng = args.rng_buf.*,
-        },
-        .outputs = .{
-            .tokens = args.next_token_buf,
-            .rng = args.rng_buf,
-        },
+        .hidden = hidden_buffer,
+        .tokens = args.tokens_buf.*,
+        .active_length = args.active_length_buf.*,
+        .rng = args.rng_buf.*,
+    }, .{
+        .tokens = args.next_token_buf,
+        .rng = args.rng_buf,
     }, .{});
 }
 

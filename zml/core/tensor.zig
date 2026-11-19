@@ -1566,7 +1566,7 @@ pub const Tensor = struct {
             const exe = try platform.compileFn(std.testing.allocator, std.testing.io, forward, .{ x, y, ctr }, .{});
             defer exe.deinit();
 
-            try zml.testing.expectEqualShapes(Shape.init(z_shape, .f32), exe.output_shapes[0]);
+            try zml.testing.expectEqualShapes(Shape.init(z_shape, .f32), exe.raw.output_shapes[0]);
         }
     }
 
@@ -2599,7 +2599,7 @@ pub const Tensor = struct {
         const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.arange, .{ .{ .start = 2, .end = 26, .step = 4 }, .u32 }, .{});
         defer exe.deinit();
 
-        var output = try exe.eval(std.testing.allocator, std.testing.io, {});
+        var output = try exe.eval(std.testing.allocator, std.testing.io, .{});
         defer output.deinit();
 
         try zml.testing.expectClose(
@@ -3187,7 +3187,7 @@ pub const Tensor = struct {
             var temp_exe = try platform.compileFn(std.testing.allocator, std.testing.io, temp_func, .{}, .{});
             defer temp_exe.deinit();
 
-            const buffer = try temp_exe.eval(std.testing.allocator, std.testing.io, {});
+            const buffer = try temp_exe.eval(std.testing.allocator, std.testing.io, .{});
             break :b buffer;
         };
         defer operand_buffer.deinit();
@@ -3563,7 +3563,7 @@ pub const Tensor = struct {
             var res: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
             var runner = try exe.runner(allocator);
             defer runner.deinit(allocator);
-            runner.run(std.testing.io, .{x_buffer}, .{&res}, .{ .wait = true });
+            runner.run(std.testing.io, .{x_buffer}, .{ .values = &res.values, .indices = &res.indices }, .{ .wait = true });
             defer res.values.deinit();
             defer res.indices.deinit();
             const max_ = res.values.getValue(f32, std.testing.io);
@@ -3580,7 +3580,7 @@ pub const Tensor = struct {
             var res: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
             var runner = try exe.runner(allocator);
             defer runner.deinit(allocator);
-            runner.run(std.testing.io, .{x_buffer}, .{&res}, .{ .wait = true });
+            runner.run(std.testing.io, .{x_buffer}, .{ .values = &res.values, .indices = &res.indices }, .{ .wait = true });
             defer res.values.deinit();
             defer res.indices.deinit();
             const max_ = try res.values.getValue(f32, std.testing.io);
@@ -4808,7 +4808,7 @@ test "Tensor.maxPool1d" {
     var result: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
     var runner = try exe.runner(std.testing.allocator);
     defer runner.deinit(std.testing.allocator);
-    runner.run(std.testing.io, .{x_buffer}, .{&result}, .{ .wait = true });
+    runner.run(std.testing.io, .{x_buffer}, .{ .values = &result.values, .indices = &result.indices }, .{ .wait = true });
     defer result.values.deinit();
     defer result.indices.deinit();
 
@@ -4850,7 +4850,7 @@ test "Tensor.maxPool2d" {
     var result: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
     var runner = try exe.runner(std.testing.allocator);
     defer runner.deinit(std.testing.allocator);
-    runner.run(std.testing.io, .{x_buffer}, .{&result}, .{ .wait = true });
+    runner.run(std.testing.io, .{x_buffer}, .{ .values = &result.values, .indices = &result.indices }, .{ .wait = true });
     defer result.values.deinit();
     defer result.indices.deinit();
 

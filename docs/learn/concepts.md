@@ -129,8 +129,8 @@ corresponding types.
 2. Instantiate a model struct -> `Model` struct (with `zml.Tensor` inside)
 
 3. Compile the model struct and its `forward` function into an executable.
-   `foward` is a `Tensor -> Tensor` function, executable is a
-   `zml.Executable`
+   `forward` is a `Tensor -> Tensor` function, the executable is a
+   `zml.Exe(Model.forward)`
 
 4. Load the model weights from disk, onto accelerator memory ->
    `zml.Bufferized(Model)` struct (with `zml.Buffer` inside)
@@ -138,8 +138,9 @@ corresponding types.
 5. Load some user inputs (custom struct), encode them into arrays of numbers
    (`zml.Slice`), and copy them to the accelerator (`zml.Buffer`).
 
-6. Call the executable on the user inputs. `exe.call` accepts `zml.Buffer`
-   arguments and returns `zml.Buffer`
+6. Call the executable on the user inputs. `exe.eval` accepts the bufferized
+   arguments of `forward` (`zml.Buffer` instead of `zml.Tensor`) and returns its
+   bufferized result
 
 7. Return the model output (`zml.Buffer`) to the host (`zml.Slice`),
    decode it (custom struct) and finally return to the user.

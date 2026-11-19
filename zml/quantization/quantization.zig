@@ -427,8 +427,8 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
         const x: Tensor = .init(.{ .b = 2, .k = 256, .s = 3 }, .bf16);
         var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
         defer exe.deinit();
-        try zml.testing.expectEqualShapes(x.shape().withDtype(.f32), exe.output_shapes[0]);
-        try zml.testing.expectEqualShapes(x.shape().setDim(.k, 2).withDtype(.f32), exe.output_shapes[1]);
+        try zml.testing.expectEqualShapes(x.shape().withDtype(.f32), exe.raw.output_shapes[0]);
+        try zml.testing.expectEqualShapes(x.shape().setDim(.k, 2).withDtype(.f32), exe.raw.output_shapes[1]);
         var host: [2 * 256 * 3]zml.floats.BFloat16 = undefined;
         for (&host, 0..) |*value, i| {
             const magnitude: f32 = if ((i / 3) % 256 < 128) 1.0 else 2.0;
@@ -443,7 +443,7 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
         var output: zml.Bufferized(Local.Outputs) = undefined;
         var runner = try exe.runner(allocator);
         defer runner.deinit(allocator);
-        runner.run(io, .{buffer}, .{&output}, .{ .wait = true });
+        runner.run(io, .{buffer}, .{ .values = &output.values, .scales = &output.scales }, .{ .wait = true });
         defer zml.Buffer.deinitAll(Local.Outputs, &output);
         var values = try output.values.toSliceAlloc(allocator, io);
         defer values.free(allocator);
@@ -472,8 +472,8 @@ test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" 
         const x: Tensor = .init(.{ .b = 2, .k = 256, .s = 3 }, .f32);
         var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
         defer exe.deinit();
-        try zml.testing.expectEqualShapes(x.shape().withDtype(.f32), exe.output_shapes[0]);
-        try zml.testing.expectEqualShapes(x.shape().setDim(.k, 8).withDtype(.f32), exe.output_shapes[1]);
+        try zml.testing.expectEqualShapes(x.shape().withDtype(.f32), exe.raw.output_shapes[0]);
+        try zml.testing.expectEqualShapes(x.shape().setDim(.k, 8).withDtype(.f32), exe.raw.output_shapes[1]);
         const fp8_max: f32 = if (dtype == .f8e4m3fn) 448.0 else 224.0;
         var host: [2 * 256 * 3]f32 = undefined;
         var maxima: [2 * 8 * 3]f32 = @splat(0);
@@ -502,7 +502,7 @@ test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" 
         var output: zml.Bufferized(Local.Outputs) = undefined;
         var runner = try exe.runner(allocator);
         defer runner.deinit(allocator);
-        runner.run(io, .{buffer}, .{&output}, .{ .wait = true });
+        runner.run(io, .{buffer}, .{ .values = &output.values, .scales = &output.scales }, .{ .wait = true });
         defer zml.Buffer.deinitAll(Local.Outputs, &output);
         var values = try output.values.toSliceAlloc(allocator, io);
         defer values.free(allocator);

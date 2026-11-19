@@ -516,7 +516,7 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
             const activation: Activation = .{ .swiglu = .{ .limit = threshold } };
             var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, layout, activation }, .{});
             defer exe.deinit();
-            try zml.testing.expectEqualShapes(Shape.init(.{ .token = 1, .out = 3 }, .f32), exe.output_shapes[0]);
+            try zml.testing.expectEqualShapes(Shape.init(.{ .token = 1, .out = 3 }, .f32), exe.raw.output_shapes[0]);
             var output = try exe.eval(allocator, io, .{input});
             defer output.deinit();
             var actual = try output.toSliceAlloc(allocator, io);
@@ -647,7 +647,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
                 var output: zml.Bufferized(Local.Outputs) = undefined;
                 var runner = try exe.runner(allocator);
                 defer runner.deinit(allocator);
-                runner.run(io, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] }, .{&output}, .{ .wait = true });
+                runner.run(io, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] }, .{ .actual = &output.actual, .expected = &output.expected }, .{ .wait = true });
                 defer zml.Buffer.deinitAll(Local.Outputs, &output);
                 zml.testing.expectClose(io, output.expected, output.actual, .{ .absolute_tolerance = 0.03125, .relative_tolerance = 0.01 }) catch |err| {
                     log.warn("FP8 routed GEMM failed for scheme={s}, quantize_input={}, tokens={}", .{ @tagName(scheme), quantize_input, tokens });

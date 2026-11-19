@@ -1899,7 +1899,7 @@ test "HostAccessible executions read shared inputs on every device" {
     for (0..2) |iteration| {
         pinned.view(i32).fillIota(@intCast(iteration * 100), 1);
         var output: Buffer = undefined;
-        runner.run(io, .{pinned.buffer}, .{&output}, .{});
+        runner.run(io, .{pinned.buffer}, &output, .{});
         defer output.deinit();
         try output.await(io);
         for (output._shards.constSlice()) |shard| {
@@ -2132,7 +2132,7 @@ test "HostAccessible await after executable donation permits the next host updat
     // Reuse the same runner and output destination as the model execution paths.
     // Only await waits for the asynchronous executable before host access.
     for (0..3) |iteration| {
-        runner.run(io, .{pinned.buffer}, .{&pinned.buffer}, .{});
+        runner.run(io, .{pinned.buffer}, &pinned.buffer, .{});
         try pinned.await(io);
 
         // Reacquire from the output handles, even when donation reuses memory.
@@ -2184,7 +2184,7 @@ test "HostAccessible await follows an output that doesn't reuse the pinned alloc
         var input = pinned.buffer;
         defer input.deinit();
         const previous = pinned.mapping.allocations.entries.items(.ptr)[0];
-        runner.run(io, .{input}, .{&pinned.buffer}, .{});
+        runner.run(io, .{input}, &pinned.buffer, .{});
         try pinned.await(io);
         const values = pinned.view(i32);
         try std.testing.expect(pinned.mapping.allocations.entries.items(.ptr)[0] != previous);

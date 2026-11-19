@@ -217,7 +217,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     });
     defer reference_exe.deinit();
 
-    var reference_d = try reference_exe.eval(allocator, io, .{ q, k, v, token_index, reference_metadata });
+    var reference_d = try reference_exe.eval(allocator, io, .{ q, k, v, token_index, .{ .stablehlo = {} } });
     defer reference_d.deinit();
     try reference_d.await(io);
     try std.testing.expectEqualDeep(q_shape.withPartitioning(mesh, partitioning.out_specs)._sharding, reference_d.shape()._sharding);
@@ -244,7 +244,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
         var metadata_d = try metadata.initBuffer(io, platform);
         defer flash_attention.Metadata.deinitBuffer(&metadata_d);
 
-        var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, metadata_d });
+        var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, .{ .flash_attention = metadata_d } });
         defer output_d.deinit();
         try output_d.await(io);
         const output_h = try output_d.toSliceAlloc(allocator, io);

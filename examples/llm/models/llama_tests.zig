@@ -119,16 +119,7 @@ fn testLayer(
     const exe = try platform.compileFn(allocator, io, Call.forward, .{ layer, in_tensor }, .{ .meshes = meshes });
     defer exe.deinit();
 
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-    args.set(.{ layer_weights, in_buffer });
-
-    var res = try exe.results(allocator);
-    defer res.deinit(allocator);
-
-    exe.call(io, args, &res, .{});
-
-    var out_result = res.get(zml.Buffer);
+    var out_result = try exe.eval(allocator, io, .{ layer_weights, in_buffer });
     defer out_result.deinit();
     try zml.testing.expectClose(io, out_result, out_buffer_expected, opts);
 }

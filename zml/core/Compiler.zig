@@ -14,7 +14,9 @@ const zio = @import("zio");
 
 const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
-const Exe = @import("exe.zig").Exe;
+const exe_ = @import("exe.zig");
+const Exe = exe_.Exe;
+const RawExe = exe_.RawExe;
 const Memory = @import("platform.zig").Memory;
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
@@ -409,7 +411,7 @@ pub fn Typed(comptime func_: anytype) type {
             platform: *const Platform,
             opts: Options,
             args: std.meta.ArgsTuple(@TypeOf(func_)),
-        ) Error!Exe {
+        ) Error!Exe(func_) {
             return Compiler.compile(allocator, io, platform, func_, args, opts);
         }
     };
@@ -422,15 +424,16 @@ pub fn compile(
     comptime func_: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func_)),
     opts: Options,
-) Error!Exe {
-    return switch (platform.io_impl) {
-        .threaded => compileInternal(allocator, io, platform, func_, args, opts),
+) Error!Exe(func_) {
+    const raw = switch (platform.io_impl) {
+        .threaded => try compileInternal(allocator, io, platform, func_, args, opts),
         .zio => try zio.blockInPlace(struct {
-            fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const Platform, args_: @TypeOf(args), opts_: Options) Error!Exe {
+            fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const Platform, args_: @TypeOf(args), opts_: Options) Error!RawExe {
                 return try compileInternal(allocator_, io_, platform_, func_, args_, opts_);
             }
         }.call, .{ allocator, io, platform, args, opts }),
     };
+    return .{ .raw = raw };
 }
 
 pub fn compileInternal(
@@ -440,7 +443,7 @@ pub fn compileInternal(
     comptime func_: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func_)),
     opts: Options,
-) Error!Exe {
+) Error!RawExe {
     // TODO: Here we have somewhat of a requirement
     // Emitting MLIR requires to have the compiler context available at all times using `Compiler.current()`.
     // If in the future, we inject an Io that is not thread-based, we might have some surprises.
@@ -500,7 +503,7 @@ pub fn compileInternal(
 
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
-    const exe = try Exe.init(
+    const exe = try RawExe.init(
         allocator,
         platform,
         loaded_executable,

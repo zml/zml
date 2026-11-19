@@ -158,11 +158,8 @@ pub const KernelRunner = struct {
 pub fn run(runner: *KernelRunner, args: RunArgs) void {
     var hidden_buffer: zml.Buffer = undefined;
     runner.embed.run(args.io, .{
-        .inputs = .{
-            .tokens = args.tokens_buffer.*,
-        },
-        .outputs = .{ .hidden = &hidden_buffer },
-    }, .{});
+        .tokens = args.tokens_buffer.*,
+    }, .{ .hidden = &hidden_buffer }, .{});
     defer hidden_buffer.deinit();
 
     for (runner.layers, args.layer_index_buffers) |*layer_runner, layer_index_buffer| {
@@ -178,13 +175,10 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                     .layer_index = index_buffer,
                 };
                 layer.run(args.io, .{
-                    .inputs = .{
-                        .hidden = hidden_buffer,
-                        .token_index = args.token_index_buffer.*,
-                        .cache = layer_cache,
-                    },
-                    .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                }, .{});
+                    .hidden = hidden_buffer,
+                    .token_index = args.token_index_buffer.*,
+                    .cache = layer_cache,
+                }, .{ .hidden = &hidden_buffer, .cache = &layer_cache }, .{});
                 args.kv_cache_buffers.self_attn.k = layer_cache.k;
                 args.kv_cache_buffers.self_attn.v = layer_cache.v;
                 layer_cache.layer_index.deinit();
@@ -200,13 +194,10 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                     .layer_index = index_buffer,
                 };
                 layer.run(args.io, .{
-                    .inputs = .{
-                        .hidden = hidden_buffer,
-                        .active_length = args.active_length_buffer.*,
-                        .cache = layer_cache,
-                    },
-                    .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                }, .{});
+                    .hidden = hidden_buffer,
+                    .active_length = args.active_length_buffer.*,
+                    .cache = layer_cache,
+                }, .{ .hidden = &hidden_buffer, .cache = &layer_cache }, .{});
                 args.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
                 args.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
                 layer_cache.layer_index.deinit();
@@ -215,18 +206,15 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
     }
 
     runner.sample.run(args.io, .{
-        .inputs = .{
-            .hidden = hidden_buffer,
-            .tokens = args.tokens_buffer.*,
-            .active_length = args.active_length_buffer.*,
-            .rng = args.rng_buffers.*,
-            .token_index = args.token_index_buffer.*,
-        },
-        .outputs = .{
-            .tokens = args.next_token_buffer,
-            .rng = args.rng_buffers,
-            .token_index = args.token_index_buffer,
-        },
+        .hidden = hidden_buffer,
+        .tokens = args.tokens_buffer.*,
+        .active_length = args.active_length_buffer.*,
+        .rng = args.rng_buffers.*,
+        .token_index = args.token_index_buffer.*,
+    }, .{
+        .tokens = args.next_token_buffer,
+        .rng = args.rng_buffers,
+        .token_index = args.token_index_buffer,
     }, .{});
 }
 

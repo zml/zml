@@ -102,7 +102,7 @@ test "unpackFp4 expands the requested axis" {
     var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.call, .{packed_weight}, .{});
     defer exe.deinit();
 
-    try zml.testing.expectEqualShapes(.init(.{ .out = 2, .contracted = 8 }, .f4e2m1), exe.output_shapes[0]);
+    try zml.testing.expectEqualShapes(.init(.{ .out = 2, .contracted = 8 }, .f4e2m1), exe.raw.output_shapes[0]);
 }
 
 /// Scaled matrix multiply (`xla.scaled_dot`): `acc = (lhs * lhs_scale) @ (rhs * rhs_scale)`.
@@ -278,7 +278,7 @@ test "block128 scaled dot layouts" {
                 const scales: Tensor = .init(w.shape().setDim(.n, std.math.divCeil(i64, w.dim(.n), 128) catch unreachable).setDim(.k, @divExact(w.dim(.k), 128)).withDtype(scale_dtype), scale_dtype);
                 var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, scales, dtype, prequantized }, .{});
                 defer exe.deinit();
-                try zml.testing.expectEqualShapes(exe.output_shapes[1], exe.output_shapes[0]);
+                try zml.testing.expectEqualShapes(exe.raw.output_shapes[1], exe.raw.output_shapes[0]);
                 var buffers: [3]zml.Buffer = undefined;
                 var initialized: usize = 0;
                 defer for (buffers[0..initialized]) |*buffer| buffer.deinit();
@@ -299,7 +299,7 @@ test "block128 scaled dot layouts" {
                 var output: zml.Bufferized(Local.Outputs) = undefined;
                 var runner = try exe.runner(allocator);
                 defer runner.deinit(allocator);
-                runner.run(io, .{ buffers[0], buffers[1], buffers[2] }, .{&output}, .{ .wait = true });
+                runner.run(io, .{ buffers[0], buffers[1], buffers[2] }, .{ .actual = &output.actual, .expected = &output.expected, .linear = &output.linear, .linear_expected = &output.linear_expected }, .{ .wait = true });
                 defer zml.Buffer.deinitAll(Local.Outputs, &output);
                 var expected = try output.expected.toSliceAlloc(allocator, io);
                 defer expected.free(allocator);
@@ -979,7 +979,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, .{});
         defer exe.deinit();
 
-        var d_interleaved = try exe.eval(std.testing.allocator, std.testing.io, {});
+        var d_interleaved = try exe.eval(std.testing.allocator, std.testing.io, .{});
         defer d_interleaved.deinit();
         try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
     }
@@ -987,7 +987,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, .{});
         defer exe.deinit();
 
-        var d_sequential = try exe.eval(std.testing.allocator, std.testing.io, {});
+        var d_sequential = try exe.eval(std.testing.allocator, std.testing.io, .{});
         defer d_sequential.deinit();
         try std.testing.expectEqual(20, try d_sequential.getValue(i32, std.testing.io));
     }
@@ -997,7 +997,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, .{});
         defer exe.deinit();
 
-        var d_split_seq_void = try exe.eval(std.testing.allocator, std.testing.io, {});
+        var d_split_seq_void = try exe.eval(std.testing.allocator, std.testing.io, .{});
         defer d_split_seq_void.deinit();
         try std.testing.expectEqual(20, try d_split_seq_void.getValue(i32, std.testing.io));
     }
@@ -1007,7 +1007,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, .{});
         defer exe.deinit();
 
-        var d_split_seq = try exe.eval(std.testing.allocator, std.testing.io, {});
+        var d_split_seq = try exe.eval(std.testing.allocator, std.testing.io, .{});
         defer d_split_seq.deinit();
         try std.testing.expectEqual(20, try d_split_seq.getValue(i32, std.testing.io));
     }
@@ -1016,7 +1016,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, .{});
         defer exe.deinit();
 
-        var d_split_seq = try exe.eval(std.testing.allocator, std.testing.io, {});
+        var d_split_seq = try exe.eval(std.testing.allocator, std.testing.io, .{});
         defer d_split_seq.deinit();
         try std.testing.expectEqual(20, try d_split_seq.getValue(i32, std.testing.io));
     }
@@ -1908,7 +1908,7 @@ test "gated delta net" {
     runner.run(
         std.testing.io,
         .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, oversized_length_buffer },
-        .{&result},
+        .{ .state = &result.state, .outputs = &result.outputs },
         .{ .wait = true },
     );
     defer result.outputs.deinit();
@@ -1944,7 +1944,7 @@ test "gated delta net" {
     runner.run(
         std.testing.io,
         .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, prefix_length_buffer },
-        .{&prefix_result},
+        .{ .state = &prefix_result.state, .outputs = &prefix_result.outputs },
         .{ .wait = true },
     );
     defer prefix_result.outputs.deinit();
