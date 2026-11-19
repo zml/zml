@@ -1,0 +1,12 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "tcl",
+    srcs = [
+        "attention.zig",
+        "attention_f32.zig",
+        "online_softmax.zig",
+        "tcl.zig",
+        "tests.zig",
+    ],
+)

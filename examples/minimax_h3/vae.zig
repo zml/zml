@@ -11,6 +11,7 @@ const std = @import("std");
 const zml = @import("zml");
 const config = @import("config.zig");
 const ops = @import("ops.zig");
+const projection = @import("projection.zig");
 
 const VisualConfig = config.VisualConfig;
 const linear = ops.linear;
@@ -22,6 +23,15 @@ const Run = ops.Run;
 const log = std.log.scoped(.minimax_h3);
 
 fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
+    const compiler = zml.Compiler.current();
+    if (compiler.platform.target == .furiosa and x.dtype() == .f32 and lin.weight.dtype() == .f32 and @mod(lin.weight.dim(0), 256) == 0) { // TODO: simplify this
+        if (lin.bias) |bias| {
+            const mesh = compiler.mesh(.model);
+            if (bias.dtype() == .f32 and @mod(x.dim(.b), mesh.numPartitionsForLogicalAxis(.model)) == 0) {
+                return projection.forwardBatchF32(x, lin.weight, bias, mesh).rename(.{ .d = .dout });
+            }
+        }
+    }
     const y = x.convert(lin.weight.dtype());
     return lin.forward(y, y.dtype()).convert(x.dtype());
 }
@@ -36,8 +46,8 @@ const VitFf = struct {
 
     pub fn init(store: zml.io.TensorStore.View) VitFf {
         return .{
-            .w1 = linear(store, "net.0.proj.weight", "net.0.proj.bias", .replicated, .{}),
-            .w2 = linear(store, "net.2.weight", "net.2.bias", .replicated, .{}),
+            .w1 = linear(store, "net.0.proj.weight", "net.0.proj.bias", .replicated, .{}), // VAE Expansion
+            .w2 = linear(store, "net.2.weight", "net.2.bias", .replicated, .{}), // VAE Contraction
         };
     }
 
@@ -68,17 +78,30 @@ const VitAttn = struct {
         };
     }
 
+    fn attend(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor) zml.Tensor {
+        const compiler = zml.Compiler.current();
+        if (compiler.platform.target == .furiosa and q.dtype() == .f32) {
+            const mesh = compiler.mesh(.model);
+            if (@mod(q.dim(.b), mesh.numPartitionsForLogicalAxis(.model)) == 0) {
+                const batch: zml.Sharding.Partitioning.Logical = .parse(.{ .b = .model });
+                return zml.attention.attentionOpts(q, k, v, .scalar(0, .i32), .{ .flash_attention = .{ .tcl = {} } }, .{ .flash_attention = .{ .tcl = {} } }, .{ .causal = false }, mesh, .{
+                    .in_specs = .{ .q = batch, .k = batch, .v = batch },
+                    .out_specs = batch,
+                });
+            }
+        }
+        return zml.nn.sdpa(q, k, v, .{});
+    }
+
     pub fn forward(self: VitAttn, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
         const heads = .{ .h = self.num_heads, .hd = self.head_dim };
         const q = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.q, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
         const k = ops.applyRotary(zml.nn.rmsNorm(applyLinear(self.k, x).splitAxis(.dout, heads), .hd, self.eps), cos, sin);
         const v = applyLinear(self.v, x).splitAxis(.dout, heads);
-        // Portable SDPA. DiT uses the shared non causal attention API for the long packed sequence.
-        return applyLinear(self.out, zml.nn.sdpa(
+        return applyLinear(self.out, attend(
             q.rename(.{ .s = .q }),
             k.rename(.{ .s = .k }),
             v.rename(.{ .s = .k }),
-            .{},
         ).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } })).rename(.{ .dout = .d });
     }
 };

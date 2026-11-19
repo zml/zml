@@ -10,6 +10,7 @@ zig_binary(
         "main.zig",
         "ops.zig",
         "pack.zig",
+        "projection.zig",
         "vae.zig",
     ],
     main = "main.zig",

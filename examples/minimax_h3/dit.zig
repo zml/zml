@@ -18,6 +18,7 @@ const zml = @import("zml");
 const config = @import("config.zig");
 const ops = @import("ops.zig");
 const pack = @import("pack.zig");
+const projection = @import("projection.zig");
 
 const log = std.log.scoped(.minimax_h3);
 
@@ -51,19 +52,24 @@ fn residualGate(x: zml.Tensor, gate: zml.Tensor, y: zml.Tensor) zml.Tensor {
     return x.add(gate.squeeze(.k).convert(y.dtype()).broad(y.shape()).mul(y));
 }
 
-/// Dense `{b,s,d}` pack: text | audio | video. Update-slice matches scatter's FA2 layout.
+// /// Dense `{b,s,d}` pack: text | audio | video. Update-slice matches scatter's FA2 layout.
+// fn packedHidden(text: zml.Tensor, audio: zml.Tensor, video: zml.Tensor) zml.Tensor {
+//     const text_len = text.dim(.s);
+//     const audio_len = audio.dim(.s);
+//     var hidden = zml.Tensor.zeroes(zml.Shape.init(.{
+//         .b = text.dim(.b),
+//         .s = text_len + audio_len + video.dim(.s),
+//         .d = text.dim(.d),
+//     }, text.dtype()));
+//     hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i32) }, text);
+//     hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len)), .i32) }, audio);
+//     hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len + audio_len)), .i32) }, video);
+//     return hidden.replicate();
+// }
+
+/// Dense `{b,s,d}` pack: text | audio | video.
 fn packedHidden(text: zml.Tensor, audio: zml.Tensor, video: zml.Tensor) zml.Tensor {
-    const text_len = text.dim(.s);
-    const audio_len = audio.dim(.s);
-    var hidden = zml.Tensor.zeroes(zml.Shape.init(.{
-        .b = text.dim(.b),
-        .s = text_len + audio_len + video.dim(.s),
-        .d = text.dim(.d),
-    }, text.dtype()));
-    hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i32) }, text);
-    hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len)), .i32) }, audio);
-    hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len + audio_len)), .i32) }, video);
-    return hidden.replicate();
+    return zml.Tensor.concatenate(&.{ text, audio, video }, .s).replicate();
 }
 
 // =============================================================================
@@ -129,18 +135,25 @@ const Attention = struct {
 
         const metadata: zml.attention.Metadata = .init(.fromBackend(backend));
         const parameters: zml.attention.Parameters = .init(.fromBackend(backend));
-        // Diffusion Transformer and text refinement use bidirectional full sequence attention. heads sharded on .model dimension.
-        const attn = zml.attention.attentionOpts(
-            q.rename(.{ .s = .q }),
-            k.rename(.{ .s = .k }),
-            v.rename(.{ .s = .k }),
+        const compiler = zml.Compiler.current();
+        const mesh = compiler.mesh(.model);
+        const queries = q.rename(.{ .s = .q });
+        const keys = k.rename(.{ .s = .k });
+        const values = v.rename(.{ .s = .k });
+
+        const attended = zml.attention.attentionOpts(
+            queries,
+            keys,
+            values,
             zml.Tensor.scalar(0, .u32),
             metadata,
             parameters,
             .{ .causal = false },
-            zml.Compiler.current().mesh(.model),
+            mesh,
             .head(.model),
-        ).rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
+        );
+
+        const attn = attended.rename(.{ .q = .s }).merge(.{ .d = .{ .h, .hd } });
         return self.out.forward(attn, attn.dtype()).rename(.{ .dout = .d }).withPartitioning(.model, .{ .d = .replicated });
     }
 };
@@ -315,9 +328,19 @@ const PatchEmbed = struct {
         const dt = input.text.dtype();
         const video_in = input.video.convert(input.model.video_proj.weight.dtype());
         const audio_in = input.audio.convert(input.model.audio_proj.weight.dtype());
-        const video = input.model.video_proj.forward(video_in, video_in.dtype()).rename(.{ .dout = .d }).convert(dt);
-        const audio = input.model.audio_proj.forward(audio_in, audio_in.dtype()).rename(.{ .dout = .d }).convert(dt);
+        const video = project(input.model.video_proj, video_in, dt);
+        const audio = project(input.model.audio_proj, audio_in, dt);
         return .{ .hidden = packedHidden(input.text, audio, video) };
+    }
+
+    fn project(layer: zml.nn.Linear, x: zml.Tensor, dtype: zml.DataType) zml.Tensor {
+        const compiler = zml.Compiler.current();
+        if (compiler.platform.target == .furiosa and x.dtype() == .f32 and layer.weight.dtype() == .f32 and dtype == .bf16) {
+            if (layer.bias) |bias| {
+                if (bias.dtype() == .f32) return projection.forward(x, layer.weight, bias, compiler.mesh(.model));
+            }
+        }
+        return layer.forward(x, x.dtype()).rename(.{ .dout = .d }).convert(dtype);
     }
 };
 
@@ -476,7 +499,7 @@ pub const Dit = struct {
     /// Ten kernels: text, RoPE, patch pack, temb, AdaLN, final AdaLN, one block, finish, Euler video/audio.
     /// Shapes come from `packed_run`.
     pub fn compile(self: *Dit, run: *const Run, geo: config.Geometry, text_len: u32, packed_run: Packed, text_dt: zml.DataType) !void {
-        const attn: zml.attention.Backend = if (run.platform.target == .cuda)
+        const attn: zml.attention.Backend = if (run.platform.target == .cuda or run.platform.target == .furiosa)
             zml.attention.Backend.auto(run.platform)
         else
             .{ .stablehlo = {} };

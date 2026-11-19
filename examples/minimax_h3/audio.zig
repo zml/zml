@@ -50,6 +50,11 @@ fn loadWn(store: zml.io.TensorStore.View, layout: WnLayout) struct { v: zml.Tens
 /// `v * g / ||v||`. ZML `sum` keeps reduced axes at 1, matching `g`.
 fn weightNorm(v: zml.Tensor, g: zml.Tensor, comptime ax0: anytype, comptime ax1: anytype) zml.Tensor {
     const vf = v.convert(.f32);
+    if (zml.Compiler.current().platform.target == .furiosa) { // TODO: See if we can have this for all platforms rather than just Furiosa
+        const flat = vf.merge(.{ .norm = .{ ax1, ax0 } });
+        const sq = flat.mul(flat).sum(.norm).addConstant(1e-9);
+        return flat.mul(g.convert(.f32).reshape(sq.shape()).mul(sq.rsqrt())).reshape(vf.shape());
+    }
     const sq = vf.mul(vf).sum(ax0).sum(ax1).addConstant(1e-9);
     return vf.mul(g.convert(.f32).mul(sq.rsqrt()));
 }
@@ -159,7 +164,7 @@ const SnakeBeta = struct {
         const shaped = alpha.broad(xf.shape());
         const mag = zml.Tensor.scalar(1.0, .f32).div(beta.addConstant(1e-9)).broad(xf.shape());
         const s = xf.mul(shaped).sin();
-        return xf.add(mag.mul(s.mul(s))).convert(x.dtype());
+        return xf.add(s.mul(s).mul(mag)).convert(x.dtype()); // Fixed for TCL/Furiosa lowering: keep dense operand first so mag broadcast fuses into the multyply.
     }
 };
 
@@ -207,6 +212,8 @@ const Activation1d = struct {
         }).scale(@as(f32, @floatFromInt(config.audio_activation_ratio)));
         y = y.slice(.t, .{ .start = crop_left, .end = y.dim(.t) - crop_right });
         y = self.act.forward(y.convert(x.dtype())).convert(.f32);
+        // Bound TCL fusion after SnakeBeta to avoid VRF scheduling failures.
+        if (zml.Compiler.current().platform.target == .furiosa) y = y.optimizationBarrier();
         const pad_left = @divFloor(config.audio_activation_kernel, 2) - 1;
         const pad_right = @divFloor(config.audio_activation_kernel, 2);
         y = padRepeatT(y, pad_left, pad_right);
