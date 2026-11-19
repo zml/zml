@@ -207,6 +207,9 @@ const Activation1d = struct {
         }).scale(@as(f32, @floatFromInt(config.audio_activation_ratio)));
         y = y.slice(.t, .{ .start = crop_left, .end = y.dim(.t) - crop_right });
         y = self.act.forward(y.convert(x.dtype())).convert(.f32);
+        // TODO: Remove this scheduling workaround once Furiosa XLA fusion policy produces units that TCC can schedule with VRF correctly. A TCC scheduler fix could also eliminate the need for this barrier.
+        // Bound TCL fusion after SnakeBeta to avoid VRF scheduling failures.
+        if (zml.Compiler.current().platform.target == .furiosa) y = y.optimizationBarrier();
         const pad_left = @divFloor(config.audio_activation_kernel, 2) - 1;
         const pad_right = @divFloor(config.audio_activation_kernel, 2);
         y = padRepeatT(y, pad_left, pad_right);
