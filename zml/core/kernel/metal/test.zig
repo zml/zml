@@ -50,7 +50,7 @@ test "metal kernels run on metal" {
         }
     };
     const x: zml.Tensor = .init(.{n}, .f32);
-    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{ x, zml.Tensor.init(.{n}, .f32) }, platform, .{});
+    var exe = try platform.compileFn(allocator, std.testing.io, Mod.forward, .{ x, zml.Tensor.init(.{n}, .f32) }, .{});
     defer exe.deinit();
 
     var hx: [n]f32 = undefined;

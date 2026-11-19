@@ -1705,7 +1705,7 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
             .sink = if (case.opts.sink != null) Tensor.init(.{ .h = hkv * g }, .f32) else null,
         };
         const v_t: Tensor = .init(k_t.shape(), dims.dtype);
-        var exe = try zml.module.compile(allocator, io, Mod.forward, .{ params, q_t, k_t, v_t, opts }, platform, .{});
+        var exe = try platform.compileFn(allocator, io, Mod.forward, .{ params, q_t, k_t, v_t, opts }, .{});
         defer exe.deinit();
 
         const q = try allocator.alloc(bf16, @intCast(tokens * hkv * g * d));

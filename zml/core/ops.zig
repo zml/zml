@@ -702,14 +702,7 @@ test @"while" {
 
     const initial_i: zml.Tensor = .init(.{}, .i64);
     const initial_sum: zml.Tensor = .init(.{}, .i64);
-    var exe = try zml.module.compile(
-        std.testing.allocator,
-        std.testing.io,
-        While.forward,
-        .{ initial_i, initial_sum },
-        platform,
-        .{},
-    );
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, While.forward, .{ initial_i, initial_sum }, .{});
     defer exe.deinit();
 
     var i_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_i.shape(), std.mem.sliceAsBytes(&[1]i64{1}));
@@ -1116,7 +1109,7 @@ test "fly custom call, both entry ABIs" {
     // Compile `forward` over one f32 input and bring the result back.
     const call = struct {
         fn f(comptime forward: anytype, p: *const zml.Platform, t: Tensor, h: []const f32) !zml.Slice {
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{t}, p, .{});
+            var exe = try p.compileFn(std.testing.allocator, std.testing.io, forward, .{t}, .{});
             defer exe.deinit();
             var buf: zml.Buffer = try .fromBytes(std.testing.io, p, t.shape(), std.mem.sliceAsBytes(h));
             defer buf.deinit();
@@ -1334,7 +1327,7 @@ test "triton" {
     const a: zml.Tensor = .init(.{}, .f32);
     const b: zml.Tensor = .init(.{}, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, .{});
     defer exe.deinit();
 
     var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}));
@@ -1662,7 +1655,7 @@ test "cute" {
 
     const a: zml.Tensor = .init(.{ .n = 128 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Mod.forward, .{a}, .{});
     defer exe.deinit();
 
     var input: [128]f32 = undefined;
@@ -1721,7 +1714,7 @@ test "cuda_tile" {
 
     const a: zml.Tensor = .init(.{ .n = 128 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Mod.forward, .{a}, .{});
     defer exe.deinit();
 
     var input: [128]f32 = undefined;
@@ -1789,7 +1782,7 @@ test "cuda_tile grid" {
     const n = 24 * 128;
     const a: zml.Tensor = .init(.{ .n = n }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Mod.forward, .{a}, .{});
     defer exe.deinit();
 
     const input: [n]f32 = @splat(0);
@@ -1848,7 +1841,7 @@ test "cuda_tile zeroed_outputs" {
 
     const a: zml.Tensor = .init(.{ .n = 128 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Mod.forward, .{a}, .{});
     defer exe.deinit();
 
     var input: [128]f32 = undefined;

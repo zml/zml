@@ -335,7 +335,7 @@ pub const Tensor = struct {
             }
         };
 
-        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcpyH2D, .{x_t}, platform, .{});
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.memcpyH2D, .{x_t}, .{});
         defer exe.deinit();
 
         var x_h = try zml.Buffer.fromBytesOpts(io, platform, x_t.shape(), @ptrCast(&inputs), .{ .memory = .host_pinned });
@@ -495,7 +495,7 @@ pub const Tensor = struct {
             }
         };
 
-        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcopy, .{ x_t, y_t, z_t }, platform, .{});
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.memcopy, .{ x_t, y_t, z_t }, .{});
         defer exe.deinit();
 
         var x_d = try zml.Buffer.fromBytes(io, platform, x_t.shape(), @ptrCast(&inputs));
@@ -627,14 +627,7 @@ pub const Tensor = struct {
         inline for (inputs, expectations, divisors) |i, e, d| {
             const input: zml.Tensor = .init(.{6}, .f32);
 
-            const exe = try zml.module.compile(
-                std.testing.allocator,
-                std.testing.io,
-                Tensor.fmod,
-                .{ input, d },
-                platform,
-                .{},
-            );
+            const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.fmod, .{ input, d }, .{});
             defer exe.deinit();
 
             var input_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&i));
@@ -813,14 +806,7 @@ pub const Tensor = struct {
             }
         };
 
-        var exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Local._fwd,
-            .{Tensor.init(.{rfft_input_len}, .f32)},
-            platform,
-            .{},
-        );
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{Tensor.init(.{rfft_input_len}, .f32)}, .{});
         defer exe.deinit();
     }
 
@@ -937,7 +923,7 @@ pub const Tensor = struct {
 
             const platform = zml.testing.env();
             // Compute stats over a uniform distribution on [-2, 10].
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, .{});
             defer exe.deinit();
 
             var rng_buffer = try Rng.init().initBuffer(std.testing.io, platform, 1234);
@@ -1048,7 +1034,7 @@ pub const Tensor = struct {
             const tgt_dist_data = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
             const tgt_dist: Tensor = .init(.{tgt_dist_data.len}, .f32);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, .{});
             defer exe.deinit();
 
             var rng_buffer = try Rng.init().initBuffer(std.testing.io, platform, 1234);
@@ -1391,14 +1377,7 @@ pub const Tensor = struct {
         }
 
         const x_d: Tensor = .init(.{x_f32.len}, .f32);
-        const exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Tensor.convert,
-            .{ x_d, .f4e2m1 },
-            platform,
-            .{},
-        );
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f4e2m1 }, .{});
         defer exe.deinit();
 
         var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), @ptrCast(&x_f32));
@@ -1423,14 +1402,7 @@ pub const Tensor = struct {
         for (&x_f8e3, &x) |*xi_f8e3, xi| xi_f8e3.* = .fromF32(xi);
 
         const x_d: Tensor = .init(.{x.len}, .f32);
-        const exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Tensor.convert,
-            .{ x_d, .f8e3m4 },
-            platform,
-            .{},
-        );
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f8e3m4 }, .{});
         defer exe.deinit();
 
         var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), std.mem.sliceAsBytes(&x));
@@ -1453,14 +1425,7 @@ pub const Tensor = struct {
         const x_u8: [8]u8 = .{ 0, 1, 2, 3, 3, 2, 1, 0 };
 
         const x_u2_t: Tensor = .init(.{8}, .u2);
-        const exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Tensor.convert,
-            .{ x_u2_t, .u8 },
-            platform,
-            .{},
-        );
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_u2_t, .u8 }, .{});
         defer exe.deinit();
 
         var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_u2_t.shape(), @ptrCast(&x_u2));
@@ -1481,14 +1446,7 @@ pub const Tensor = struct {
         const x_f4_packed = [_]floats.Float4E2M1.Packed{ .fromF32(0, 0.5), .fromF32(1, 1.5), .fromF32(2, 3), .fromF32(4, 6) };
 
         const x_t: Tensor = .init(.{x_f4_packed.len * 2}, .f4e2m1);
-        const exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Tensor.convert,
-            .{ x_t, .f32 },
-            platform,
-            .{},
-        );
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_t, .f32 }, .{});
         defer exe.deinit();
 
         var x_f4_d: zml.Buffer = try .fromBytes(std.testing.io, platform, x_t.shape(), @ptrCast(&x_f4_packed));
@@ -1605,14 +1563,7 @@ pub const Tensor = struct {
                 }
             }.forward;
 
-            const exe = try zml.module.compile(
-                std.testing.allocator,
-                std.testing.io,
-                forward,
-                .{ x, y, ctr },
-                platform,
-                .{},
-            );
+            const exe = try platform.compileFn(std.testing.allocator, std.testing.io, forward, .{ x, y, ctr }, .{});
             defer exe.deinit();
 
             try zml.testing.expectEqualShapes(Shape.init(z_shape, .f32), exe.output_shapes[0]);
@@ -1723,14 +1674,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         const input: Tensor = .init(.{2}, .f32);
-        var exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Tensor.leakyReLU,
-            .{ input, 0.1 },
-            platform,
-            .{},
-        );
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.leakyReLU, .{ input, 0.1 }, .{});
         defer exe.deinit();
 
         var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6884, 1.6795 }));
@@ -1767,14 +1711,7 @@ pub const Tensor = struct {
         const b: Tensor = .init(.{ .c = 3 }, .f32);
         const c: Tensor = .init(.{ .e = 3 }, .f32);
 
-        var exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Tensor.swiglu,
-            .{ input, beta, w, v, b, c, Shape.toTag(.d) },
-            platform,
-            .{},
-        );
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.swiglu, .{ input, beta, w, v, b, c, Shape.toTag(.d) }, .{});
         defer exe.deinit();
 
         var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&[4]f32{ 1, 0, 1, 2 }));
@@ -2045,14 +1982,7 @@ pub const Tensor = struct {
 
         const x: Tensor = .init(.{ 2, 5 }, .f32);
 
-        var exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Local._cumsum,
-            .{x},
-            platform,
-            .{},
-        );
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._cumsum, .{x}, .{});
         defer exe.deinit();
 
         var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), @ptrCast(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
@@ -2360,14 +2290,7 @@ pub const Tensor = struct {
             .{ -1, Tensor.Slice{ .start = -2 }, [4]f32{ 3, 4, 8, 9 } },
         }) |testcase| {
             const ax, const slice_, const expectation = testcase;
-            var exe = try zml.module.compile(
-                std.testing.allocator,
-                std.testing.io,
-                Local._slice1dAxis,
-                .{ x, ax, slice_ },
-                platform,
-                .{},
-            );
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._slice1dAxis, .{ x, ax, slice_ }, .{});
             defer exe.deinit();
 
             var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, .{} });
@@ -2395,7 +2318,7 @@ pub const Tensor = struct {
             const x: Tensor = .fromShape(x_shape);
             const z: Tensor = .init(.{}, .i32);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.dynSliceResolved, .{ x, ax, .dyn(z, 2) }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.dynSliceResolved, .{ x, ax, .dyn(z, 2) }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&x_data));
@@ -2514,14 +2437,7 @@ pub const Tensor = struct {
             const input_data, const shape_, const expectation, const ax, const reps = testcase;
             const input: Tensor = .fromShape(shape_);
 
-            var exe = try zml.module.compile(
-                std.testing.allocator,
-                std.testing.io,
-                Local.repeat1d,
-                .{ input, ax, reps },
-                platform,
-                .{},
-            );
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.repeat1d, .{ input, ax, reps }, .{});
             defer exe.deinit();
 
             var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&input_data));
@@ -2578,14 +2494,7 @@ pub const Tensor = struct {
             const input_data, const shape_, const expectation, const ax, const reps = testcase;
             const input: Tensor = .fromShape(shape_);
 
-            var exe = try zml.module.compile(
-                std.testing.allocator,
-                std.testing.io,
-                Local.stutter1d,
-                .{ input, ax, reps },
-                platform,
-                .{},
-            );
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.stutter1d, .{ input, ax, reps }, .{});
             defer exe.deinit();
 
             var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&input_data));
@@ -2687,14 +2596,7 @@ pub const Tensor = struct {
         const zml = @import("core.zig");
         const platform = zml.testing.env();
 
-        const exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Tensor.arange,
-            .{ .{ .start = 2, .end = 26, .step = 4 }, .u32 },
-            platform,
-            .{},
-        );
+        const exe = try platform.compileFn(std.testing.allocator, std.testing.io, Tensor.arange, .{ .{ .start = 2, .end = 26, .step = 4 }, .u32 }, .{});
         defer exe.deinit();
 
         var output = try exe.eval(std.testing.allocator, std.testing.io, {});
@@ -2782,7 +2684,7 @@ pub const Tensor = struct {
             }
         };
 
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{}, .{});
         defer exe.deinit();
     }
 
@@ -3271,14 +3173,7 @@ pub const Tensor = struct {
         // Test with actual values.
         const operand: Tensor = .init(.{ .a = 2, .b = 4, .c = 6 }, .u16);
         const indices: Tensor = .init(.{ .n = 2, ._ = 2 }, .i32);
-        var exe = try zml.module.compile(
-            std.testing.allocator,
-            std.testing.io,
-            Local._gatherSlices,
-            .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), indices, .{} },
-            platform,
-            .{},
-        );
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), indices, .{} }, .{});
         defer exe.deinit();
 
         var indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, indices.shape(), std.mem.sliceAsBytes(&[2][2]i32{ .{ 2, 1 }, .{ 0, 3 } }));
@@ -3289,7 +3184,7 @@ pub const Tensor = struct {
                     return Tensor.arange(.{ .end = 2 * 4 * 6 }, .u16).reshape(.{ .a = 2, .b = 4, .c = 6 });
                 }
             }.forward;
-            var temp_exe = try zml.module.compile(std.testing.allocator, std.testing.io, temp_func, .{}, platform, .{});
+            var temp_exe = try platform.compileFn(std.testing.allocator, std.testing.io, temp_func, .{}, .{});
             defer temp_exe.deinit();
 
             const buffer = try temp_exe.eval(std.testing.allocator, std.testing.io, {});
@@ -3496,7 +3391,7 @@ pub const Tensor = struct {
             const scatter_indices = Tensor.init(.{2}, .i32).withTags(.{.n});
             const updates = Tensor.init(.{ 2, 3 }, .i32).withTags(.{ .n, .b });
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, .{});
             defer exe.deinit();
 
             var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
@@ -3519,7 +3414,7 @@ pub const Tensor = struct {
             const scatter_indices = Tensor.init(.{2}, .i32).withTags(.{.n});
             const updates = Tensor.init(.{2}, .i32).withTags(.{.n});
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, .{});
             defer exe.deinit();
 
             var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
@@ -3541,7 +3436,7 @@ pub const Tensor = struct {
             const start_indices: Tensor = .init(.{ .n = 2, .a = 2, .m = 3, .coord = 2 }, .i32);
             const values: Tensor = .init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatterCB, .{ operand, start_indices, values }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._scatterCB, .{ operand, start_indices, values }, .{});
             defer exe.deinit();
 
             var operand_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, operand.shape(), std.mem.sliceAsBytes(&@as([2 * 3 * 4 * 2]u16, @splat(0))));
@@ -3658,7 +3553,7 @@ pub const Tensor = struct {
         };
 
         const x: Tensor = .init(.{ 1, 5 }, .f32);
-        var exe = try zml.module.compile(allocator, std.testing.io, ArgMaxTest._fwd, .{x}, platform, .{});
+        var exe = try platform.compileFn(allocator, std.testing.io, ArgMaxTest._fwd, .{x}, .{});
         defer exe.deinit();
 
         {
@@ -3733,7 +3628,7 @@ pub const Tensor = struct {
         {
             const x: Tensor = .init(.{ 2, 5 }, .f32);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{} }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{} }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 }));
@@ -3752,7 +3647,7 @@ pub const Tensor = struct {
         {
             const x: Tensor = .init(.{ 1, 5, 10 }, .f16);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{ .descending = true } }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{ .descending = true } }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f16{
@@ -3783,7 +3678,7 @@ pub const Tensor = struct {
         {
             const x: Tensor = .init(.{ 4, 2, 1, 4 }, .i32);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 3, .{} }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 3, .{} }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{
@@ -4120,7 +4015,7 @@ pub const Tensor = struct {
             const x_data, const x_shape, const ax, const args, const expectation = testcase;
             const x: Tensor = .fromShape(x_shape);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._split, .{ x, ax, &args }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._split, .{ x, ax, &args }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&x_data));
@@ -4248,7 +4143,7 @@ pub const Tensor = struct {
                     return x_.dynamicUpdateSlice(idx_, y_);
                 }
             }._fwd;
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = ids }, y }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = ids }, y }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
@@ -4274,7 +4169,7 @@ pub const Tensor = struct {
                     return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
                 }
             }._fwd;
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
@@ -4303,7 +4198,7 @@ pub const Tensor = struct {
                     return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
                 }
             }._fwd;
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
@@ -4333,7 +4228,7 @@ pub const Tensor = struct {
                     return x_.dynamicUpdateSlice(idx_, y_);
                 }
             }._fwd;
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = idx_a, .b = idx_b }, y }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = idx_a, .b = idx_b }, y }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
@@ -4365,7 +4260,7 @@ pub const Tensor = struct {
                     return x_.dynamicUpdateSlice(&idx_, y_);
                 }
             }._fwd;
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ idx_a, idx_b }, y }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, forward, .{ x, .{ idx_a, idx_b }, y }, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
@@ -4445,7 +4340,7 @@ pub const Tensor = struct {
         };
 
         const x: Tensor = .init(.{ 2, 2 }, .u8);
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._toDiag, .{x}, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._toDiag, .{x}, .{});
         defer exe.deinit();
 
         var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][2]u8{ .{ 1, 2 }, .{ 3, 4 } }));
@@ -4504,7 +4399,7 @@ pub const Tensor = struct {
         defer x_buffer.deinit();
 
         {
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 0 }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._tri, .{ x, 0 }, .{});
             defer exe.deinit();
 
             var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
@@ -4520,7 +4415,7 @@ pub const Tensor = struct {
             );
         }
         {
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 1 }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._tri, .{ x, 1 }, .{});
             defer exe.deinit();
 
             var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
@@ -4536,7 +4431,7 @@ pub const Tensor = struct {
             );
         }
         {
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, -1 }, platform, .{});
+            var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._tri, .{ x, -1 }, .{});
             defer exe.deinit();
 
             var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
@@ -4675,7 +4570,7 @@ pub const Tensor = struct {
             }
         };
 
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._cartesianProduct2, .{ x, y }, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._cartesianProduct2, .{ x, y }, .{});
         defer exe.deinit();
 
         var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
@@ -4752,7 +4647,7 @@ pub const Tensor = struct {
             }
         };
 
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, y }, platform, .{});
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{ x, y }, .{});
         defer exe.deinit();
 
         var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
@@ -4904,7 +4799,7 @@ test "Tensor.maxPool1d" {
 
     const x: Tensor = .init(.{ 2, 2, 5 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, .{});
     defer exe.deinit();
 
     var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&data));
@@ -4946,7 +4841,7 @@ test "Tensor.maxPool2d" {
 
     const x: Tensor = .init(.{ 2, 2, 5, 5 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform, .{});
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, .{});
     defer exe.deinit();
 
     var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&data));
@@ -5049,13 +4944,6 @@ test "unused tensor" {
         }
     };
 
-    var exe = try zml.module.compile(
-        std.testing.allocator,
-        std.testing.io,
-        Local._fwd,
-        .{Tensor.init(.{10}, .f32)},
-        platform,
-        .{},
-    );
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{Tensor.init(.{10}, .f32)}, .{});
     defer exe.deinit();
 }

@@ -59,7 +59,7 @@ test "fly kernels run on rocm" {
     // Compile `forward`, upload both inputs, run, and bring the result back.
     const call = struct {
         fn f(comptime forward: anytype, p: *const zml.Platform, ta: zml.Tensor, ha: anytype, tb: zml.Tensor, hb: anytype) !zml.Slice {
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ ta, tb }, p, .{});
+            var exe = try p.compileFn(std.testing.allocator, std.testing.io, forward, .{ ta, tb }, .{});
             defer exe.deinit();
             var ba: zml.Buffer = try .fromBytes(std.testing.io, p, ta.shape(), std.mem.sliceAsBytes(ha));
             defer ba.deinit();

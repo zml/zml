@@ -43,7 +43,7 @@ test "tcl kernels run on furiosa" {
         }
     };
     const x: zml.Tensor = .init(.{ cfg.b, cfg.s, cfg.d }, .f32);
-    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{x}, platform, .{});
+    var exe = try platform.compileFn(allocator, std.testing.io, Mod.forward, .{x}, .{});
     defer exe.deinit();
 
     var input: [cfg.b * cfg.s * cfg.d]f32 = undefined;
@@ -104,7 +104,7 @@ test "tcl multi-chip kernels run on two furiosa chips" {
         }
     };
     const x: zml.Tensor = .fromShape(x_shape);
-    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{ x, tp }, platform, .{ .meshes = &.{tp} });
+    var exe = try platform.compileFn(allocator, std.testing.io, Mod.forward, .{ x, tp }, .{ .meshes = &.{tp} });
     defer exe.deinit();
     var hx: [2 * 1024]f32 = undefined;
     for (&hx, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 13)) * 0.125 - 0.5;
