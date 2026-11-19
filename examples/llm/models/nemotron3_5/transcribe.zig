@@ -96,9 +96,7 @@ pub fn encode(
     defer progress.end();
 
     const compile_start: std.Io.Timestamp = .now(io, .awake);
-    const exe = try zml.FnExe(encodeAudio).compile(allocator, io, platform, .{
-        .meshes = &options.meshes.all(),
-    }, .{
+    const exe = try zml.FnExe(encodeAudio).compile(allocator, io, platform, .{ .meshes = &options.meshes.all() }, .{
         .{
             .perception = mdl,
             .input = .{ .features = .fromShape(inputs.features.shape()), .lengths = .fromShape(inputs.lengths.shape()) },

@@ -345,8 +345,17 @@ pub const Model = struct {
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, gen_options: GenOptions) !Model {
+        const backbone_store = if (store.getShape("backbone.layers.0.norm.weight") != null)
+            store.withPrefix("backbone")
+        else if (store.getShape("llm.model.layers.0.norm.weight") != null)
+            store.withPrefix("llm.model")
+        else {
+            log.err("Unsupported Nemotron checkpoint layout: expected backbone.layers.0.norm.weight or llm.model.layers.0.norm.weight", .{});
+            return error.UnsupportedNemotronCheckpointLayout;
+        };
+
         return .{
-            .backbone = try .init(allocator, store.withPrefix("backbone"), config, gen_options),
+            .backbone = try .init(allocator, backbone_store, config, gen_options),
             .config = config,
         };
     }
@@ -421,6 +430,22 @@ pub const Backbone = struct {
         config: Config,
         gen_options: Model.GenOptions,
     ) !Backbone {
+        const embedding_name: []const u8 = if (store.getShape("embeddings.weight") != null)
+            "embeddings.weight"
+        else if (store.getShape("embed_tokens.weight") != null)
+            "embed_tokens.weight"
+        else
+            return error.MissingEmbeddingTensor;
+        const norm_name: []const u8 = if (store.getShape("norm_f.weight") != null)
+            "norm_f"
+        else if (store.getShape("norm.weight") != null)
+            "norm"
+        else
+            return error.MissingFinalNormTensor;
+        const head_store = store.parent().withPrefix("lm_head");
+        if (head_store.getShape("weight") == null)
+            return error.MissingLmHeadTensor;
+
         const layers = try allocator.alloc(BackboneLayer, config.llm_config.numHiddenLayers());
         errdefer allocator.free(layers);
 
@@ -431,15 +456,15 @@ pub const Backbone = struct {
         return .{
             .embed_tokens = .{
                 .weight = store.createTensor(
-                    "embeddings.weight",
+                    embedding_name,
                     .{ .voc, .d },
                     .model,
                     .{ .voc = .replicated, .d = .model },
                 ),
             },
             .layers = layers,
-            .norm = RmsNorm.init(store.withPrefix("norm_f"), config.llm_config.layer_norm_epsilon),
-            .lm_head = .init(store.root().withPrefix("lm_head").createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }), null, .d),
+            .norm = RmsNorm.init(store.withPrefix(norm_name), config.llm_config.layer_norm_epsilon),
+            .lm_head = .init(head_store.createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }), null, .d),
             .gen_options = gen_options,
         };
     }
@@ -784,6 +809,28 @@ const PackedExpertProjection = struct {
         defer scratch.deinit();
         const arena = scratch.allocator();
 
+        const packed_key: []const u8 = comptime if (std.mem.eql(u8, projection, "up_proj"))
+            "gate_and_up_projs"
+        else if (std.mem.eql(u8, projection, "down_proj"))
+            "down_projs"
+        else
+            @compileError("Unsupported expert projection");
+        if (store.getShape(packed_key)) |shape| {
+            if (shape.rank() != 3 or shape.dim(0) != num_experts or
+                shape.dim(1) != input_dim or shape.dim(2) != output_dim)
+                return error.InvalidMoeShape;
+
+            switch (shape.dtype()) {
+                .bf16, .f16, .f32 => {},
+                else => return error.UnsupportedProjectionQuantization,
+            }
+
+            return .{
+                .weight = store.maybeCreateBinding(&.{packed_key}, .init(.{ .expert = num_experts, .dout = output_dim, .d = input_dim }, shape.dtype())) orelse return error.MissingMoeTensor,
+                .fp8 = null,
+            };
+        }
+
         const first_shape = store.withLayer(0).withPrefix(projection).getShape("weight") orelse return error.MissingMoeTensor;
         if (first_shape.rank() != 2 or first_shape.dim(0) != output_dim or first_shape.dim(1) != input_dim)
             return error.InvalidMoeShape;
@@ -891,6 +938,10 @@ const PackedExpertProjection = struct {
     }
 
     fn packWeights(inputs: []const zml.Tensor) zml.Tensor {
+        if (inputs.len == 1 and inputs[0].rank() == 3) {
+            // Packed checkpoints store [expert, input, output], unlike per-expert weights.
+            return inputs[0].transpose(.{ 0, 2, 1 }).withTags(.{ .expert, .dout, .d });
+        }
         return zml.Tensor.stack(inputs, 0, .expert).withTags(.{ .expert, .dout, .d });
     }
 

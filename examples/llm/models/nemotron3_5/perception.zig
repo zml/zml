@@ -209,7 +209,6 @@ pub const FeatureStacking = struct {
         try validateLinear(projection, config.feat_in * config.subsampling_factor, config.d_model, false);
         if (projection.getShape("weight").?.dtype() == .f8e4m3fn)
             return error.UnsupportedPerceptionQuantization;
-
         return .{
             .proj = .init(projection.createReplicatedTensor("weight", .{ .dout, .stacked }), null, .stacked),
             .factor = config.subsampling_factor,
@@ -227,8 +226,15 @@ pub const FeatureStacking = struct {
 
         const padding = @mod(-frames, self.factor);
         const padded = features.pad(0, .{ .s = zml.Tensor.Pad{ .high = padding } });
-        const stacked = padded.splitAxis(.s, .{ .s = @divExact(frames + padding, self.factor), .frame = self.factor })
-            .merge(.{ .stacked = .{ .frame, .mel } });
+        const stacked = padded.splitAxis(.s, .{
+            .s = @divExact(frames + padding, self.factor),
+            .frame = self.factor,
+        }).merge(.{
+            .stacked = .{
+                .frame,
+                .mel,
+            },
+        });
 
         const lengths = input.lengths.convert(.u64).addConstant(self.factor - 1)
             .div(.scalar(self.factor, .u64)).convert(.u32);
@@ -248,7 +254,6 @@ pub const EncoderAttention = struct {
     config: EncoderConfig,
     rotary_dim: i64,
 
-    /// `store` must point at a block's `attn` prefix.
     pub fn init(store: zml.io.TensorStore.View, config: EncoderConfig) !EncoderAttention {
         try config.validate();
 
@@ -842,7 +847,6 @@ const Linear = struct {
 fn initLinear(store: zml.io.TensorStore.View, input_dim: i64, output_dim: i64, has_bias: bool) !Linear {
     try validateLinear(store, input_dim, output_dim, has_bias);
     const fp8 = store.getShape("weight").?.dtype() == .f8e4m3fn;
-
     return .{
         .weight = store.createReplicatedTensor("weight", .{ .dout, .d }),
         .bias = if (has_bias) store.createReplicatedTensor("bias", .{.dout}) else null,

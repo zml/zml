@@ -154,8 +154,7 @@ pub const Session = struct {
         try self.runPrefillInputs(&tokens_buffer, all_tokens.len, null);
     }
 
-    /// Prefill projected audio [1, T, hidden_size] in the backbone dtype, using only `audio_length` frames.
-    /// The audio buffer remains caller-owned; the expanded prompt must leave room for generation.
+    /// Prefill projected audio [1, T, hidden_size] in the backbone dtype, using only `audio_length` frames
     pub fn runAudioPrefill(self: *Session, audio_hidden: *const zml.Buffer, audio_length: usize) !void {
         const backbone = self.compiled_model.loaded_model.inner.backbone;
         const config = self.compiled_model.loaded_model.inner.config.llm_config;
