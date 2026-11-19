@@ -32,6 +32,74 @@ pub const Config = struct {
     quantile_width_factor: f32,
 };
 
+pub const Roles = enum(u8) {
+    target = 0,
+    past_covariate = 1,
+    know_covariate = 2,
+};
+
+// TODO we will need to merge all inputs into one (with roles) to handle fixed shape.
+// TODO missing left pad_to_patch when not a multiple of 32
+pub const PreProcessor = struct {
+    /// Series whose dimensions are predicted.
+    pub const TargetsSeries = struct {
+        values: Tensor,
+        mask: Tensor,
+
+        /// Compute mask from infinite and NaN data and replace missing values.
+        ///
+        /// Input tensor with dimensions {.b, .v, .t}
+        pub fn make(targets: Tensor) TargetsSeries {
+            const mask = targets.isFinite(); // exclude NaN and inf
+            return .{
+                .values = mask.select(targets, .scalar(0, targets.dtype())),
+                .mask = mask,
+            };
+        }
+    };
+
+    const Rows = struct {
+        values: Tensor,
+        mask: Tensor,
+        roles: Tensor,
+
+        pub fn make(targets: TargetsSeries) Rows {
+            const n_batch = targets.values.dim(.b);
+            const n_targets = targets.values.dim(.v);
+            const target_roles = Tensor.scalar(@backingInt(Roles.target), .u8)
+                .broad(.init(.{ .v = n_targets }, .u8));
+            return .{
+                .values = ffill_mask(targets.values, targets.mask, .t).renameTag(.v, .d),
+                .mask = targets.mask.renameTag(.v, .d),
+                .roles = target_roles.renameTag(.v, .d).repeat1d(.v, @intCast(n_batch)),
+            };
+        }
+
+        /// Forward-fill unobserved positions.
+        /// Leading unobserved positions are forward filled with the unobserved value.
+        fn ffill_mask(inputs: Tensor, mask: Tensor, axis: anytype) Tensor {
+            // A tensor like inputs with an arange across axis.
+            // We replaced the masked indices with preceding non masked index.
+            var idx = Tensor.iota(inputs.shape(), axis);
+            idx = mask.select(idx, .scalar(0, idx.dtype()));
+            idx = idx.cumulativeMax(axis);
+
+            // Gather indices to forward fill masked values.
+            const ax = inputs.axis(axis);
+            return zml.ops.gather(
+                inputs,
+                &.{ax},
+                &.{idx.renameTag(ax, ._gather_axis)}, // gathered axis must not share its tag with inputs
+                .{ .indices_are_sorted = true },
+            ).renameTag(._gather_axis, inputs.shape().tag(ax));
+        }
+    };
+
+    pub fn forward(targets: Tensor) Rows {
+        return .make(.make(targets));
+    }
+};
+
 const ResidualBlock = struct {
     hidden_layer: zml.nn.Linear,
     output_layer: zml.nn.Linear,
@@ -86,4 +154,11 @@ const ResidualBlock = struct {
     }
 };
 
-pub const Model = ResidualBlock;
+pub const Model = struct {
+    residuals: ResidualBlock,
+
+    pub fn forward(self: Model, targets: Tensor) PreProcessor.Rows {
+        _ = self;
+        return PreProcessor.forward(targets);
+    }
+};
