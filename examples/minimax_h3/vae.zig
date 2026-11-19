@@ -23,6 +23,8 @@ const log = std.log.scoped(.minimax_h3);
 
 fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
     const compiler = zml.Compiler.current();
+    // TODO: Should be gone when we move FP32 projections into bounded tiles with fused biais addition into Furiosa XLA
+    // lowering so ordinary linear projections no longer need this custom kernel.
     if (compiler.platform.target == .furiosa and x.dtype() == .f32 and lin.weight.dtype() == .f32 and @mod(lin.weight.dim(0), 256) == 0) { // TODO: simplify this
         if (lin.bias) |bias| {
             const mesh = compiler.mesh(.model);
