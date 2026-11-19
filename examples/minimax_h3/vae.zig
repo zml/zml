@@ -22,6 +22,18 @@ const Run = ops.Run;
 const log = std.log.scoped(.minimax_h3);
 
 fn applyLinear(lin: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
+    const compiler = zml.Compiler.current();
+    if (compiler.platform.target == .furiosa and x.dtype() == .f32 and lin.weight.dtype() == .f32 and @mod(lin.weight.dim(0), 256) == 0) { // TODO: simplify this
+        if (lin.bias) |bias| {
+            const mesh = compiler.mesh(.model);
+            if (bias.dtype() == .f32 and @mod(x.dim(.b), mesh.numPartitionsForLogicalAxis(.model)) == 0) {
+                return zml.ops.manualComputation2(zml.linear.tcl.forwardBatchF32, .{ .x = x, .weight = lin.weight, .bias = bias }, x.shape().setDim(-1, lin.weight.dim(0)), mesh, .{
+                    .in_specs = .{ .x = .parse(.{ .b = .model }), .weight = .replicated, .bias = .replicated },
+                    .out_specs = .parse(.{ .b = .model }),
+                }).rename(.{ .d = .dout });
+            }
+        }
+    }
     const y = x.convert(lin.weight.dtype());
     return lin.forward(y, y.dtype()).convert(x.dtype());
 }
@@ -36,8 +48,8 @@ const VitFf = struct {
 
     pub fn init(store: zml.io.TensorStore.View) VitFf {
         return .{
-            .w1 = linear(store, "net.0.proj.weight", "net.0.proj.bias", .replicated, .{}),
-            .w2 = linear(store, "net.2.weight", "net.2.bias", .replicated, .{}),
+            .w1 = linear(store, "net.0.proj.weight", "net.0.proj.bias", .replicated, .{}), // VAE Expansion
+            .w2 = linear(store, "net.2.weight", "net.2.bias", .replicated, .{}), // VAE Contraction
         };
     }
 

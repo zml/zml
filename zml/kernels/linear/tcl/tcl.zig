@@ -1,6 +1,7 @@
-//! Local FP32-to-BF16 linear projection using bounded native TCL tiles.
+//! Local FP32 linear projections with BF16 or FP32 output using bounded native TCL tiles.
 
 const std = @import("std");
+const builder = @import("dsl/tcl/builder");
 const zml = @import("../../../zml.zig");
 const tcl = zml.kernel.tcl;
 const Tensor = zml.Tensor;
@@ -76,15 +77,103 @@ fn run(b: *tcl.Builder, cfg: Config) tcl.FinishError!void {
     const row = try b.indexRead(input.x, loop.iv); // reads input.x at index loop.iv
     for (weights, outputs) |weight, *output| {
         // [512, K] × transpose([group_width, K]) --> [512, group_width]
-        const op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
-        output.* = try op.commit(op.fetch(row, .{}).mulf(op.fetch(weight, .{})).reduce(&.{K}, .addf), .{
-            .axes = &.{ R, weight.axes[0] },
-        });
+        output.* = try dotF32(b, row, weight, K, &.{ R, weight.axes[0] });
     }
     // For instannce: [512,4096] + [512,1024] + [512,256] → [512,5376]
     const projected = if (partCount == 1) outputs[0] else try b.concat(outputs, &.{ R, N }, .{});
-    const op = b.tensorOperation(.{ .tactic = .elementwise });
-    const y = try op.commit(op.fetch(projected, .{}).addf(op.fetch(input.bias, .{})), .{ .dtype = .bf16 }); // Add bias
+    const y = try addBias(b, projected, input.bias, .{ .dtype = .bf16 }); // Add bias
     try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, y)});
     b.ret(&.{loop.results[0]});
+}
+
+/// Projects local FP32 inputs to FP32 output; output width must be divisible by 256.
+/// Requires an explicit manual-computation boundary.
+pub const forwardBatchF32 = BatchF32.local;
+
+const BatchF32 = struct {
+    const chunkRows = 384;
+    const tileRows = 128;
+    const tileColumns = 256;
+    const BatchConfig = struct { columns: i64, width: i64 };
+
+    fn local(input: Inputs, output: zml.Shape) Tensor {
+        const width = input.x.dim(-1);
+        const outputWidth = input.weight.dim(0);
+        const rows = @divExact(@as(i64, @intCast(input.x.shape().count())), width);
+        const padding = @mod(-rows, chunkRows);
+        const chunkCount = @divExact(rows + padding, chunkRows);
+        const columns = @divExact(outputWidth, tileColumns);
+        const x = input.x.reshape(.{ .row = rows, .k = width })
+            .pad(0, .{ .row = Tensor.Pad{ .high = padding } });
+        const weight = input.weight.reshape(.{ .column = columns, .n = tileColumns, .k = width });
+        const bias = input.bias.reshape(.{ .column = columns, .n = tileColumns });
+
+        // Emit fixed calls to one bounded kernel; grouped runtime while loops are unsupported.
+        const pieces = zml.Compiler.current().alloc(Tensor, @intCast(chunkCount));
+        // Iterate over each chunk of the input batch and apply the projection kernel
+        for (pieces, 0..) |*piece, i| {
+            const start: i64 = @intCast(i * chunkRows);
+            const chunk = x.slice(.row, .{ .start = start, .end = start + chunkRows })
+                .reshape(.{ .tile = @divExact(chunkRows, tileRows), .row = tileRows, .k = width });
+            const projected = Kernel.call(.{ .x = chunk, .weight = weight, .bias = bias }, .{
+                .out = .init(.{ .column = columns, .tile = @divExact(chunkRows, tileRows), .row = tileRows, .n = tileColumns }, .f32),
+            }, .{ .cfg = .{ .columns = columns, .width = width } }).out;
+            piece.* = projected.transpose(.{ .tile, .row, .column, .n })
+                .reshape(.{ .row = chunkRows, .n = outputWidth });
+        }
+        return Tensor.concatenate(pieces, .row).slice(.row, .{ .end = rows }).reshape(output);
+    }
+
+    const Kernel = tcl.Kernel(BatchConfig, .{
+        .name = "batch_f32_projection",
+        .inputs = &.{ "x", "weight", "bias" },
+        .outputs = &.{"out"},
+        .run = build,
+    });
+
+    fn build(b: *tcl.Builder, cfg: BatchConfig) tcl.FinishError!void {
+        b.compilerConfig(.{ .hierarchical_tactic_population = true });
+        const C = b.axis("Columns", cfg.columns);
+        const T = b.axis("Tiles", @divExact(chunkRows, tileRows));
+        const R = b.axis("Rows", tileRows);
+        const K = b.axis("K", cfg.width);
+        const N = b.axis("N", tileColumns);
+        const input = try b.declareArgs(.{
+            .x = .{ .dtype = .f32, .axes = &.{ T, R, K } },
+            .weight = .{ .dtype = .f32, .axes = &.{ C, N, K } },
+            .bias = .{ .dtype = .f32, .axes = &.{ C, N } },
+        });
+
+        var columns = b.openFor(C, .{try b.scratchpad(.f32, &.{ C, T, R, N })}); // Move horizontally, 256 columns at a time
+        const weight = try b.indexRead(input.weight, columns.iv);
+        const bias = try b.indexRead(input.bias, columns.iv);
+        var tiles = b.openFor(T, .{try b.scratchpad(.f32, &.{ T, R, N })}); // Moves vertically, 128 rows at a time
+        const row = try b.indexRead(input.x, tiles.iv);
+        const projected = try dotF32(b, row, weight, K, &.{ R, N });
+        const y = try addBias(b, projected, bias, .{ .dtype = .f32, .axes = &.{ R, N } });
+        try tiles.yield(.{try b.indexWrite(tiles.carried[0], tiles.iv, y)});
+        try columns.yield(.{try b.indexWrite(columns.carried[0], columns.iv, tiles.results[0])});
+        b.ret(&.{columns.results[0]});
+    }
+};
+
+fn dotF32(
+    b: *tcl.Builder,
+    row: builder.Tensor,
+    weight: builder.Tensor,
+    reduction: tcl.Axis,
+    axes: []const tcl.Axis,
+) tcl.FinishError!builder.Tensor {
+    const op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
+    return op.commit(op.fetch(row, .{}).mulf(op.fetch(weight, .{})).reduce(&.{reduction}, .addf), .{ .axes = axes });
+}
+
+fn addBias(
+    b: *tcl.Builder,
+    projected: builder.Tensor,
+    bias: builder.Tensor,
+    opts: tcl.TensorOperation.CommitOptions,
+) tcl.FinishError!builder.Tensor {
+    const op = b.tensorOperation(.{ .tactic = .elementwise });
+    return op.commit(op.fetch(projected, .{}).addf(op.fetch(bias, .{})), opts);
 }
