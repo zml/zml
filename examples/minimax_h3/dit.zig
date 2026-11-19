@@ -305,9 +305,26 @@ const PatchEmbed = struct {
         const dt = input.text.dtype();
         const video_in = input.video.convert(input.model.video_proj.weight.dtype());
         const audio_in = input.audio.convert(input.model.audio_proj.weight.dtype());
-        const video = input.model.video_proj.forward(video_in, video_in.dtype()).rename(.{ .dout = .d }).convert(dt);
-        const audio = input.model.audio_proj.forward(audio_in, audio_in.dtype()).rename(.{ .dout = .d }).convert(dt);
+        const video = project(input.model.video_proj, video_in, dt);
+        const audio = project(input.model.audio_proj, audio_in, dt);
         return .{ .hidden = packedHidden(input.text, audio, video) };
+    }
+
+    // TODO: Should be gone when we move row tiling and fused bias/conversion into Furiosa XLA
+    // lowering so ordinary linear projections no longer need this custom kernel.
+    fn project(layer: zml.nn.Linear, x: zml.Tensor, dtype: zml.DataType) zml.Tensor {
+        const compiler = zml.Compiler.current();
+        if (compiler.platform.target == .furiosa and x.dtype() == .f32 and layer.weight.dtype() == .f32 and dtype == .bf16) {
+            if (layer.bias) |bias| {
+                if (bias.dtype() == .f32) {
+                    return zml.ops.manualComputation2(zml.linear.tcl.forward, .{ .x = x, .weight = layer.weight, .bias = bias }, x.shape().setDim(-1, layer.weight.dim(0)).withDtype(.bf16), compiler.mesh(.model), .{
+                        .in_specs = .{ .x = .replicated, .weight = .replicated, .bias = .replicated },
+                        .out_specs = .replicated,
+                    });
+                }
+            }
+        }
+        return layer.forward(x, x.dtype()).rename(.{ .dout = .d }).convert(dtype);
     }
 };
 

@@ -27,6 +27,7 @@ pub const FnExe = exe.FnExe;
 pub const floats = @import("floats.zig");
 pub const io = @import("io.zig");
 pub const kernel = @import("kernel.zig");
+pub const linear = @import("kernels/linear/linear.zig");
 pub const logo = @import("logo.zig");
 pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
