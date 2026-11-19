@@ -51,19 +51,9 @@ fn residualGate(x: zml.Tensor, gate: zml.Tensor, y: zml.Tensor) zml.Tensor {
     return x.add(gate.squeeze(.k).convert(y.dtype()).broad(y.shape()).mul(y));
 }
 
-/// Dense `{b,s,d}` pack: text | audio | video. Update-slice matches scatter's FA2 layout.
+/// Dense `{b,s,d}` pack: text | audio | video.
 fn packedHidden(text: zml.Tensor, audio: zml.Tensor, video: zml.Tensor) zml.Tensor {
-    const text_len = text.dim(.s);
-    const audio_len = audio.dim(.s);
-    var hidden = zml.Tensor.zeroes(zml.Shape.init(.{
-        .b = text.dim(.b),
-        .s = text_len + audio_len + video.dim(.s),
-        .d = text.dim(.d),
-    }, text.dtype()));
-    hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i32) }, text);
-    hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len)), .i32) }, audio);
-    hidden = hidden.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(@as(i32, @intCast(text_len + audio_len)), .i32) }, video);
-    return hidden.replicate();
+    return zml.Tensor.concatenate(&.{ text, audio, video }, .s).replicate();
 }
 
 // =============================================================================
