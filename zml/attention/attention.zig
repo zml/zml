@@ -146,6 +146,7 @@ pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: z
                 .flash_attention => |metadata_| .{ .flash_attention = switch (metadata_) {
                     .cute => .{ .cute = {} },
                     .nki => .{ .nki = {} },
+                    .tcl => .{ .tcl = {} },
                     .metal => .{ .metal = .{ .num_tokens = .replicated } },
                 } },
             },
