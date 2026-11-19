@@ -466,10 +466,7 @@ pub const Dit = struct {
     /// Ten kernels: text, RoPE, patch pack, temb, AdaLN, final AdaLN, one block, finish, Euler video/audio.
     /// Shapes come from `packed_run`.
     pub fn compile(self: *Dit, run: *const Run, geo: config.Geometry, text_len: u32, packed_run: Packed, text_dt: zml.DataType) !void {
-        const attn: zml.attention.Backend = if (run.platform.target == .cuda)
-            zml.attention.Backend.auto(run.platform)
-        else
-            .{ .stablehlo = {} };
+        const attn: zml.attention.Backend = .auto(run.platform);
         const attnName: []const u8 = switch (attn) {
             .stablehlo => "stablehlo",
             .flash_attention => |backend| @tagName(backend),
