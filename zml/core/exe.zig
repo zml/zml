@@ -86,12 +86,19 @@ pub const Exe = struct {
         return Results.init(allocator, self.output_shapes, self.platform, self.num_devices);
     }
 
+    /// PJRT buffer handles for one side of a call (arguments or results), laid out as
+    /// `PJRT_LoadedExecutable_Execute` expects: one row per device, one column per
+    /// flattened tensor, in `meta.visit` order.
+    /// Only handles are stored; their buffers are owned by the caller's `Buffer`s.
     pub const FlatBuffers = struct {
+        /// Row pointers into `raw_buffers`: `buffers[device][index]`.
         buffers: []const [*]*pjrt.Buffer,
+        /// Backing storage for all rows, `num_devices * count` handles, device-major.
         raw_buffers: []const *pjrt.Buffer,
 
         num_devices: usize,
 
+        /// Allocates `count` handle slots per device. The slots are undefined until set.
         pub fn init(allocator: std.mem.Allocator, count: usize, num_devices: usize) !FlatBuffers {
             const raw_buffers = try allocator.alloc(*pjrt.Buffer, num_devices * count);
             errdefer allocator.free(raw_buffers);
