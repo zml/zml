@@ -696,7 +696,8 @@ pub const Device = opaque {
 
     pub const Attributes = struct {
         values: []const NamedValue,
-        state: *c.PJRT_Device_Attributes,
+        // Keep: the plugin's deleter accepts its original owner, including null for static data.
+        state: ?*c.PJRT_Device_Attributes,
         deleter: *const fn (?*c.PJRT_Device_Attributes) callconv(.c) void,
 
         pub fn deinit(self: Attributes) void {
@@ -715,16 +716,11 @@ pub const Device = opaque {
     pub fn attributes(self: *const Device, api: *const Api) ApiError!Attributes {
         const ret = try api.call(.PJRT_Device_GetAttributes, .{ .device = self.inner() });
 
-        const deleter = ret.attributes_deleter.?;
-        errdefer deleter(ret.device_attributes);
-
-        const state = ret.device_attributes.?;
-        std.debug.assert((ret.attributes == null) == (ret.num_attributes == 0));
-
+        std.debug.assert(ret.num_attributes == 0 or ret.attributes != null);
         return .{
-            .values = if (ret.attributes == null) &.{} else @ptrCast(ret.attributes[0..ret.num_attributes]),
-            .state = state,
-            .deleter = deleter,
+            .values = if (ret.num_attributes == 0) &.{} else @ptrCast(ret.attributes[0..ret.num_attributes]),
+            .state = ret.device_attributes,
+            .deleter = ret.attributes_deleter.?,
         };
     }
 
