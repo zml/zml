@@ -42,6 +42,13 @@ pub const Phase = enum {
     }
 };
 
+/// Weight loading settings used when the CLI doesn't override them.
+pub const default_loader_opts: zml.io.Loader.Opts = .{
+    .dma_chunks = 32,
+    .dma_chunk_size = 256 * zml.MiB,
+    .parallelism = 16,
+};
+
 pub const Meshes = struct {
     model: *const zml.Mesh,
     experts: *const zml.Mesh,

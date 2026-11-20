@@ -20,6 +20,9 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?enum { stablehlo, cute, nki, metal } = null,
     profile: bool = false,
+    load_chunk_mib: ?u32 = null,
+    load_chunks: ?u32 = null,
+    load_parallelism: ?u32 = null,
 
     pub const help =
         \\ Use llm --model=<path> [options]
@@ -33,6 +36,9 @@ const Args = struct {
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
+        \\   --load-chunk-mib=<number>    Pinned staging chunk size in MiB for weight loading (default: 256)
+        \\   --load-chunks=<number>       Max pinned staging chunks per device (default: 32)
+        \\   --load-parallelism=<number>  Tensors loaded concurrently (default: 16)
         \\
     ;
 };
@@ -134,7 +140,13 @@ pub fn main(init: std.process.Init) !void {
     defer compiled_model.deinit();
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress);
+    var loader_opts = models.default_loader_opts;
+    if (args.load_chunk_mib) |mib| loader_opts.dma_chunk_size = @as(usize, mib) * zml.MiB;
+    if (args.load_chunks) |n| loader_opts.dma_chunks = n;
+    if (args.load_parallelism) |n| loader_opts.parallelism = n;
+    log.info("Loader: {d} MiB chunks, {d} chunks/device, {d} tensors in flight", .{ loader_opts.dma_chunk_size / zml.MiB, loader_opts.dma_chunks, loader_opts.parallelism });
+
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, loader_opts);
     defer model.unloadBuffers(&model_buffers, allocator);
 
     progress.end();
