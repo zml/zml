@@ -81,14 +81,15 @@ pub const Phonon = struct {
     };
 
     /// `self` can be fully undefined, as long as it's heap allocated.
-    /// Accepts expanded i64 prompt IDs [1,S], f32 voice frames [1,P,512],
-    /// and generation limits computed by the caller; does no text processing.
+    /// Loads f32 voice frames [1,P,512] and compiles fixed-capacity executables.
+    /// The instance is idle until start_chunk supplies expanded prompt IDs and
+    /// generation limits. No text processing occurs here.
     pub fn init_in_place(
         self: *Phonon,
         io: std.Io,
         gpa: std.mem.Allocator,
         platform: *const zml.Platform,
-        input: Input,
+        voice: zml.Slice,
         capacity: Capacity,
         dtype: zml.DataType,
         trace_context: ?zml.tracer.Context,
@@ -100,14 +101,12 @@ pub const Phonon = struct {
         self.gpa = gpa;
         self.platform = platform;
         self.remaining = null;
-        self.done = false;
+        self.done = true;
         self.stopped_by_eos = false;
         self.max_prompt_tokens = capacity.max_prompt_tokens;
         self.frame_capacity = capacity.max_frames;
-        self.max_frames = input.max_frames;
-        self.frames_after_eos = input.frames_after_eos;
-        const tokens = input.tokens;
-        const voice = input.voice;
+        self.max_frames = 0;
+        self.frames_after_eos = 0;
 
         var span = zml.tracer.span_at_for(@src(), here, .{}, .{
             .consumer = trace_context,
@@ -125,8 +124,8 @@ pub const Phonon = struct {
         {}
         span_load_registry.end();
 
-        self.num_tokens = tokens.constItems(i64).len;
-        if (self.num_tokens < 2 or self.num_tokens > self.max_prompt_tokens or input.max_frames == 0 or input.max_frames > self.frame_capacity)
+        self.num_tokens = 0;
+        if (self.max_prompt_tokens < 2 or self.frame_capacity == 0)
             return error.InvalidChunkCapacity;
         self.max_tokens = try std.math.add(usize, self.max_prompt_tokens, self.frame_capacity);
 
@@ -186,7 +185,8 @@ pub const Phonon = struct {
         self.active_lengths = try zml.Buffer.fromBytes(io, platform, .init(.{2}, .i32), std.mem.asBytes(&initial_lengths));
         errdefer self.active_lengths.deinit();
 
-        self.ids = try upload_ids(io, gpa, platform, tokens, self.max_prompt_tokens);
+        const empty_ids: zml.Slice = .initConst(.init(.{ .b = 1, .s = 0 }, .i64), &.{});
+        self.ids = try upload_ids(io, gpa, platform, empty_ids, self.max_prompt_tokens);
 
         errdefer self.ids.deinit();
         const audio_marker = [_]i64{6};

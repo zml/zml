@@ -119,15 +119,26 @@ pub fn main(init: std.process.Init) !void {
     defer span_init.end();
     {}
 
-    const prepared = try prepare_prompt(io, gpa, text);
+    if (std.mem.trim(u8, text, " \t\r\n\x0b\x0c").len == 0) return;
+    const prepared = try prepare_prompt(io, gpa);
     defer prepared.deinit(gpa);
-    if (prepared.chunks.len == 0) return;
-    const input = prepared.chunks[0];
-    std.log.info("Prepared {d} text chunks; longest index {any}, {d} text tokens (soft target: 50).", .{
-        prepared.text_chunks.items.len,
-        prepared.longest_chunk,
-        prepared.text_chunks.max_text_tokens,
-    });
+
+    var chunk_queue_buf: [chunk_queue_capacity]Prepared_Chunk = undefined;
+    var chunk_queue: std.Io.Queue(Prepared_Chunk) = .init(&chunk_queue_buf);
+    var fut_chunks: ?std.Io.Future(anyerror!void) = null;
+    defer {
+        chunk_queue.close(io);
+        if (fut_chunks) |*future| future.cancel(io) catch {};
+        while (chunk_queue.getOneUncancelable(io)) |chunk| chunk.deinit(gpa) else |_| {}
+    }
+    if (!args.noop) {
+        const context: zml.tracer.Context = .init(.generic);
+        var dispatch = zml.tracer.span_at_for(@src(), here ++ "/init/dispatch_prepare_chunks", .{}, .{ .producer = context });
+        defer dispatch.end();
+        // A bounded producer must have a unit of concurrency: async is allowed
+        // to run inline and could block on a full queue before main can consume it.
+        fut_chunks = try io.concurrent(prepare_chunks, .{ io, gpa, text, prepared, &chunk_queue, context });
+    }
     std.log.info("Shared capacity: {d} prompt positions, {d} generated frames.", .{
         prepared.capacity.max_prompt_tokens,
         prepared.capacity.max_frames,
@@ -150,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
             .f16 => .f16,
             .bf16 => .bf16,
         };
-        break :blk io.async(Phonon.init_in_place, .{ phonon, io, gpa, platform, input, prepared.capacity, dtype, context });
+        break :blk io.async(Phonon.init_in_place, .{ phonon, io, gpa, platform, prepared.voice, prepared.capacity, dtype, context });
     };
     var fut_mimi = blk: {
         const context: zml.tracer.Context = .init(.generic);
@@ -190,6 +201,7 @@ pub fn main(init: std.process.Init) !void {
         future.cancel(io) catch {};
         while (display_queue.getOneUncancelable(io)) |sample| {
             gpa.free(sample.waveform);
+            if (sample.text) |caption| gpa.free(caption);
         } else |_| {}
     };
 
@@ -212,10 +224,16 @@ pub fn main(init: std.process.Init) !void {
     var active_lengths: ?zml.Buffer = null;
 
     var iteration: usize = 0;
-    if (!args.noop) for (prepared.chunks, 0..) |chunk_input, chunk_index| {
-        var chunk_span = zml.tracer.span_at(@src(), here ++ "/chunk", .{ .chunk = chunk_index });
+    if (!args.noop) while (true) {
+        const queued = chunk_queue.getOne(io) catch |err| switch (err) {
+            error.Closed => break,
+            else => return err,
+        };
+        defer queued.deinit(gpa);
+        const chunk_index = queued.index;
+        var chunk_span = zml.tracer.span_at_for(@src(), here ++ "/chunk", .{ .chunk = chunk_index }, .{ .consumer = queued.context });
         defer chunk_span.end();
-        if (chunk_index > 0) try phonon.start_chunk(chunk_input);
+        try phonon.start_chunk(queued.input);
         while (!phonon.done) : (iteration += 1) {
             const context: zml.tracer.Context = .init(.generic);
             var span_iteration = zml.tracer.span_at_for(@src(), here ++ "/iteration", .{ .chunk = chunk_index, .iteration = iteration }, .{
@@ -232,16 +250,17 @@ pub fn main(init: std.process.Init) !void {
             {
                 errdefer chunk.free(gpa);
                 if (display_enabled) {
-                    // Each consumer owns its audio; text stays alive in prepared until both finish.
                     const samples = try gpa.dupe(f32, chunk.constItems(f32));
-                    display_queue.putOneUncancelable(io, .{
+                    errdefer gpa.free(samples);
+                    // The display owns a caption only on the first frame. It
+                    // retains that caption until the next utterance arrives.
+                    const caption = if (phonon.frames() == 1) try gpa.dupe(u8, queued.text) else null;
+                    errdefer if (caption) |value| gpa.free(value);
+                    try display_queue.putOneUncancelable(io, .{
                         .waveform = samples,
-                        .text = prepared.text_chunks.items[chunk_index].text,
+                        .text = caption,
                         .context = context,
-                    }) catch |err| {
-                        gpa.free(samples);
-                        return err;
-                    };
+                    });
                 }
 
                 try sample_queue.putOneUncancelable(io, .{ .waveform = chunk, .context = context });
@@ -249,6 +268,7 @@ pub fn main(init: std.process.Init) !void {
         }
     };
 
+    if (fut_chunks) |*future| try future.await(io);
     sample_queue.close(io);
     if (display_enabled) display_queue.close(io);
     const waveform = try fut_waveform.await(io);
@@ -294,54 +314,96 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+/// Sentence grouping remains a soft target; a sentence exceeding the hard
+/// limit is rejected instead of being truncated or split inside a sentence.
+pub const chunk_target_tokens = 50;
+pub const max_text_chunk_tokens = 256;
+pub const chunk_queue_capacity = 4;
+
 pub const Prepared_Prompt = struct {
-    /// Each input borrows the same selected voice; its token IDs are owned here.
-    chunks: []Phonon.Input,
     voice: zml.Slice,
-    text_chunks: Tokenizer.Text_Chunks,
-    /// Longest expanded prompt, including voice markers and BOS.
-    longest_chunk: ?usize,
     capacity: Phonon.Capacity,
 
     pub fn deinit(self: Prepared_Prompt, allocator: std.mem.Allocator) void {
-        for (self.chunks) |chunk| chunk.tokens.free(allocator);
-        allocator.free(self.chunks);
         self.voice.free(allocator);
-        self.text_chunks.deinit(allocator);
     }
 };
 
-/// Prepare sentence chunks and their expanded prompt IDs. Capacity is the
-/// maximum prompt width and frame budget across the chunks, not the full text.
-/// The caller releases all owned host storage with Prepared_Prompt.deinit.
-pub fn prepare_prompt(io: std.Io, gpa: std.mem.Allocator, text: []const u8) !Prepared_Prompt {
-    const here = @typeName(@This()) ++ ".prepare_prompt";
-    var span = zml.tracer.span_at(@src(), here, .{});
+/// Only shared voice data and fixed capacities are prepared on the caller.
+/// All text splitting, tokenization, and per-chunk policy run in prepare_chunks.
+pub fn prepare_prompt(io: std.Io, gpa: std.mem.Allocator) !Prepared_Prompt {
+    var span = zml.tracer.span_at(@src(), @typeName(@This()) ++ ".prepare_prompt", .{});
     defer span.end();
-
-    var arena_local_impl: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_local_impl.deinit();
-    const arena_local = arena_local_impl.allocator();
-    const tokenizer_path = try util.assetPath(arena_local, util.gradium_phonon_31m_en_tokenizer);
-    var tokenizer = try Tokenizer.init(arena_local, io, tokenizer_path);
-    defer tokenizer.deinit();
-    const text_chunks = try tokenizer.split_text(gpa, text, 50);
-    errdefer text_chunks.deinit(gpa);
-    const voice_path = try util.assetPath(arena_local, util.gradium_phonon_voice);
+    const voice_path = try util.assetPath(gpa, util.gradium_phonon_voice);
+    defer gpa.free(voice_path);
     const voice = try load_voice(gpa, io, voice_path);
     errdefer voice.free(gpa);
+    return .{
+        .voice = voice,
+        .capacity = .{
+            .max_prompt_tokens = @as(usize, @intCast(voice.shape.dim(.p))) + max_text_chunk_tokens + 1,
+            .max_frames = @intFromFloat(@ceil((@as(f64, max_text_chunk_tokens) / 3 + 2) * 12.5)),
+        },
+    };
+}
 
-    const chunks = try gpa.alloc(Phonon.Input, text_chunks.items.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (chunks[0..initialized]) |chunk| chunk.tokens.free(gpa);
-        gpa.free(chunks);
+/// Ownership of text and input.tokens transfers producer -> queue -> consumer.
+/// input.voice borrows the shared Prepared_Prompt, which outlives the producer
+/// and every queued item. The context correlates preparation with main-thread use.
+pub const Prepared_Chunk = struct {
+    input: Phonon.Input,
+    text: []const u8,
+    index: usize,
+    context: zml.tracer.Context,
+
+    pub fn deinit(self: Prepared_Chunk, allocator: std.mem.Allocator) void {
+        self.input.tokens.free(allocator);
+        allocator.free(self.text);
     }
+};
+
+/// Run concurrently with model initialization and inference. Closing the queue
+/// signals EOF; awaiting this coroutine distinguishes EOF from a producer error.
+pub fn prepare_chunks(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    prepared: Prepared_Prompt,
+    queue: *std.Io.Queue(Prepared_Chunk),
+    trace_context: ?zml.tracer.Context,
+) anyerror!void {
+    const here = @typeName(@This()) ++ ".prepare_chunks";
+
+    var span = zml.tracer.span_at_for(@src(), here, .{}, .{ .consumer = trace_context });
+    defer span.end();
+
+    defer queue.close(io);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const tokenizer_path = try util.assetPath(arena.allocator(), util.gradium_phonon_31m_en_tokenizer);
+    var tokenizer = try Tokenizer.init(arena.allocator(), io, tokenizer_path);
+    defer tokenizer.deinit();
+    try io.checkCancel();
+    var text_chunks = try tokenizer.split_text(gpa, text, chunk_target_tokens);
+    defer text_chunks.deinit();
+    const voice = prepared.voice;
+    const voice_positions: usize = @intCast(voice.shape.dim(.p));
+    var index: usize = 0;
     var longest_chunk: ?usize = null;
-    var capacity: Phonon.Capacity = .{ .max_prompt_tokens = 0, .max_frames = 0 };
-    for (text_chunks.items, chunks, 0..) |chunk, *input, i| {
-        const tokens = try tokenizer.encode_prompt(gpa, chunk.text, @intCast(voice.shape.dim(.p)));
+    var max_text_tokens: usize = 0;
+    while (try text_chunks.next(io)) |chunk| {
+        errdefer gpa.free(chunk.text);
+        try io.checkCancel();
+        const context: zml.tracer.Context = .init(.generic);
+        var chunk_span = zml.tracer.span_at_for(@src(), here ++ "/chunk", .{ .chunk = index }, .{ .producer = context });
+        defer chunk_span.end();
+        if (chunk.num_tokens > max_text_chunk_tokens) {
+            std.log.err("Text chunk {d} has {d} tokens; maximum is {d}.", .{ index, chunk.num_tokens, max_text_chunk_tokens });
+            return error.TextChunkTooLong;
+        }
+        const tokens = try tokenizer.encode_prompt(gpa, chunk.text, @intCast(voice_positions));
         errdefer tokens.free(gpa);
+        if (tokens.constItems(i64).len > prepared.capacity.max_prompt_tokens) return error.TextChunkTooLong;
         var max_frames: usize = 0;
         var frames_after_eos: usize = 0;
         {
@@ -369,27 +431,27 @@ pub fn prepare_prompt(io: std.Io, gpa: std.mem.Allocator, text: []const u8) !Pre
             if (word_count <= 4) frames_after_eos = 3;
         }
 
-        input.* = .{
-            .tokens = tokens,
-            .voice = voice,
-            .max_frames = max_frames,
-            .frames_after_eos = frames_after_eos,
-        };
-        initialized += 1;
-        if (longest_chunk == null or tokens.constItems(i64).len > capacity.max_prompt_tokens) {
-            longest_chunk = i;
-            capacity.max_prompt_tokens = tokens.constItems(i64).len;
+        if (longest_chunk == null or chunk.num_tokens > max_text_tokens) {
+            longest_chunk = index;
+            max_text_tokens = chunk.num_tokens;
         }
-        capacity.max_frames = @max(capacity.max_frames, max_frames);
+        chunk_span.end(); // End preparation before the consumer can start.
+        try queue.putOne(io, .{
+            .input = .{
+                .tokens = tokens,
+                .voice = voice,
+                .max_frames = max_frames,
+                .frames_after_eos = frames_after_eos,
+            },
+            .text = chunk.text,
+            .index = index,
+            .context = context,
+        });
+        index += 1;
     }
-
-    return .{
-        .chunks = chunks,
-        .voice = voice,
-        .text_chunks = text_chunks,
-        .longest_chunk = longest_chunk,
-        .capacity = capacity,
-    };
+    std.log.info("Prepared {d} text chunks; longest index {any}, {d} text tokens (soft target: {d}).", .{
+        index, longest_chunk, max_text_tokens, chunk_target_tokens,
+    });
 }
 
 fn load_voice(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !zml.Slice {
@@ -448,9 +510,10 @@ const Sample = struct {
 };
 
 const Waveform_Sample = struct {
-    /// Owned by the display consumer. Text borrows Prepared_Prompt storage.
+    /// Both allocations are owned by the display consumer. A caption is sent
+    /// only with the first audio frame of an utterance; later frames use null.
     waveform: []const f32,
-    text: []const u8,
+    text: ?[]const u8,
     context: zml.tracer.Context,
 };
 
@@ -465,13 +528,14 @@ fn visual_playback(io: std.Io, gpa: std.mem.Allocator, queue: *std.Io.Queue(Wave
     var output = std.Io.File.stdout().writerStreaming(io, &output_buffer);
     const writer = &output.interface;
     var previous_text: ?[]const u8 = null;
-    defer if (previous_text != null) {
+    defer if (previous_text) |caption| {
+        gpa.free(caption);
         writer.writeAll("\x1b[?25h\n") catch {};
         writer.flush() catch {};
     };
 
-    const width = 72;
-    const height = 8;
+    const width = 72 * 2;
+    const height = 8 * 2;
     const columns = width * 2;
     const dots = height * 4;
     const samples_per_column = Mimi.sampling_rate * 3 / columns;
@@ -490,6 +554,8 @@ fn visual_playback(io: std.Io, gpa: std.mem.Allocator, queue: *std.Io.Queue(Wave
             else => return err,
         };
         defer gpa.free(sample.waveform);
+        var pending_caption = sample.text;
+        defer if (pending_caption) |caption| gpa.free(caption);
 
         var span_iteration = zml.tracer.span_at_for(@src(), here ++ "/iteration", .{}, .{
             .consumer = sample.context,
@@ -516,14 +582,16 @@ fn visual_playback(io: std.Io, gpa: std.mem.Allocator, queue: *std.Io.Queue(Wave
                 try next_frame.wait(io);
             }
 
-            if (previous_text == null or !std.mem.eql(u8, previous_text.?, sample.text)) {
+            if (pending_caption) |caption| {
+                if (previous_text) |old| gpa.free(old);
+                previous_text = caption;
+                pending_caption = null;
                 history = @splat(.{});
                 next = 0;
                 pending = .{};
                 pending_count = 0;
-                previous_text = sample.text;
                 try writer.writeAll("\x1b[?25l\x1b[2J\x1b[H");
-                try writer.print("{s}\n\n", .{sample.text});
+                try writer.print("{s}\n\n", .{caption});
                 try writer.writeAll("\x1b7");
             }
 

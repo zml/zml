@@ -135,13 +135,8 @@ fn encode_text(self: *const Tokenizer, allocator: std.mem.Allocator, text: []con
     var span = zml.tracer.span_at(@src(), here, .{});
     defer span.end();
 
-    var normalized = try allocator.dupe(u8, text);
+    const normalized = try self.normalize_text(allocator, text);
     defer allocator.free(normalized);
-    for (self.normalizers) |normalizer| {
-        const next = try normalizer.apply(allocator, normalized);
-        allocator.free(normalized);
-        normalized = next;
-    }
 
     var encoder = try self.inner.encoder();
     defer encoder.deinit();
@@ -156,39 +151,148 @@ pub const Text_Chunk = struct {
     num_tokens: usize,
 };
 
-pub const Text_Chunks = struct {
-    items: []Text_Chunk,
-    /// Index of the first chunk with the largest token count; null for empty input.
-    longest_chunk: ?usize,
-    max_text_tokens: usize,
+/// Lazy sentence grouping over a streaming Unigram encoder. Owns the normalized
+/// document, but retains only pending token IDs and at most one lookahead sentence.
+/// next transfers ownership of each returned chunk's text to the caller.
+/// The tokenizer must outlive this iterator. deinit releases unread input/state.
+pub const Text_Splitter = struct {
+    tokenizer: *const Tokenizer,
+    allocator: std.mem.Allocator,
+    normalized: []u8,
+    encoder: zml.tokenizer.Tokenizer.Encoder,
+    tokens: std.Io.Writer.Allocating,
+    position: usize = 0,
+    eof: bool = false,
+    sentence_start: usize = 0,
+    scan_index: usize = 1,
+    sentence_ends: [4]?u32,
+    unknown_id: u32,
+    max_tokens: usize,
+    pending: ?Text_Chunk = null,
+    current: std.ArrayList(u8) = .empty,
 
-    pub fn deinit(self: Text_Chunks, allocator: std.mem.Allocator) void {
-        for (self.items) |chunk| allocator.free(chunk.text);
-        allocator.free(self.items);
+    pub fn deinit(self: *Text_Splitter) void {
+        if (self.pending) |sentence| self.allocator.free(sentence.text);
+        self.current.deinit(self.allocator);
+        self.tokens.deinit();
+        self.encoder.deinit();
+        self.allocator.free(self.normalized);
+    }
+
+    pub fn next(self: *Text_Splitter, io: std.Io) !?Text_Chunk {
+        var span = zml.tracer.span_at(@src(), @typeName(@This()) ++ ".next", .{});
+        defer span.end();
+        var current_tokens: usize = 0;
+        while (true) {
+            try io.checkCancel();
+            const sentence = if (self.pending) |pending| blk: {
+                self.pending = null;
+                break :blk pending;
+            } else (try self.next_sentence(io)) orelse break;
+            if (self.current.items.len > 0 and current_tokens + sentence.num_tokens > self.max_tokens) {
+                self.pending = sentence;
+                break;
+            }
+            defer self.allocator.free(sentence.text);
+            if (self.current.items.len > 0) try self.current.append(self.allocator, ' ');
+            try self.current.appendSlice(self.allocator, sentence.text);
+            current_tokens += sentence.num_tokens;
+        }
+        if (self.current.items.len == 0) return null;
+        const chunk = try self.tokenizer.make_chunk(self.allocator, self.current.items);
+        self.current.clearRetainingCapacity();
+        return chunk;
+    }
+
+    fn ids(self: *Text_Splitter) []const u32 {
+        return std.mem.bytesAsSlice(u32, @as([]align(@alignOf(u32)) u8, @alignCast(self.tokens.written())));
+    }
+
+    fn next_sentence(self: *Text_Splitter, io: std.Io) !?Text_Chunk {
+        while (true) {
+            const buffered = self.ids();
+            // A decimal check needs two suffix tokens. Do not decide a boundary
+            // at the end of a feed block until that lookahead arrives (or EOF).
+            while (self.scan_index < buffered.len and (self.eof or self.scan_index + 1 < buffered.len)) {
+                const i = self.scan_index;
+                self.scan_index += 1;
+                if (is_sentence_end(buffered[i - 1], &self.sentence_ends, self.unknown_id) and
+                    !is_sentence_end(buffered[i], &self.sentence_ends, self.unknown_id) and
+                    !try self.tokenizer.is_decimal_point(self.allocator, buffered, i))
+                {
+                    const text = try self.tokenizer.decode_text(self.allocator, buffered[self.sentence_start..i]);
+                    const count = i - self.sentence_start;
+                    self.sentence_start = i;
+                    return .{ .text = text, .num_tokens = count };
+                }
+            }
+            if (self.eof) {
+                if (self.sentence_start == buffered.len) return null;
+                const text = try self.tokenizer.decode_text(self.allocator, buffered[self.sentence_start..]);
+                const count = buffered.len - self.sentence_start;
+                self.sentence_start = buffered.len;
+                return .{ .text = text, .num_tokens = count };
+            }
+            try io.checkCancel();
+            try self.feed();
+        }
+    }
+
+    fn feed(self: *Text_Splitter) !void {
+        // Discard consumed sentences before requesting more input. Keeping their
+        // IDs would turn this iterator back into an allocation of the whole book.
+        const buffered = self.ids();
+        const remaining = buffered[self.sentence_start..];
+        std.mem.copyForwards(u8, self.tokens.written(), std.mem.sliceAsBytes(remaining));
+        self.tokens.shrinkRetainingCapacity(remaining.len * @sizeOf(u32));
+        self.scan_index -= self.sentence_start;
+        self.sentence_start = 0;
+
+        const encoder = &self.encoder.iree;
+        if (self.position == self.normalized.len) {
+            try encoder.finalize(&self.tokens.writer);
+            self.eof = true;
+            return;
+        }
+        // Bound speculative tokenization and never split a UTF-8 code point.
+        var end = @min(self.normalized.len, self.position + 1024);
+        while (end < self.normalized.len and self.normalized[end] & 0xc0 == 0x80) end += 1;
+        try encoder.feed(self.normalized[self.position..end], &self.tokens.writer);
+        self.position = end;
     }
 };
 
 /// PocketTTSProcessor.split_text's sentence boundaries and greedy grouping,
 /// with max_tokens as a soft target: sentences are never split into clauses.
-/// Returns owned chunks in speaking order. Empty text produces no chunks.
-pub fn split_text(self: *const Tokenizer, allocator: std.mem.Allocator, text: []const u8, max_tokens: usize) !Text_Chunks {
-    const here = @typeName(@This()) ++ ".split_text";
-    var span = zml.tracer.span_at(@src(), here, .{});
+/// Normalization is one document-wide pass to preserve anchored rules. Encoding
+/// and grouping happen on demand in next(), rather than before the first chunk.
+pub fn split_text(self: *const Tokenizer, allocator: std.mem.Allocator, text: []const u8, max_tokens: usize) !Text_Splitter {
+    var span = zml.tracer.span_at(@src(), @typeName(@This()) ++ ".split_text", .{});
     defer span.end();
     std.debug.assert(max_tokens > 0);
 
-    // The text-only chat template trims its input. The processor removes audio
-    // placeholders before tokenizing it; do the same before normalization.
+    // Remove only the processor's three voice/audio placeholders before
+    // normalization. Collect them once, instead of searching 204 added tokens
+    // at every byte of a potentially book-sized input.
+    var placeholders: [3][]const u8 = undefined;
+    var num_placeholders: usize = 0;
+    const added_tokens = self.definition.value.object.get("added_tokens").?.array.items;
+    var special_prefix: [256]bool = @splat(false);
+    for (added_tokens) |token| {
+        const id = token.object.get("id").?.integer;
+        const content = token.object.get("content").?.string;
+        special_prefix[content[0]] = true;
+        if (id != 4 and id != 5 and id != 6) continue;
+        placeholders[num_placeholders] = content;
+        num_placeholders += 1;
+    }
     var cleaned: std.Io.Writer.Allocating = .init(allocator);
     defer cleaned.deinit();
     const trimmed = std.mem.trim(u8, text, " \t\r\n\x0b\x0c");
     var position: usize = 0;
     while (position < trimmed.len) {
         var placeholder_len: usize = 0;
-        for (self.definition.value.object.get("added_tokens").?.array.items) |token| {
-            const id = token.object.get("id").?.integer;
-            if (id != 4 and id != 5 and id != 6) continue;
-            const content = token.object.get("content").?.string;
+        for (placeholders[0..num_placeholders]) |content| {
             if (std.mem.startsWith(u8, trimmed[position..], content)) placeholder_len = @max(placeholder_len, content.len);
         }
         if (placeholder_len > 0) {
@@ -199,66 +303,66 @@ pub fn split_text(self: *const Tokenizer, allocator: std.mem.Allocator, text: []
         }
     }
 
-    const encoded = try self.encode(allocator, cleaned.written());
-    defer encoded.free(allocator);
-    const ids = try allocator.alloc(u32, encoded.constItems(i64).len);
-    defer allocator.free(ids);
-    for (ids, encoded.constItems(i64)) |*dst, src| dst.* = @intCast(src);
-
-    const unknown_id: u32 = @intCast(self.definition.value.object.get("model").?.object.get("unk_id").?.integer);
-    const sentence_ends = [_]?u32{
-        self.inner.tokenId("."), self.inner.tokenId("!"), self.inner.tokenId("..."), self.inner.tokenId("?"),
-    };
-    var sentences: std.ArrayList([]const u32) = .empty;
-    defer sentences.deinit(allocator);
+    // As in encode(), literal added tokens bypass normalization. Ordinary text
+    // takes the fast path without scanning every added-token string per byte.
+    var normalized: std.Io.Writer.Allocating = .init(allocator);
+    defer normalized.deinit();
+    const input = cleaned.written();
     var start: usize = 0;
-    for (ids, 0..) |id, i| {
-        if (i == 0) continue;
-        if (is_sentence_end(ids[i - 1], &sentence_ends, unknown_id) and
-            !is_sentence_end(id, &sentence_ends, unknown_id) and
-            !try self.is_decimal_point(allocator, ids, i))
-        {
-            try sentences.append(allocator, ids[start..i]);
-            start = i;
+    position = 0;
+    while (position < input.len) {
+        if (!special_prefix[input[position]]) {
+            position += 1;
+            continue;
         }
+        var match_len: usize = 0;
+        for (added_tokens) |token| {
+            const content = token.object.get("content").?.string;
+            if (std.mem.startsWith(u8, input[position..], content)) match_len = @max(match_len, content.len);
+        }
+        if (match_len == 0) {
+            position += 1;
+            continue;
+        }
+        const segment = try self.normalize_text(allocator, input[start..position]);
+        defer allocator.free(segment);
+        try normalized.writer.writeAll(segment);
+        try normalized.writer.writeAll(input[position..][0..match_len]);
+        position += match_len;
+        start = position;
     }
-    if (ids.len > 0) try sentences.append(allocator, ids[start..]);
+    const segment = try self.normalize_text(allocator, input[start..]);
+    defer allocator.free(segment);
+    try normalized.writer.writeAll(segment);
 
-    var chunks: std.ArrayList(Text_Chunk) = .empty;
-    errdefer {
-        for (chunks.items) |chunk| allocator.free(chunk.text);
-        chunks.deinit(allocator);
-    }
-    var current: std.ArrayList(u8) = .empty;
-    defer current.deinit(allocator);
-    var current_tokens: usize = 0;
-    for (sentences.items) |sentence| {
-        const decoded = try self.decode_text(allocator, sentence);
-        defer allocator.free(decoded);
-        if (current.items.len > 0 and current_tokens + sentence.len > max_tokens) {
-            try self.append_chunk(allocator, &chunks, current.items);
-            current.clearRetainingCapacity();
-            current_tokens = 0;
-        }
-        if (current.items.len > 0) try current.append(allocator, ' ');
-        try current.appendSlice(allocator, decoded);
-        current_tokens += sentence.len;
-    }
-    if (current.items.len > 0) try self.append_chunk(allocator, &chunks, current.items);
-
-    var longest_chunk: ?usize = null;
-    var max_text_tokens: usize = 0;
-    for (chunks.items, 0..) |chunk, i| {
-        if (longest_chunk == null or chunk.num_tokens > max_text_tokens) {
-            longest_chunk = i;
-            max_text_tokens = chunk.num_tokens;
-        }
-    }
+    const owned = try normalized.toOwnedSlice();
+    errdefer allocator.free(owned);
+    var encoder = try self.inner.encoder();
+    errdefer encoder.deinit();
     return .{
-        .items = try chunks.toOwnedSlice(allocator),
-        .longest_chunk = longest_chunk,
-        .max_text_tokens = max_text_tokens,
+        .tokenizer = self,
+        .allocator = allocator,
+        .normalized = owned,
+        .encoder = encoder,
+        .tokens = .initAligned(allocator, .of(u32)),
+        .sentence_ends = .{ self.inner.tokenId("."), self.inner.tokenId("!"), self.inner.tokenId("..."), self.inner.tokenId("?") },
+        .unknown_id = @intCast(self.definition.value.object.get("model").?.object.get("unk_id").?.integer),
+        .max_tokens = max_tokens,
     };
+}
+
+fn normalize_text(self: *const Tokenizer, allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var span = zml.tracer.span_at(@src(), @typeName(@This()) ++ ".normalize_text", .{});
+    defer span.end();
+    var normalized = try allocator.dupe(u8, text);
+    errdefer allocator.free(normalized);
+    if (text.len == 0) return normalized;
+    for (self.normalizers) |normalizer| {
+        const next = try normalizer.apply(allocator, normalized);
+        allocator.free(normalized);
+        normalized = next;
+    }
+    return normalized;
 }
 
 fn is_sentence_end(id: u32, boundaries: []const ?u32, unknown_id: u32) bool {
@@ -268,10 +372,16 @@ fn is_sentence_end(id: u32, boundaries: []const ?u32, unknown_id: u32) bool {
 }
 
 fn is_decimal_point(self: *const Tokenizer, allocator: std.mem.Allocator, ids: []const u32, index: usize) !bool {
-    const prefix = try self.decode_text(allocator, ids[0..index]);
+    // Phonon's boundary tokens are standalone punctuation. The preceding token
+    // suffices to check for an ASCII digit before '.', including byte fallback.
+    // Never decode the growing prefix: doing so at every boundary is quadratic.
+    const prefix = try self.decode_text(allocator, ids[index -| 2..index]);
     defer allocator.free(prefix);
     if (prefix.len < 2 or prefix[prefix.len - 1] != '.' or !std.ascii.isDigit(prefix[prefix.len - 2])) return false;
-    const suffix = try self.decode_text(allocator, ids[index..]);
+    // Metaspace can remove the first token's leading space, leaving it empty.
+    // Include the next token too; further whitespace or non-ASCII bytes already
+    // rule out an ASCII digit at the beginning of the decoded suffix.
+    const suffix = try self.decode_text(allocator, ids[index..@min(ids.len, index + 2)]);
     defer allocator.free(suffix);
     return suffix.len > 0 and std.ascii.isDigit(suffix[0]);
 }
@@ -284,14 +394,14 @@ fn decode_text(self: *const Tokenizer, allocator: std.mem.Allocator, ids: []cons
     return try decoded.toOwnedSlice(allocator);
 }
 
-fn append_chunk(self: *const Tokenizer, allocator: std.mem.Allocator, chunks: *std.ArrayList(Text_Chunk), text: []const u8) !void {
+fn make_chunk(self: *const Tokenizer, allocator: std.mem.Allocator, text: []const u8) !Text_Chunk {
     const owned = try allocator.dupe(u8, std.mem.trim(u8, text, " \t\r\n\x0b\x0c"));
     errdefer allocator.free(owned);
     // Decode/join/normalize can change tokenization. Record the actual count
     // that encode_prompt will use, rather than the grouping estimate above.
     const encoded = try self.encode(allocator, owned);
     defer encoded.free(allocator);
-    try chunks.append(allocator, .{ .text = owned, .num_tokens = encoded.constItems(i64).len });
+    return .{ .text = owned, .num_tokens = encoded.constItems(i64).len };
 }
 
 pub fn encode_prompt(self: *const Tokenizer, gpa: std.mem.Allocator, text: []const u8, voice_frames: usize) !zml.Slice {

@@ -2,7 +2,8 @@
 //! On-device Tensor.Rng (.DEFAULT), reset to seed 42 per text chunk; Box-Muller noise, variance 0.3.
 //! Voice: Tek4tJXiX6_yvXq7. Mono audio at 24 kHz, 1920 samples per generated frame.
 //! Text chunks have a soft target of 50 tokens and retain whole sentences.
-//! Phonon compiles once at the largest chunk's prompt width and frame budget.
+//! Phonon compiles once for the fixed limit of 256 text tokens plus voice/BOS positions.
+//! Text chunk preparation runs concurrently and hands owned inputs to the inference queue.
 //! Each chunk prefills once, then decodes one position per frame using six donated K/V pairs.
 //! Token/frame counts, latent history, RNG, and EOS state reset between utterances.
 //! History capacity is at least 34; its returned window includes the just-generated frame.

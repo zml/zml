@@ -39,15 +39,22 @@ fn run_pipeline(prompt: []const u8) !zml.Slice {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
-    const prepared = try main.prepare_prompt(io, allocator, prompt);
-    defer prepared.deinit(allocator);
-    if (prepared.chunks.len == 0)
+    if (std.mem.trim(u8, prompt, " \t\r\n\x0b\x0c").len == 0)
         return zml.Slice.alloc(allocator, .init(.{ .b = 1, .d = 1, .s = 0 }, .f32));
-    const input = prepared.chunks[0];
+    const prepared = try main.prepare_prompt(io, allocator);
+    defer prepared.deinit(allocator);
+    var queue_buf: [main.chunk_queue_capacity]main.Prepared_Chunk = undefined;
+    var queue: std.Io.Queue(main.Prepared_Chunk) = .init(&queue_buf);
+    var producer = try io.concurrent(main.prepare_chunks, .{ io, allocator, prompt, prepared, &queue, null });
+    defer {
+        queue.close(io);
+        producer.cancel(io) catch {};
+        while (queue.getOneUncancelable(io)) |chunk| chunk.deinit(allocator) else |_| {}
+    }
 
     var phonon = try allocator.create(Phonon);
     defer allocator.destroy(phonon);
-    try phonon.init_in_place(io, allocator, platform, input, prepared.capacity, .f32, null);
+    try phonon.init_in_place(io, allocator, platform, prepared.voice, prepared.capacity, .f32, null);
     defer phonon.deinit();
 
     const mimi = try allocator.create(Mimi);
@@ -58,8 +65,15 @@ fn run_pipeline(prompt: []const u8) !zml.Slice {
     // Match playback: Mimi receives the fixed window and returns the newest waveform chunk.
     var samples: std.ArrayList(f32) = .empty;
     defer samples.deinit(allocator);
-    for (prepared.chunks, 0..) |chunk_input, chunk_index| {
-        if (chunk_index > 0) try phonon.start_chunk(chunk_input);
+    while (true) {
+        const queued = queue.getOne(io) catch |err| switch (err) {
+            error.Closed => break,
+            else => return err,
+        };
+        defer queued.deinit(allocator);
+        var span = zml.tracer.span_at_for(@src(), "pipeline_test.chunk", .{ .chunk = queued.index }, .{ .consumer = queued.context });
+        defer span.end();
+        try phonon.start_chunk(queued.input);
         while (!phonon.done) {
             const out = try phonon.forward();
             const chunk = try mimi.forward(out.active_lengths, out.history34);
@@ -68,6 +82,7 @@ fn run_pipeline(prompt: []const u8) !zml.Slice {
         }
     }
 
+    try producer.await(io);
     const waveform = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .d = 1, .s = samples.items.len }, .f32));
     @memcpy(waveform.items(f32), samples.items);
     return waveform;
