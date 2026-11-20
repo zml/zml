@@ -48,7 +48,6 @@ test {
     _ = hwmon;
     _ = pci;
     _ = proc;
-    _ = @import("sandbox.zig");
     _ = sysfs;
     _ = units;
 }

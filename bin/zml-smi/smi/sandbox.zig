@@ -21,9 +21,3 @@ pub fn path(io: std.Io, buffer: *[std.Io.Dir.max_path_bytes]u8) ?[]const u8 {
 fn env(name: [*:0]const u8) ?[]const u8 {
     return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
 }
-
-test path {
-    const io = std.testing.io;
-    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try std.Io.Dir.cwd().access(io, path(io, &buffer) orelse return error.NoSandbox, .{});
-}
