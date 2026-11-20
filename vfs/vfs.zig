@@ -481,3 +481,83 @@ test "copy a local file through the VFS" {
     defer allocator.free(copied);
     try std.testing.expectEqualSlices(u8, &source_data, copied);
 }
+
+test "HTTP positional reads from full responses" {
+    const allocator = std.testing.allocator;
+    const process_io = std.testing.io;
+    const Serve = struct {
+        fn run(inner: std.Io, server: *std.Io.net.Server) !void {
+            while (true) {
+                const stream = try server.accept(inner);
+                defer stream.close(inner);
+                var read_buffer: [1024]u8 = undefined;
+                var write_buffer: [1024]u8 = undefined;
+                var reader = stream.reader(inner, &read_buffer);
+                var writer = stream.writer(inner, &write_buffer);
+                var http: std.http.Server = .init(&reader.interface, &writer.interface);
+                var request = try http.receiveHead();
+                // Ignore Range, as servers without range support do.
+                if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/broken")) {
+                    try writer.interface.writeAll("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n8\r\n");
+                    try writer.interface.flush();
+                    continue;
+                }
+                const body = if (request.head.method == .HEAD)
+                    "01234567"
+                else if (std.mem.eql(u8, request.head.target, "/short"))
+                    "01"
+                else
+                    "01234567";
+                try request.respond(body, .{ .keep_alive = false });
+            }
+        }
+    };
+
+    const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+    var server = try address.listen(process_io, .{});
+    defer server.deinit(process_io);
+    var serving = try process_io.concurrent(Serve.run, .{ process_io, &server });
+    defer _ = serving.cancel(process_io) catch {};
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = process_io };
+    defer client.deinit();
+    var http: HTTP = try .init(allocator, process_io, &client, .http);
+    defer http.deinit();
+    const http_io = http.io();
+    var path_buffer: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "127.0.0.1:{d}/file", .{server.socket.address.getPort()});
+    const file = try std.Io.Dir.cwd().openFile(http_io, path, .{});
+    defer file.close(http_io);
+
+    var buffer: [4]u8 = undefined;
+    var n = try file.readPositional(http_io, &.{buffer[0..1]}, 1);
+    try std.testing.expectEqual(1, n);
+    try std.testing.expectEqualStrings("1", buffer[0..n]);
+
+    n = try file.readPositional(http_io, &.{&buffer}, 6);
+    try std.testing.expectEqual(2, n);
+    try std.testing.expectEqualStrings("67", buffer[0..n]);
+    try std.testing.expectEqual(0, try file.readPositional(http_io, &.{&buffer}, 8));
+
+    try http_io.vtable.fileSeekTo(http_io.userdata, file, 3);
+    n = try file.readStreaming(http_io, &.{&buffer});
+    try std.testing.expectEqual(4, n);
+    try std.testing.expectEqualStrings("3456", buffer[0..n]);
+
+    const short_path = try std.fmt.bufPrint(&path_buffer, "127.0.0.1:{d}/short", .{server.socket.address.getPort()});
+    const short_file = try std.Io.Dir.cwd().openFile(http_io, short_path, .{});
+    defer short_file.close(http_io);
+    // The GET body ends before the size cached from HEAD.
+    try std.testing.expectEqual(0, try short_file.readPositional(http_io, &.{&buffer}, 3));
+    try std.testing.expectEqual(1, try short_file.readPositional(http_io, &.{&buffer}, 1));
+    try std.testing.expectEqual('1', buffer[0]);
+    try http_io.vtable.fileSeekTo(http_io.userdata, short_file, 3);
+    try std.testing.expectError(error.EndOfStream, short_file.readStreaming(http_io, &.{&buffer}));
+
+    const broken_path = try std.fmt.bufPrint(&path_buffer, "127.0.0.1:{d}/broken", .{server.socket.address.getPort()});
+    const broken_file = try std.Io.Dir.cwd().openFile(http_io, broken_path, .{});
+    defer broken_file.close(http_io);
+    try std.testing.expectEqual(0, try broken_file.readPositional(http_io, &.{buffer[0..0]}, 1));
+
+    serving.cancel(process_io) catch |err| if (err != error.Canceled) return err;
+}
