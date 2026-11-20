@@ -2720,6 +2720,13 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
+    /// Returns a Tensor containing the element-wise log(1 + x) of the input Tensor,
+    /// accurate for x close to zero.
+    pub fn log1p(self: Tensor) Tensor {
+        const op = stablehlo.log_plus_one(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
+        return _result(self._shape, op.result(0));
+    }
+
     /// Returns a Tensor containing the element-wise square-root of the input Tensor.
     pub fn sqrt(self: Tensor) Tensor {
         const sqrt_op = stablehlo.sqrt(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
