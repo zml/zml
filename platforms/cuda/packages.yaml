@@ -22,5 +22,5 @@ archs:
 packages:
   - "llvm-libunwind1" # LLVM 22 runtime from llvm-toolchain-bookworm-22.
   - "zlib1g"
-  - "cuda-compat-13-4"
+  - "cuda-compat-13-5"
   - "libnccl2"
