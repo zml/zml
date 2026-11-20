@@ -49,37 +49,6 @@ pub const Buffer = struct {
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
     pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
 
-    pub const Shard = struct {
-        _platform: *const Platform,
-        _pjrt_buffer: *pjrt.Buffer,
-
-        pub fn devicePtr(self: *const Shard) *anyopaque {
-            return self._pjrt_buffer.opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
-        }
-    };
-
-    pub const ShardIterator = struct {
-        _platform: *const Platform,
-        _shards: []const *pjrt.Buffer,
-        _index: usize = 0,
-
-        pub fn remaining(self: *ShardIterator) usize {
-            return self._shards.len -| self._index;
-        }
-
-        pub fn next(self: *ShardIterator) ?Shard {
-            defer self._index += 1;
-            if (self._index >= self._shards.len) return null;
-
-            return .{
-                ._pjrt_buffer = self._shards[self._index],
-                ._platform = self._platform,
-            };
-        }
-    };
-
-    pub const FromOptions = struct { wait: bool = true, memory: Memory.Kind = .default };
-
     /// Frees the accelerator memory.
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
@@ -119,19 +88,14 @@ pub const Buffer = struct {
         return @intCast(self._shards.len);
     }
 
-    pub fn shards(self: *const Buffer) ShardIterator {
-        return .{
-            ._platform = self._platform,
-            ._shards = self._shards.constSlice(),
-        };
-    }
-
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
         const pl = Sharding.Placement.init(&self._shape) catch |err| {
             return try writer.print("Buffer({f}) with invalid sharding {} ({})", .{ self._shape, self._shape._sharding, err });
         };
         try writer.print("{f}", .{pl});
     }
+
+    pub const FromOptions = struct { wait: bool = true, memory: Memory.Kind = .default };
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
     pub fn from(
@@ -420,31 +384,6 @@ test "device round-trip" {
         try zml.testing.expectClose(io, x_h, x_h_reborn, .exact_match);
     }
 }
-
-pub const PjrtBufferMetadata = struct {
-    shape: Shape,
-    ty: pjrt.BufferType,
-    placement: Sharding.Placement,
-    layout: pjrt.MemoryLayout,
-
-    /// Inline because the layout may point to stack memory, as with
-    /// `Platform.defaultMemoryLayout`. Outside `Buffer` so that
-    /// `Buffer.HostAccessible` can use it without it being part of the API:
-    /// zml.zig only exports `Buffer` from this file.
-    pub inline fn init(platform: *const Platform, shape_: Shape) PjrtBufferMetadata {
-
-        // Shards use the PJRT shape, which packs sub-byte elements.
-        const packed_shape = shape_.packedShape();
-        const placement = placementOrPanic(platform, packed_shape);
-
-        return .{
-            .shape = packed_shape,
-            .ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype()),
-            .placement = placement,
-            .layout = platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype()),
-        };
-    }
-};
 
 fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
     var sh = shape;
