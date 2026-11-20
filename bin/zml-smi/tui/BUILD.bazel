@@ -40,7 +40,7 @@ zig_library(
         "assets/nvidia.png",
         "assets/tpu.png",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [
         "//bazel/stamp:zig",
         "//bin/zml-smi/smi",
