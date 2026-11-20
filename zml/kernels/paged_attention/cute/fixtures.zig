@@ -4,6 +4,12 @@ const zml = @import("zml");
 
 const cases = @import("cases.zig");
 
+pub const Backend = enum { cute, cute_generic };
+
+pub fn backends(c: cases.Case) []const Backend {
+    return if (c.mask == .indices) &.{.cute} else std.enums.values(Backend);
+}
+
 pub const Fixture = struct {
     q: []zml.floats.BFloat16,
     k: []zml.floats.BFloat16,
@@ -24,14 +30,14 @@ pub const Fixture = struct {
             .lengths = try a.alloc(i32, c.batch),
             .starts = try a.alloc(i32, c.batch + 1),
             .sinks = try a.alloc(f32, c.heads()),
-            .indices = try a.alloc(i32, c.tokens() * cases.topk),
+            .indices = try a.alloc(i32, c.tokens() * c.topk),
         };
         var rng = std.Random.DefaultPrng.init(42);
         const random = rng.random();
         for (f.q) |*v| v.* = .fromF32(random.float(f32) * 2 - 1);
         for (f.k) |*v| v.* = .fromF32(random.float(f32) * 2 - 1);
         for (f.v) |*v| v.* = .fromF32(random.float(f32) * 2 - 1);
-        for (f.sinks, 0..) |*v, h| v.* = @as(f32, @floatFromInt(h % 5)) - 2;
+        for (f.sinks, 0..) |*v, h| v.* = c.sink_value orelse (@as(f32, @floatFromInt(h % 5)) - 2);
         @memset(f.indices, -1);
         f.starts[0] = 0;
         for (0..c.batch) |s| {
@@ -55,7 +61,15 @@ pub const Fixture = struct {
             }
             for (@intCast(f.starts[s])..@intCast(f.starts[s + 1])) |t| {
                 const l: i32 = @intCast(len);
-                @memcpy(f.indices[t * cases.topk ..][0..cases.topk], &[_]i32{ 0, l - 1, @divTrunc(l, 2), -1, l, 0, 1, l - 2 });
+                const boundary = [_]i32{ 0, l - 1, @divTrunc(l, 2), -1, l, 0, 1, l - 2 };
+                for (f.indices[t * c.topk ..][0..c.topk], 0..) |*index, j| {
+                    index.* = if (j < boundary.len) boundary[j] else switch (j % 17) {
+                        0 => -1,
+                        1 => l,
+                        2 => 0,
+                        else => @intCast((j * 37 + t * 13) % len),
+                    };
+                }
             }
         }
         if (c.empty_indices) {
@@ -63,7 +77,18 @@ pub const Fixture = struct {
             @memset(f.k, .fromF32(std.math.nan(f32)));
             @memset(f.v, .fromF32(std.math.nan(f32)));
         }
+        const active_tokens: usize = @intCast(f.starts[c.batch]);
+        @memset(f.q[active_tokens * c.heads() * c.head_dim ..], .fromF32(std.math.nan(f32)));
         return f;
+    }
+
+    pub fn quantizeF16(f: Fixture) void {
+        // Both host reference and native FP16 uploads receive identical values.
+        for ([_][]zml.floats.BFloat16{ f.q, f.k, f.v }) |values| {
+            for (values) |*v| if (std.math.isFinite(v.toF32())) {
+                v.* = .fromF32(@round(v.toF32() * 64) / 64);
+            };
+        }
     }
 
     pub fn kvOffset(f: Fixture, c: cases.Case, seq: usize, key: usize, head: usize) usize {
@@ -83,15 +108,19 @@ pub const Inputs = struct {
     indices: zml.Tensor,
 
     pub fn init(c: cases.Case) Inputs {
+        return initDType(c, .bf16);
+    }
+
+    pub fn initDType(c: cases.Case, dtype: zml.DataType) Inputs {
         return .{
-            .q = .init(.{ .b = c.tokens(), .hkv = c.kv_heads, .hg = c.group, .hd = c.head_dim }, .bf16),
-            .k = .init(.{ .page = c.batch * c.pages(), .k_chunk = cases.page_size, .hkv = c.kv_heads, .hd = c.head_dim }, .bf16),
-            .v = .init(.{ .page = c.batch * c.pages(), .k_chunk = cases.page_size, .hkv = c.kv_heads, .hd = c.head_dim }, .bf16),
+            .q = .init(.{ .b = c.tokens(), .hkv = c.kv_heads, .hg = c.group, .hd = c.head_dim }, dtype),
+            .k = .init(.{ .page = c.batch * c.pages(), .k_chunk = cases.page_size, .hkv = c.kv_heads, .hd = c.head_dim }, dtype),
+            .v = .init(.{ .page = c.batch * c.pages(), .k_chunk = cases.page_size, .hkv = c.kv_heads, .hd = c.head_dim }, dtype),
             .table = .init(.{ .b = c.batch, .p = c.pages() }, .i32),
             .lengths = .init(.{ .b = c.batch }, .i32),
             .starts = .init(.{ .b = c.batch + 1 }, .i32),
             .sinks = .init(.{c.heads()}, .f32),
-            .indices = .init(.{ .b = c.tokens(), .topk = cases.topk }, .i32),
+            .indices = .init(.{ .b = c.tokens(), .topk = c.topk }, .i32),
         };
     }
 
@@ -111,30 +140,46 @@ pub const Inputs = struct {
 };
 
 pub fn forward(i: Inputs, c: cases.Case) zml.Tensor {
-    const parameters: zml.paged_attention.Parameters = .{
-        .cute = .{
-            .block_table = i.table,
-            .seq_lens = i.lengths,
-            .query_start_len = i.starts,
-            .options_ = .{
-                .batch_size = c.batch,
-                .max_num_pages = c.pages(),
-                .max_seqlen_q = if (c.prefill > 0) c.chunk else 1,
-                .is_prefill = c.prefill > 0,
-            },
-        },
-    };
-    return zml.paged_attention.cute.pagedAttention(parameters.cute, i.q, i.k, i.v, i.options(c));
+    return forwardBackend(i, c, .cute);
 }
 
-pub fn upload(io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {
+pub fn forwardBackend(i: Inputs, c: cases.Case, backend: Backend) zml.Tensor {
+    const parameters: zml.paged_attention.cute.Parameters = .{
+        .block_table = i.table,
+        .seq_lens = i.lengths,
+        .query_start_len = i.starts,
+        .options_ = .{
+            .batch_size = c.batch,
+            .max_num_pages = c.pages(),
+            .max_seqlen_q = if (c.prefill > 0) c.chunk else 1,
+            .is_prefill = c.prefill > 0,
+        },
+    };
+    return switch (backend) {
+        .cute => zml.paged_attention.cute.pagedAttention(parameters, i.q, i.k, i.v, i.options(c)),
+        .cute_generic => zml.paged_attention.cute.pagedAttentionGeneric(parameters, i.q, i.k, i.v, i.options(c)),
+    };
+}
+
+pub fn upload(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {
     var result: zml.Bufferized(Inputs) = undefined;
     var initialized: usize = 0;
     errdefer inline for (@typeInfo(Inputs).@"struct".field_names, 0..) |name, index| {
         if (index < initialized) @field(result, name).deinit();
     };
     inline for (@typeInfo(Inputs).@"struct".field_names) |name| {
-        @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(@field(f, name)));
+        if (comptime std.mem.eql(u8, name, "q") or std.mem.eql(u8, name, "k") or std.mem.eql(u8, name, "v")) {
+            if (@field(inputs, name).dtype() == .f16) {
+                const values = try a.alloc(f16, @field(f, name).len);
+                defer a.free(values);
+                for (values, @field(f, name)) |*dst, src| dst.* = @floatCast(src.toF32());
+                @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(values));
+            } else {
+                @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(@field(f, name)));
+            }
+        } else {
+            @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(@field(f, name)));
+        }
         initialized += 1;
     }
     return result;

@@ -10,7 +10,7 @@ pub fn row(c: cases.Case, f: fixtures.Fixture, seq: usize, token: usize, head: u
     const start: usize = @intCast(f.starts[seq]);
     const qlen: usize = @intCast(f.starts[seq + 1] - f.starts[seq]);
     const position = len - qlen + token - start;
-    const count = if (c.mask == .indices) cases.topk else len;
+    const count = if (c.mask == .indices) c.topk else len;
     const scale = c.scale orelse 1 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
     const q = f.q[(token * c.heads() + head) * c.head_dim ..][0..c.head_dim];
     var maximum: f32 = if (c.sink) f.sinks[head] else -std.math.inf(f32);
@@ -44,15 +44,19 @@ pub fn row(c: cases.Case, f: fixtures.Fixture, seq: usize, token: usize, head: u
 }
 
 fn keyAt(c: cases.Case, f: fixtures.Fixture, token: usize, j: usize) i64 {
-    return if (c.mask == .indices) f.indices[token * cases.topk + j] else @intCast(j);
+    return if (c.mask == .indices) f.indices[token * c.topk + j] else @intCast(j);
 }
 
-pub fn check(a: std.mem.Allocator, c: cases.Case, f: fixtures.Fixture, actual: []const zml.floats.BFloat16) !f32 {
+fn toF32(value: anytype) f32 {
+    return if (@TypeOf(value) == zml.floats.BFloat16) value.toF32() else @floatCast(value);
+}
+
+pub fn check(a: std.mem.Allocator, c: cases.Case, f: fixtures.Fixture, actual: anytype) !f32 {
     const active_tokens: usize = @intCast(f.starts[c.batch]);
     for (actual[0 .. active_tokens * c.heads() * c.head_dim]) |v| {
-        if (!std.math.isFinite(v.toF32())) return error.NonFiniteOutput;
+        if (!std.math.isFinite(toF32(v))) return error.NonFiniteOutput;
     }
-    const scores = try a.alloc(f32, @max(c.kv_len, cases.topk));
+    const scores = try a.alloc(f32, @max(c.kv_len, c.topk));
     defer a.free(scores);
     const expected = try a.alloc(f32, c.head_dim);
     defer a.free(expected);
@@ -64,7 +68,7 @@ pub fn check(a: std.mem.Allocator, c: cases.Case, f: fixtures.Fixture, actual: [
                 row(c, f, s, t, h, scores, expected);
                 const base = (t * c.heads() + h) * c.head_dim;
                 for (expected, actual[base..][0..c.head_dim], 0..) |want, got_bf16, d| {
-                    const got = got_bf16.toF32();
+                    const got = toF32(got_bf16);
                     const err = @abs(want - got);
                     max_error = @max(max_error, err);
                     // Fixed BF16 error budget; never adapted to observed failures.
@@ -78,6 +82,13 @@ pub fn check(a: std.mem.Allocator, c: cases.Case, f: fixtures.Fixture, actual: [
     }
     if (failures > 0) return error.ReferenceMismatch;
     return max_error;
+}
+
+pub fn checkZeroTail(c: cases.Case, f: fixtures.Fixture, actual: anytype) !void {
+    const active_tokens: usize = @intCast(f.starts[c.batch]);
+    for (actual[active_tokens * c.heads() * c.head_dim ..]) |value| {
+        if (toF32(value) != 0) return error.NonzeroInactiveOutput;
+    }
 }
 
 test "reference single key, uniform causal scores, and sink" {
@@ -123,5 +134,52 @@ test "reference windows, noncausal, duplicate and invalid indices" {
     row(c, f, 0, 0, 0, &scores, &out);
     for (out) |v| try std.testing.expectApproxEqAbs(@as(f32, 8.0 / 3.0), v, 1e-6);
     row(c, f, 0, 1, 0, &scores, &out);
+    for (out) |v| try std.testing.expectEqual(@as(f32, 0), v);
+}
+
+test "reference indexed selection tail, FP16 output and unused query capacity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c: cases.Case = .{
+        .head_dim = 64,
+        .batch = 1,
+        .kv_heads = 1,
+        .group = 1,
+        .prefill = 1,
+        .chunk = 2,
+        .kv_len = 2,
+        .mask = .indices,
+        .topk = 65,
+        .token_capacity = 4,
+    };
+    const f = try fixtures.Fixture.init(a, c);
+    @memset(f.q[0 .. 2 * 64], .fromF32(0));
+    @memset(f.v[0..64], .fromF32(2));
+    @memset(f.v[64..128], .fromF32(4));
+    @memset(f.indices, -1);
+    f.indices[64] = 1;
+    f.indices[c.topk + 64] = 0;
+    const actual = try a.alloc(f16, c.tokens() * c.heads() * c.head_dim);
+    @memset(actual[0..64], 4);
+    @memset(actual[64..128], 2);
+    @memset(actual[128..], 0);
+    try std.testing.expectEqual(@as(f32, 0), try check(a, c, f, actual));
+    try checkZeroTail(c, f, actual);
+    actual[128] = std.math.nan(f16);
+    try std.testing.expectError(error.NonzeroInactiveOutput, checkZeroTail(c, f, actual));
+}
+
+test "reference all invalid indexed slots with sink ignore poisoned cache" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const c: cases.Case = .{ .head_dim = 64, .batch = 1, .kv_heads = 1, .group = 1, .mask = .indices, .topk = 65, .empty_indices = true, .sink = true };
+    const f = try fixtures.Fixture.init(arena.allocator(), c);
+    var scores: [65]f32 = undefined;
+    var out: [64]f32 = undefined;
+    row(c, f, 0, 0, 0, &scores, &out);
+    for (out) |v| try std.testing.expectEqual(@as(f32, 0), v);
+    @memset(f.sinks, -std.math.inf(f32));
+    row(c, f, 0, 0, 0, &scores, &out);
     for (out) |v| try std.testing.expectEqual(@as(f32, 0), v);
 }
