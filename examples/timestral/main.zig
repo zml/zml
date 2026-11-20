@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     defer store.deinit();
 
     const forecaster: model.Model = .{
-        .residuals = .init(store.view().withPrefix("representation.patch_proj")),
+        .representation = .init(store.view().withPrefix("representation")),
         .patcher = .{ .options = shallowPick(&config.value, model.PatchBuilder.Options) },
     };
 
@@ -41,12 +41,13 @@ pub fn main(init: std.process.Init) !void {
     defer executable.deinit();
 
     var weights = try zml.mem.bufferize(allocator, model.Model, &forecaster);
-    defer weights.residuals.hidden_layer.weight.deinit();
-    defer if (weights.residuals.hidden_layer.bias) |*b| b.deinit();
-    defer weights.residuals.output_layer.weight.deinit();
-    defer if (weights.residuals.output_layer.bias) |*b| b.deinit();
-    defer weights.residuals.residual_layer.weight.deinit();
-    defer if (weights.residuals.residual_layer.bias) |*b| b.deinit();
+    defer weights.representation.patch_proj.hidden_layer.weight.deinit();
+    defer if (weights.representation.patch_proj.hidden_layer.bias) |*b| b.deinit();
+    defer weights.representation.patch_proj.output_layer.weight.deinit();
+    defer if (weights.representation.patch_proj.output_layer.bias) |*b| b.deinit();
+    defer weights.representation.patch_proj.residual_layer.weight.deinit();
+    defer if (weights.representation.patch_proj.residual_layer.bias) |*b| b.deinit();
+    defer weights.representation.forecast_query.deinit();
 
     var loader: zml.io.Loader = try .init(allocator, platform, .default);
     defer loader.deinit();

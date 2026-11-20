@@ -76,9 +76,9 @@ pub const PreProcessor = struct {
             const target_roles = Tensor.scalar(@backingInt(Roles.target), .u8)
                 .broad(.init(.{ .variates = n_targets }, .u8));
             return .{
-                .values = ffillMissing(targets.values, targets.mask, .time).renameTag(.variates, .d),
-                .mask = targets.mask.renameTag(.variates, .d),
-                .roles = target_roles.renameTag(.variates, .d).repeat1d(.variates, @intCast(n_batch)),
+                .values = ffillMissing(targets.values, targets.mask, .time),
+                .mask = targets.mask,
+                .roles = target_roles.repeat1d(.variates, @intCast(n_batch)),
             };
         }
 
@@ -138,8 +138,8 @@ pub const PatchBuilder = struct {
     ///
     /// Input are expected in shape `{.row, .time}` and the output is `{.row, .h, .token}`.
     pub fn forward(self: PatchBuilder, rows: PreProcessor.Rows) Output {
-        assertTags(rows.values, .{ .batch, .d, .time });
-        assertTags(rows.mask, .{ .batch, .d, .time });
+        assertTags(rows.values, .{ .batch, .variates, .time });
+        assertTags(rows.mask, .{ .batch, .variates, .time });
         // Scaling locations and scale for all timesteps
         var stats = scaling.computeCausalStatistics(
             rows.values,
@@ -164,15 +164,43 @@ pub const PatchBuilder = struct {
     }
 };
 
+const PatchRepresentation = struct {
+    patch_proj: layer.ResidualBlock,
+    forecast_query: Tensor,
+
+    pub fn init(store: zml.io.TensorStore.View) PatchRepresentation {
+        const query = store.createTensor("forecast_query", .{.h}, .replicated, .{ .h = .replicated });
+        return .{
+            .patch_proj = .init(store.withPrefix("patch_proj")),
+            .forecast_query = query,
+        };
+    }
+
+    pub fn forward(self: *const PatchRepresentation, rows: PatchBuilder.PatchRows) Tensor {
+        assertTags(rows.values, .{ .batch, .variates, .token, .h });
+        assertTags(rows.mask, .{ .batch, .variates, .token, .h });
+        const dtype = rows.values.dtype();
+        const x: Tensor = .concatenate(&[_]Tensor{ rows.values, rows.mask.not().convert(dtype) }, .h);
+        return self.patch_proj.forward(x.renameTag(.h, .d));
+    }
+
+    pub fn forecast_tokens(self: *const PatchRepresentation, rows: u32, n_patches: u32) Tensor {
+        assertTags(self.forecast_query, .{.h});
+        const token = self.forecast_query.reshape(.{ .batch = 1, .token = 1, .h = .auto });
+        return token.broad(token.shape().setDim(.batch, rows).setDim(.token, n_patches));
+    }
+};
+
 pub const Model = struct {
     patcher: PatchBuilder,
-    residuals: layer.ResidualBlock,
+    representation: PatchRepresentation,
 
-    pub fn forward(self: Model, targets: Tensor) PatchBuilder.Output {
+    pub fn forward(self: Model, targets: Tensor) Tensor {
         assertTags(targets, .{ .batch, .variates, .time });
         const preprocessed = PreProcessor.forward(targets);
         const patches = self.patcher.forward(preprocessed);
-        return patches;
+        const reprs = self.representation.forward(patches.rows);
+        return reprs;
     }
 };
 
