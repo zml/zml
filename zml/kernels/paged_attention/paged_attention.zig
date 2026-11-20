@@ -39,6 +39,7 @@ pub const Backend = enum {
             .cpu => .stablehlo,
             .furiosa => .tcl,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
+            .ascend => .stablehlo,
         };
     }
 
@@ -49,7 +50,7 @@ pub const Backend = enum {
             .tcl => platform.target == .furiosa,
             .triton => switch (platform.target) {
                 .cuda, .rocm, .oneapi => true,
-                .cpu, .tpu, .neuron, .metal, .furiosa => false,
+                .cpu, .tpu, .neuron, .metal, .furiosa, .ascend => false,
             },
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
