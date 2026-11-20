@@ -1,6 +1,10 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const stdx = zml.stdx;
+
+const scaling = @import("./scaling.zig");
+const layer = @import("./layer.zig");
 
 const Tensor = zml.Tensor;
 
@@ -48,8 +52,9 @@ pub const PreProcessor = struct {
 
         /// Compute mask from infinite and NaN data and replace missing values.
         ///
-        /// Input tensor with dimensions {.b, .v, .t}
+        /// Input tensor with dimensions {.batch, .variates, .time}
         pub fn make(targets: Tensor) TargetsSeries {
+            assertTags(targets, .{ .batch, .variates, .time });
             const mask = targets.isFinite(); // exclude NaN and inf
             return .{
                 .values = mask.select(targets, .scalar(0, targets.dtype())),
@@ -64,20 +69,22 @@ pub const PreProcessor = struct {
         roles: Tensor,
 
         pub fn make(targets: TargetsSeries) Rows {
-            const n_batch = targets.values.dim(.b);
-            const n_targets = targets.values.dim(.v);
+            assertTags(targets.values, .{ .batch, .variates, .time });
+            assertTags(targets.mask, .{ .batch, .variates, .time });
+            const n_batch = targets.values.dim(.batch);
+            const n_targets = targets.values.dim(.variates);
             const target_roles = Tensor.scalar(@backingInt(Roles.target), .u8)
-                .broad(.init(.{ .v = n_targets }, .u8));
+                .broad(.init(.{ .variates = n_targets }, .u8));
             return .{
-                .values = ffill_mask(targets.values, targets.mask, .t).renameTag(.v, .d),
-                .mask = targets.mask.renameTag(.v, .d),
-                .roles = target_roles.renameTag(.v, .d).repeat1d(.v, @intCast(n_batch)),
+                .values = ffillMissing(targets.values, targets.mask, .time).renameTag(.variates, .d),
+                .mask = targets.mask.renameTag(.variates, .d),
+                .roles = target_roles.renameTag(.variates, .d).repeat1d(.variates, @intCast(n_batch)),
             };
         }
 
         /// Forward-fill unobserved positions.
         /// Leading unobserved positions are forward filled with the unobserved value.
-        fn ffill_mask(inputs: Tensor, mask: Tensor, axis: anytype) Tensor {
+        fn ffillMissing(inputs: Tensor, mask: Tensor, axis: anytype) Tensor {
             // A tensor like inputs with an arange across axis.
             // We replaced the masked indices with preceding non masked index.
             var idx = Tensor.iota(inputs.shape(), axis);
@@ -96,69 +103,93 @@ pub const PreProcessor = struct {
     };
 
     pub fn forward(targets: Tensor) Rows {
+        assertTags(targets, .{ .batch, .variates, .time });
         return .make(.make(targets));
     }
 };
 
-const ResidualBlock = struct {
-    hidden_layer: zml.nn.Linear,
-    output_layer: zml.nn.Linear,
-    residual_layer: zml.nn.Linear,
+pub const PatchBuilder = struct {
+    pub const Options = struct {
+        minimum_scale: f32,
+        patch_size: u32,
+        scale_factor_exponent: f32 = 10.0,
+        stabilize_with_global: bool,
+        use_asinh: bool,
+    };
 
-    pub fn init(store: zml.io.TensorStore.View) ResidualBlock {
-        const hl = store.withPrefix("hidden_layer");
-        const hidden_layer: zml.nn.Linear = .init(
-            hl.createTensor(
-                "weight",
-                .{ .h, .d },
-                .replicated,
-                .{ .h = .replicated, .d = .replicated },
-            ),
-            hl.maybeCreateTensor("bias", .{.h}, .replicated, .{ .h = .replicated }),
-            .d,
-        );
-        const ol = store.withPrefix("output_layer");
-        const output_layer: zml.nn.Linear = .init(
-            ol.createTensor(
-                "weight",
-                .{ .out, .h },
-                .replicated,
-                .{ .out = .replicated, .h = .replicated },
-            ),
-            ol.maybeCreateTensor("bias", .{.out}, .replicated, .{ .out = .replicated }),
-            .h,
-        );
-        const rl = store.withPrefix("residual_layer");
-        const residual_layer: zml.nn.Linear = .init(
-            rl.createTensor(
-                "weight",
-                .{ .out, .d },
-                .replicated,
-                .{ .out = .replicated, .d = .replicated },
-            ),
-            rl.maybeCreateTensor("bias", .{.out}, .replicated, .{ .out = .replicated }),
-            .d,
-        );
+    options: Options,
 
-        return .{
-            .hidden_layer = hidden_layer,
-            .output_layer = output_layer,
-            .residual_layer = residual_layer,
-        };
+    const PatchRows = struct {
+        values: Tensor,
+        mask: Tensor,
+    };
+
+    const Output = struct {
+        rows: PatchRows,
+        stats: scaling.LocationScales,
+    };
+
+    /// Split the `.time` axis into a `.token` sequence axis and a `.h` patch dimension.
+    fn toPatches(self: PatchBuilder, x: Tensor) Tensor {
+        return x.splitAxis(.time, .{ .token = .auto, .h = self.options.patch_size });
     }
 
-    pub fn forward(self: ResidualBlock, x: Tensor) Tensor {
-        const h = self.hidden_layer.forward(x, x.dtype()).silu();
-        const out = self.output_layer.forward(h, h.dtype());
-        return out.add(self.residual_layer.forward(x, x.dtype()));
+    /// Transform input time series into tokens.
+    ///
+    /// Input are expected in shape `{.row, .time}` and the output is `{.row, .h, .token}`.
+    pub fn forward(self: PatchBuilder, rows: PreProcessor.Rows) Output {
+        assertTags(rows.values, .{ .batch, .d, .time });
+        assertTags(rows.mask, .{ .batch, .d, .time });
+        // Scaling locations and scale for all timesteps
+        var stats = scaling.computeCausalStatistics(
+            rows.values,
+            rows.mask,
+            .{
+                .minimum_scale = self.options.minimum_scale,
+                .stabilize_with_global = self.options.stabilize_with_global,
+            },
+            .time,
+        );
+        // Use only the last value in each patch for its whole patch
+        const ps: u31 = @intCast(self.options.patch_size);
+        stats.scales = scaling.patchwiseBroadcastLast(stats.scales, .time, ps);
+        stats.locations = scaling.patchwiseBroadcastLast(stats.locations, .time, ps);
+        // Scale inputs with locations and scales
+        const scaled = scaling.scaleByAffineAsinh(rows.values, rows.mask, stats, self.options.use_asinh);
+
+        return .{
+            .rows = .{ .values = self.toPatches(scaled), .mask = self.toPatches(rows.mask) },
+            .stats = stats,
+        };
     }
 };
 
 pub const Model = struct {
-    residuals: ResidualBlock,
+    patcher: PatchBuilder,
+    residuals: layer.ResidualBlock,
 
-    pub fn forward(self: Model, targets: Tensor) PreProcessor.Rows {
-        _ = self;
-        return PreProcessor.forward(targets);
+    pub fn forward(self: Model, targets: Tensor) PatchBuilder.Output {
+        assertTags(targets, .{ .batch, .variates, .time });
+        const preprocessed = PreProcessor.forward(targets);
+        const patches = self.patcher.forward(preprocessed);
+        return patches;
     }
 };
+
+/// Debug-assert that `x` has exactly the given tags (in any order).
+fn assertTags(x: Tensor, comptime tags: anytype) void {
+    const n_tags = tags.len;
+    const expected = comptime blk: {
+        // Braces are doubled because this is spliced into a format string.
+        var s: []const u8 = "{{";
+        for (tags, 0..) |t, i| {
+            s = s ++ (if (i == 0) "" else ", ") ++ "." ++ @tagName(t);
+        }
+        break :blk s ++ "}}";
+    };
+    stdx.debug.assert(
+        x.rank() == n_tags and x.shape().hasTags(tags),
+        "Expected tensor with tags " ++ expected ++ ", got {f}",
+        .{x},
+    );
+}
