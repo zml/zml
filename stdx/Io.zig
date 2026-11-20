@@ -114,6 +114,7 @@ pub const AllocatingLimitedConcurrentGroup = struct {
         args: std.meta.ArgsTuple(@TypeOf(function)),
     ) !void {
         self.queue.putOneUncancelable(io, true) catch unreachable;
+        errdefer _ = self.queue.getOneUncancelable(io) catch unreachable;
 
         try self.group.concurrent(io, struct {
             fn wrapper(
