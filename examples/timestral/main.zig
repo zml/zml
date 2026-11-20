@@ -14,9 +14,14 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+    var model_dir = try std.Io.Dir.cwd().openDir(io, args.model, .{});
+    defer model_dir.close(io);
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
+
+    const config = try parseConfig(model.Config, allocator, io, model_dir);
+    defer config.deinit();
 
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.model);
     defer registry.deinit();
@@ -26,10 +31,11 @@ pub fn main(init: std.process.Init) !void {
 
     const forecaster: model.Model = .{
         .residuals = .init(store.view().withPrefix("representation.patch_proj")),
+        .patcher = .{ .options = shallowPick(&config.value, model.PatchBuilder.Options) },
     };
 
     // Dummy input
-    const input: zml.Tensor = .init(.{ .b = 1, .v = 1, .t = 2000 }, .f32);
+    const input: zml.Tensor = .init(.{ .batch = 1, .variates = 1, .time = 320 }, .f32);
 
     var executable = try platform.compile(allocator, io, forecaster, .forward, .{input}, .{});
     defer executable.deinit();
@@ -49,13 +55,13 @@ pub fn main(init: std.process.Init) !void {
     try loader.await(io);
 
     // Dummy data
-    const buf: []f32 = try allocator.alloc(f32, 3200);
+    const buf: []f32 = try allocator.alloc(f32, 320);
     defer allocator.free(buf);
     for (buf, 0..) |*x, i| x.* = @as(f32, @floatFromInt(i)) - 30.0;
     @memset(buf[0..3], std.math.nan(f32)); // leading missing data: the series starts late
-    for ([_]usize{ 10, 1210, 1640 }) |i| buf[i] = std.math.inf(f32); // isolated +inf values
-    buf[1500] = -std.math.inf(f32); // and one -inf
-    @memset(buf[1800..1820], std.math.nan(f32)); // a gap inside the context
+    for ([_]usize{ 10, 121, 164 }) |i| buf[i] = std.math.inf(f32); // isolated +inf values
+    buf[150] = -std.math.inf(f32); // and one -inf
+    @memset(buf[180..182], std.math.nan(f32)); // a gap inside the context
 
     const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(buf));
     var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
@@ -80,4 +86,47 @@ pub fn main(init: std.process.Init) !void {
         "\n\nThe result is {d}\n",
         .{result_slice},
     );
+}
+
+pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(T) {
+    const file = try dir.openFile(io, "config.json", .{});
+    defer file.close(io);
+
+    var buffer: [256]u8 = undefined;
+    var file_reader = file.reader(io, &buffer);
+    var reader: std.json.Reader = .init(allocator, &file_reader.interface);
+    defer reader.deinit();
+
+    return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
+}
+
+/// Builds a `Subset` by copying, field by field, the matching fields of `config`
+/// (a struct value, or a single-item pointer to one).
+/// Fields of `Subset` missing from `config` use their default value, or trigger a compile error.
+pub fn shallowPick(config: anytype, comptime Subset: type) Subset {
+    const Config = switch (@typeInfo(@TypeOf(config))) {
+        .pointer => |p| blk: {
+            if (p.size != .one) {
+                @compileError(
+                    "pick: expected a struct or a single-item pointer to one, got " ++ @typeName(@TypeOf(config)),
+                );
+            }
+            break :blk p.child;
+        },
+        else => @TypeOf(config),
+    };
+
+    const info = @typeInfo(Subset).@"struct";
+    var result: Subset = undefined;
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
+        if (@hasField(Config, name)) {
+            @field(result, name) = @field(config, name);
+        } else if (attrs.defaultValue(Field)) |default| {
+            @field(result, name) = default;
+        } else {
+            @compileError("pick: field '" ++ name ++ "' of " ++ @typeName(Subset) ++
+                " not found in " ++ @typeName(Config) ++ " and has no default value");
+        }
+    }
+    return result;
 }
