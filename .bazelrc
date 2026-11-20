@@ -15,9 +15,9 @@ common          --@rules_zig//zig/settings:host_mode=release_safe
 common          --copt='-w'
 common          --host_copt='-w'
 
-# Enable C++17
-common          --cxxopt='-std=c++17'
-common          --host_cxxopt='-std=c++17'
+# XLA and Triton require C++20.
+common          --cxxopt='-std=c++20'
+common          --host_cxxopt='-std=c++20'
 common          --enable_runfiles
 
 # Ensure rules_python doesn't rely on the system's Python for stage-1 bootstrap

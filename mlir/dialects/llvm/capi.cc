@@ -49,7 +49,7 @@ MlirAttribute mlirLLVMLoopAnnotationAttrGet(MlirContext context,
   if (!ctx)
     return {nullptr};
   return wrap(LLVM::LoopAnnotationAttr::get(
-      ctx, optional<BoolAttr>(disableNonforced), {}, {},
+      ctx, {}, optional<BoolAttr>(disableNonforced), {}, {},
       optional<LLVM::LoopUnrollAttr>(unroll), {}, {}, {}, {}, {}, {},
-      optional<BoolAttr>(mustProgress), {}, {}, {}, {}));
+      optional<BoolAttr>(mustProgress), {}, {}, {}, {}, {}));
 }
