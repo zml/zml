@@ -19,7 +19,11 @@
 //! leg in BF16 ulps; the final K and V caches are judged the same way, per
 //! position. A leg whose program the backend refuses (UNIMPLEMENTED) prints
 //! the refusal verbatim and is not run; the process still exits 0. Exit 1
-//! means a leg failed (any other error) or ran and broke a limit.
+//! means a leg failed (any other error) or a Tenstorrent leg ran and broke a
+//! limit; the CPU legs calibrate (BF16 alone and the CPU's own TP=2 distance)
+//! and the probe programs only report. It also prints, per leg, the time of
+//! each phase (compile includes Load and the kernel JIT) and the device
+//! memory in use.
 
 const std = @import("std");
 
@@ -41,12 +45,33 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.tenstorrent_m1);
 
-/// DESIGN 14.2, M1: every step within this of the CPU F32 reference.
+/// DESIGN 14.2, M1: every step within this of the CPU F32 reference. The
+/// worst token of a run sits near it: over seeds 1 to 31 the CPU backend's
+/// BF16 legs exceed it on two seeds (7 and 26) and the cards on two (13 and
+/// 26), always on a prefill token, while the mean per-token RMS error stays
+/// at 5.6e-3 to 6.5e-3 on every leg (seeds 1 to 11); a run's verdict
+/// depends on its input.
 const reference_limit = 2e-2;
-/// DESIGN 14.2, M1: "TP=2 and 1-card outputs agree to BF16 rounding", read as
-/// max |a - b| within this many BF16 units in the last place of max |ref|.
-/// The CPU backend's own TP=2 and one-device BF16 runs differ by one.
-const agreement_ulps = 2;
+/// DESIGN 14.2, M1: "TP=2 and 1-card outputs agree to BF16 rounding". Summing
+/// the partial products of a split matmul in another order moves outputs by
+/// BF16 rounding steps, on the CPU backend too, so the rule is calibrated by
+/// the CPU backend's own TP=2 and one-device runs in the same run (the
+/// calibration pair, reported and not judged). Measured over seeds 1 to 11,
+/// and held on seeds 12 to 31 measured after the rule was set: the RMS of
+/// the difference relative to the RMS of the reference is 3.5e-3 to 3.7e-3
+/// on the CPU's prefill and 0.95 to 1.00 times the CPU's on the cards (0.89
+/// to 0.99 on the decode steps), while the worst row's maximum difference,
+/// in BF16 ulps of the row's max |ref|, is 2 to 4 on the CPU and 2 to 5 on
+/// the cards, unrelated within a run. So a two-device leg agrees when, for
+/// each output (the prefill, the decode steps together, the K cache, the V
+/// cache), its RMS distance is within `agreement_rms_factor` times the
+/// CPU's or below `agreement_rms_floor` (about one BF16 rounding), and no
+/// row is more than `agreement_row_ulps` apart (twice the CPU's worst).
+const agreement_rms_factor = 1.25;
+const agreement_rms_floor = 0x1p-10;
+const agreement_row_ulps = 8;
+/// The CPU legs whose distance calibrates the agreement limit.
+const calibration_pair = pairs[0];
 
 /// Device memory of a device-free leg: the layer's BF16 weights (436 MB on one
 /// device) and its activations. The plugin's default is 16 MiB.
@@ -55,10 +80,12 @@ const device_free_arena_bytes = 1 << 30;
 const Args = struct {
     model: []const u8,
     legs: []const u8 = "cpu_bf16,cpu_bf16_tp2,fake1,fake2",
-    program: enum { layer, standin } = .layer,
+    program: enum { layer, standin, probe_ops, probe_attention, probe_mlp, probe_norm_fp32, probe_norm_tf32 } = .layer,
     steps: u32 = 16,
     seed: u64 = 1,
     dump: ?[]const u8 = null,
+    outputs: ?[]const u8 = null,
+    inputs: ?[]const u8 = null,
 
     pub const help =
         \\ Use tenstorrent_m1 --model=<dir> [options]
@@ -71,11 +98,22 @@ const Args = struct {
         \\   --legs=<list>       Comma-separated legs besides the reference: cpu_bf16, cpu_bf16_tp2,
         \\                       fake1, fake2, cards1, cards2 (default: cpu_bf16,cpu_bf16_tp2,fake1,fake2).
         \\                       cards1 and cards2 open the cards: run them under the card lock.
-        \\   --program=<name>    layer (default), or standin: elementwise arithmetic on the same
-        \\                       arguments, for what the backend can compile before the layer
+        \\   --program=<name>    layer (default); standin: elementwise arithmetic on the same
+        \\                       arguments and the norm weights; probes of the layer's numerics, on
+        \\                       the same arguments and outputs (llama_layer.zig): probe_ops (input
+        \\                       RMSNorm; k_proj of the raw input; v_proj of the normalized input),
+        \\                       probe_attention (x + attention(x)), probe_mlp (x + mlp(norm(x))),
+        \\                       probe_norm_fp32 and probe_norm_tf32 (the layer with each RMSNorm
+        \\                       rounded once from F32, or as TTNN's rms_norm rounds, on BF16 legs)
         \\   --steps=<n>         Decode steps after the prefill (default 16, at most 128)
         \\   --seed=<n>          Seed of the token sequence (default 1)
         \\   --dump=<dir>        Writes the programs handed to PJRT under <dir>/<leg>/, as the corpus does
+        \\   --outputs=<dir>     Writes every leg's outputs as little-endian F32 under <dir>/<leg>/:
+        \\                       hidden.f32 (the prefill's rows, then one row per decode step),
+        \\                       k.f32 and v.f32 (the final caches in [layer, k, h, hd] order)
+        \\   --inputs=<dir>      Takes the hidden states from <dir>/cpu/hidden.f32, as --outputs wrote
+        \\                       them (the reference's outputs of another program, e.g. probe_attention
+        \\                       before probe_mlp), rounded to BF16 for every leg, the reference included
         \\
     ;
 };
@@ -128,13 +166,60 @@ const Results = struct {
     timings: Timings,
 };
 
+const max_decode_steps = llama_layer.cache_positions - llama_layer.prefill_tokens;
+
 const Timings = struct {
     open_ms: f64 = 0,
-    compile_ms: f64 = 0,
+    /// Per program, indexed like `phases`: PJRT compile, Load and the kernel
+    /// JIT of the Load-time warm-up, which `Exe.compile` does together.
+    compile_ms: [phases.len]f64 = @splat(0),
     load_ms: f64 = 0,
     prefill_ms: f64 = 0,
-    decode_ms: f64 = 0,
+    /// Launch to every result ready, per decode step.
+    decode_ms: [max_decode_steps]f64 = @splat(0),
+    /// Device memory in use, the largest over the leg's devices, as PJRT
+    /// reports it (bytes_in_use; zero where the plugin reports nothing).
+    bytes_after_load: u64 = 0,
+    bytes_after_last_step: u64 = 0,
+    peak_bytes: ?u64 = null,
+    bytes_limit: ?u64 = null,
+
+    const DecodeStats = struct { mean: f64, median: f64, min: f64, max: f64 };
+
+    fn decode(self: *const Timings, steps: u32) DecodeStats {
+        if (steps == 0) return .{ .mean = 0, .median = 0, .min = 0, .max = 0 };
+        var sorted: [max_decode_steps]f64 = undefined;
+        @memcpy(sorted[0..steps], self.decode_ms[0..steps]);
+        std.mem.sort(f64, sorted[0..steps], {}, std.sort.asc(f64));
+        var sum: f64 = 0;
+        for (sorted[0..steps]) |ms| sum += ms;
+        const median = if (steps % 2 == 1) sorted[steps / 2] else (sorted[steps / 2 - 1] + sorted[steps / 2]) / 2;
+        return .{ .mean = sum / @as(f64, @floatFromInt(steps)), .median = median, .min = sorted[0], .max = sorted[steps - 1] };
+    }
+
+    fn recordMemory(self: *Timings, platform: *const zml.Platform, after: enum { load, last_step }) void {
+        for (platform.devices) |device| {
+            const stats = device.memoryStats();
+            switch (after) {
+                .load => self.bytes_after_load = @max(self.bytes_after_load, stats.bytes_in_use),
+                .last_step => self.bytes_after_last_step = @max(self.bytes_after_last_step, stats.bytes_in_use),
+            }
+            if (stats.peak_bytes_in_use) |peak| self.peak_bytes = @max(self.peak_bytes orelse 0, peak);
+            if (stats.bytes_limit) |limit| self.bytes_limit = @max(self.bytes_limit orelse 0, limit);
+        }
+    }
 };
+
+test "decode step statistics" {
+    var t: Timings = .{};
+    for ([_]f64{ 4, 1, 3, 2 }, 0..) |ms, i| t.decode_ms[i] = ms;
+    const s = t.decode(4);
+    try std.testing.expectEqual(2.5, s.mean);
+    try std.testing.expectEqual(2.5, s.median);
+    try std.testing.expectEqual(1, s.min);
+    try std.testing.expectEqual(4, s.max);
+    try std.testing.expectEqual(3, t.decode(3).median);
+}
 
 const Outcome = union(enum) {
     ran: Results,
@@ -158,6 +243,40 @@ const Context = struct {
     /// See `Args.dump`.
     dump: ?[]const u8,
 };
+
+/// See `Args.inputs`: replaces `rows` by the reference's outputs under `dir`, rounded to BF16.
+fn readInputs(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, rows: []zml.floats.BFloat16) !void {
+    const path = try std.Io.Dir.path.join(allocator, &.{ dir, reference_leg.name, "hidden.f32" });
+    defer allocator.free(path);
+    const values = try allocator.alloc(f32, rows.len);
+    defer allocator.free(values);
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const read = try file.readPositionalAll(io, std.mem.sliceAsBytes(values), 0);
+    if (read != values.len * @sizeOf(f32)) {
+        log.err("{s}: {d} bytes, the run needs {d} (as many steps as the run that wrote it)", .{ path, read, values.len * @sizeOf(f32) });
+        return error.UnexpectedInputs;
+    }
+    for (values, rows) |f, *b| b.* = .fromF32(f);
+}
+
+/// See `Args.outputs`.
+fn writeOutputs(io: std.Io, dir_path: []const u8, leg: []const u8, results: Results) !void {
+    var root = try std.Io.Dir.cwd().createDirPathOpen(io, dir_path, .{});
+    defer root.close(io);
+    var dir = try root.createDirPathOpen(io, leg, .{});
+    defer dir.close(io);
+    {
+        var file = try dir.createFile(io, "hidden.f32", .{});
+        defer file.close(io);
+        var buf: [64 * 1024]u8 = undefined;
+        var writer = file.writerStreaming(io, &buf);
+        for (results.hidden) |h| try writer.interface.writeAll(std.mem.sliceAsBytes(h));
+        try writer.interface.flush();
+    }
+    try dir.writeFile(io, .{ .sub_path = "k.f32", .data = std.mem.sliceAsBytes(results.k) });
+    try dir.writeFile(io, .{ .sub_path = "v.f32", .data = std.mem.sliceAsBytes(results.v) });
+}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -197,6 +316,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(ids);
     const rows_bf16 = try embeddingRows(allocator, io, &registry, ids, parsed_config.value.hidden_size);
     defer allocator.free(rows_bf16);
+    if (args.inputs) |dir| try readInputs(allocator, io, dir, rows_bf16);
     const rows_f32 = try allocator.alloc(f32, rows_bf16.len);
     defer allocator.free(rows_f32);
     for (rows_bf16, rows_f32) |b, *f| f.* = b.toF32();
@@ -223,11 +343,22 @@ pub fn main(init: std.process.Init) !void {
 
     var report: Report = .{ .ctx = &ctx, .program = @tagName(args.program), .ids = ids, .model = args.model };
     defer report.deinit();
+    // Judging a two-device leg needs the CPU's own distance, which calibrates the limit.
+    for (pairs[1..]) |pair| {
+        if (requested[legIndex(pair[0]).?] and requested[legIndex(pair[1]).?]) {
+            for (calibration_pair) |name| requested[legIndex(name).?] = true;
+        }
+    }
     switch (args.program) {
         inline else => |program| {
             const func = comptime switch (program) {
                 .layer => llama_layer.forward,
                 .standin => llama_layer.standIn,
+                .probe_ops => llama_layer.probeOps,
+                .probe_attention => llama_layer.probeAttention,
+                .probe_mlp => llama_layer.probeMlp,
+                .probe_norm_fp32 => llama_layer.probeNormFp32,
+                .probe_norm_tf32 => llama_layer.probeNormTf32,
             };
             report.reference = try runLeg(&ctx, func, reference_leg);
             for (known_legs, requested, &report.legs) |leg, wanted, *outcome| {
@@ -235,6 +366,12 @@ pub fn main(init: std.process.Init) !void {
                 outcome.* = try runLeg(&ctx, func, leg);
             }
         },
+    }
+    if (args.outputs) |dir| {
+        if (report.reference == .ran) try writeOutputs(io, dir, reference_leg.name, report.reference.ran);
+        for (known_legs, report.legs) |leg, outcome| {
+            if (outcome == .ran) try writeOutputs(io, dir, leg.name, outcome.ran);
+        }
     }
 
     var stdout_buf: [4096]u8 = undefined;
@@ -391,11 +528,12 @@ fn runOnPlatform(ctx: *const Context, comptime func: anytype, leg: Leg, platform
     // Both programs are compiled even when one is refused: each refusal is reported.
     var refusals: [phases.len]?Failure = @splat(null);
     errdefer for (refusals) |refusal| if (refusal) |f| allocator.free(f.message);
-    var start: std.Io.Timestamp = .now(io, .awake);
-    for (phases, &inputs, &compiled, &refusals) |phase, *input, *exe, *refusal| {
+    var start: std.Io.Timestamp = undefined;
+    for (phases, &inputs, &compiled, &refusals, &timings.compile_ms) |phase, *input, *exe, *refusal, *compile_ms| {
         input.* = .init(layer, ctx.config, phase, leg.dtype, meshes, platform.target, backend);
         stage.* = if (phase == .prefill) "compile the prefill" else "compile the decode step";
         pjrt_error_log.reset();
+        start = .now(io, .awake);
         exe.* = Exe.compile(allocator, io, platform, .{
             .meshes = &meshes.all(),
             .program_name = llama_layer.programName(phase),
@@ -404,8 +542,8 @@ fn runOnPlatform(ctx: *const Context, comptime func: anytype, leg: Leg, platform
             refusal.* = try failure(ctx, stage.*, err);
             break :b null;
         };
+        compile_ms.* = msSince(io, start);
     }
-    timings.compile_ms = msSince(io, start);
     for (refusals) |refusal| if (refusal != null) return .{ .refused = refusals };
     const exes: [phases.len]*const Exe = .{ &compiled[0].?, &compiled[1].? };
 
@@ -462,6 +600,8 @@ fn runOnPlatform(ctx: *const Context, comptime func: anytype, leg: Leg, platform
         r.* = try .init(exe, allocator, .{ .layer = weights });
         runners_made += 1;
     }
+    // Weights, caches and positions are on the devices; nothing has run.
+    timings.recordMemory(platform, .load);
 
     const hidden = try allocator.alloc([]f32, step_count);
     var hidden_made: usize = 0;
@@ -496,19 +636,21 @@ fn runOnPlatform(ctx: *const Context, comptime func: anytype, leg: Leg, platform
             .outputs = .{ .hidden = &hidden_buffer, .kv_cache = &kv },
         }, .{ .wait = true });
         const took = msSince(io, start);
-        if (step == 0) timings.prefill_ms = took else timings.decode_ms += took / @as(f64, @floatFromInt(ctx.steps));
+        if (step == 0) timings.prefill_ms = took else timings.decode_ms[step - 1] = took;
 
         stage.* = "read the results back";
         hidden[step] = try readF32(allocator, io, hidden_buffer);
         hidden_made += 1;
     }
 
+    timings.recordMemory(platform, .last_step);
     stage.* = "read the results back";
     const k = try readCanonicalKv(allocator, io, kv.k);
     errdefer allocator.free(k);
     const v = try readCanonicalKv(allocator, io, kv.v);
-    log.info("{s}: ran (open {d:.0} ms, compile {d:.0} ms, load {d:.0} ms, prefill {d:.1} ms, decode {d:.2} ms per step)", .{
-        leg.name, timings.open_ms, timings.compile_ms, timings.load_ms, timings.prefill_ms, timings.decode_ms,
+    const decode = timings.decode(ctx.steps);
+    log.info("{s}: ran (open {d:.0} ms, compile {d:.0} + {d:.0} ms, load {d:.0} ms, prefill {d:.1} ms, decode {d:.2} ms per step)", .{
+        leg.name, timings.open_ms, timings.compile_ms[0], timings.compile_ms[1], timings.load_ms, timings.prefill_ms, decode.mean,
     });
     return .{ .ran = .{ .hidden = hidden, .k = k, .v = v, .timings = timings } };
 }
@@ -623,8 +765,9 @@ const Distance = struct {
         return self.rel <= limit;
     }
 
-    fn agrees(self: Distance) bool {
-        return self.ulps <= agreement_ulps;
+    /// NaN agrees with nothing, and nothing agrees under a NaN limit.
+    fn agrees(self: Distance, limit_ulps: f64) bool {
+        return self.ulps <= limit_ulps;
     }
 
     fn maxWith(self: Distance, other: Distance) Distance {
@@ -662,8 +805,50 @@ test "Distance: zero rows of the reference must stay zero, NaN fails" {
     try std.testing.expect(std.math.isInf(Distance.of(&written, &ref, &ref, 2).rel));
     const nan = [_]f32{ std.math.nan(f32), 1, 0, 0 };
     const d: Distance = .of(&nan, &ref, &ref, 2);
-    try std.testing.expect(std.math.isNan(d.rel) and !d.within(2e-2) and !d.agrees());
+    try std.testing.expect(std.math.isNan(d.rel) and !d.within(2e-2) and !d.agrees(agreement_row_ulps));
     try std.testing.expect(std.math.isNan(d.maxWith(.{}).rel) and std.math.isNan(Distance.maxWith(.{}, d).rel));
+}
+
+/// The RMS limit of an output of a two-device leg from the calibration
+/// pair's RMS distance of the same output (see `agreement_rms_factor`); NaN,
+/// which nothing passes, when that is NaN.
+fn rmsLimit(cpu_rms: f64) f64 {
+    if (std.math.isNan(cpu_rms)) return cpu_rms;
+    return @max(agreement_rms_floor, agreement_rms_factor * cpu_rms);
+}
+
+test "the agreement limits follow the CPU backend's own TP=2 distance" {
+    try std.testing.expectEqual(1.25 * 3.5e-3, rmsLimit(3.5e-3));
+    try std.testing.expectEqual(agreement_rms_floor, rmsLimit(0));
+    try std.testing.expect(std.math.isNan(rmsLimit(std.math.nan(f64))));
+    const A = Report.Agreement;
+    const cpu: A = .{ .rms = .{ 3.5e-3, 3e-3, 0, 0 }, .row = .{ .ulps = 2 } };
+    try std.testing.expect((A{ .rms = .{ 3.4e-3, 3.7e-3, 0, 1e-4 }, .row = .{ .ulps = 5 } }).agrees(cpu));
+    // 4.5e-3 > 1.25 * 3.5e-3 on the prefill.
+    try std.testing.expect(!(A{ .rms = .{ 4.5e-3, 3e-3, 0, 0 }, .row = .{ .ulps = 2 } }).agrees(cpu));
+    // A cache the CPU keeps identical may differ by less than one rounding, not more.
+    try std.testing.expect(!(A{ .rms = .{ 3e-3, 3e-3, 2e-3, 0 }, .row = .{ .ulps = 2 } }).agrees(cpu));
+    try std.testing.expect(!(A{ .rms = .{ 3e-3, 3e-3, 0, 0 }, .row = .{ .ulps = 9 } }).agrees(cpu));
+    try std.testing.expect(!(A{ .rms = .{ std.math.nan(f64), 0, 0, 0 }, .row = .{} }).agrees(cpu));
+    try std.testing.expect(!cpu.agrees(null));
+}
+
+test "Agreement measures the RMS distance of each output" {
+    var prefill = [_]f32{ 1, 1, 1, 1 };
+    var prefill_b = [_]f32{ 1, 1, 1, 3 };
+    var decode = [_]f32{ 2, 2 };
+    var hidden = [_][]f32{ &prefill, &decode };
+    var hidden_b = [_][]f32{ &prefill_b, &decode };
+    var kv = [_]f32{ 1, 0 };
+    const a: Results = .{ .hidden = &hidden, .k = &kv, .v = &kv, .timings = .{} };
+    const b: Results = .{ .hidden = &hidden_b, .k = &kv, .v = &kv, .timings = .{} };
+    const d: Report.Agreement = .of(b, a, a, 1, .{ .hidden = 2, .kv = 2 });
+    // sqrt(2^2 / 4) on the prefill; nothing else differs.
+    try std.testing.expectEqual(1, d.rms[0]);
+    try std.testing.expectEqual(0, d.rms[1]);
+    try std.testing.expectEqual(0, d.rms[2]);
+    // Row 1 of the prefill: |3 - 1| in ulps of 1 (2^-7).
+    try std.testing.expectEqual(256, d.row.ulps);
 }
 
 const Report = struct {
@@ -701,6 +886,9 @@ const Report = struct {
     /// Writes the report; false when a leg that ran broke a limit or a leg failed.
     fn write(self: *const Report, w: *std.Io.Writer) !bool {
         var ok = true;
+        // A probe computes part of the layer, whose outputs the M1 limits are not
+        // about: it shows them, and fails only when a leg fails.
+        const judged = std.mem.eql(u8, self.program, "layer") or std.mem.eql(u8, self.program, "standin");
         const steps = self.ctx.steps;
         try w.print(
             \\
@@ -710,10 +898,10 @@ const Report = struct {
         , .{ self.program, llama_layer.prefill_tokens, steps, self.model, self.ids[0], self.ids[1], self.ids[2], llama_layer.cache_positions });
 
         try w.print("\nlegs\n", .{});
-        try writeOutcome(w, reference_leg, self.reference);
+        try writeOutcome(w, reference_leg, self.reference, steps);
         for (known_legs, self.legs) |leg, outcome| {
             if (outcome == .not_requested) continue;
-            try writeOutcome(w, leg, outcome);
+            try writeOutcome(w, leg, outcome, steps);
             if (outcome == .failed) ok = false;
         }
 
@@ -741,13 +929,21 @@ const Report = struct {
             try w.writeByte('\n');
         }
 
-        try w.print("\nTP=2 against one device: max |a - b| in BF16 ulps of max |ref|, worst token of each step (limit {d})\n", .{agreement_ulps});
+        var agreements: [pairs.len]?Agreement = @splat(null);
+        for (pairs, &agreements) |pair, *agreement| {
+            const a = self.results(pair[0]) orelse continue;
+            const b = self.results(pair[1]) orelse continue;
+            agreement.* = .of(a, b, ref, steps, widths);
+        }
+        const cpu_agreement = agreements[0];
+
+        try w.print("\nTP=2 against one device: max |a - b| in BF16 ulps of max |ref|, worst token of each step (limit {d})\n", .{agreement_row_ulps});
         try w.print("{s:<8} {s:>5}", .{ "step", "pos" });
         for (pairs) |pair| try w.print(" {s:>14}", .{pair[0]});
         try w.writeByte('\n');
         for (0..rowCount(steps)) |row| {
             try writeRowLabel(w, row, steps, null);
-            for (pairs) |pair| {
+            for (pairs, 0..) |pair, p| {
                 const a = self.results(pair[0]) orelse {
                     try w.print(" {s:>14}", .{"-"});
                     continue;
@@ -757,10 +953,26 @@ const Report = struct {
                     continue;
                 };
                 const dist = compare(a, b, ref, row, steps, widths);
+                const judge = p != 0;
                 var cell_buf: [32]u8 = undefined;
-                try w.print(" {s:>14}", .{try std.fmt.bufPrint(&cell_buf, "{d:.2}{s}", .{ dist.ulps, if (dist.agrees()) "" else "!" })});
+                try w.print(" {s:>14}", .{try std.fmt.bufPrint(&cell_buf, "{d:.2}{s}", .{ dist.ulps, if (!judge or dist.agrees(agreement_row_ulps)) "" else "!" })});
             }
             try w.writeByte('\n');
+        }
+
+        try w.print("\nTP=2 against one device: RMS |a - b| / RMS |ref| per output (limit: {d}x the {s} distance, at least 2^-10)\n", .{ agreement_rms_factor, calibration_pair[0] });
+        try w.print("{s:<14}", .{"pair"});
+        for (groups) |group| try w.print(" {s:>12}", .{group});
+        try w.print(" {s:>12}\n", .{"worst row"});
+        for (pairs, agreements, 0..) |pair, maybe, p| {
+            const agreement = maybe orelse continue;
+            try w.print("{s:<14}", .{pair[0]});
+            for (agreement.rms, 0..) |rms, group| {
+                const over = p != 0 and !(rms <= rmsLimit(if (cpu_agreement) |c| c.rms[group] else std.math.nan(f64)));
+                var cell_buf: [32]u8 = undefined;
+                try w.print(" {s:>12}", .{try std.fmt.bufPrint(&cell_buf, "{e:.2}{s}", .{ rms, if (over) "!" else "" })});
+            }
+            try w.print(" {d:>12.2}{s}\n", .{ agreement.row.ulps, if (p == 0) " (calibrates)" else "" });
         }
 
         try w.print("\nverdict (DESIGN 14.2, M1; every output: the prefill's and each decode step's hidden states, per token, and the final K and V caches, per position)\n", .{});
@@ -772,30 +984,92 @@ const Report = struct {
                 .ran => |r| {
                     const worst, const at = worstRow(r, ref, ref, steps, widths);
                     const pass = worst.within(reference_limit);
-                    if (!pass) ok = false;
+                    // The CPU legs show what BF16 costs on their own: reported, not judged.
+                    if (!pass and judged and leg.where != .cpu) ok = false;
                     try w.print("  {s:<13} {s} 2e-2 of the reference (worst {e:.2}: ", .{ leg.name, if (pass) "within" else "NOT within", worst.rel });
                     try writeWhere(w, at, steps, worst.row);
-                    try w.print(")\n", .{});
+                    try w.print("){s}\n", .{if (leg.where == .cpu and !pass) ", the CPU backend itself (not judged)" else ""});
                 },
             }
         }
-        for (pairs) |pair| {
-            const a = self.results(pair[0]) orelse continue;
-            const b = self.results(pair[1]) orelse continue;
-            var worst: Distance = .{};
-            for (0..rowCount(steps)) |row| worst = worst.maxWith(compare(a, b, ref, row, steps, widths));
-            const pass = worst.agrees();
-            if (!pass) ok = false;
-            try w.print("  {s} vs {s}: {s} to {d} BF16 ulps (worst {d:.2})\n", .{ pair[0], pair[1], if (pass) "agree" else "DO NOT agree", agreement_ulps, worst.ulps });
+        var cards_agree = false;
+        for (pairs, agreements, 0..) |pair, maybe, p| {
+            const agreement = maybe orelse continue;
+            if (p == 0) {
+                try w.print("  {s} vs {s}: RMS {e:.2} on the prefill, worst row {d:.2} BF16 ulps: calibrates the others\n", .{ pair[0], pair[1], agreement.rms[0], agreement.row.ulps });
+                continue;
+            }
+            const pass = agreement.agrees(cpu_agreement);
+            if (!pass and judged) ok = false;
+            if (std.mem.eql(u8, pair[0], "cards2")) cards_agree = pass;
+            try w.print("  {s} vs {s}: {s} (RMS {e:.2} on the prefill, worst row {d:.2} BF16 ulps)\n", .{ pair[0], pair[1], if (pass) "agree" else "DO NOT agree", agreement.rms[0], agreement.row.ulps });
         }
         if (std.mem.eql(u8, self.program, "layer")) {
-            const cards_met = self.results("cards1") != null and self.results("cards2") != null and ok;
-            try w.print("  M1 numeric criteria on the cards: {s}\n", .{if (cards_met) "MET" else "not met"});
+            var cards_within = true;
+            for ([_][]const u8{ "cards1", "cards2" }) |name| {
+                const r = self.results(name) orelse {
+                    cards_within = false;
+                    continue;
+                };
+                const worst, _ = worstRow(r, ref, ref, steps, widths);
+                if (!worst.within(reference_limit)) cards_within = false;
+            }
+            try w.print("  M1 numeric criteria on the cards: {s}\n", .{if (cards_within and cards_agree) "MET" else "not met"});
+        } else if (judged) {
+            try w.print("  M1 numeric criteria: not judged on the {s} program\n", .{self.program});
         } else {
-            try w.print("  M1 numeric criteria: not judged on the stand-in program\n", .{});
+            try w.print("  M1 numeric criteria: not judged on the {s} program, a probe (its limits are shown, not enforced)\n", .{self.program});
         }
         return ok;
     }
+
+    /// The outputs whose RMS distances the agreement rule compares: rows of `rowCount` order.
+    const groups = [_][]const u8{ "prefill", "decode", "k cache", "v cache" };
+
+    fn groupRows(group: usize, steps: u32) struct { usize, usize } {
+        return switch (group) {
+            0 => .{ 0, 1 },
+            1 => .{ 1, steps + 1 },
+            2 => .{ steps + 1, steps + 2 },
+            else => .{ steps + 2, steps + 3 },
+        };
+    }
+
+    /// How far a two-device leg is from its one-device leg (see `agreement_rms_factor`).
+    const Agreement = struct {
+        /// RMS |a - b| / RMS |ref| of each of `groups`.
+        rms: [groups.len]f64 = @splat(0),
+        /// The worst row of every output, in BF16 ulps of the row's max |ref|.
+        row: Distance = .{},
+
+        fn of(a: Results, b: Results, ref: Results, steps: u32, widths: Widths) Agreement {
+            var self: Agreement = .{};
+            for (&self.rms, 0..) |*rms, group| {
+                var num: f64 = 0;
+                var den: f64 = 0;
+                const first, const end = groupRows(group, steps);
+                for (first..end) |row| {
+                    for (output(a, row, steps), output(b, row, steps), output(ref, row, steps)) |x, y, r| {
+                        num += (@as(f64, x) - y) * (@as(f64, x) - y);
+                        den += @as(f64, r) * r;
+                    }
+                }
+                rms.* = if (std.math.isNan(num)) num else if (den == 0) (if (num == 0) 0 else std.math.inf(f64)) else @sqrt(num / den);
+            }
+            for (0..rowCount(steps)) |row| self.row = self.row.maxWith(compare(a, b, ref, row, steps, widths));
+            return self;
+        }
+
+        /// Whether `self` agrees, `cpu` being the calibration pair's (null when it did not run).
+        fn agrees(self: Agreement, cpu: ?Agreement) bool {
+            const c = cpu orelse return false;
+            if (!self.row.agrees(agreement_row_ulps)) return false;
+            for (self.rms, c.rms) |d, cpu_rms| {
+                if (!(d <= rmsLimit(cpu_rms))) return false;
+            }
+            return true;
+        }
+    };
 
     /// Values per compared row: one token's hidden state, one cache position (every head).
     const Widths = struct {
@@ -870,13 +1144,27 @@ const Report = struct {
         try w.print(" {s:>12}", .{try std.fmt.bufPrint(&cell_buf, "{e:.2}{s}", .{ dist.rel, if (dist.within(limit)) "" else "!" })});
     }
 
-    fn writeOutcome(w: *std.Io.Writer, leg: Leg, outcome: Outcome) !void {
+    fn writeOutcome(w: *std.Io.Writer, leg: Leg, outcome: Outcome, steps: u32) !void {
         try w.print("  {s:<13} {s:<38} ", .{ leg.name, leg.what });
         switch (outcome) {
             .not_requested => try w.print("not run\n", .{}),
-            .ran => |r| try w.print("ran: open {d:.0} ms, compile {d:.0} ms, load {d:.0} ms, prefill {d:.1} ms, decode {d:.2} ms/step\n", .{
-                r.timings.open_ms, r.timings.compile_ms, r.timings.load_ms, r.timings.prefill_ms, r.timings.decode_ms,
-            }),
+            .ran => |r| {
+                const t = r.timings;
+                const decode = t.decode(steps);
+                try w.print("ran: open {d:.0} ms, compile {d:.0} + {d:.0} ms, load {d:.0} ms, prefill {d:.1} ms, decode {d:.2} ms/step\n", .{
+                    t.open_ms, t.compile_ms[0], t.compile_ms[1], t.load_ms, t.prefill_ms, decode.mean,
+                });
+                try w.print("  {s:<13} decode per step: median {d:.2} ms, min {d:.2}, max {d:.2}", .{ "", decode.median, decode.min, decode.max });
+                if (leg.where != .cpu) {
+                    const mib = 1024.0 * 1024.0;
+                    try w.print("; device memory in use: {d:.1} MiB after load, {d:.1} MiB after the last step", .{
+                        @as(f64, @floatFromInt(t.bytes_after_load)) / mib, @as(f64, @floatFromInt(t.bytes_after_last_step)) / mib,
+                    });
+                    if (t.peak_bytes) |peak| try w.print(", peak {d:.1} MiB", .{@as(f64, @floatFromInt(peak)) / mib});
+                    if (t.bytes_limit) |limit| try w.print(", limit {d:.1} MiB", .{@as(f64, @floatFromInt(limit)) / mib});
+                }
+                try w.writeByte('\n');
+            },
             .refused => |refusals| {
                 try w.print("REFUSED\n", .{});
                 for (refusals) |refusal| if (refusal) |f| try writeFailure(w, f);
