@@ -1,0 +1,70 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+exports_files(["libzml_tenstorrent.BUILD.bazel"])
+
+zig_library(
+    name = "tenstorrent",
+    import_name = "platforms/tenstorrent",
+    main = "tenstorrent.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//platforms:options",
+        "//stdx",
+    ] + select({
+        "//platforms:tenstorrent.enabled": ["@libzml_tenstorrent"],
+        "//conditions:default": [],
+    }),
+)
+
+filegroup(
+    name = "fixtures",
+    srcs = glob(["fixtures/*.yaml"]),
+    visibility = ["//visibility:public"],
+)
+
+_ENABLED_ONLY = select({
+    "//platforms:tenstorrent.enabled": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+# --@zml//platforms:tenstorrent=true: the plugin's device-free runtime on the
+# cluster descriptors of fixtures/, on any Linux host.
+zig_test(
+    name = "device_free_test",
+    srcs = ["smoke.zig"],
+    data = [":fixtures"],
+    main = "device_free_test.zig",
+    target_compatible_with = _ENABLED_ONLY,
+    deps = ["//zml"],
+)
+
+# The cards of this host, through the TTNN runtime.
+zig_test(
+    name = "hardware_test",
+    srcs = ["smoke.zig"],
+    main = "hardware_test.zig",
+    tags = [
+        "manual",
+        "tt_hardware",
+    ],
+    target_compatible_with = _ENABLED_ONLY,
+    deps = ["//zml"],
+)
+
+# zml.testing.env() on the cards, never deinit'ed, as ZML package tests use it:
+# the platform must close the cards when the process exits. Run a hardware
+# test after it to see them usable.
+zig_test(
+    name = "testing_env_hw_test",
+    srcs = ["smoke.zig"],
+    main = "testing_env_hw_test.zig",
+    tags = [
+        "manual",
+        "tt_hardware",
+    ],
+    target_compatible_with = _ENABLED_ONLY,
+    deps = ["//zml"],
+)

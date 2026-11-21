@@ -248,7 +248,7 @@ pub fn init(
         ._shape = shape_,
         ._shards = .empty,
     };
-    const metadata: PjrtBufferMetadata = .init(platform, shape_);
+    const metadata: PjrtBufferMetadata = try .init(platform, shape_);
     const devices = platform.physical_mesh.devices_in_canonical_order;
     const api = platform.pjrt_api;
 

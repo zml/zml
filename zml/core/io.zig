@@ -208,7 +208,7 @@ pub const TensorStore = struct {
         }
 
         pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
-            const tensor = self.maybeCreateTensor(subkey, comptime parseTags(tags), mesh_, partitioning);
+            const tensor = self.maybeCreateTensor(subkey, tags, mesh_, partitioning);
             if (tensor) |t| {
                 const storage = self.store.id_to_sources.getPtr(t.id);
                 storage.?.memory = .host_pinned;
@@ -697,7 +697,11 @@ pub const MemoryWriter = union(enum) {
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
-                .{ .buffered = try .init(allocator, io, platform, shape, buffer) },
+                .{ .buffered = try .init(allocator, io, platform, shape, buffer, .default) },
+            // The direct writer streams raw bytes into tiled buffers, which the
+            // plugin refuses; Buffer.from goes through its tile transpose, into
+            // device and pinned_host memory alike.
+            .tenstorrent => .{ .buffered = try .init(allocator, io, platform, shape, buffer, memory) },
         };
     }
 
@@ -728,14 +732,16 @@ pub const BufferedMemoryWriter = struct {
     platform: *const Platform,
     shape: Shape,
     buffer: *Buffer,
+    memory: Memory.Kind,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer) !BufferedMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer, memory: Memory.Kind) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,
             .shape = shape,
             .buffer = buffer,
+            .memory = memory,
             .interface = .{
                 .buffer = try allocator.alloc(u8, shape.byteSize()),
                 .vtable = &.{
@@ -761,7 +767,7 @@ pub const BufferedMemoryWriter = struct {
             self.platform,
             self.shape,
             @ptrCast(self.interface.buffer),
-            .{ .wait = true },
+            .{ .wait = true, .memory = self.memory },
         ) catch return std.Io.Writer.Error.WriteFailed;
     }
 };

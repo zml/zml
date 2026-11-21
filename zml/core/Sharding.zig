@@ -11,6 +11,7 @@ const stdx = @import("stdx");
 
 const Platform = @import("platform.zig").Platform;
 const PlatformDevice = @import("platform.zig").Device;
+const platform_tenstorrent = @import("platform.zig").tenstorrent;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
@@ -192,7 +193,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .furiosa => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .furiosa, .tenstorrent => .shardy,
         };
     }
 };
@@ -1049,7 +1050,7 @@ pub const PhysicalMesh = struct {
     /// This is used by Strategy.suggest to match intent to bandwidth.
     pub fn shardableAxes(self: PhysicalMesh) []const PhysicalAxisTag {
         return switch (self.target) {
-            .tpu => &.{ .link_x, .link_y, .link_z },
+            .tpu, .tenstorrent => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
             .cpu, .metal, .furiosa => &.{.bus},
@@ -1255,6 +1256,7 @@ pub const PhysicalMesh = struct {
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
             .oneapi, .metal, .furiosa => cpu(allocator, platform_devices),
+            .tenstorrent => tenstorrent(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
@@ -1336,6 +1338,99 @@ pub const PhysicalMesh = struct {
         const axis_strides = try CoordsTopology.axisStrides(axis_sizes[0..rank]);
 
         return CoordsTopology.buildMeshNode(allocator, indexed, axis_sizes[0..rank], axis_tags[0..rank], axis_strides[0..rank], 0, 0);
+    }
+
+    /// Tenstorrent's logical view of the Ethernet cabling, from the plugin's
+    /// device attributes. The non-singleton view axes become link_x, link_y,
+    /// link_z in order, so link_x is the axis of `coords[0]`; a line axis is
+    /// an open ring and a ring axis a closed one. A single chip is one link_x
+    /// device.
+    pub fn tenstorrent(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        if (platform_devices.len == 0) return error.InvalidPhysicalMesh;
+        const placements = try allocator.alloc(TenstorrentPlacement, platform_devices.len);
+        defer allocator.free(placements);
+
+        var view: ?platform_tenstorrent.View = null;
+        for (platform_devices, placements) |device, *placement| {
+            const info: platform_tenstorrent.DeviceInfo = try .init(device.platform, device);
+            if (view) |v| {
+                if (!v.eql(info.view)) return error.InvalidDeviceTopology;
+            }
+            view = info.view;
+            placement.* = .{ .id = device.id(), .coords = info.coords };
+        }
+        return tenstorrentTree(allocator, view.?, placements);
+    }
+
+    pub const TenstorrentPlacement = struct {
+        id: u32,
+        coords: stdx.BoundedArray(u32, MAX_MESH_RANK),
+    };
+
+    /// Builds the tree of a Tenstorrent view. The plugin numbers devices in
+    /// row-major view order, so device ids are checked against the coordinates.
+    pub fn tenstorrentTree(allocator: std.mem.Allocator, view: platform_tenstorrent.View, placements: []const TenstorrentPlacement) !Tree {
+        const axis_tags: [3]PhysicalAxisTag = .{ .link_x, .link_y, .link_z };
+        var extents: stdx.BoundedArray(usize, MAX_MESH_RANK) = .empty;
+        var geometries: stdx.BoundedArray(AxisGeometry, MAX_MESH_RANK) = .empty;
+        for (view.axes.constSlice()) |ax| {
+            switch (ax.kind) {
+                .singleton => continue,
+                .line => geometries.appendAssumeCapacity(.{ .ring = .linear }),
+                .ring => geometries.appendAssumeCapacity(.{ .ring = .closed_ring }),
+            }
+            extents.appendAssumeCapacity(ax.extent);
+        }
+        if (extents.len > axis_tags.len) return error.UnsupportedDeviceCoordsRank;
+        if (extents.len == 0) {
+            extents.appendAssumeCapacity(1);
+            geometries.appendAssumeCapacity(.point_to_point);
+        }
+        if (placements.len != view.deviceCount()) return error.InvalidDeviceTopology;
+
+        const leaves = try allocator.alloc(?Device, placements.len);
+        defer allocator.free(leaves);
+        @memset(leaves, null);
+        for (placements) |placement| {
+            if (placement.coords.len != extents.len) return error.InvalidDeviceCoordsRank;
+            var coords: Device.Coords = @splat(0);
+            var linear: usize = 0;
+            for (placement.coords.constSlice(), extents.constSlice(), 0..) |coord, extent, i| {
+                if (coord >= extent) return error.InvalidDeviceCoords;
+                coords[i] = @intCast(coord);
+                linear = linear * extent + coord;
+            }
+            if (linear != placement.id or leaves[linear] != null) return error.InvalidDeviceTopology;
+            leaves[linear] = .{ .id = placement.id, .coords = coords };
+        }
+
+        var next: usize = 0;
+        return buildTenstorrentNode(allocator, leaves, axis_tags[0..extents.len], extents.constSlice(), geometries.constSlice(), &next);
+    }
+
+    fn buildTenstorrentNode(
+        allocator: std.mem.Allocator,
+        leaves: []const ?Device,
+        tags: []const PhysicalAxisTag,
+        extents: []const usize,
+        geometries: []const AxisGeometry,
+        next: *usize,
+    ) !PhysicalNode {
+        if (tags.len == 0) {
+            defer next.* += 1;
+            return .{ .leaf = leaves[next.*].? };
+        }
+        const children = try allocator.alloc(PhysicalNode, extents[0]);
+        var built: usize = 0;
+        errdefer {
+            for (children[0..built]) |child| freeNode(allocator, child);
+            allocator.free(children);
+        }
+        for (children) |*child| {
+            child.* = try buildTenstorrentNode(allocator, leaves, tags[1..], extents[1..], geometries[1..], next);
+            built += 1;
+        }
+        return .{ .branch = .{ .tag = tags[0], .geometry = geometries[0], .children = children } };
     }
 
     pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !PhysicalMesh {
@@ -3298,4 +3393,106 @@ test "GSPMD executes a reduction across a folded logical axis" {
     var output = try exe.eval(allocator, io, .{input_buffer});
     defer output.deinit();
     try std.testing.expectEqual(expected, try output.getValue([4]i32, io));
+}
+
+test "PhysicalMesh.tenstorrentTree follows the plugin's view" {
+    const View = platform_tenstorrent.View;
+    const TtPlacement = PhysicalMesh.TenstorrentPlacement;
+    const allocator = std.testing.allocator;
+
+    const Case = struct { shape: []const i64, kinds: []const u8 };
+    const cases = [_]Case{
+        .{ .shape = &.{1}, .kinds = "singleton" },
+        .{ .shape = &.{2}, .kinds = "line" },
+        .{ .shape = &.{3}, .kinds = "line" },
+        .{ .shape = &.{4}, .kinds = "ring" },
+        .{ .shape = &.{8}, .kinds = "ring" },
+        .{ .shape = &.{ 2, 2 }, .kinds = "line,line" },
+        .{ .shape = &.{ 2, 4 }, .kinds = "line,ring" },
+        .{ .shape = &.{ 1, 4 }, .kinds = "singleton,ring" },
+        .{ .shape = &.{ 2, 1, 2 }, .kinds = "line,singleton,ring" },
+        .{ .shape = &.{ 2, 2, 2 }, .kinds = "line,line,ring" },
+    };
+    for (cases) |case| {
+        var links: [MAX_MESH_RANK]i64 = @splat(2);
+        const view: View = try .parse(case.shape, case.kinds, links[0..case.shape.len]);
+        const n = view.deviceCount();
+
+        // The plugin's coords: row-major position on the non-singleton axes.
+        var extents: stdx.BoundedArray(u32, MAX_MESH_RANK) = .empty;
+        for (view.axes.constSlice()) |ax| if (ax.kind != .singleton) extents.appendAssumeCapacity(ax.extent);
+        const placements = try allocator.alloc(TtPlacement, n);
+        defer allocator.free(placements);
+        for (placements, 0..) |*placement, id| {
+            placement.* = .{ .id = @intCast(id), .coords = .empty };
+            if (extents.len == 0) {
+                placement.coords.appendAssumeCapacity(0);
+                continue;
+            }
+            placement.coords.len = extents.len;
+            var rest = id;
+            var i = extents.len;
+            while (i > 0) {
+                i -= 1;
+                placement.coords.set(i, @intCast(rest % extents.get(i)));
+                rest /= extents.get(i);
+            }
+        }
+
+        const tree = try PhysicalMesh.tenstorrentTree(allocator, view, placements);
+        var mesh: PhysicalMesh = try .fromOwnedTree(allocator, .tenstorrent, tree);
+        defer mesh.deinit(allocator);
+
+        try std.testing.expectEqual(n, mesh.countDevices());
+        const tags: [3]PhysicalAxisTag = .{ .link_x, .link_y, .link_z };
+        if (extents.len == 0) {
+            try std.testing.expectEqual(1, mesh.axis(.link_x));
+            try std.testing.expectEqual(AxisGeometry.point_to_point, mesh.geometry(.link_x).?);
+        }
+        var axis_index: usize = 0;
+        for (view.axes.constSlice()) |ax| {
+            if (ax.kind == .singleton) continue;
+            const tag = tags[axis_index];
+            try std.testing.expectEqual(@as(i64, ax.extent), mesh.axis(tag));
+            const expected: AxisGeometry = if (ax.kind == .ring) .{ .ring = .closed_ring } else .{ .ring = .linear };
+            try std.testing.expectEqual(expected, mesh.geometry(tag).?);
+            axis_index += 1;
+        }
+        // Canonical order is the plugin's device order, which ZML also uses as partition order.
+        for (mesh.devices_in_canonical_order, 0..) |device, i| {
+            try std.testing.expectEqual(@as(u32, @intCast(i)), device.id);
+        }
+    }
+}
+
+test "PhysicalMesh.tenstorrentTree rejects inconsistent attributes" {
+    const View = platform_tenstorrent.View;
+    const TtPlacement = PhysicalMesh.TenstorrentPlacement;
+    const allocator = std.testing.allocator;
+    const line: View = try .parse(&.{2}, "line", &.{2});
+
+    // A device missing from the view.
+    try std.testing.expectError(error.InvalidDeviceTopology, PhysicalMesh.tenstorrentTree(allocator, line, &.{
+        .{ .id = 0, .coords = .init(&.{0}) },
+    }));
+    // Ids that do not follow row-major view order.
+    try std.testing.expectError(error.InvalidDeviceTopology, PhysicalMesh.tenstorrentTree(allocator, line, &[_]TtPlacement{
+        .{ .id = 1, .coords = .init(&.{0}) },
+        .{ .id = 0, .coords = .init(&.{1}) },
+    }));
+    // Coordinates outside the view.
+    try std.testing.expectError(error.InvalidDeviceCoords, PhysicalMesh.tenstorrentTree(allocator, line, &[_]TtPlacement{
+        .{ .id = 0, .coords = .init(&.{0}) },
+        .{ .id = 1, .coords = .init(&.{2}) },
+    }));
+    // Coordinates of another rank.
+    try std.testing.expectError(error.InvalidDeviceCoordsRank, PhysicalMesh.tenstorrentTree(allocator, line, &[_]TtPlacement{
+        .{ .id = 0, .coords = .init(&.{ 0, 0 }) },
+        .{ .id = 1, .coords = .init(&.{ 1, 0 }) },
+    }));
+    // Four non-singleton axes have no physical tag.
+    const four: View = try .parse(&.{ 2, 2, 2, 2 }, "line,line,line,line", &.{ 2, 2, 2, 2 });
+    const placements = try allocator.alloc(TtPlacement, 16);
+    defer allocator.free(placements);
+    try std.testing.expectError(error.UnsupportedDeviceCoordsRank, PhysicalMesh.tenstorrentTree(allocator, four, placements));
 }

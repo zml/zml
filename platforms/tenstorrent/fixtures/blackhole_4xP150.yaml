@@ -1,0 +1,166 @@
+arch:
+  0: blackhole
+  1: blackhole
+  2: blackhole
+  3: blackhole
+chips:
+  {}
+chip_unique_ids:
+  3: 143238000421664
+  2: 143238000419264
+  1: 143238000420640
+  0: 143238000422112
+ethernet_connections:
+  -
+    - chip: 0
+      chan: 4
+    - chip: 2
+      chan: 4
+  -
+    - chip: 0
+      chan: 5
+    - chip: 2
+      chan: 5
+  -
+    - chip: 0
+      chan: 6
+    - chip: 2
+      chan: 6
+  -
+    - chip: 0
+      chan: 7
+    - chip: 2
+      chan: 7
+  -
+    - chip: 0
+      chan: 8
+    - chip: 3
+      chan: 8
+  -
+    - chip: 0
+      chan: 9
+    - chip: 3
+      chan: 9
+  -
+    - chip: 0
+      chan: 10
+    - chip: 3
+      chan: 10
+  -
+    - chip: 0
+      chan: 11
+    - chip: 3
+      chan: 11
+  -
+    - chip: 1
+      chan: 4
+    - chip: 3
+      chan: 4
+  -
+    - chip: 1
+      chan: 5
+    - chip: 3
+      chan: 5
+  -
+    - chip: 1
+      chan: 6
+    - chip: 3
+      chan: 6
+  -
+    - chip: 1
+      chan: 7
+    - chip: 3
+      chan: 7
+  -
+    - chip: 1
+      chan: 8
+    - chip: 2
+      chan: 8
+  -
+    - chip: 1
+      chan: 9
+    - chip: 2
+      chan: 9
+  -
+    - chip: 1
+      chan: 10
+    - chip: 2
+      chan: 10
+  -
+    - chip: 1
+      chan: 11
+    - chip: 2
+      chan: 11
+ethernet_connections_to_remote_devices:
+  []
+chips_with_mmio:
+  - 0: 1
+  - 1: 2
+  - 2: 3
+  - 3: 0
+io_device_type: PCIe
+harvesting:
+  0:
+    noc_translation: true
+    harvest_mask: 192
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+  1:
+    noc_translation: true
+    harvest_mask: 192
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+  2:
+    noc_translation: true
+    harvest_mask: 192
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+  3:
+    noc_translation: true
+    harvest_mask: 192
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+chip_to_bus_id:
+  0: "0x0001"
+  1: "0x0041"
+  2: "0x0042"
+  3: "0x00c1"
+boards:
+  -
+    - board_id: 4476187513102
+    - board_type: p150
+    - chips:
+        - 2
+  -
+    - board_id: 4476187513145
+    - board_type: p150
+    - chips:
+        - 1
+  -
+    - board_id: 4476187513177
+    - board_type: p150
+    - chips:
+        - 3
+  -
+    - board_id: 4476187513191
+    - board_type: p150
+    - chips:
+        - 0
+asic_locations:
+  0: 0
+  1: 0
+  2: 0
+  3: 0
+chip_pci_bdfs:
+  0: 0000:01:00.0
+  1: 0000:41:00.0
+  2: 0000:42:00.0
+  3: 0000:c1:00.0

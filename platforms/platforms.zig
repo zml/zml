@@ -9,6 +9,7 @@ const oneapi = @import("platforms/oneapi");
 const pjrt = @import("pjrt");
 const platforms_options = @import("platforms/options");
 const rocm = @import("platforms/rocm");
+const tenstorrent = @import("platforms/tenstorrent");
 const tpu = @import("platforms/tpu");
 
 const platforms = @This();
@@ -22,6 +23,7 @@ pub const Platform = enum {
     oneapi,
     metal,
     furiosa,
+    tenstorrent,
 
     pub fn selectFirstAcceleratorEnabled() error{Unavailable}!Platform {
         inline for (@typeInfo(Platform).@"enum".field_names) |field| {

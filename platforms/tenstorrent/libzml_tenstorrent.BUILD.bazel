@@ -1,0 +1,25 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# XLA owns the full payload: lib/ (the plugin and the libraries it needs),
+# libexec/tt-metalium/ (the tt-metal runtime root, SFPI included) and
+# share/licenses/. ZML only places it in the platform's runfiles.
+copy_to_directory(
+    name = "sandbox",
+    srcs = glob(
+        [
+            "lib/**",
+            "libexec/**",
+            "share/**",
+        ],
+        allow_empty = False,
+    ),
+    add_directory_to_runfiles = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "libzml_tenstorrent",
+    data = [":sandbox"],
+    visibility = ["//visibility:public"],
+)

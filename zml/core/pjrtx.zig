@@ -11,10 +11,39 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/pjrtx");
 
+/// Where `Client.compile` writes what it hands to PJRT_Client_Compile, before compiling:
+/// `<name>.mlirbc` (the StableHLO portable artifact, exact bytes), `<name>.mlir`
+/// (the same module as text) and `<name>.compile_options.pb` (the serialized
+/// CompileOptionsProto). A later program of the same name overwrites them.
+pub const ProgramDump = struct {
+    dir: []const u8,
+    name: []const u8,
+
+    fn write(self: ProgramDump, io: std.Io, allocator: std.mem.Allocator, module: *const mlir.Module, portable_artifact: []const u8, compile_options_pb: []const u8) !void {
+        var dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.dir, .{});
+        defer dir.close(io);
+
+        const bytecode_name = try std.fmt.allocPrint(allocator, "{s}.mlirbc", .{self.name});
+        defer allocator.free(bytecode_name);
+        try dir.writeFile(io, .{ .sub_path = bytecode_name, .data = portable_artifact });
+
+        const options_name = try std.fmt.allocPrint(allocator, "{s}.compile_options.pb", .{self.name});
+        defer allocator.free(options_name);
+        try dir.writeFile(io, .{ .sub_path = options_name, .data = compile_options_pb });
+
+        var text: std.Io.Writer.Allocating = .init(allocator);
+        defer text.deinit();
+        try text.writer.print("{f}\n", .{module.operation().fmt(.{})});
+        const text_name = try std.fmt.allocPrint(allocator, "{s}.mlir", .{self.name});
+        defer allocator.free(text_name);
+        try dir.writeFile(io, .{ .sub_path = text_name, .data = text.written() });
+    }
+};
+
 pub const Client = opaque {
     pub const CompileError = std.mem.Allocator.Error || error{InvalidMlirBytecodeVersion} || pjrt.ApiError;
 
-    pub fn compile(client: *const pjrt.Client, api: *const pjrt.Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*pjrt.LoadedExecutable {
+    pub fn compile(client: *const pjrt.Client, api: *const pjrt.Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8, dump: ?ProgramDump) CompileError!*pjrt.LoadedExecutable {
         const stablehlo_version = blk: {
             if (api.stablehloCurrentVersion()) |requested_version| {
                 break :blk stablehlo.smallerVersion(requested_version, stablehlo.currentVersion());
@@ -35,6 +64,10 @@ pub const Client = opaque {
                 std.Io.Writer.Error.WriteFailed => error.OutOfMemory,
                 else => |e| e,
             };
+        };
+
+        if (dump) |d| d.write(io, allocator, module, serialized_buffer.written(), compile_options_pb) catch |err| {
+            log.warn("failed to dump the PJRT program {s} to {s}: {}", .{ d.name, d.dir, err });
         };
 
         return @ptrCast(try client.compile(api, io, .{

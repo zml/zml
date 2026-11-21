@@ -150,7 +150,7 @@ pub const Buffer = struct {
             std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ packed_shape, err });
         };
         const ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype());
-        const layout = platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype());
+        const layout = try platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype());
 
         errdefer for (pjrt_shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
@@ -243,7 +243,7 @@ pub const Buffer = struct {
             ._shape = shape_,
             ._shards = .empty,
         };
-        const metadata: PjrtBufferMetadata = .init(platform, shape_);
+        const metadata: PjrtBufferMetadata = try .init(platform, shape_);
         errdefer for (buffer._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
         };
@@ -431,7 +431,7 @@ pub const PjrtBufferMetadata = struct {
     /// `Platform.defaultMemoryLayout`. Outside `Buffer` so that
     /// `Buffer.HostAccessible` can use it without it being part of the API:
     /// zml.zig only exports `Buffer` from this file.
-    pub inline fn init(platform: *const Platform, shape_: Shape) PjrtBufferMetadata {
+    pub inline fn init(platform: *const Platform, shape_: Shape) !PjrtBufferMetadata {
 
         // Shards use the PJRT shape, which packs sub-byte elements.
         const packed_shape = shape_.packedShape();
@@ -441,7 +441,7 @@ pub const PjrtBufferMetadata = struct {
             .shape = packed_shape,
             .ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype()),
             .placement = placement,
-            .layout = platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype()),
+            .layout = try platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype()),
         };
     }
 };

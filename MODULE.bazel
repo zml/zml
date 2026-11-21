@@ -246,6 +246,9 @@ use_repo(oneapi, "libzml_oneapi")
 furiosa = use_extension("//platforms/furiosa:furiosa.bzl", "furiosa_packages")
 use_repo(furiosa, "libzml_furiosa")
 
+tenstorrent = use_extension("//platforms/tenstorrent:tenstorrent.bzl", "tenstorrent_packages")
+use_repo(tenstorrent, "libzml_tenstorrent")
+
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libzml_tpu")
 

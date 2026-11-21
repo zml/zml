@@ -1,0 +1,33 @@
+arch:
+  0: blackhole
+chips:
+  {}
+chip_unique_ids:
+  0: 4476187513037
+ethernet_connections:
+  []
+ethernet_connections_to_remote_devices:
+  []
+chips_with_mmio:
+  - 0: 0
+io_device_type: PCIe
+harvesting:
+  0:
+    noc_translation: true
+    harvest_mask: 192
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+chip_to_bus_id:
+  0: "0x01"
+boards:
+  -
+    - board_id: 4402341478400
+    - board_type: p150
+    - chips:
+        - 0
+asic_locations:
+  0: 0
+chip_pci_bdfs:
+  0: 0000:01:00.0

@@ -26,7 +26,7 @@ pub fn env() *const Platform {
                 .metal = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = memory_fraction } } },
                 .oneapi = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = memory_fraction } } },
             },
-        ) catch @panic("Pjrt not available");
+        ) catch |err| std.debug.panic("Pjrt not available: {}", .{err});
 
         // Register meshes required by flash attention.
         _ = platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;

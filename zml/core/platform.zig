@@ -6,6 +6,7 @@ const constants = @import("zml/constants");
 const pjrt = @import("pjrt");
 const profiler_ = @import("zml/profiling").profiler;
 const stdx = @import("stdx");
+const tenstorrent_platform = @import("platforms/tenstorrent");
 pub const Target = @import("platforms").Platform;
 
 const Exe = @import("exe.zig").Exe;
@@ -18,6 +19,73 @@ const zml = @import("core.zig");
 const log = std.log.scoped(.zml);
 
 var api_map: std.enums.EnumArray(Target, ?*const pjrt.Api) = .initFill(null);
+
+/// Tenstorrent clients still alive when the process exits. A client that is
+/// never destroyed leaves the cards' Ethernet cores in fabric mode, and every
+/// later open of the cards times out until they are reset; `zml.testing`'s
+/// platform, for one, is never deinit'ed. Clients left are destroyed when the
+/// main thread exits normally (return from main, `std.process.exit`), by a
+/// thread-local destructor of the main thread: glibc's `exit` runs those
+/// before any `atexit` handler, and so before the destructors of the plugin's
+/// C++ statics (an `atexit` release crashed in tt-metal's GraphTracker, already
+/// destroyed). A crash or a fatal signal still leaves the cards to a reset.
+const exit_release = struct {
+    const Entry = struct { api: *const pjrt.Api, client: *pjrt.Client };
+
+    var mutex: std.atomic.Mutex = .unlocked;
+    var entries: stdx.BoundedArray(Entry, 32) = .empty;
+    var registered = false;
+
+    /// glibc's registration of thread-local destructors, as C++ `thread_local` uses it.
+    extern "c" fn __cxa_thread_atexit_impl(func: *const fn (?*anyopaque) callconv(.c) void, obj: ?*anyopaque, dso_symbol: ?*anyopaque) c_int;
+
+    fn track(api: *const pjrt.Api, client: *pjrt.Client) void {
+        if (comptime builtin.os.tag != .linux) return;
+        lock();
+        defer mutex.unlock();
+        if (!registered) {
+            // Another thread's destructors run when that thread ends, not at exit.
+            if (std.os.linux.gettid() != std.os.linux.getpid()) {
+                log.warn("Tenstorrent client created off the main thread: deinit its platform before the process ends, or the cards stay unusable until a reset", .{});
+                return;
+            }
+            if (__cxa_thread_atexit_impl(releaseAll, null, @ptrCast(&registered)) != 0) {
+                log.warn("Cannot release Tenstorrent clients at exit: deinit every platform before the process ends", .{});
+                return;
+            }
+            registered = true;
+        }
+        entries.append(.{ .api = api, .client = client }) catch {
+            log.warn("More than {} live Tenstorrent clients: the others are not released at exit", .{entries.capacity()});
+        };
+    }
+
+    fn untrack(client: *pjrt.Client) void {
+        if (comptime builtin.os.tag != .linux) return;
+        lock();
+        defer mutex.unlock();
+        for (entries.constSlice(), 0..) |entry, i| {
+            if (entry.client == client) {
+                _ = entries.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    fn releaseAll(_: ?*anyopaque) callconv(.c) void {
+        lock();
+        defer mutex.unlock();
+        for (entries.constSlice()) |entry| {
+            log.info("Closing a Tenstorrent client left open at exit", .{});
+            entry.client.deinit(entry.api);
+        }
+        entries.clear();
+    }
+
+    fn lock() void {
+        while (!mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+};
 
 fn disableXlaLogs() void {
     // https://deepreg.readthedocs.io/en/latest/docs/logging.html#tensorflow-logging
@@ -46,14 +114,20 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
                 return error.InvalidDeviceCount;
             }
         },
+        // The backend partitions over any view of the cabling, e.g. three cards in a line.
+        .tenstorrent => {},
     }
 }
 
-fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
+fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*const pjrt.Api {
     return switch (target) {
         inline else => |tgt| api_map.get(tgt) orelse b: {
             disableXlaLogs();
-            const api = try tgt.load(allocator, io);
+            const api = if (tgt == .tenstorrent and options.tenstorrent.runtime == .fake)
+                // The device-free runtime needs no card on this host.
+                try tenstorrent_platform.loadPlugin(allocator, io)
+            else
+                try tgt.load(allocator, io);
             api_map.set(tgt, api);
             break :b api;
         },
@@ -89,7 +163,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu, .furiosa => {
+            .cuda, .rocm, .oneapi, .tpu, .furiosa, .tenstorrent => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -225,7 +299,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .tenstorrent => device.id(),
     };
 }
 
@@ -257,6 +331,7 @@ pub const State = union(Target) {
     oneapi: void,
     metal: void,
     furiosa: void,
+    tenstorrent: void,
 
     pub const CudaState = struct {
         flashinfer_cutlass_moe_runners: ?*flashinfer_cutlass_runtime.Runners = null,
@@ -279,6 +354,7 @@ pub const State = union(Target) {
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
             .furiosa => .{ .furiosa = {} },
+            .tenstorrent => .{ .tenstorrent = {} },
         };
     }
 
@@ -302,6 +378,8 @@ pub const Platform = struct {
     meshes: std.StringArrayHashMapUnmanaged(*const zml.Mesh),
     replicated_mesh: *const zml.Mesh,
     io_impl: IoImpl,
+    /// See `CreateOptions.pjrt_program_dump_dir`.
+    pjrt_program_dump_dir: ?[]const u8 = null,
 
     pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
 
@@ -311,10 +389,20 @@ pub const Platform = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
-        const api = try loadOrGetApi(allocator, io, target);
+        const api = try loadOrGetApi(allocator, io, target, options);
+
+        var create_options = options;
+        var defaults_arena: std.heap.ArenaAllocator = .init(allocator);
+        defer defaults_arena.deinit();
+        if (target == .tenstorrent) {
+            create_options.tenstorrent = try options.tenstorrent.withDefaultPaths(defaults_arena.allocator(), io);
+        }
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
-        const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
+        const pjrt_client = try pjrt.Client.init(api, create_options.toNamedValues(target, &named_values_buf));
+        // A client may hold hardware (Tenstorrent cards stay unusable until a
+        // reset if their client is never destroyed): release it on every failure below.
+        errdefer pjrt_client.deinit(api);
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
@@ -347,6 +435,7 @@ pub const Platform = struct {
                 .memories = undefined,
                 .physical_mesh = undefined,
                 .io_impl = options.io_impl,
+                .pjrt_program_dump_dir = if (options.pjrt_program_dump_dir) |dir| try initial_allocator.dupe(u8, dir) else null,
             };
             break :platform platform;
         };
@@ -400,9 +489,13 @@ pub const Platform = struct {
             log.warn("Failed to register FFI custom call \"zml$print\", error: {}", .{err});
         };
 
+        if ((comptime Target.tenstorrent.isEnabled()) and target == .tenstorrent) exit_release.track(api, pjrt_client);
         return platform;
     }
 
+    /// Returns the first platform of this build that has devices on this host.
+    /// A platform whose plugin is present but fails to start is reported: a
+    /// Tenstorrent failure is returned, other platforms are skipped after a warning.
     pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !*Platform {
         const ordered_targets: []const Target = &.{
             .tpu,
@@ -412,10 +505,24 @@ pub const Platform = struct {
             .oneapi,
             .metal,
             .furiosa,
+            .tenstorrent,
             .cpu,
         };
         return for (ordered_targets) |target| {
-            break init(allocator, io, target, options) catch continue;
+            break init(allocator, io, target, options) catch |err| switch (err) {
+                error.Unavailable => continue,
+                else => {
+                    // Cards that are present but cannot be opened (held by
+                    // another process, wedged, misconfigured) must not turn
+                    // a run into a silent CPU run.
+                    if (target == .tenstorrent) {
+                        log.err("Platform {} has devices on this host but failed to start: {}", .{ target, err });
+                        return err;
+                    }
+                    log.warn("Platform {} failed to start, trying the next one: {}", .{ target, err });
+                    continue;
+                },
+            };
         } else error.Unavailable;
     }
 
@@ -542,6 +649,7 @@ pub const Platform = struct {
             self.state.deinit();
         }
         self.physical_mesh.deinit(self.arena.allocator());
+        if ((comptime Target.tenstorrent.isEnabled()) and self.target == .tenstorrent) exit_release.untrack(self.pjrt_client);
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();
     }
@@ -680,16 +788,21 @@ pub const Platform = struct {
         unreachable;
     }
 
-    pub inline fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) pjrt.MemoryLayout {
+    pub inline fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) !pjrt.MemoryLayout {
         // inline cause `default` is a huge ass struct allocated on the stack,
         // and toMemoryLayout returns slices into it.
         // There is probably a better way of doing this,
         // The queried layout can include backend-specific tiling.
         return switch (platform.target) {
-            .tpu, .furiosa => {
-                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled()) unreachable;
+            .tpu, .furiosa, .tenstorrent => {
+                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled() and !Target.tenstorrent.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
-                const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
+                // A plugin may hold only some types (Tenstorrent's M0: f32, bf16, i32,
+                // u32, u16, u8 and bool): the buffer that asks fails with its error.
+                const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch |err| {
+                    log.warn("{} has no default memory layout for {s} {any}: {}", .{ platform.target, @tagName(dtype), dims, err });
+                    return err;
+                };
                 return default.toMemoryLayout();
             },
             .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
@@ -733,15 +846,93 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
+    tenstorrent: Tenstorrent = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,
+    /// Debugging: every compile on this platform writes the program it hands to
+    /// PJRT under this directory before compiling it (see `pjrtx.ProgramDump`),
+    /// named after `Compiler.Options.program_name`.
+    pjrt_program_dump_dir: ?[]const u8 = null,
 
     pub const Furiosa = struct {
         pe_count: u8 = 8,
 
         fn writeNamedValues(self: Furiosa, values: *std.ArrayList(pjrt.NamedValue)) void {
             values.appendAssumeCapacity(.init(.int64, "pe_count", self.pe_count));
+        }
+    };
+
+    /// Client options of the Tenstorrent plugin (`tt_*` named values).
+    pub const Tenstorrent = struct {
+        runtime: Runtime = .ttnn_eager,
+        /// tt-umd cluster descriptor (YAML) to take the system from instead
+        /// of discovering the cards; required by the device-free runtime.
+        cluster_descriptor: ?[]const u8 = null,
+        /// Forces the logical view, e.g. `&.{ 2, 2 }`; empty lets the plugin choose.
+        mesh_shape: []const i64 = &.{},
+        /// Data-parallel and tensor-parallel degrees the program will use,
+        /// `&.{ dp, tp }`, for the plugin to choose a view that suits them.
+        mesh_hint: []const i64 = &.{},
+        /// Comma-separated board ids (device attribute `tt_board_id`) the
+        /// client may use; null uses every reachable card.
+        visible_chips: ?[]const u8 = null,
+        /// tt-metal runtime root; defaults to the sandbox's.
+        runtime_root: ?[]const u8 = null,
+        /// Writable kernel JIT cache, reused across processes; defaults to
+        /// `$XDG_CACHE_HOME/zml/tenstorrent`, else `$HOME/.cache/zml/tenstorrent`.
+        cache_dir: ?[]const u8 = null,
+        /// tt-metal logs; the plugin defaults to `<cache_dir>/logs`.
+        logs_dir: ?[]const u8 = null,
+        /// DRAM left to tt-metal per chip (kernel binaries, TTNN temporaries).
+        dram_reserve_bytes: ?i64 = null,
+        /// tt-metal trace region per chip, fixed when the mesh opens.
+        trace_region_bytes: ?i64 = null,
+        /// XLA-owned memory per device (host memory for the device-free runtime).
+        arena_bytes: ?i64 = null,
+
+        pub const Runtime = enum {
+            /// The cards of this host, through TTNN.
+            ttnn_eager,
+            /// No card: compiles against `cluster_descriptor` and runs on the host.
+            fake,
+        };
+
+        /// Fills the directories the card runtime needs and that only the
+        /// loader knows: the sandbox's runtime root and a persistent cache.
+        /// Strings are allocated in `allocator`.
+        pub fn withDefaultPaths(self: Tenstorrent, allocator: std.mem.Allocator, io: std.Io) !Tenstorrent {
+            var resolved = self;
+            if (self.runtime == .fake) return resolved;
+
+            if (resolved.runtime_root == null) {
+                resolved.runtime_root = try tenstorrent_platform.runtimeRoot(allocator, io);
+            }
+            if (resolved.cache_dir == null) {
+                resolved.cache_dir = if (std.c.getenv("XDG_CACHE_HOME")) |cache_home|
+                    try std.Io.Dir.path.join(allocator, &.{ std.mem.span(cache_home), "zml", "tenstorrent" })
+                else if (std.c.getenv("HOME")) |home|
+                    try std.Io.Dir.path.join(allocator, &.{ std.mem.span(home), ".cache", "zml", "tenstorrent" })
+                else {
+                    log.err("Tenstorrent needs a writable JIT cache: set CreateOptions.tenstorrent.cache_dir, $XDG_CACHE_HOME or $HOME", .{});
+                    return error.MissingCacheDir;
+                };
+            }
+            return resolved;
+        }
+
+        fn writeNamedValues(self: Tenstorrent, values: *std.ArrayList(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(.init(.string, "tt_runtime", @tagName(self.runtime)));
+            if (self.cluster_descriptor) |path| values.appendAssumeCapacity(.init(.string, "tt_cluster_descriptor", path));
+            if (self.mesh_shape.len > 0) values.appendAssumeCapacity(.init(.int64list, "tt_mesh_shape", self.mesh_shape));
+            if (self.mesh_hint.len > 0) values.appendAssumeCapacity(.init(.int64list, "tt_mesh_hint", self.mesh_hint));
+            if (self.visible_chips) |chips| values.appendAssumeCapacity(.init(.string, "tt_visible_chips", chips));
+            if (self.runtime_root) |path| values.appendAssumeCapacity(.init(.string, "tt_runtime_root", path));
+            if (self.cache_dir) |path| values.appendAssumeCapacity(.init(.string, "tt_cache_dir", path));
+            if (self.logs_dir) |path| values.appendAssumeCapacity(.init(.string, "tt_logs_dir", path));
+            if (self.dram_reserve_bytes) |bytes| values.appendAssumeCapacity(.init(.int64, "tt_dram_reserve_bytes", bytes));
+            if (self.trace_region_bytes) |bytes| values.appendAssumeCapacity(.init(.int64, "tt_trace_region_bytes", bytes));
+            if (self.arena_bytes) |bytes| values.appendAssumeCapacity(.init(.int64, "tt_arena_bytes", bytes));
         }
     };
 
@@ -825,6 +1016,7 @@ pub const CreateOptions = struct {
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
             .furiosa => self.furiosa.writeNamedValues(&values),
+            .tenstorrent => self.tenstorrent.writeNamedValues(&values),
             .cuda => self.cuda.writeNamedValues(target, &values),
             .rocm => self.rocm.writeNamedValues(target, &values),
             .oneapi => self.oneapi.writeNamedValues(target, &values),
@@ -970,6 +1162,137 @@ pub const rocm = struct {
     }
 };
 
+pub const tenstorrent = struct {
+    pub const MAX_VIEW_RANK = Sharding.MAX_MESH_RANK;
+
+    pub const AxisKind = enum {
+        /// An axis of extent 1, as the view of a single chip.
+        singleton,
+        /// Chips linked to their neighbours, open ends.
+        line,
+        /// Chips linked to their neighbours, wrap-around link cabled.
+        ring,
+    };
+
+    pub const Axis = struct {
+        extent: u32,
+        kind: AxisKind,
+        links_per_hop: u32,
+    };
+
+    /// The logical view the plugin serves, identical on every device.
+    pub const View = struct {
+        axes: stdx.BoundedArray(Axis, MAX_VIEW_RANK) = .empty,
+
+        /// Parses `tt_view_shape`, `tt_view_axis_kinds` ("line,ring") and `tt_view_axis_links`.
+        pub fn parse(shape: []const i64, kinds: []const u8, links: []const i64) !View {
+            if (shape.len == 0 or shape.len > MAX_VIEW_RANK or links.len != shape.len) return error.InvalidTenstorrentView;
+            var view: View = .{};
+            var kind_names = std.mem.splitScalar(u8, kinds, ',');
+            for (shape, links) |extent, link_count| {
+                const kind_name = kind_names.next() orelse return error.InvalidTenstorrentView;
+                const kind = std.meta.stringToEnum(AxisKind, kind_name) orelse return error.InvalidTenstorrentView;
+                if (extent < 1 or link_count < 0) return error.InvalidTenstorrentView;
+                if ((kind == .singleton) != (extent == 1)) return error.InvalidTenstorrentView;
+                view.axes.appendAssumeCapacity(.{
+                    .extent = std.math.cast(u32, extent) orelse return error.InvalidTenstorrentView,
+                    .kind = kind,
+                    .links_per_hop = std.math.cast(u32, link_count) orelse return error.InvalidTenstorrentView,
+                });
+            }
+            if (kind_names.next() != null) return error.InvalidTenstorrentView;
+            return view;
+        }
+
+        pub fn eql(a: View, b: View) bool {
+            if (a.axes.len != b.axes.len) return false;
+            for (a.axes.constSlice(), b.axes.constSlice()) |x, y| {
+                if (!std.meta.eql(x, y)) return false;
+            }
+            return true;
+        }
+
+        pub fn deviceCount(self: View) usize {
+            var count: usize = 1;
+            for (self.axes.constSlice()) |ax| count *= ax.extent;
+            return count;
+        }
+    };
+
+    /// What the plugin tells about one device, beyond its PJRT id.
+    pub const DeviceInfo = struct {
+        /// Position on the non-singleton axes of `view`, `[0]` for a single chip.
+        coords: stdx.BoundedArray(u32, MAX_VIEW_RANK),
+        view: View,
+        /// Board id of the chip, as `CreateOptions.tenstorrent.visible_chips` takes it.
+        board_id: u64,
+        /// DRAM bandwidth, whole GB/s.
+        dram_gbps: i64,
+        /// Latency floor of an all-reduce over the whole view, in microseconds.
+        ccl_base_us: f64,
+
+        pub fn init(platform: *const Platform, device: Device) !DeviceInfo {
+            stdx.debug.assert(platform.target == .tenstorrent, "tenstorrent.DeviceInfo expects a Tenstorrent platform, got {}", .{platform.target});
+            const api = platform.pjrt_api;
+            const desc = device.pjrt_desc;
+            const coords = try int64List(desc.attribute(api, "coords"));
+            var info: DeviceInfo = .{
+                .coords = .empty,
+                .view = try .parse(
+                    try int64List(desc.attribute(api, "tt_view_shape")),
+                    try string(desc.attribute(api, "tt_view_axis_kinds")),
+                    try int64List(desc.attribute(api, "tt_view_axis_links")),
+                ),
+                // PJRT has no unsigned attribute: the plugin keeps the bit pattern.
+                .board_id = @bitCast(try int64(desc.attribute(api, "tt_board_id"))),
+                .dram_gbps = try int64(desc.attribute(api, "tt_dram_gbps")),
+                // The PJRT C API carries no float attribute, hence a decimal string.
+                .ccl_base_us = std.fmt.parseFloat(f64, try string(desc.attribute(api, "tt_ccl_base_us"))) catch return error.InvalidDeviceAttribute,
+            };
+            if (coords.len == 0 or coords.len > MAX_VIEW_RANK) return error.InvalidDeviceCoords;
+            for (coords) |coord| {
+                info.coords.appendAssumeCapacity(std.math.cast(u32, coord) orelse return error.InvalidDeviceCoords);
+            }
+            return info;
+        }
+
+        fn int64(value: ?pjrt.NamedValue.Value) !i64 {
+            const v = value orelse return error.MissingDeviceAttribute;
+            return if (v == .int64) v.int64 else error.InvalidDeviceAttribute;
+        }
+
+        fn int64List(value: ?pjrt.NamedValue.Value) ![]const i64 {
+            const v = value orelse return error.MissingDeviceAttribute;
+            return if (v == .int64list) v.int64list else error.InvalidDeviceAttribute;
+        }
+
+        fn string(value: ?pjrt.NamedValue.Value) ![]const u8 {
+            const v = value orelse return error.MissingDeviceAttribute;
+            return if (v == .string) v.string else error.InvalidDeviceAttribute;
+        }
+    };
+
+    test "View.parse reads the plugin's view attributes" {
+        const one: View = try .parse(&.{1}, "singleton", &.{0});
+        try std.testing.expectEqual(1, one.deviceCount());
+        try std.testing.expectEqual(AxisKind.singleton, one.axes.get(0).kind);
+
+        const grid: View = try .parse(&.{ 2, 4 }, "line,ring", &.{ 2, 4 });
+        try std.testing.expectEqual(8, grid.deviceCount());
+        try std.testing.expectEqual(Axis{ .extent = 4, .kind = .ring, .links_per_hop = 4 }, grid.axes.get(1));
+        try std.testing.expect(grid.eql(try .parse(&.{ 2, 4 }, "line,ring", &.{ 2, 4 })));
+        try std.testing.expect(!grid.eql(try .parse(&.{ 2, 4 }, "line,line", &.{ 2, 4 })));
+
+        try std.testing.expectError(error.InvalidTenstorrentView, View.parse(&.{ 2, 2 }, "line", &.{ 2, 2 }));
+        try std.testing.expectError(error.InvalidTenstorrentView, View.parse(&.{2}, "line,line", &.{2}));
+        try std.testing.expectError(error.InvalidTenstorrentView, View.parse(&.{2}, "torus", &.{2}));
+        try std.testing.expectError(error.InvalidTenstorrentView, View.parse(&.{1}, "line", &.{2}));
+        try std.testing.expectError(error.InvalidTenstorrentView, View.parse(&.{3}, "singleton", &.{2}));
+        try std.testing.expectError(error.InvalidTenstorrentView, View.parse(&.{}, "", &.{}));
+        try std.testing.expectError(error.InvalidTenstorrentView, View.parse(&.{ 2, 2, 2, 2, 2 }, "line,line,line,line,line", &.{ 2, 2, 2, 2, 2 }));
+    }
+};
+
 fn dataTypeFromFfiDataType(ffi_dt: pjrt.ffi.DataType) zml.DataType {
     return switch (ffi_dt) {
         .bool => .bool,
@@ -1079,8 +1402,8 @@ test "platform defaultMemoryLayout is boring" {
         const default_layout = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, pjrtx.bufferTypeFromDtype(.f32), dims);
         const mem_layout = default_layout.toMemoryLayout();
 
-        if (platform.target == .furiosa) {
-            try std.testing.expectEqualDeep(mem_layout, platform.defaultMemoryLayout(dims, .f32));
+        if (platform.target == .furiosa or platform.target == .tenstorrent) {
+            try std.testing.expectEqualDeep(mem_layout, try platform.defaultMemoryLayout(dims, .f32));
             continue;
         }
 

@@ -74,6 +74,7 @@ zig_library(
         "//mlir/dialects/stablehlo",
         "//pjrt",
         "//platforms",
+        "//platforms/tenstorrent",
         "//stdx",
         "//upb",
         "//vfs",

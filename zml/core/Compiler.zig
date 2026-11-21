@@ -1037,6 +1037,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
         compiler.io,
         compiler.module,
         try upb.serialize(options, upb_arena),
+        if (platform.pjrt_program_dump_dir) |dir| .{ .dir = dir, .name = opts.program_name } else null,
     );
     errdefer loaded_executable.deinit();
 

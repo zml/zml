@@ -14,6 +14,8 @@ const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 
+const log = std.log.scoped(.@"zml/exe");
+
 pub const Exe = struct {
     platform: *const Platform,
     exe: *pjrt.LoadedExecutable,
@@ -335,6 +337,15 @@ pub const Exe = struct {
     /// Donated input contents cannot be used after the call; output buffers have their own handles.
     /// Use a runner to destroy donated handles automatically and replace buffers through output destinations.
     pub fn call(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+        self.tryCall(io, arguments, results_, opts) catch |err| {
+            std.debug.panic("PJRT execution failed with: {}", .{err});
+        };
+    }
+
+    /// `call` that returns a failed execution instead of panicking, for a caller
+    /// that must release its devices before exiting (an aborted process leaves
+    /// Tenstorrent cards unusable until they are reset).
+    pub fn tryCall(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) !void {
         var span = tracer.span("zml.exe.call", .{
             .wait = opts.wait,
             .arg_count = arguments.expected_shapes.len,
@@ -347,7 +358,7 @@ pub const Exe = struct {
         const partition_events = events[0..@intCast(self.num_partitions)];
         const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
             .neuron => partition_events,
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => if (opts.wait) partition_events else null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .tenstorrent => if (opts.wait) partition_events else null,
         };
 
         self.exe.execute(self.platform.pjrt_api, .{
@@ -359,32 +370,20 @@ pub const Exe = struct {
             .non_donatable_input_indices = &.{},
             .context = self.context,
         }) catch |err| {
-            std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
+            log.err("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
+            return err;
         };
 
-        switch (self.platform.target) {
-            .neuron => {
-                for (events_slice.?) |e| {
-                    if (e) |ev| {
-                        if (opts.wait) {
-                            ev.await(self.platform.pjrt_api, io) catch |err| {
-                                std.debug.panic("PJRT execution failed with: {}", .{err});
-                            };
-                        }
-                        ev.deinit(self.platform.pjrt_api);
-                    }
-                }
-            },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => if (opts.wait) {
-                for (events_slice.?) |e| {
-                    if (e) |ev| {
-                        ev.await(self.platform.pjrt_api, io) catch |err| {
-                            std.debug.panic("PJRT execution failed with: {}", .{err});
-                        };
-                        ev.deinit(self.platform.pjrt_api);
-                    }
-                }
-            },
+        // Neuron always returns events, awaited only on request; the other
+        // targets return them only when asked to wait.
+        const events_ = events_slice orelse return;
+        for (events_, 0..) |e, i| {
+            const ev = e orelse continue;
+            if (opts.wait) ev.await(self.platform.pjrt_api, io) catch |err| {
+                for (events_[i..]) |rest| if (rest) |r| r.deinit(self.platform.pjrt_api);
+                return err;
+            };
+            ev.deinit(self.platform.pjrt_api);
         }
     }
 
@@ -476,6 +475,15 @@ pub fn FnExe(comptime function_: anytype) type {
                 pub fn run(self: *RunnerSelf, io: std.Io, call: Call, opts: Exe.CallOpts) void {
                     self.args.set(call.inputs);
                     self.exe.call(io, self.args, &self.results, opts);
+                    self.exe.deinitDonatedInputs(self.args);
+                    self.results.fill(call.outputs);
+                }
+
+                /// `run` that returns a failed execution (see `Exe.tryCall`); the
+                /// inputs then stay caller-owned and the outputs are not filled.
+                pub fn tryRun(self: *RunnerSelf, io: std.Io, call: Call, opts: Exe.CallOpts) !void {
+                    self.args.set(call.inputs);
+                    try self.exe.tryCall(io, self.args, &self.results, opts);
                     self.exe.deinitDonatedInputs(self.args);
                     self.results.fill(call.outputs);
                 }

@@ -1,0 +1,71 @@
+# Captured from hardware: the cluster descriptor tt-umd serialized on the tt box
+# (host p150ax4: two p150a, PCIe 01:00.0 and 21:00.0, one QSFP-DD cable) by
+# //xla/backends/tenstorrent/topology:discovery_umd_hw_test on 2026-11-21
+# (tt-umd at tt-metal v0.82.0), unedited below this comment. The DESIGN 2.2
+# inference behind box_2xp150_1cable.yaml holds: chip 0 channels 9 and 11
+# reach chip 1 channels 9 and 11 (QSFP port 1 of each card), 2 links. The
+# board ids are the real ones; UMD chip 0 is board 4411763081535.
+cluster_id: p150ax4
+arch:
+  0: blackhole
+  1: blackhole
+chips:
+  {}
+chip_unique_ids:
+  0: 141176418609120
+  1: 141176418608928
+ethernet_connections:
+  -
+    - chip: 0
+      chan: 9
+    - chip: 1
+      chan: 9
+  -
+    - chip: 0
+      chan: 11
+    - chip: 1
+      chan: 11
+ethernet_connections_to_remote_devices:
+  []
+chips_with_mmio:
+  - 0: 0
+  - 1: 1
+io_device_type: PCIe
+harvesting:
+  0:
+    noc_translation: true
+    harvest_mask: 192
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+  1:
+    noc_translation: true
+    harvest_mask: 192
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+chip_to_bus_id:
+  0: "0x01"
+  1: "0x21"
+boards:
+  -
+    - board_id: 4411763081529
+    - board_type: p150
+    - chips:
+        - 1
+  -
+    - board_id: 4411763081535
+    - board_type: p150
+    - chips:
+        - 0
+asic_locations:
+  0: 0
+  1: 0
+chip_pci_bdfs:
+  0: 0000:01:00.0
+  1: 0000:21:00.0
+chip_pcie_lane_counts:
+  0: 16
+  1: 16
