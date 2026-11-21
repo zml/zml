@@ -96,7 +96,9 @@ pub fn forward(input: Input) Output {
 /// elementwise arithmetic on the same arguments and outputs, so that weights,
 /// cache, positions and results travel the same way. The hidden state becomes
 /// 2x + 1; every cache element grows by one per step, so after n steps the
-/// keys hold n and the values -n wherever the cache started at zero.
+/// keys hold n and the values -n wherever the cache started at zero. The
+/// weights are uploaded but not read: the M0 backend has no broadcast of a
+/// tensor yet, which combining a weight with the hidden state needs.
 pub fn standIn(input: Input) Output {
     const hidden = input.hidden.scale(2).addConstant(1).withPartitioning(.model, .{ .d = .replicated });
     const cache_sharding = .{ .h = .model };

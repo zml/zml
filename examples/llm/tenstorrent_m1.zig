@@ -14,10 +14,12 @@
 //! The CPU BF16 legs show what BF16 and the two-way split cost on their own.
 //!
 //! Per step it prints, for every leg, max |y - ref| / max |ref| against the
-//! reference, and the same distance between each two-device leg and its
-//! one-device leg. A leg whose program the backend refuses prints the
-//! refusal verbatim and is not run; the process still exits 0. Exit 1 means a
-//! leg that ran broke a limit or failed.
+//! reference for the worst token of the step (each token against its own
+//! maximum), and the distance between each two-device leg and its one-device
+//! leg in BF16 ulps; the final K and V caches are judged the same way, per
+//! position. A leg whose program the backend refuses (UNIMPLEMENTED) prints
+//! the refusal verbatim and is not run; the process still exits 0. Exit 1
+//! means a leg failed (any other error) or ran and broke a limit.
 
 const std = @import("std");
 
@@ -56,6 +58,7 @@ const Args = struct {
     program: enum { layer, standin } = .layer,
     steps: u32 = 16,
     seed: u64 = 1,
+    dump: ?[]const u8 = null,
 
     pub const help =
         \\ Use tenstorrent_m1 --model=<dir> [options]
@@ -72,6 +75,7 @@ const Args = struct {
         \\                       arguments, for what the backend can compile before the layer
         \\   --steps=<n>         Decode steps after the prefill (default 16, at most 128)
         \\   --seed=<n>          Seed of the token sequence (default 1)
+        \\   --dump=<dir>        Writes the programs handed to PJRT under <dir>/<leg>/, as the corpus does
         \\
     ;
 };
@@ -106,6 +110,8 @@ const pairs = [_][2][]const u8{
     .{ "cards2", "cards1" },
 };
 
+const phases = [_]common.Phase{ .prefill, .decode };
+
 const Failure = struct {
     stage: []const u8,
     err: anyerror,
@@ -132,8 +138,9 @@ const Timings = struct {
 
 const Outcome = union(enum) {
     ran: Results,
-    /// The backend refused a program (compile error from PJRT).
-    refused: Failure,
+    /// The backend refused the prefill program, the decode program or both
+    /// (compile errors from PJRT), indexed like `phases`.
+    refused: [phases.len]?Failure,
     /// The platform could not open, or a run failed.
     failed: Failure,
     not_requested,
@@ -148,6 +155,8 @@ const Context = struct {
     /// One embedding row per position: the prefill's rows, then one per decode step.
     rows_bf16: []const zml.floats.BFloat16,
     rows_f32: []const f32,
+    /// See `Args.dump`.
+    dump: ?[]const u8,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -200,13 +209,14 @@ pub fn main(init: std.process.Init) !void {
         .steps = args.steps,
         .rows_bf16 = rows_bf16,
         .rows_f32 = rows_f32,
+        .dump = args.dump,
     };
 
     // The plugin needs a newer libstdc++ than the host's, which the CPU plugin
     // maps: load it first, through a device-free client.
     for (known_legs, requested) |leg, wanted| {
         if (!wanted or leg.where == .cpu) continue;
-        const platform = try openDeviceFree(&ctx, "blackhole_P150.yaml");
+        const platform = try openDeviceFree(&ctx, "blackhole_P150.yaml", null);
         platform.deinit(allocator, io);
         break;
     }
@@ -228,7 +238,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
+    // Streaming: a positional writer would write from offset 0 of a redirected
+    // stdout, over what the plugin's logs wrote there before.
+    var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buf);
     const ok = try report.write(&stdout.interface);
     try stdout.interface.flush();
     if (!ok) std.process.exit(1);
@@ -281,34 +293,49 @@ fn fixturePath(buf: []u8, file: []const u8) ![]const u8 {
     return try r.rlocation(name, buf) orelse error.FileNotFound;
 }
 
-fn openDeviceFree(ctx: *const Context, fixture: []const u8) !*zml.Platform {
+fn openDeviceFree(ctx: *const Context, fixture: []const u8, dump_dir: ?[]const u8) !*zml.Platform {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    return zml.Platform.init(ctx.allocator, ctx.io, .tenstorrent, .{ .tenstorrent = .{
-        .runtime = .fake,
-        .cluster_descriptor = try fixturePath(&path_buf, fixture),
-        .arena_bytes = device_free_arena_bytes,
-    } });
+    return zml.Platform.init(ctx.allocator, ctx.io, .tenstorrent, .{
+        .tenstorrent = .{
+            .runtime = .fake,
+            .cluster_descriptor = try fixturePath(&path_buf, fixture),
+            .arena_bytes = device_free_arena_bytes,
+        },
+        .pjrt_program_dump_dir = dump_dir,
+    });
 }
 
 fn openPlatform(ctx: *const Context, leg: Leg) !*zml.Platform {
     const allocator = ctx.allocator;
     const io = ctx.io;
+    // The platform keeps its own copy.
+    const dump_dir = if (ctx.dump) |dir| try std.Io.Dir.path.join(allocator, &.{ dir, leg.name }) else null;
+    defer if (dump_dir) |dir| allocator.free(dir);
     return switch (leg.where) {
-        .cpu => zml.Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = leg.devices } }),
-        .device_free => openDeviceFree(ctx, leg.fixture),
-        .cards => if (leg.devices == 1) one: {
-            // The first card of the default view, alone.
-            const board = all: {
-                const platform: *zml.Platform = try .init(allocator, io, .tenstorrent, .{});
-                defer platform.deinit(allocator, io);
-                const info: zml.platform.tenstorrent.DeviceInfo = try .init(platform, platform.devices[0]);
-                break :all info.board_id;
-            };
-            var chips_buf: [32]u8 = undefined;
-            break :one zml.Platform.init(allocator, io, .tenstorrent, .{
-                .tenstorrent = .{ .visible_chips = try std.fmt.bufPrint(&chips_buf, "{d}", .{board}) },
+        .cpu => zml.Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = leg.devices }, .pjrt_program_dump_dir = dump_dir }),
+        .device_free => openDeviceFree(ctx, leg.fixture, dump_dir),
+        .cards => cards: {
+            // The first cards of the default view, neighbours in it, alone:
+            // a view of `leg.devices` cards whatever else this host has.
+            var chips_buf: [zml.Platform.MAX_NUM_DEVICES * 21]u8 = undefined;
+            var chips: std.Io.Writer = .fixed(&chips_buf);
+            {
+                const all: *zml.Platform = try .init(allocator, io, .tenstorrent, .{});
+                defer all.deinit(allocator, io);
+                if (all.devices.len < leg.devices) {
+                    log.err("{s}: this host has {d} cards", .{ leg.name, all.devices.len });
+                    return error.NotEnoughCards;
+                }
+                for (all.devices[0..leg.devices], 0..) |device, i| {
+                    const info: zml.platform.tenstorrent.DeviceInfo = try .init(all, device);
+                    try chips.print("{s}{d}", .{ if (i == 0) "" else ",", info.board_id });
+                }
+            }
+            break :cards zml.Platform.init(allocator, io, .tenstorrent, .{
+                .tenstorrent = .{ .visible_chips = chips.buffered() },
+                .pjrt_program_dump_dir = dump_dir,
             });
-        } else zml.Platform.init(allocator, io, .tenstorrent, .{}),
+        },
     };
 }
 
@@ -320,48 +347,70 @@ fn msSince(io: std.Io, from: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(from.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_ms;
 }
 
-/// Runs the prefill and the decode steps of `func` on one leg. Errors of the
-/// leg itself (open, compile, run) are its outcome; only host errors return.
+/// Runs the prefill and the decode steps of `func` on one leg. What fails on
+/// the leg (open, compile, load, run, read back) is its outcome; only running
+/// out of host memory returns.
 fn runLeg(ctx: *const Context, comptime func: anytype, leg: Leg) !Outcome {
     const allocator = ctx.allocator;
     const io = ctx.io;
-    const Exe = zml.FnExe(func);
     log.info("{s}: {s}", .{ leg.name, leg.what });
-    var timings: Timings = .{};
 
     pjrt_error_log.reset();
-    var start: std.Io.Timestamp = .now(io, .awake);
+    const start: std.Io.Timestamp = .now(io, .awake);
     const platform = openPlatform(ctx, leg) catch |err| return .{ .failed = try failure(ctx, "open the platform", err) };
     defer platform.deinit(allocator, io);
-    timings.open_ms = msSince(io, start);
+    var stage: []const u8 = "count the devices";
+    return runOnPlatform(ctx, func, leg, platform, msSince(io, start), &stage) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => .{ .failed = try failure(ctx, stage, err) },
+    };
+}
+
+/// `runLeg` once the platform is open; `stage` names the step under way.
+fn runOnPlatform(ctx: *const Context, comptime func: anytype, leg: Leg, platform: *zml.Platform, open_ms: f64, stage: *[]const u8) !Outcome {
+    const allocator = ctx.allocator;
+    const io = ctx.io;
+    const Exe = zml.FnExe(func);
+    var timings: Timings = .{ .open_ms = open_ms };
+
     if (platform.devices.len != leg.devices) {
         log.err("{s}: the platform serves {d} devices, the leg needs {d}", .{ leg.name, platform.devices.len, leg.devices });
-        return .{ .failed = try failure(ctx, "count the devices", error.UnexpectedDeviceCount) };
+        return error.UnexpectedDeviceCount;
     }
 
+    stage.* = "describe the layer";
     const meshes: common.Meshes = try .init(platform);
     var store: zml.io.TensorStore = .fromRegistry(allocator, ctx.registry, &meshes.all());
     defer store.deinit();
     const layer: TransformerLayer = try .init(store.view().withPrefix("model").withPrefix("layers").withLayer(0), ctx.config);
     const backend: zml.attention.Backend = .auto(platform);
 
-    const phases = [_]common.Phase{ .prefill, .decode };
     var inputs: [phases.len]llama_layer.Input = undefined;
-    var exes: [phases.len]Exe = undefined;
-    var compiled: usize = 0;
-    defer for (exes[0..compiled]) |*exe| exe.deinit();
-    start = .now(io, .awake);
-    for (phases, &inputs, &exes) |phase, *input, *exe| {
+    var compiled: [phases.len]?Exe = @splat(null);
+    defer for (&compiled) |*exe| if (exe.*) |*e| e.deinit();
+    // Both programs are compiled even when one is refused: each refusal is reported.
+    var refusals: [phases.len]?Failure = @splat(null);
+    errdefer for (refusals) |refusal| if (refusal) |f| allocator.free(f.message);
+    var start: std.Io.Timestamp = .now(io, .awake);
+    for (phases, &inputs, &compiled, &refusals) |phase, *input, *exe, *refusal| {
         input.* = .init(layer, ctx.config, phase, leg.dtype, meshes, platform.target, backend);
+        stage.* = if (phase == .prefill) "compile the prefill" else "compile the decode step";
         pjrt_error_log.reset();
         exe.* = Exe.compile(allocator, io, platform, .{
             .meshes = &meshes.all(),
             .program_name = llama_layer.programName(phase),
-        }, .{input.*}) catch |err| return .{ .refused = try failure(ctx, if (phase == .prefill) "compile the prefill" else "compile the decode step", err) };
-        compiled += 1;
+        }, .{input.*}) catch |err| b: {
+            if (!isRefusal(leg.where, err)) return err;
+            refusal.* = try failure(ctx, stage.*, err);
+            break :b null;
+        };
     }
     timings.compile_ms = msSince(io, start);
+    for (refusals) |refusal| if (refusal != null) return .{ .refused = refusals };
+    const exes: [phases.len]*const Exe = .{ &compiled[0].?, &compiled[1].? };
 
+    stage.* = "load the weights";
+    pjrt_error_log.reset();
     start = .now(io, .awake);
     var weights = try zml.mem.bufferize(allocator, TransformerLayer, &layer);
     {
@@ -371,22 +420,24 @@ fn runLeg(ctx: *const Context, comptime func: anytype, leg: Leg) !Outcome {
             .parallelism = 16,
         });
         defer loader.deinit();
-        pjrt_error_log.reset();
-        loader.load(io, TransformerLayer, &layer, &weights, &store, .{}) catch |err| return .{ .failed = try failure(ctx, "load the weights", err) };
-        loader.await(io) catch |err| return .{ .failed = try failure(ctx, "load the weights", err) };
+        try loader.load(io, TransformerLayer, &layer, &weights, &store, .{});
+        try loader.await(io);
     }
     defer TransformerLayer.unloadBuffers(&weights);
     timings.load_ms = msSince(io, start);
 
     // The cache starts at zero: positions the causal mask hides must not hold NaN bits.
+    stage.* = "upload the cache and the positions";
+    pjrt_error_log.reset();
     const kv_shape = inputs[0].kv_cache.k.shape();
     const zeros = try allocator.alloc(u8, kv_shape.byteSize());
     defer allocator.free(zeros);
     @memset(zeros, 0);
-    var kv: KvCache.Buffer = .{
-        .k = try .fromBytes(io, platform, kv_shape, zeros),
-        .v = try .fromBytes(io, platform, kv_shape, zeros),
-    };
+    var kv: KvCache.Buffer = .{ .k = try .fromBytes(io, platform, kv_shape, zeros), .v = undefined };
+    {
+        errdefer kv.k.deinit();
+        kv.v = try .fromBytes(io, platform, kv_shape, zeros);
+    }
     defer KvCache.deinitBuffer(&kv);
 
     // As examples/llm's Session, every position lives on the device before the first step.
@@ -407,7 +458,7 @@ fn runLeg(ctx: *const Context, comptime func: anytype, leg: Leg) !Outcome {
     var runners: [phases.len]Exe.Runner(.{.layer}) = undefined;
     var runners_made: usize = 0;
     defer for (runners[0..runners_made]) |*r| r.deinit(allocator);
-    for (&runners, &exes) |*r, *exe| {
+    for (&runners, exes) |*r, exe| {
         r.* = try .init(exe, allocator, .{ .layer = weights });
         runners_made += 1;
     }
@@ -428,13 +479,14 @@ fn runLeg(ctx: *const Context, comptime func: anytype, leg: Leg) !Outcome {
             .bf16 => std.mem.sliceAsBytes(ctx.rows_bf16[first_row * d ..][0 .. rows * d]),
             else => unreachable,
         };
+        stage.* = if (step == 0) "run the prefill" else "run a decode step";
+        pjrt_error_log.reset();
         // Donated to the output, which replaces it.
         var hidden_buffer: zml.Buffer = try .fromBytes(io, platform, inputs[phase_index].hidden.shape(), bytes);
         defer hidden_buffer.deinit();
 
-        pjrt_error_log.reset();
         start = .now(io, .awake);
-        runners[phase_index].tryRun(io, .{
+        try runners[phase_index].tryRun(io, .{
             .inputs = .{
                 .hidden = hidden_buffer,
                 .token_index = token_index[step],
@@ -442,14 +494,16 @@ fn runLeg(ctx: *const Context, comptime func: anytype, leg: Leg) !Outcome {
                 .attention_metadata = metadata,
             },
             .outputs = .{ .hidden = &hidden_buffer, .kv_cache = &kv },
-        }, .{ .wait = true }) catch |err| return .{ .failed = try failure(ctx, if (step == 0) "run the prefill" else "run a decode step", err) };
+        }, .{ .wait = true });
         const took = msSince(io, start);
         if (step == 0) timings.prefill_ms = took else timings.decode_ms += took / @as(f64, @floatFromInt(ctx.steps));
 
+        stage.* = "read the results back";
         hidden[step] = try readF32(allocator, io, hidden_buffer);
         hidden_made += 1;
     }
 
+    stage.* = "read the results back";
     const k = try readCanonicalKv(allocator, io, kv.k);
     errdefer allocator.free(k);
     const v = try readCanonicalKv(allocator, io, kv.v);
@@ -457,6 +511,20 @@ fn runLeg(ctx: *const Context, comptime func: anytype, leg: Leg) !Outcome {
         leg.name, timings.open_ms, timings.compile_ms, timings.load_ms, timings.prefill_ms, timings.decode_ms,
     });
     return .{ .ran = .{ .hidden = hidden, .k = k, .v = v, .timings = timings } };
+}
+
+/// A refusal is the backend answering UNIMPLEMENTED for what it does not
+/// lower yet; any other compile error, and any on the CPU, fails the leg.
+fn isRefusal(where: Where, err: anyerror) bool {
+    return where != .cpu and err == error.Unimplemented;
+}
+
+test "only the Tenstorrent backend's UNIMPLEMENTED is a refusal" {
+    try std.testing.expect(isRefusal(.cards, error.Unimplemented));
+    try std.testing.expect(isRefusal(.device_free, error.Unimplemented));
+    try std.testing.expect(!isRefusal(.cpu, error.Unimplemented));
+    try std.testing.expect(!isRefusal(.cards, error.InvalidArgument));
+    try std.testing.expect(!isRefusal(.device_free, error.OutOfMemory));
 }
 
 fn readF32(allocator: std.mem.Allocator, io: std.Io, buffer: zml.Buffer) ![]f32 {
@@ -500,35 +568,103 @@ fn readCanonicalKv(allocator: std.mem.Allocator, io: std.Io, buffer: zml.Buffer)
     return out;
 }
 
-/// max |got - ref| over max |ref|: elementwise relative error is meaningless
-/// where the reference is near zero, which BF16 outputs always have.
+/// How far `got` is from `base`, one row of `width` values at a time (one
+/// token's hidden state, or one cache position), each row against the largest
+/// magnitude of the same row of `ref`: max |got - base| / max |ref|.
+/// Elementwise relative error is meaningless where the reference is near
+/// zero, which BF16 outputs always have. A whole-tensor maximum is too lenient
+/// for the prefill: after layer 0 the beginning-of-text token's state is about
+/// twenty times larger than the other tokens', which it would measure against
+/// its own maximum.
 const Distance = struct {
-    rel: f64,
-    max_diff: f64,
-    max_ref: f64,
+    /// Worst row of max |got - base| / max |ref|.
+    rel: f64 = 0,
+    /// Worst row of max |got - base| in BF16 units in the last place of max |ref|.
+    ulps: f64 = 0,
+    /// The row of `rel`.
+    row: usize = 0,
 
-    fn of(got: []const f32, base: []const f32, ref: []const f32) Distance {
-        var max_diff: f64 = 0;
-        var max_ref: f64 = 0;
-        var nan = false;
-        for (got, base, ref) |g, b, r| {
-            if (std.math.isNan(g) or std.math.isNan(b)) nan = true;
-            max_diff = @max(max_diff, @abs(@as(f64, g) - b));
-            max_ref = @max(max_ref, @abs(@as(f64, r)));
+    fn of(got: []const f32, base: []const f32, ref: []const f32, width: usize) Distance {
+        std.debug.assert(got.len == ref.len and base.len == ref.len and ref.len % width == 0);
+        var worst: Distance = .{};
+        for (0..ref.len / width) |row| {
+            var max_diff: f64 = 0;
+            var max_ref: f64 = 0;
+            var nan = false;
+            for (got[row * width ..][0..width], base[row * width ..][0..width], ref[row * width ..][0..width]) |g, b, r| {
+                if (std.math.isNan(g) or std.math.isNan(b)) nan = true;
+                max_diff = @max(max_diff, @abs(@as(f64, g) - b));
+                max_ref = @max(max_ref, @abs(@as(f64, r)));
+            }
+            const rel, const ulps = if (nan)
+                .{ std.math.nan(f64), std.math.nan(f64) }
+            else if (max_ref == 0)
+                // A row the reference leaves at zero (a cache position never written) must stay zero.
+                if (max_diff == 0) .{ 0, 0 } else .{ std.math.inf(f64), std.math.inf(f64) }
+            else
+                // BF16 keeps 8 significant bits: 2^(e - 7) for max_ref in [2^e, 2^(e+1)).
+                .{ max_diff / max_ref, max_diff / @exp2(@floor(@log2(max_ref)) - 7) };
+            if (worse(rel, worst.rel)) {
+                worst.rel = rel;
+                worst.row = row;
+            }
+            if (worse(ulps, worst.ulps)) worst.ulps = ulps;
         }
-        if (nan) max_diff = std.math.nan(f64);
-        return .{ .rel = max_diff / max_ref, .max_diff = max_diff, .max_ref = max_ref };
+        return worst;
+    }
+
+    /// NaN is worse than any number, and stays.
+    fn worse(a: f64, b: f64) bool {
+        if (std.math.isNan(b)) return false;
+        return std.math.isNan(a) or a > b;
     }
 
     fn within(self: Distance, limit: f64) bool {
         return self.rel <= limit;
     }
 
-    /// max_diff in BF16 units in the last place of max_ref: 2^(e - 7) for max_ref in [2^e, 2^(e+1)).
-    fn ulps(self: Distance) f64 {
-        return self.max_diff / @exp2(@floor(@log2(self.max_ref)) - 7);
+    fn agrees(self: Distance) bool {
+        return self.ulps <= agreement_ulps;
+    }
+
+    fn maxWith(self: Distance, other: Distance) Distance {
+        return .{
+            .rel = if (worse(other.rel, self.rel)) other.rel else self.rel,
+            .row = if (worse(other.rel, self.rel)) other.row else self.row,
+            .ulps = if (worse(other.ulps, self.ulps)) other.ulps else self.ulps,
+        };
     }
 };
+
+test {
+    // The test binary links Bazel's runfiles initialiser, whose Zig half lives there.
+    _ = zml.bazel;
+}
+
+test "Distance measures each token against its own row" {
+    // Row 0 is large (as the beginning-of-text token), row 1 small and 10% off.
+    const ref = [_]f32{ 32, -32, 0.5, -0.25 };
+    const got = [_]f32{ 32, -32, 0.55, -0.25 };
+    const d: Distance = .of(&got, &ref, &ref, 2);
+    try std.testing.expectApproxEqRel(0.1, d.rel, 1e-6);
+    try std.testing.expectEqual(1, d.row);
+    // 0.05 in units of 2^-8, the BF16 ulp of 0.5.
+    try std.testing.expectApproxEqRel(12.8, d.ulps, 1e-5);
+    try std.testing.expect(!d.within(2e-2));
+    // A whole-tensor maximum would have passed it: 0.05 / 32.
+    try std.testing.expect(Distance.of(&got, &ref, &ref, 4).within(2e-2));
+}
+
+test "Distance: zero rows of the reference must stay zero, NaN fails" {
+    const ref = [_]f32{ 1, 1, 0, 0 };
+    try std.testing.expectEqual(0, Distance.of(&ref, &ref, &ref, 2).rel);
+    const written = [_]f32{ 1, 1, 0, 1e-3 };
+    try std.testing.expect(std.math.isInf(Distance.of(&written, &ref, &ref, 2).rel));
+    const nan = [_]f32{ std.math.nan(f32), 1, 0, 0 };
+    const d: Distance = .of(&nan, &ref, &ref, 2);
+    try std.testing.expect(std.math.isNan(d.rel) and !d.within(2e-2) and !d.agrees());
+    try std.testing.expect(std.math.isNan(d.maxWith(.{}).rel) and std.math.isNan(Distance.maxWith(.{}, d).rel));
+}
 
 const Report = struct {
     ctx: *const Context,
@@ -551,7 +687,8 @@ const Report = struct {
                 allocator.free(r.k);
                 allocator.free(r.v);
             },
-            .refused, .failed => |f| allocator.free(f.message),
+            .refused => |refusals| for (refusals) |refusal| if (refusal) |f| allocator.free(f.message),
+            .failed => |f| allocator.free(f.message),
             .not_requested => {},
         }
     }
@@ -588,38 +725,28 @@ const Report = struct {
             },
         };
 
-        try w.print("\nmax |y - ref| / max |ref| against the reference, per step (limit {e})\n", .{reference_limit});
+        const widths: Widths = .of(self.ctx.config);
+        try w.print("\nmax |y - ref| / max |ref| against the reference, worst token of each step (limit {e})\n", .{reference_limit});
         try w.print("{s:<8} {s:>5} {s:>10}", .{ "step", "pos", "max|ref|" });
         for (known_legs, self.legs) |leg, outcome| if (outcome != .not_requested) try w.print(" {s:>12}", .{leg.name});
         try w.writeByte('\n');
-        for (0..1 + steps) |step| {
-            const position: usize = if (step == 0) 0 else llama_layer.prefill_tokens + step - 1;
-            try w.print("{s:<8} {d:>5} {e:>10.3}", .{ if (step == 0) "prefill" else "decode", position, Distance.of(ref.hidden[step], ref.hidden[step], ref.hidden[step]).max_ref });
+        for (0..rowCount(steps)) |row| {
+            try writeRowLabel(w, row, steps, maxAbs(output(ref, row, steps)));
             for (self.legs) |outcome| switch (outcome) {
                 .not_requested => {},
-                .ran => |r| try writeCell(w, Distance.of(r.hidden[step], ref.hidden[step], ref.hidden[step]), reference_limit),
+                .ran => |r| try writeCell(w, compare(r, ref, ref, row, steps, widths), reference_limit),
                 .refused => try w.print(" {s:>12}", .{"refused"}),
                 .failed => try w.print(" {s:>12}", .{"failed"}),
             };
             try w.writeByte('\n');
         }
-        for ([_][]const u8{ "k cache", "v cache" }, 0..) |label, which| {
-            try w.print("{s:<8} {s:>5} {e:>10.3}", .{ label, "end", Distance.of(kvOf(ref, which), kvOf(ref, which), kvOf(ref, which)).max_ref });
-            for (self.legs) |outcome| switch (outcome) {
-                .not_requested => {},
-                .ran => |r| try writeCell(w, Distance.of(kvOf(r, which), kvOf(ref, which), kvOf(ref, which)), reference_limit),
-                else => try w.print(" {s:>12}", .{"-"}),
-            };
-            try w.writeByte('\n');
-        }
 
-        try w.print("\nTP=2 against one device: max |a - b| in BF16 ulps of max |ref|, per step (limit {d})\n", .{agreement_ulps});
+        try w.print("\nTP=2 against one device: max |a - b| in BF16 ulps of max |ref|, worst token of each step (limit {d})\n", .{agreement_ulps});
         try w.print("{s:<8} {s:>5}", .{ "step", "pos" });
         for (pairs) |pair| try w.print(" {s:>14}", .{pair[0]});
         try w.writeByte('\n');
-        for (0..1 + steps) |step| {
-            const position: usize = if (step == 0) 0 else llama_layer.prefill_tokens + step - 1;
-            try w.print("{s:<8} {d:>5}", .{ if (step == 0) "prefill" else "decode", position });
+        for (0..rowCount(steps)) |row| {
+            try writeRowLabel(w, row, steps, null);
             for (pairs) |pair| {
                 const a = self.results(pair[0]) orelse {
                     try w.print(" {s:>14}", .{"-"});
@@ -629,48 +756,37 @@ const Report = struct {
                     try w.print(" {s:>14}", .{"-"});
                     continue;
                 };
-                const dist = Distance.of(a.hidden[step], b.hidden[step], ref.hidden[step]);
+                const dist = compare(a, b, ref, row, steps, widths);
                 var cell_buf: [32]u8 = undefined;
-                try w.print(" {s:>14}", .{try std.fmt.bufPrint(&cell_buf, "{d:.2}{s}", .{ dist.ulps(), if (dist.ulps() <= agreement_ulps) "" else "!" })});
+                try w.print(" {s:>14}", .{try std.fmt.bufPrint(&cell_buf, "{d:.2}{s}", .{ dist.ulps, if (dist.agrees()) "" else "!" })});
             }
             try w.writeByte('\n');
         }
 
-        try w.print("\nverdict (DESIGN 14.2, M1)\n", .{});
+        try w.print("\nverdict (DESIGN 14.2, M1; every output: the prefill's and each decode step's hidden states, per token, and the final K and V caches, per position)\n", .{});
         for (known_legs, self.legs) |leg, outcome| {
             switch (outcome) {
                 .not_requested => {},
                 .refused => try w.print("  {s:<13} refused by the backend: no number\n", .{leg.name}),
                 .failed => try w.print("  {s:<13} failed\n", .{leg.name}),
                 .ran => |r| {
-                    var worst: Distance = .{ .rel = 0, .max_diff = 0, .max_ref = 0 };
-                    var worst_step: usize = 0;
-                    for (r.hidden, ref.hidden, 0..) |h, rh, step| {
-                        const dist = Distance.of(h, rh, rh);
-                        if (std.math.isNan(worst.rel)) break;
-                        if (std.math.isNan(dist.rel) or dist.rel > worst.rel) {
-                            worst = dist;
-                            worst_step = step;
-                        }
-                    }
+                    const worst, const at = worstRow(r, ref, ref, steps, widths);
                     const pass = worst.within(reference_limit);
                     if (!pass) ok = false;
-                    try w.print("  {s:<13} {s} 2e-2 of the reference at every step (worst {e:.2}, step {d})\n", .{ leg.name, if (pass) "within" else "NOT within", worst.rel, worst_step });
+                    try w.print("  {s:<13} {s} 2e-2 of the reference (worst {e:.2}: ", .{ leg.name, if (pass) "within" else "NOT within", worst.rel });
+                    try writeWhere(w, at, steps, worst.row);
+                    try w.print(")\n", .{});
                 },
             }
         }
         for (pairs) |pair| {
             const a = self.results(pair[0]) orelse continue;
             const b = self.results(pair[1]) orelse continue;
-            var worst: f64 = 0;
-            for (a.hidden, b.hidden, ref.hidden) |ah, bh, rh| {
-                const ulps = Distance.of(ah, bh, rh).ulps();
-                if (std.math.isNan(ulps) or ulps > worst) worst = ulps;
-                if (std.math.isNan(worst)) break;
-            }
-            const pass = worst <= agreement_ulps;
+            var worst: Distance = .{};
+            for (0..rowCount(steps)) |row| worst = worst.maxWith(compare(a, b, ref, row, steps, widths));
+            const pass = worst.agrees();
             if (!pass) ok = false;
-            try w.print("  {s} vs {s}: {s} to {d} BF16 ulps at every step (worst {d:.2})\n", .{ pair[0], pair[1], if (pass) "agree" else "DO NOT agree", agreement_ulps, worst });
+            try w.print("  {s} vs {s}: {s} to {d} BF16 ulps (worst {d:.2})\n", .{ pair[0], pair[1], if (pass) "agree" else "DO NOT agree", agreement_ulps, worst.ulps });
         }
         if (std.mem.eql(u8, self.program, "layer")) {
             const cards_met = self.results("cards1") != null and self.results("cards2") != null and ok;
@@ -681,8 +797,72 @@ const Report = struct {
         return ok;
     }
 
-    fn kvOf(r: Results, which: usize) []const f32 {
-        return if (which == 0) r.k else r.v;
+    /// Values per compared row: one token's hidden state, one cache position (every head).
+    const Widths = struct {
+        hidden: usize,
+        kv: usize,
+
+        fn of(config: llama.Config) Widths {
+            const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
+            return .{ .hidden = config.hidden_size, .kv = @as(usize, config.num_key_value_heads) * head_dim };
+        }
+    };
+
+    /// The compared outputs, in report order: the prefill, each decode step, then the K and V caches.
+    fn rowCount(steps: u32) usize {
+        return 1 + steps + 2;
+    }
+
+    fn output(r: Results, row: usize, steps: u32) []const f32 {
+        if (row <= steps) return r.hidden[row];
+        return if (row == steps + 1) r.k else r.v;
+    }
+
+    fn compare(got: Results, base: Results, ref: Results, row: usize, steps: u32, widths: Widths) Distance {
+        const width = if (row <= steps) widths.hidden else widths.kv;
+        return .of(output(got, row, steps), output(base, row, steps), output(ref, row, steps), width);
+    }
+
+    /// The worst output of a leg and its index in `rowCount` order.
+    fn worstRow(got: Results, base: Results, ref: Results, steps: u32, widths: Widths) struct { Distance, usize } {
+        var worst: Distance = .{};
+        var at: usize = 0;
+        for (0..rowCount(steps)) |row| {
+            const dist = compare(got, base, ref, row, steps, widths);
+            if (Distance.worse(dist.rel, worst.rel)) {
+                worst = dist;
+                at = row;
+            }
+        }
+        return .{ worst, at };
+    }
+
+    fn writeRowLabel(w: *std.Io.Writer, row: usize, steps: u32, max_ref: ?f64) !void {
+        if (row == 0) {
+            var label_buf: [16]u8 = undefined;
+            try w.print("{s:<8} {s:>5}", .{ "prefill", try std.fmt.bufPrint(&label_buf, "0-{d}", .{llama_layer.prefill_tokens - 1}) });
+        } else if (row <= steps) {
+            try w.print("{s:<8} {d:>5}", .{ "decode", llama_layer.prefill_tokens + row - 1 });
+        } else {
+            try w.print("{s:<8} {s:>5}", .{ if (row == steps + 1) "k cache" else "v cache", "end" });
+        }
+        if (max_ref) |m| try w.print(" {e:>10.3}", .{m});
+    }
+
+    fn writeWhere(w: *std.Io.Writer, row: usize, steps: u32, inner: usize) !void {
+        if (row == 0) {
+            try w.print("prefill, token {d}", .{inner});
+        } else if (row <= steps) {
+            try w.print("decode step {d}, position {d}", .{ row, llama_layer.prefill_tokens + row - 1 });
+        } else {
+            try w.print("{s} cache, position {d}", .{ if (row == steps + 1) "k" else "v", inner });
+        }
+    }
+
+    fn maxAbs(values: []const f32) f64 {
+        var m: f64 = 0;
+        for (values) |v| m = @max(m, @abs(@as(f64, v)));
+        return m;
     }
 
     fn writeCell(w: *std.Io.Writer, dist: Distance, limit: f64) !void {
@@ -697,12 +877,18 @@ const Report = struct {
             .ran => |r| try w.print("ran: open {d:.0} ms, compile {d:.0} ms, load {d:.0} ms, prefill {d:.1} ms, decode {d:.2} ms/step\n", .{
                 r.timings.open_ms, r.timings.compile_ms, r.timings.load_ms, r.timings.prefill_ms, r.timings.decode_ms,
             }),
-            .refused, .failed => |f| try w.print("{s} at \"{s}\": {s}: {s}\n", .{
-                if (outcome == .refused) "REFUSED" else "FAILED",
-                f.stage,
-                @errorName(f.err),
-                if (f.message.len > 0) f.message else "(no PJRT message)",
-            }),
+            .refused => |refusals| {
+                try w.print("REFUSED\n", .{});
+                for (refusals) |refusal| if (refusal) |f| try writeFailure(w, f);
+            },
+            .failed => |f| {
+                try w.print("FAILED\n", .{});
+                try writeFailure(w, f);
+            },
         }
+    }
+
+    fn writeFailure(w: *std.Io.Writer, f: Failure) !void {
+        try w.print("      at \"{s}\": {s}: {s}\n", .{ f.stage, @errorName(f.err), if (f.message.len > 0) f.message else "(no PJRT message)" });
     }
 };

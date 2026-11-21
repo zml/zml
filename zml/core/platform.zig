@@ -20,15 +20,18 @@ const log = std.log.scoped(.zml);
 
 var api_map: std.enums.EnumArray(Target, ?*const pjrt.Api) = .initFill(null);
 
-/// Tenstorrent clients still alive when the process exits. A client that is
-/// never destroyed leaves the cards' Ethernet cores in fabric mode, and every
-/// later open of the cards times out until they are reset; `zml.testing`'s
-/// platform, for one, is never deinit'ed. Clients left are destroyed when the
-/// main thread exits normally (return from main, `std.process.exit`), by a
-/// thread-local destructor of the main thread: glibc's `exit` runs those
-/// before any `atexit` handler, and so before the destructors of the plugin's
-/// C++ statics (an `atexit` release crashed in tt-metal's GraphTracker, already
-/// destroyed). A crash or a fatal signal still leaves the cards to a reset.
+/// Tenstorrent clients still alive when the process exits. A process that
+/// exits normally (return from main, `exit`) with a client never destroyed
+/// leaves the cards' Ethernet cores in fabric mode, and every later open of the
+/// cards times out until they are reset; `zml.testing`'s platform, for one, is
+/// never deinit'ed. Clients left are destroyed when the main thread exits
+/// normally, by a thread-local destructor of the main thread: glibc's `exit`
+/// runs those before any `atexit` handler, and so before the destructors of
+/// the plugin's C++ statics (an `atexit` release crashed in tt-metal's
+/// GraphTracker, already destroyed). A process that ends by abort (a Zig
+/// panic) or by SIGTERM, SIGINT or SIGHUP needs no release: the next open
+/// recovers the cards (exit_paths_hw_test). `exit` called from another thread
+/// is not covered.
 const exit_release = struct {
     const Entry = struct { api: *const pjrt.Api, client: *pjrt.Client };
 
@@ -516,7 +519,7 @@ pub const Platform = struct {
                     // another process, wedged, misconfigured) must not turn
                     // a run into a silent CPU run.
                     if (target == .tenstorrent) {
-                        log.err("Platform {} has devices on this host but failed to start: {}", .{ target, err });
+                        log.warn("Platform {} has devices on this host but failed to start: {}", .{ target, err });
                         return err;
                     }
                     log.warn("Platform {} failed to start, trying the next one: {}", .{ target, err });

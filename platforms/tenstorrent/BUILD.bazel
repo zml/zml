@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 exports_files(["libzml_tenstorrent.BUILD.bazel"])
 
@@ -61,6 +61,34 @@ zig_test(
     name = "testing_env_hw_test",
     srcs = ["smoke.zig"],
     main = "testing_env_hw_test.zig",
+    tags = [
+        "manual",
+        "tt_hardware",
+    ],
+    target_compatible_with = _ENABLED_ONLY,
+    deps = ["//zml"],
+)
+
+# Helper of exit_paths_hw_test: opens the cards through Platform.auto, never
+# deinit'ed, then ends the way --way names.
+zig_binary(
+    name = "exit_paths",
+    srcs = ["smoke.zig"],
+    main = "exit_paths.zig",
+    tags = ["manual"],
+    target_compatible_with = _ENABLED_ONLY,
+    deps = ["//zml"],
+)
+
+# Every way a process that opened the cards can end and still leave them
+# usable: return, exit, panic, SIGTERM, SIGINT, SIGHUP. A failure leaves the
+# cards wedged until a reset.
+zig_test(
+    name = "exit_paths_hw_test",
+    timeout = "long",
+    srcs = ["smoke.zig"],
+    data = [":exit_paths"],
+    main = "exit_paths_hw_test.zig",
     tags = [
         "manual",
         "tt_hardware",

@@ -41,6 +41,19 @@ test "y = x * 2 + 1 on every card, then on one card, matches the CPU" {
     try smoke.expectLoaderRoundTrip(allocator, io, platform);
 }
 
+test "Platform.auto returns a Tenstorrent client that fails to start instead of falling back to the CPU" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // A view of more chips than any host has: the plugin refuses the client.
+    if (zml.Platform.auto(allocator, io, .{ .tenstorrent = .{ .mesh_shape = &.{64} } })) |platform| {
+        defer platform.deinit(allocator, io);
+        std.log.warn("Platform.auto gave a {} platform", .{platform.target});
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expect(err != error.Unavailable);
+    }
+}
+
 fn countDeviceNodes(io: std.Io) !usize {
     var dir = try std.Io.Dir.openDirAbsolute(io, "/dev/tenstorrent", .{ .iterate = true });
     defer dir.close(io);
