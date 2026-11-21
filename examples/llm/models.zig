@@ -88,6 +88,11 @@ pub const LoadedModel = union(ModelType) {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !CompiledModel {
+        if (platform.target == .tenstorrent and seqlen % 32 != 0) {
+            // Prefill tensors are tiled 32 rows at a time.
+            log.err("Tenstorrent needs a sequence length that is a multiple of 32, got {}", .{seqlen});
+            return error.InvalidSeqlen;
+        }
         const inner: CompiledModel.Inner = switch (self.*) {
             inline else => |*m, t| @unionInit(
                 CompiledModel.Inner,

@@ -63,6 +63,25 @@ pub const Meshes = struct {
                     .experts = try platform.registerMeshWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
                 };
             },
+            .tenstorrent => {
+                // Tensor parallelism spans every axis of the view, as on TPU,
+                // instead of the first axis with replicas along the others.
+                var strategy_model: zml.Sharding.Strategy = .parseBindings(.{ .model = .link_x });
+                var strategy_experts: zml.Sharding.Strategy = .parseBindings(.{ .experts = .link_x });
+                var axes: zml.stdx.BoundedArray(zml.Sharding.PhysicalAxisTag, 3) = .empty;
+                for ([_]zml.Sharding.PhysicalAxisTag{ .link_x, .link_y, .link_z }) |tag| {
+                    if (platform.physical_mesh.hasAxis(tag)) axes.appendAssumeCapacity(tag);
+                }
+                if (axes.len > 1) {
+                    strategy_model.addFold(.link_x, axes.constSlice());
+                    strategy_experts.addFold(.link_x, axes.constSlice());
+                }
+
+                return .{
+                    .model = try platform.registerMeshWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), strategy_model),
+                    .experts = try platform.registerMeshWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
+                };
+            },
             .cuda, .rocm, .oneapi, .neuron, .metal, .cpu, .furiosa => return .{
                 .model = try platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })),
                 .experts = try platform.registerMesh("experts", .mesh(.{ .experts = .high_bandwidth })),

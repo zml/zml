@@ -20,19 +20,20 @@ pub const CompilationParameters = struct {
     seqlen: usize,
     meshes: common.Meshes,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes, target: zml.Target) CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
+        const kv_shape: zml.Shape = .init(.{
+            .layer = mdl.model.layers.len,
+            .k = seqlen,
+            .h = config.num_key_value_heads,
+            .hd = head_dim,
+        }, mdl.model.embed_tokens.weight.dtype());
 
         return .{
             .prefill_tokens = .init(.{ .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
             .token_index = .init(.{}, .u32),
-            .kv_cache = .init(.init(.{
-                .layer = mdl.model.layers.len,
-                .k = seqlen,
-                .h = config.num_key_value_heads,
-                .hd = head_dim,
-            }, mdl.model.embed_tokens.weight.dtype()), meshes.model),
+            .kv_cache = .init(model.KvCache.platformShape(target, kv_shape), meshes.model),
             .rng = .init(),
             .attention_metadata = .init(.fromBackend(backend)),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
@@ -175,7 +176,7 @@ pub fn run(runner: *KernelRunner, args: Args) void {
     }, .{});
 }
 
-fn compileKernel(
+pub fn compileKernel(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,

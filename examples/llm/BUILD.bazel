@@ -29,6 +29,35 @@ zig_binary(
     deps = ["//zml"],
 )
 
+# Op-selection corpus of the Tenstorrent backend (--@zml//platforms:tenstorrent=true):
+#   bazel run //examples/llm:tenstorrent_corpus -- --out=<dir>
+zig_binary(
+    name = "tenstorrent_corpus",
+    srcs = glob(["**/*.zig"]),
+    data = ["//platforms/tenstorrent:fixtures"],
+    main = "tenstorrent_corpus.zig",
+    target_compatible_with = select({
+        "//platforms:tenstorrent.enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//zml"],
+)
+
+# M1 runner of the Tenstorrent backend: layer 0 of a Llama checkpoint against a
+# CPU F32 reference. Legs cards1 and cards2 open the cards (card lock):
+#   bazel run //examples/llm:tenstorrent_m1 -- --model=<dir> [--legs=...] [--program=standin]
+zig_binary(
+    name = "tenstorrent_m1",
+    srcs = glob(["**/*.zig"]),
+    data = ["//platforms/tenstorrent:fixtures"],
+    main = "tenstorrent_m1.zig",
+    target_compatible_with = select({
+        "//platforms:tenstorrent.enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
     targets = [":llm"],

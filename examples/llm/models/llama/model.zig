@@ -116,7 +116,7 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, meshes);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, meshes, platform.target);
 
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
@@ -604,6 +604,16 @@ pub const KvCache = struct {
     v: zml.Tensor,
 
     pub const Buffer = zml.Bufferized(KvCache);
+
+    /// Tenstorrent's decode attention and cache update read heads before
+    /// positions: storing the cache as [layer, h, k, hd] there avoids
+    /// permuting it on every layer of every step.
+    pub fn platformShape(target: zml.Target, kv_shape: zml.Shape) zml.Shape {
+        return switch (target) {
+            .tenstorrent => kv_shape.transpose(.{ .layer, .h, .k, .hd }),
+            else => kv_shape,
+        };
+    }
 
     pub fn init(kv_shape: zml.Shape, mesh: *const zml.Mesh) KvCache {
         const sharded_shape = kv_shape.withPartitioning(mesh, .{ .h = .model });
