@@ -170,10 +170,11 @@ test "a buffer of a type the plugin cannot hold yet is an error, not a crash" {
     });
     defer platform.deinit(allocator, io);
 
-    // M0 holds f32, bf16, i32, u32, u16, u8 and bool; the plugin answers the
-    // others' layout query with UNIMPLEMENTED (u64 arrives with M2).
+    // The plugin holds f32, bf16, i32, u32, u16, u8, bool and, as 32-bit
+    // halves, i64 and u64; it answers the others' layout query with
+    // UNIMPLEMENTED.
     const bytes: [64 * 96 * 8]u8 = @splat(0);
-    for ([_]zml.DataType{ .f16, .i64, .u64 }) |dtype| {
+    for ([_]zml.DataType{ .f16, .f64, .i16 }) |dtype| {
         const shape = zml.Shape.init(.{ .b = 64, .d = 96 }, dtype);
         try expectUnimplemented(zml.Buffer.fromBytes(io, platform, shape, bytes[0..shape.byteSize()]));
         try expectUnimplemented(zml.Buffer.uninitialized(io, platform, shape, .{}));
