@@ -362,10 +362,21 @@ pub const LmHead = struct {
 
     pub fn forward(input: Input) Output {
         const self = input.lm_head;
-        const last_index = input.active_length.convert(.i32).addConstant(-1);
-        const hidden = self.norm.forward(input.hidden.withPartialTags(.{ .s, .d }).slice(.s, .dyn(last_index, 1)));
+        const next_tokens, const new_rng = zml.nn.sampleTokens(self.logits(input.hidden, input.active_length), self.gen_opts, input.rng);
+        return .{ .tokens = next_tokens.convert(.u32), .rng = new_rng };
+    }
 
-        var logits = blk: {
+    /// The logits of the last active position, `{.s = 1, .voc}`, as `forward` samples them.
+    pub fn logits(self: LmHead, hidden_states: zml.Tensor, active_length: zml.Tensor) zml.Tensor {
+        const last_index = active_length.convert(.i32).addConstant(-1);
+        return self.project(hidden_states.withPartialTags(.{ .s, .d }).slice(.s, .dyn(last_index, 1)));
+    }
+
+    /// The logits of every position of `hidden_states` `{.s, .d}`: the final norm, then the LM head.
+    pub fn project(self: LmHead, hidden_states: zml.Tensor) zml.Tensor {
+        const hidden = self.norm.forward(hidden_states);
+
+        var result = blk: {
             if (self.lm_head) |lm_head| {
                 break :blk lm_head.forward(hidden, hidden.dtype()).rename(.{ .dout = .d });
             } else {
@@ -373,11 +384,9 @@ pub const LmHead = struct {
             }
         };
 
-        if (logits.shape().hasTag(.voc) == null)
-            logits = logits.rename(.{ .d = .voc });
-
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, input.rng);
-        return .{ .tokens = next_tokens.convert(.u32), .rng = new_rng };
+        if (result.shape().hasTag(.voc) == null)
+            result = result.rename(.{ .d = .voc });
+        return result;
     }
 };
 

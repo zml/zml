@@ -92,7 +92,7 @@ pub const CompiledModel = struct {
 
 pub const Inference = CompiledModel;
 
-const Forward = struct {
+pub const Forward = struct {
     pub const Input = struct {
         weights: model.Model,
         tokens: zml.Tensor,
@@ -111,6 +111,23 @@ const Forward = struct {
     };
 
     pub fn forward(input: Input) Output {
+        const hidden, const kv_cache = layers(input);
+        // LmHead owns final normalization; Llama.forward would apply it twice.
+        const result = model.LmHead.forward(.{
+            .lm_head = .init(input.weights),
+            .hidden = hidden,
+            .active_length = input.active_length,
+            .rng = input.rng,
+        });
+        return .{
+            .tokens = if (input.tokens.dim(.s) == 1) result.tokens.reuseBuffer(input.tokens) else result.tokens,
+            .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
+            .rng = .{ ._state = result.rng._state.reuseBuffer(input.rng._state) },
+        };
+    }
+
+    /// The embedding and every decoder layer: the hidden states before the LM head, and the updated cache.
+    pub fn layers(input: Input) struct { zml.Tensor, model.KvCache } {
         var hidden = model.EmbedTokens.forward(.{
             .embedding = .{ .embed_tokens = input.weights.model.embed_tokens },
             .tokens = input.tokens,
@@ -129,18 +146,7 @@ const Forward = struct {
             hidden = result.hidden;
             kv_cache = result.kv_cache;
         }
-        // LmHead owns final normalization; Llama.forward would apply it twice.
-        const result = model.LmHead.forward(.{
-            .lm_head = .init(input.weights),
-            .hidden = hidden,
-            .active_length = input.active_length,
-            .rng = input.rng,
-        });
-        return .{
-            .tokens = if (input.tokens.dim(.s) == 1) result.tokens.reuseBuffer(input.tokens) else result.tokens,
-            .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
-            .rng = .{ ._state = result.rng._state.reuseBuffer(input.rng._state) },
-        };
+        return .{ hidden, kv_cache };
     }
 };
 

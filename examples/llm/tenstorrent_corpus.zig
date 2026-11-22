@@ -28,12 +28,23 @@ pub const std_options: std.Options = .{
 const Args = struct {
     out: []const u8,
     tp: ?u32 = null,
+    /// Layers of the Llama programs (the corpus: 2; the whole model: 32).
+    layers: u32 = 2,
+    /// Sequence length of the Llama programs (the corpus: 1024; examples/llm: 2048).
+    seqlen: u32 = seqlen,
+    programs: enum { all, llama } = .all,
+    /// Host memory per device of the device-free runtime, in MiB (the plugin's default: 16).
+    arena_mib: ?u32 = null,
 
     pub const help =
-        \\ Use tenstorrent_corpus --out=<dir> [--tp=<1|2|4|8>]
+        \\ Use tenstorrent_corpus --out=<dir> [--tp=<1|2|4|8>] [--layers=<n>] [--seqlen=<n>] [--programs=<all|llama>] [--arena-mib=<n>]
         \\
         \\ Writes <dir>/<topology>/<program>.mlirbc, .mlir and .compile_options.pb, and <dir>/<topology>/manifest.jsonl,
         \\ for every topology (tp1, tp2, tp4, tp4_2x2, tp8) or those of tensor-parallel degree --tp.
+        \\ --layers and --seqlen change the two Llama programs only (default: the corpus, 2 layers of 1024 tokens;
+        \\ examples/llm on Llama-3.1-8B is --layers=32 --seqlen=2048); --programs=llama captures only them.
+        \\ Compiling loads each program on the device-free runtime, whose arena (host memory per device, 16 MiB
+        \\ by default) must hold the program's constants: the whole model at 2048 tokens needs --arena-mib=64.
         \\
     ;
 };
@@ -105,11 +116,15 @@ pub fn main(init: std.process.Init) !void {
 
     for (topologies) |topology| {
         if (args.tp) |tp| if (tp != topology.tp) continue;
-        try captureTopology(allocator, io, out_path, topology);
+        try captureTopology(allocator, io, out_path, topology, args);
     }
 }
 
-fn captureTopology(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8, topology: Topology) !void {
+fn captureTopology(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8, topology: Topology, args: Args) !void {
+    if (args.seqlen % 32 != 0 or args.layers == 0) {
+        std.log.err("--seqlen must be a multiple of 32 and --layers positive, got {d} and {d}", .{ args.seqlen, args.layers });
+        return error.InvalidArgs;
+    }
     var fixture_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const r = try zml.bazel.runfiles(bazel_builtin.current_repository);
     var name_buf: [256]u8 = undefined;
@@ -129,7 +144,12 @@ fn captureTopology(allocator: std.mem.Allocator, io: std.Io, out_path: []const u
     var manifest: Manifest = .{ .writer = &manifest_writer.interface };
 
     const platform: *zml.Platform = try .init(allocator, io, .tenstorrent, .{
-        .tenstorrent = .{ .runtime = .fake, .cluster_descriptor = fixture, .mesh_shape = topology.mesh_shape },
+        .tenstorrent = .{
+            .runtime = .fake,
+            .cluster_descriptor = fixture,
+            .mesh_shape = topology.mesh_shape,
+            .arena_bytes = if (args.arena_mib) |mib| @as(i64, mib) << 20 else null,
+        },
         .pjrt_program_dump_dir = dump_dir,
     });
     defer platform.deinit(allocator, io);
@@ -153,10 +173,12 @@ fn captureTopology(allocator: std.mem.Allocator, io: std.Io, out_path: []const u
         .dir_name = dir_name,
         .view = info.view,
         .manifest = &manifest,
+        .llama_layers = args.layers,
+        .llama_seqlen = args.seqlen,
     };
-    try ctx.captureBlocks();
+    if (args.programs == .all) try ctx.captureBlocks();
     try ctx.captureLlama();
-    try ctx.captureLayer();
+    if (args.programs == .all) try ctx.captureLayer();
 }
 
 const Context = struct {
@@ -168,6 +190,8 @@ const Context = struct {
     dir_name: []const u8,
     view: zml.platform.tenstorrent.View,
     manifest: *Manifest,
+    llama_layers: u32,
+    llama_seqlen: u32,
 
     fn model(self: *const Context) *const zml.Mesh {
         return self.meshes.model;
@@ -183,7 +207,7 @@ const Context = struct {
         try self.record(kind, name, tensorShapes(args), result);
     }
 
-    fn record(self: *Context, comptime kind: []const u8, name: []const u8, inputs: ShapeList, result: anytype) !void {
+    fn record(self: *Context, kind: []const u8, name: []const u8, inputs: ShapeList, result: anytype) !void {
         var outcome: Outcome = .compiled;
         if (result) |exe| {
             var compiled = exe;
@@ -260,7 +284,9 @@ const Context = struct {
         const allocator = self.allocator;
         const parsed = try std.json.parseFromSlice(llama.Config, allocator, llama_config_json, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
-        const config = parsed.value;
+        var config = parsed.value;
+        config.num_hidden_layers = self.llama_layers;
+        const llama_seqlen = self.llama_seqlen;
 
         var registry = try llamaRegistry(allocator, config);
         defer registry.deinit();
@@ -274,15 +300,23 @@ const Context = struct {
         defer mdl.deinit(allocator);
 
         const backend: zml.attention.Backend = .auto(self.platform);
-        const params: llama.CompilationParameters = .init(mdl, config, seqlen, backend, self.meshes, self.platform.target);
+        const params: llama.CompilationParameters = .init(mdl, config, llama_seqlen, backend, self.meshes, self.platform.target);
         var progress: std.Progress.Node = .none;
+        var kind_buf: [32]u8 = undefined;
+        const kind = try std.fmt.bufPrint(&kind_buf, "llama_{d}_layers", .{self.llama_layers});
         for ([_]common.Phase{ .prefill, .decode }) |phase| {
             pjrt_error_log.reset();
-            const tokens: usize = if (phase == .prefill) seqlen else 1;
+            const tokens: usize = if (phase == .prefill) llama_seqlen else 1;
             const attention_parameters = if (phase == .prefill) params.prefill_attention_parameters else params.decode_attention_parameters;
+            const start: std.Io.Timestamp = .now(self.io, .awake);
             const result = llama.inference.compileKernel(allocator, self.io, self.platform, mdl, params, tokens, attention_parameters, phase, &progress);
+            std.log.info("{s} {s}: ZML trace, PJRT compile and Load took {d:.0} ms", .{
+                self.topology.name,
+                phase.programName("llama", "forward"),
+                @as(f64, @floatFromInt(start.untilNow(self.io, .awake).nanoseconds)) / std.time.ns_per_ms,
+            });
             const inputs: ShapeList = tensorShapes(.{ Tensor.init(.{ .s = tokens }, .u32), params.token_index, params.kv_cache, params.rng });
-            try self.record("llama_2_layers", phase.programName("llama", "forward"), inputs, result);
+            try self.record(kind, phase.programName("llama", "forward"), inputs, result);
         }
     }
 

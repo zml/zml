@@ -58,6 +58,30 @@ zig_binary(
     deps = ["//zml"],
 )
 
+# M2 runner of the Tenstorrent backend: the whole Llama of this example on the
+# cards, judged token by token against the CPU platform (reference and compare
+# modes) and timed with this example's own programs (generate mode). The cards
+# platform opens the cards (card lock):
+#   bazel run //examples/llm:tenstorrent_m2 -- --model=<dir> --mode=... [--platform=cpu|cards] [--cards=n]
+zig_binary(
+    name = "tenstorrent_m2",
+    srcs = glob(["**/*.zig"]),
+    main = "tenstorrent_m2.zig",
+    target_compatible_with = select({
+        "//platforms:tenstorrent.enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//zml"],
+)
+
+# The M2 runner's helpers (top logits, BF16 ulps, statistics), on the CPU.
+zig_test(
+    name = "tenstorrent_m2_test",
+    srcs = glob(["**/*.zig"]),
+    main = "tenstorrent_m2.zig",
+    deps = ["//zml"],
+)
+
 # The runner's comparisons, on the CPU.
 zig_test(
     name = "tenstorrent_m1_test",
