@@ -375,12 +375,22 @@ pub const Loader = struct {
 
     pub const LoadOpts = struct {
         progress: ?*std.Progress.Node = null,
+        /// The device layout of each of the model's tensors, in `meta.visit`
+        /// order: those of the executables the buffers feed
+        /// (`Exe.modelLayouts`). Null: the platform's default layouts.
+        layouts: ?[]const pjrt.MemoryLayout = null,
     };
 
-    pub const LoadError = error{TransformedTensorNotDelivered};
+    pub const LoadError = error{ TransformedTensorNotDelivered, LayoutsDoNotMatchModel };
 
     pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, opts: LoadOpts) LoadError!void {
         const tensor_count = meta.count(Tensor, model);
+        if (opts.layouts) |layouts| {
+            if (layouts.len != tensor_count) {
+                log.err("{} layouts for a model of {} tensors", .{ layouts.len, tensor_count });
+                return error.LayoutsDoNotMatchModel;
+            }
+        }
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
@@ -415,12 +425,13 @@ pub const Loader = struct {
             return error.TransformedTensorNotDelivered;
         }
 
-        for (flattened_tensors, flattened_buffers) |tensor, buffer| {
+        for (flattened_tensors, flattened_buffers, 0..) |tensor, buffer, i| {
             if (store.getSourcesById(tensor.id)) |sources| {
                 if (sources.transformed) continue;
             }
 
-            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts });
+            const layout: ?pjrt.MemoryLayout = if (opts.layouts) |layouts| layouts[i] else null;
+            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts, layout });
         }
     }
 
@@ -439,24 +450,24 @@ pub const Loader = struct {
     }
 
     pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: *const Tensor, store: *const TensorStore, opts: LoadOpts) void {
-        loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts });
+        loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts, null });
     }
 
-    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts) void {
+    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts, layout: ?pjrt.MemoryLayout) void {
         const sources = store.getSourcesById(tensor.id) orelse {
             std.log.debug("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
         };
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, layout, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
     }
 
     fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, opts: LoadOpts) void {
-        self.loadSingleInner(io, source, shape, buffer, .device, opts) catch |e| {
+        self.loadSingleInner(io, source, shape, buffer, .device, null, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
             return;
@@ -471,6 +482,7 @@ pub const Loader = struct {
         shape: Shape,
         buffer: *Buffer,
         memory: Memory.Kind,
+        layout: ?pjrt.MemoryLayout,
         opts: LoadOpts,
     ) !void {
         var reader = try source.reader(io, &.{}, .{});
@@ -486,6 +498,7 @@ pub const Loader = struct {
             shape,
             buffer,
             memory,
+            layout,
         );
         defer writer.deinit(self.allocator);
 
@@ -689,19 +702,24 @@ pub const MemoryWriter = union(enum) {
         shape: Shape,
         buffer: *Buffer,
         memory: Memory.Kind,
+        layout: ?pjrt.MemoryLayout,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .rocm, .oneapi, .furiosa => .{
-                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory),
-            },
+            .cuda, .rocm, .oneapi, .furiosa => if (layout != null)
+                error.LayoutNotSupportedByDirectWriter
+            else
+                .{
+                    .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory),
+                },
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
-                .{ .buffered = try .init(allocator, io, platform, shape, buffer, .default) },
+                .{ .buffered = try .init(allocator, io, platform, shape, buffer, .default, layout) },
             // The direct writer streams raw bytes into tiled buffers, which the
             // plugin refuses; Buffer.from goes through its tile transpose, into
-            // device and pinned_host memory alike.
-            .tenstorrent => .{ .buffered = try .init(allocator, io, platform, shape, buffer, memory) },
+            // device and pinned_host memory alike, in the layout the executable
+            // reports (a matmul's weight has its two minor dims swapped).
+            .tenstorrent => .{ .buffered = try .init(allocator, io, platform, shape, buffer, memory, layout) },
         };
     }
 
@@ -733,15 +751,17 @@ pub const BufferedMemoryWriter = struct {
     shape: Shape,
     buffer: *Buffer,
     memory: Memory.Kind,
+    layout: ?pjrt.MemoryLayout,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer, memory: Memory.Kind) !BufferedMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer, memory: Memory.Kind, layout: ?pjrt.MemoryLayout) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,
             .shape = shape,
             .buffer = buffer,
             .memory = memory,
+            .layout = layout,
             .interface = .{
                 .buffer = try allocator.alloc(u8, shape.byteSize()),
                 .vtable = &.{
@@ -767,7 +787,7 @@ pub const BufferedMemoryWriter = struct {
             self.platform,
             self.shape,
             @ptrCast(self.interface.buffer),
-            .{ .wait = true, .memory = self.memory },
+            .{ .wait = true, .memory = self.memory, .layout = self.layout },
         ) catch return std.Io.Writer.Error.WriteFailed;
     }
 };

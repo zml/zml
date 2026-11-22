@@ -644,26 +644,7 @@ pub const Client = opaque {
             }
         }
 
-        var serialize_args: c.PJRT_Layouts_MemoryLayout_Serialize_Args = .{
-            .struct_size = c.PJRT_Layouts_MemoryLayout_Serialize_Args_STRUCT_SIZE,
-            .extension_start = null,
-            .layout = get_args.layout,
-            .serialized_bytes = null,
-            .serialized_bytes_size = 0,
-            .serialized_layout = null,
-            .serialized_layout_deleter = null,
-        };
-        if (ext.PJRT_Layouts_MemoryLayout_Serialize.?(&serialize_args)) |pjrt_c_error| {
-            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            defer pjrt_error.deinit(api);
-            return pjrt_error.getCode(api).toApiError();
-        }
-        defer if (serialize_args.serialized_layout_deleter) |deleter| {
-            deleter(serialize_args.serialized_layout);
-        };
-
-        const serialized = serialize_args.serialized_bytes[0..serialize_args.serialized_bytes_size];
-        return try DefaultMemoryLayout.parseSerialized(serialized);
+        return try DefaultMemoryLayout.fromPjrt(api, ext, get_args.layout.?);
     }
 
     pub const CreateUninitializedBufferArgs = struct {
@@ -952,6 +933,34 @@ pub const Executable = opaque {
         host_temp_size_in_bytes: u64,
     };
 
+    /// The device layout of every parameter (PJRT_Layouts_PJRT_Executable_GetParameterLayouts),
+    /// in parameter order, allocated with `allocator`. A plugin may store a parameter in a
+    /// layout other than its client's default (Tenstorrent keeps a matmul's weight
+    /// transposed), and a buffer passed to the parameter must have that layout.
+    pub fn parameterLayouts(self: *const Executable, api: *const Api, allocator: std.mem.Allocator) ![]DefaultMemoryLayout {
+        const ext = if (api.extension(.layouts)) |e| e.layouts else return error.LayoutsExtensionUnavailable;
+        var args: c.PJRT_Layouts_PJRT_Executable_GetParameterLayouts_Args = .{
+            .struct_size = c.PJRT_Layouts_PJRT_Executable_GetParameterLayouts_Args_STRUCT_SIZE,
+            .extension_start = null,
+            .executable = self.inner(),
+            .num_parameters = 0,
+            .layouts = null,
+        };
+        if (ext.PJRT_Layouts_PJRT_Executable_GetParameterLayouts.?(&args)) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            defer pjrt_error.deinit(api);
+            log.err("[PJRT_Layouts_PJRT_Executable_GetParameterLayouts] {s}", .{pjrt_error.getMessage(api)});
+            return pjrt_error.getCode(api).toApiError();
+        }
+        const layouts = try allocator.alloc(DefaultMemoryLayout, args.num_parameters);
+        errdefer allocator.free(layouts);
+        // The executable owns the layouts it returns.
+        for (layouts, 0..) |*layout, i| {
+            layout.* = try DefaultMemoryLayout.fromPjrt(api, ext, args.layouts[i].?);
+        }
+        return layouts;
+    }
+
     pub fn getCompiledMemoryStats(self: *const Executable, api: *const Api) ApiError!CompiledMemoryStats {
         const ret = try api.call(.PJRT_Executable_GetCompiledMemoryStats, .{
             .executable = self.inner(),
@@ -1121,6 +1130,37 @@ pub const MemoryLayout = union(MemoryLayoutType) {
         };
     }
 
+    /// Whether `a` and `b` describe the same layout.
+    pub fn eql(a: MemoryLayout, b: MemoryLayout) bool {
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+        return switch (a) {
+            .tiled => |t| std.mem.eql(i64, t.minor_to_major, b.tiled.minor_to_major) and
+                std.mem.eql(i64, t.tile_dims, b.tiled.tile_dims) and
+                std.mem.eql(usize, t.tile_dims_sizes, b.tiled.tile_dims_sizes),
+            .strides => |t| std.mem.eql(i64, t.byte_strides, b.strides.byte_strides),
+        };
+    }
+
+    /// Prints the layout as XLA does: `{1,0:T(32,32)(16,16)}`.
+    pub fn format(self: MemoryLayout, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .tiled => |t| {
+                try writer.writeAll("{");
+                for (t.minor_to_major, 0..) |d, i| try writer.print("{s}{d}", .{ if (i == 0) "" else ",", d });
+                if (t.tile_dims_sizes.len != 0) try writer.writeAll(":T");
+                var offset: usize = 0;
+                for (t.tile_dims_sizes) |size| {
+                    try writer.writeAll("(");
+                    for (t.tile_dims[offset..][0..size], 0..) |d, i| try writer.print("{s}{d}", .{ if (i == 0) "" else ",", d });
+                    try writer.writeAll(")");
+                    offset += size;
+                }
+                try writer.writeAll("}");
+            },
+            .strides => |t| try writer.print("strides {any}", .{t.byte_strides}),
+        }
+    }
+
     fn fromCStruct(self: c.PJRT_Buffer_MemoryLayout) MemoryLayout {
         return switch (self.type) {
             c.PJRT_Buffer_MemoryLayout_Type_Tiled => b: {
@@ -1173,6 +1213,30 @@ pub const DefaultMemoryLayout = struct {
                 .tile_dims_sizes = self.tile_dims_sizes_storage[0..self.tile_dims_sizes_len],
             },
         };
+    }
+
+    /// Serializes a layout the plugin returned and parses it.
+    fn fromPjrt(api: *const Api, ext: *const c.PJRT_Layouts_Extension, layout: *c.PJRT_Layouts_MemoryLayout) !DefaultMemoryLayout {
+        var serialize_args: c.PJRT_Layouts_MemoryLayout_Serialize_Args = .{
+            .struct_size = c.PJRT_Layouts_MemoryLayout_Serialize_Args_STRUCT_SIZE,
+            .extension_start = null,
+            .layout = layout,
+            .serialized_bytes = null,
+            .serialized_bytes_size = 0,
+            .serialized_layout = null,
+            .serialized_layout_deleter = null,
+        };
+        if (ext.PJRT_Layouts_MemoryLayout_Serialize.?(&serialize_args)) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            defer pjrt_error.deinit(api);
+            return pjrt_error.getCode(api).toApiError();
+        }
+        defer if (serialize_args.serialized_layout_deleter) |deleter| {
+            deleter(serialize_args.serialized_layout);
+        };
+
+        const serialized = serialize_args.serialized_bytes[0..serialize_args.serialized_bytes_size];
+        return try DefaultMemoryLayout.parseSerialized(serialized);
     }
 
     pub fn parseSerialized(serialized: []const u8) !DefaultMemoryLayout {
@@ -1287,9 +1351,29 @@ pub const Buffer = opaque {
         return ret.is_on_cpu;
     }
 
+    /// Copies the buffer to `dst`, row-major. Without a host layout PJRT
+    /// copies in the order of the buffer's device layout (tiles aside), so a
+    /// buffer whose dimensions are stored in another order (a Tenstorrent
+    /// matmul weight, its two minor dimensions swapped) is read with a
+    /// row-major host layout.
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
+        var row_major: [16]i64 = undefined;
+        var host_layout: c.PJRT_Buffer_MemoryLayout = undefined;
+        const layout: ?*c.PJRT_Buffer_MemoryLayout = if (self.memoryLayout(api)) |stored| switch (stored) {
+            .tiled => |t| b: {
+                const rank = t.minor_to_major.len;
+                if (rank > row_major.len) break :b null;
+                for (row_major[0..rank], 0..) |*d, i| d.* = @intCast(rank - 1 - i);
+                if (std.mem.eql(i64, t.minor_to_major, row_major[0..rank])) break :b null;
+                const wanted: MemoryLayout = .{ .tiled = .{ .minor_to_major = row_major[0..rank], .tile_dims = &.{}, .tile_dims_sizes = &.{} } };
+                host_layout = wanted.toCStruct();
+                break :b &host_layout;
+            },
+            .strides => null,
+        } else |_| null;
         const ret = try api.call(.PJRT_Buffer_ToHostBuffer, .{
             .src = self.inner(),
+            .host_layout = layout,
             .dst = dst.ptr,
             .dst_size = dst.len,
         });

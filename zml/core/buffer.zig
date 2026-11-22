@@ -78,7 +78,14 @@ pub const Buffer = struct {
         }
     };
 
-    pub const FromOptions = struct { wait: bool = true, memory: Memory.Kind = .default };
+    pub const FromOptions = struct {
+        wait: bool = true,
+        memory: Memory.Kind = .default,
+        /// The device layout of every shard, e.g. the one an executable reports
+        /// for the parameter the buffer feeds (`Exe.modelLayouts`); null: the
+        /// platform's default layout.
+        layout: ?pjrt.MemoryLayout = null,
+    };
 
     /// Frees the accelerator memory.
     /// Depending on the platform, the memory is typically not released to the OS
@@ -150,7 +157,10 @@ pub const Buffer = struct {
             std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ packed_shape, err });
         };
         const ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype());
-        const layout = try platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype());
+        const layout = if (opts.layout) |requested| requested else try platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype());
+        if (opts.layout) |requested| {
+            stdx.debug.assert(requested != .tiled or requested.tiled.minor_to_major.len == placement.local_dims.len, "Layout {f} does not fit shape {f}", .{ requested, packed_shape });
+        }
 
         errdefer for (pjrt_shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);

@@ -387,6 +387,58 @@ pub const Exe = struct {
         }
     }
 
+    /// The device layouts of the inputs that hold `model`'s tensors, for a
+    /// function whose first argument is `model` (a model's weights): one per
+    /// tensor, in `meta.visit` order, allocated in `arena`. The loader uploads
+    /// each tensor in its layout (`zml.io.Loader.LoadOpts.layouts`). Null where
+    /// buffers take the client's default layout: on every platform but
+    /// Tenstorrent, whose compiler stores the weight of a matmul in the order
+    /// the matmul reads (its two minor dimensions swapped).
+    pub fn modelLayouts(self: *const Exe, arena: std.mem.Allocator, model: anytype) !?[]const pjrt.MemoryLayout {
+        if (self.platform.target != .tenstorrent) return null;
+        const executable = try self.exe.executable(self.platform.pjrt_api);
+        defer executable.deinit(self.platform.pjrt_api);
+        const parsed = try executable.parameterLayouts(self.platform.pjrt_api, arena);
+        const count = meta.count(Tensor, model);
+        if (count > parsed.len or count > self.input_shapes.len) {
+            log.err("{} model tensors for an executable of {} inputs", .{ count, self.input_shapes.len });
+            return error.ModelIsNotTheFirstArgument;
+        }
+        const Context = struct { exe: *const Exe, mismatch: ?usize = null };
+        var context: Context = .{ .exe = self };
+        meta.forEachVisit(model, *const Tensor, struct {
+            fn call(i: usize, tensor: *const Tensor, ctx: *Context) void {
+                if (ctx.mismatch == null and !ctx.exe.input_shapes[i].eql(tensor.shape())) ctx.mismatch = i;
+            }
+        }.call, .{&context});
+        if (context.mismatch) |i| {
+            log.err("model tensor {} does not match input {} {f} of the executable", .{ i, i, self.input_shapes[i] });
+            return error.ModelIsNotTheFirstArgument;
+        }
+        const layouts = try arena.alloc(pjrt.MemoryLayout, count);
+        for (layouts, parsed[0..count]) |*layout, *default| layout.* = default.toMemoryLayout();
+        return layouts;
+    }
+
+    /// The layouts every executable of `exes` takes `model`'s tensors in
+    /// (`modelLayouts`), which must agree: one buffer feeds all of them. A
+    /// tensor two executables want in different layouts is an error naming
+    /// it and both layouts.
+    pub fn commonModelLayouts(arena: std.mem.Allocator, exes: []const *const Exe, model: anytype) !?[]const pjrt.MemoryLayout {
+        if (exes.len == 0) return null;
+        const first = try exes[0].modelLayouts(arena, model) orelse return null;
+        for (exes[1..], 1..) |exe, e| {
+            const other = (try exe.modelLayouts(arena, model)).?;
+            for (first, other, 0..) |a, b, i| {
+                if (!a.eql(b)) {
+                    log.err("model tensor {} {f} is wanted in layout {f} by executable 0 and {f} by executable {}; compile them with one layout for it", .{ i, exes[0].input_shapes[i], a, b, e });
+                    return error.ModelLayoutsDiffer;
+                }
+            }
+        }
+        return first;
+    }
+
     pub fn memoryStats(self: *const Exe) pjrt.ApiError!pjrt.CompiledMemoryStats {
         const exe = try self.exe.executable(self.platform.pjrt_api);
         return try exe.getCompiledMemoryStats(self.platform.pjrt_api);
