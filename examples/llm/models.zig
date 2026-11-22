@@ -55,6 +55,10 @@ pub const LoadedModel = union(ModelType) {
         }
     }
 
+    /// Uploads the weights for `compiled`'s programs. Llama's take the layouts
+    /// its programs report (Tenstorrent stores the weight of a matmul in the
+    /// order the matmul reads); the other families upload in the platform's
+    /// default layouts.
     pub fn loadBuffers(
         self: *LoadedModel,
         allocator: std.mem.Allocator,
@@ -62,8 +66,15 @@ pub const LoadedModel = union(ModelType) {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
+        compiled: *const CompiledModel,
     ) !Buffers {
         return switch (self.*) {
+            .llama => |*m| b: {
+                var arena: std.heap.ArenaAllocator = .init(allocator);
+                defer arena.deinit();
+                const layouts = try compiled.inner.llama.weightLayouts(arena.allocator());
+                break :b .{ .llama = try m.loadBuffersInLayouts(allocator, io, platform, store, progress, layouts) };
+            },
             inline else => |*m, t| @unionInit(
                 Buffers,
                 @tagName(t),

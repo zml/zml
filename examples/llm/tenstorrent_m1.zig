@@ -552,13 +552,18 @@ fn runOnPlatform(ctx: *const Context, comptime func: anytype, leg: Leg, platform
     start = .now(io, .awake);
     var weights = try zml.mem.bufferize(allocator, TransformerLayer, &layer);
     {
+        // Each weight in the layout both programs take it in (Tenstorrent stores
+        // a matmul's weight in the order the matmul reads).
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const layouts = try zml.Exe.commonModelLayouts(arena.allocator(), &.{ &exes[0].raw, &exes[1].raw }, &layer);
         var loader: zml.io.Loader = try .init(allocator, platform, .{
             .dma_chunks = 32,
             .dma_chunk_size = 256 * zml.MiB,
             .parallelism = 16,
         });
         defer loader.deinit();
-        try loader.load(io, TransformerLayer, &layer, &weights, &store, .{});
+        try loader.load(io, TransformerLayer, &layer, &weights, &store, .{ .layouts = layouts });
         try loader.await(io);
     }
     defer TransformerLayer.unloadBuffers(&weights);

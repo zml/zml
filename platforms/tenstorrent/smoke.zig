@@ -116,6 +116,87 @@ pub fn expectLoaderRoundTripIn(allocator: std.mem.Allocator, io: std.Io, platfor
     }
 }
 
+const LinearWeights = struct { w: zml.Tensor };
+
+fn linear(weights: LinearWeights, x: zml.Tensor) zml.Tensor {
+    // ZML's linear layer: x [s, d] . w [dout, d] contracted on d, as Llama's.
+    return x.dot(weights.w, .d).withPartitioning(.rows, .{ .s = .replicated, .dout = .rows });
+}
+
+/// A linear layer's weight, [dout, d] split over every device along dout:
+/// the executable reports the layout it stores it in (on Tenstorrent, tiles
+/// with the two minor dims swapped: the matmul reads it without a transpose),
+/// the loader uploads it in that layout, it reads back unchanged, and the
+/// layer's result matches the host's. Returns the weight's layout, printed.
+pub fn expectLinearLayerWeights(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, layout_buf: []u8) ![]const u8 {
+    const mesh = try rowsMesh(platform);
+    const dout: i64 = @intCast(platform.devices.len * rows_per_device);
+    const d: i64 = 64;
+    // Small integers: every product and sum is exact in f32.
+    const w = try allocator.alloc(f32, @intCast(dout * d));
+    defer allocator.free(w);
+    for (w, 0..) |*v, i| v.* = @floatFromInt(@as(i64, @intCast((i * 13) % 9)) - 4);
+    const x = try allocator.alloc(f32, @intCast(32 * d));
+    defer allocator.free(x);
+    for (x, 0..) |*v, i| v.* = @floatFromInt(@as(i64, @intCast((i * 7) % 11)) - 5);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "linear", .data = std.mem.sliceAsBytes(w) });
+    const path = try tmp.dir.realPathFileAlloc(io, "linear", allocator);
+    defer allocator.free(path);
+    var registry: zml.safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .name = "w", .file_uri = path, .shape = .init(.{ dout, d }, .f32), .offset = 0 });
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{mesh});
+    defer store.deinit();
+    const weights: LinearWeights = .{ .w = store.view().createTensor("w", .{ .dout, .d }, .rows, .{ .dout = .rows }) };
+
+    const x_shape = zml.Shape.init(.{ .s = 32, .d = d }, .f32).withPartitioning(mesh, .{ .s = .replicated, .d = .replicated });
+    var exe = try platform.compileFn(allocator, io, linear, .{ weights, zml.Tensor.fromShape(x_shape) }, .{
+        .meshes = &.{mesh},
+        .program_name = "linear",
+    });
+    defer exe.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const layouts = (try exe.modelLayouts(arena.allocator(), &weights)).?;
+    try std.testing.expectEqual(1, layouts.len);
+    const printed = try std.fmt.bufPrint(layout_buf, "{f}", .{layouts[0]});
+
+    var buffers = try zml.mem.bufferize(allocator, LinearWeights, &weights);
+    var loader: zml.io.Loader = try .init(allocator, platform, .{ .parallelism = 1, .dma_chunks = 2, .dma_chunk_size = 1 << 20 });
+    defer loader.deinit();
+    try loader.load(io, LinearWeights, &weights, &buffers, &store, .{ .layouts = layouts });
+    try loader.await(io);
+    defer buffers.w.deinit();
+
+    const back = try buffers.w.toSliceAlloc(allocator, io);
+    defer back.free(allocator);
+    try std.testing.expectEqualSlices(f32, w, back.items(f32));
+
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x_shape, std.mem.sliceAsBytes(x));
+    defer x_buffer.deinit();
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    var y_buffer: zml.Buffer = undefined;
+    runner.run(io, .{ buffers, x_buffer }, .{&y_buffer}, .{ .wait = true });
+    defer y_buffer.deinit();
+    const y = try y_buffer.toSliceAlloc(allocator, io);
+    defer y.free(allocator);
+    const n: usize = @intCast(dout);
+    const k: usize = @intCast(d);
+    for (0..32) |i| {
+        for (0..n) |j| {
+            var sum: f32 = 0;
+            for (0..k) |c| sum += x[i * k + c] * w[j * k + c];
+            try std.testing.expectEqual(sum, y.items(f32)[i * n + j]);
+        }
+    }
+    return printed;
+}
+
 /// Inputs whose doubling and increment are exact in f32 on any backend.
 pub fn input(allocator: std.mem.Allocator, num_devices: usize) ![]f32 {
     const x = try allocator.alloc(f32, num_devices * rows_per_device * cols);

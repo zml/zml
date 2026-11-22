@@ -473,11 +473,15 @@ fn isEos(config: llama.Config, token: u32) bool {
     };
 }
 
-/// Weights, cache, metadata and the device positions, after the programs compiled.
-fn loadState(ctx: *Context, loaded: *const llama.LoadedModel, store: *zml.io.TensorStore) !llama.Buffers {
+/// Weights, cache, metadata and the device positions, after the programs compiled; each
+/// weight in the layout `exes` take it in (`zml.Exe.commonModelLayouts`).
+fn loadState(ctx: *Context, loaded: *const llama.LoadedModel, store: *zml.io.TensorStore, exes: []const *const zml.Exe) !llama.Buffers {
     var progress: std.Progress.Node = .none;
+    var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
+    defer arena.deinit();
+    const layouts = try zml.Exe.commonModelLayouts(arena.allocator(), exes, &loaded.inner);
     const start: std.Io.Timestamp = .now(ctx.io, .awake);
-    const buffers = try loaded.loadBuffers(ctx.allocator, ctx.io, ctx.platform, store, &progress);
+    const buffers = try loaded.loadBuffersInLayouts(ctx.allocator, ctx.io, ctx.platform, store, &progress, layouts);
     ctx.timings.load_ms = msSince(ctx.io, start);
     ctx.kv = try ctx.params.kv_cache.initBuffer(ctx.io, ctx.platform);
     ctx.metadata = try ctx.params.attention_metadata.initBuffer(ctx.io, ctx.platform);
@@ -542,7 +546,7 @@ fn runLogits(ctx: *Context, loaded: *const llama.LoadedModel, store: *zml.io.Ten
     }
     defer for (&exes) |*exe| exe.deinit();
 
-    var weights = try loadState(ctx, loaded, store);
+    var weights = try loadState(ctx, loaded, store, &.{ &exes[0].raw, &exes[1].raw });
     defer loaded.unloadBuffers(&weights, allocator);
     defer unloadState(ctx);
     log.info("loaded the weights in {d:.0} ms", .{ctx.timings.load_ms});
@@ -980,7 +984,7 @@ fn runGenerate(ctx: *Context, loaded: *const llama.LoadedModel, store: *zml.io.T
     }
     defer compiled.deinit();
 
-    var weights = try loadState(ctx, loaded, store);
+    var weights = try loadState(ctx, loaded, store, &.{ &compiled.prefill.raw, &compiled.decode.raw });
     defer loaded.unloadBuffers(&weights, allocator);
     defer unloadState(ctx);
     var prefill_runner: llama.inference.KernelRunner = try .init(allocator, &compiled.prefill, &weights);

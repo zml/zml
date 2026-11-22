@@ -77,6 +77,21 @@ pub const LoadedModel = struct {
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
     ) !Buffers {
+        return self.loadBuffersInLayouts(allocator, io, platform, store, progress, null);
+    }
+
+    /// `loadBuffers`, each weight in the device layout of `layouts` (one per
+    /// tensor of `inner`, the compiled programs' `weightLayouts`); null: the
+    /// platform's default layouts.
+    pub fn loadBuffersInLayouts(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+        layouts: ?[]const zml.pjrt.MemoryLayout,
+    ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
 
@@ -90,7 +105,7 @@ pub const LoadedModel = struct {
         });
         defer loader.deinit();
 
-        try loader.load(io, Model, &self.inner, &buffers, store, .{ .progress = progress });
+        try loader.load(io, Model, &self.inner, &buffers, store, .{ .progress = progress, .layouts = layouts });
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);

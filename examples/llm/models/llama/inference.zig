@@ -88,6 +88,15 @@ pub const CompiledModel = struct {
         self.prefill.deinit();
         self.decode.deinit();
     }
+
+    /// The device layouts the weights are uploaded in, one per tensor of the
+    /// model: those the prefill and decode programs report, which must agree
+    /// since one buffer feeds both (`zml.Exe.commonModelLayouts`; both read
+    /// every weight the same way). Null where the platform's default layouts
+    /// apply. Allocated in `arena`.
+    pub fn weightLayouts(self: *const CompiledModel, arena: std.mem.Allocator) !?[]const zml.pjrt.MemoryLayout {
+        return zml.Exe.commonModelLayouts(arena, &.{ &self.prefill.raw, &self.decode.raw }, &self.loaded_model.inner);
+    }
 };
 
 pub const Inference = CompiledModel;
