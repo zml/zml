@@ -21,9 +21,8 @@ pub const Way = enum {
     sigint,
     /// A closed terminal or ssh session.
     sighup,
-    /// `std.process.exit(4)` from another thread, whose exit runs the plugin's
-    /// static destructors without the main thread's release: a probe, not
-    /// among exit_paths_hw_test's cases.
+    /// `std.process.exit(4)` from another thread, whose thread-locals are not
+    /// the main thread's: the plugin's exit handler closes the cards there too.
     exit_thread,
 };
 

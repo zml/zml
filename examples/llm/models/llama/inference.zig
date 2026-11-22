@@ -19,6 +19,10 @@ pub const CompilationParameters = struct {
     decode_attention_parameters: zml.attention.Parameters,
     seqlen: usize,
     meshes: common.Meshes,
+    /// The weights in the layout their matmuls read, which the loader asks the
+    /// programs for (models.zig LoadedModel.loadBuffers): -461 us per layer and
+    /// -2.73 ms on the LM head on one Tenstorrent card (F0 record 1).
+    weight_layouts: zml.Compiler.WeightLayouts = .executable,
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes, target: zml.Target) CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
@@ -87,15 +91,6 @@ pub const CompiledModel = struct {
     pub fn deinit(self: *CompiledModel) void {
         self.prefill.deinit();
         self.decode.deinit();
-    }
-
-    /// The device layouts the weights are uploaded in, one per tensor of the
-    /// model: those the prefill and decode programs report, which must agree
-    /// since one buffer feeds both (`zml.Exe.commonModelLayouts`; both read
-    /// every weight the same way). Null where the platform's default layouts
-    /// apply. Allocated in `arena`.
-    pub fn weightLayouts(self: *const CompiledModel, arena: std.mem.Allocator) !?[]const zml.pjrt.MemoryLayout {
-        return zml.Exe.commonModelLayouts(arena, &.{ &self.prefill.raw, &self.decode.raw }, &self.loaded_model.inner);
     }
 };
 
@@ -212,6 +207,7 @@ pub fn compileKernel(
     return KernelExe.compile(allocator, io, platform, .{
         .meshes = &parameters.meshes.all(),
         .program_name = phase.programName("llama", "forward"),
+        .weight_layouts = parameters.weight_layouts,
     }, .{.{
         .weights = llama_model,
         .tokens = zml.Tensor.init(.{ .s = seqlen }, .u32),

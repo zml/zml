@@ -123,22 +123,25 @@ fn linear(weights: LinearWeights, x: zml.Tensor) zml.Tensor {
     return x.dot(weights.w, .d).withPartitioning(.rows, .{ .s = .replicated, .dout = .rows });
 }
 
-/// A linear layer's weight, [dout, d] split over every device along dout:
-/// the executable reports the layout it stores it in (on Tenstorrent, tiles
-/// with the two minor dims swapped: the matmul reads it without a transpose),
-/// the loader uploads it in that layout, it reads back unchanged, and the
-/// layer's result matches the host's. Returns the weight's layout, printed.
-pub fn expectLinearLayerWeights(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, layout_buf: []u8) ![]const u8 {
+/// A linear layer's bf16 weight, [dout, d] split over every device along
+/// dout, compiled with `weight_layouts`: the executable reports the layout it
+/// stores it in (on Tenstorrent with `.executable`, tiles with the two minor
+/// dims swapped: the matmul reads it without a transpose; with `.default`,
+/// the default layout), the loader uploads it in that layout, it reads back
+/// unchanged, and the layer's result matches the host's. Returns the weight's
+/// layout, printed.
+pub fn expectLinearLayerWeights(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, weight_layouts: zml.Compiler.WeightLayouts, layout_buf: []u8) ![]const u8 {
+    const BF16 = zml.floats.BFloat16;
     const mesh = try rowsMesh(platform);
     const dout: i64 = @intCast(platform.devices.len * rows_per_device);
     const d: i64 = 64;
-    // Small integers: every product and sum is exact in f32.
-    const w = try allocator.alloc(f32, @intCast(dout * d));
+    // -1, 0 and 1: every product and sum (at most 64 in magnitude) is exact in bf16.
+    const w = try allocator.alloc(BF16, @intCast(dout * d));
     defer allocator.free(w);
-    for (w, 0..) |*v, i| v.* = @floatFromInt(@as(i64, @intCast((i * 13) % 9)) - 4);
-    const x = try allocator.alloc(f32, @intCast(32 * d));
+    for (w, 0..) |*v, i| v.* = .fromF32(@floatFromInt(@as(i64, @intCast((i * 13) % 3)) - 1));
+    const x = try allocator.alloc(BF16, @intCast(32 * d));
     defer allocator.free(x);
-    for (x, 0..) |*v, i| v.* = @floatFromInt(@as(i64, @intCast((i * 7) % 11)) - 5);
+    for (x, 0..) |*v, i| v.* = .fromF32(@floatFromInt(@as(i64, @intCast((i * 7) % 3)) - 1));
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -147,15 +150,16 @@ pub fn expectLinearLayerWeights(allocator: std.mem.Allocator, io: std.Io, platfo
     defer allocator.free(path);
     var registry: zml.safetensors.TensorRegistry = .init(allocator);
     defer registry.deinit();
-    try registry.registerTensor(.{ .name = "w", .file_uri = path, .shape = .init(.{ dout, d }, .f32), .offset = 0 });
+    try registry.registerTensor(.{ .name = "w", .file_uri = path, .shape = .init(.{ dout, d }, .bf16), .offset = 0 });
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{mesh});
     defer store.deinit();
     const weights: LinearWeights = .{ .w = store.view().createTensor("w", .{ .dout, .d }, .rows, .{ .dout = .rows }) };
 
-    const x_shape = zml.Shape.init(.{ .s = 32, .d = d }, .f32).withPartitioning(mesh, .{ .s = .replicated, .d = .replicated });
+    const x_shape = zml.Shape.init(.{ .s = 32, .d = d }, .bf16).withPartitioning(mesh, .{ .s = .replicated, .d = .replicated });
     var exe = try platform.compileFn(allocator, io, linear, .{ weights, zml.Tensor.fromShape(x_shape) }, .{
         .meshes = &.{mesh},
         .program_name = "linear",
+        .weight_layouts = weight_layouts,
     });
     defer exe.deinit();
 
@@ -168,13 +172,14 @@ pub fn expectLinearLayerWeights(allocator: std.mem.Allocator, io: std.Io, platfo
     var buffers = try zml.mem.bufferize(allocator, LinearWeights, &weights);
     var loader: zml.io.Loader = try .init(allocator, platform, .{ .parallelism = 1, .dma_chunks = 2, .dma_chunk_size = 1 << 20 });
     defer loader.deinit();
-    try loader.load(io, LinearWeights, &weights, &buffers, &store, .{ .layouts = layouts });
+    // The default: an upload that does not ask the executable (audit GL-1).
+    try loader.load(io, LinearWeights, &weights, &buffers, &store, .{ .layouts = if (weight_layouts == .default) null else layouts });
     try loader.await(io);
     defer buffers.w.deinit();
 
     const back = try buffers.w.toSliceAlloc(allocator, io);
     defer back.free(allocator);
-    try std.testing.expectEqualSlices(f32, w, back.items(f32));
+    try std.testing.expectEqualSlices(u16, @ptrCast(w), @ptrCast(back.items(BF16)));
 
     var x_buffer: zml.Buffer = try .fromBytes(io, platform, x_shape, std.mem.sliceAsBytes(x));
     defer x_buffer.deinit();
@@ -190,8 +195,8 @@ pub fn expectLinearLayerWeights(allocator: std.mem.Allocator, io: std.Io, platfo
     for (0..32) |i| {
         for (0..n) |j| {
             var sum: f32 = 0;
-            for (0..k) |c| sum += x[i * k + c] * w[j * k + c];
-            try std.testing.expectEqual(sum, y.items(f32)[i * n + j]);
+            for (0..k) |c| sum += x[i * k + c].toF32() * w[j * k + c].toF32();
+            try std.testing.expectEqual(sum, y.items(BF16)[i * n + j].toF32());
         }
     }
     return printed;

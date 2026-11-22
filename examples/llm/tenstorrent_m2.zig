@@ -5,13 +5,17 @@
 //! Modes (one platform per process):
 //!   reference  greedy generation on the platform (the CPU), recording at
 //!              every position the top logits; written to --reference.
-//!   compare    teacher forcing on the platform (the cards): the reference's
-//!              tokens are fed back (the prompt through the prefill, the
-//!              continuation one decode step at a time) and the argmax at
-//!              every position is compared with the reference's. Exit 1 when
-//!              fewer than `agreement_bar` of all positions fed agree (the
-//!              prompt's and the decode steps'), or when a disagreement is
-//!              not within BF16 rounding (`rounding_ulps`).
+//!   compare    teacher forcing on the platform: the reference's tokens are
+//!              fed back (the prompt through the prefill, the continuation
+//!              one decode step at a time) and the argmax at every position
+//!              is compared with the reference's. DESIGN 14.0's whole-model
+//!              criterion: on the cards, exit 1 when fewer positions agree
+//!              (the prompt's and the decode steps') than the CPU platform's
+//!              own N-partition run agrees with its 1-partition reference
+//!              (`--floor`: that run's record, teacher-forced on the same
+//!              reference), or when a disagreement is not a near-tie
+//!              (`rounding_ulps` in both runs). On the CPU the run measures
+//!              that floor: only its disagreements are judged.
 //!   generate   free-running generation with the programs examples/llm
 //!              compiles (prefill and decode, its sampler), timed per step;
 //!              with --reference, the tokens are compared with the
@@ -41,8 +45,6 @@ const log = std.log.scoped(.tenstorrent_m2);
 
 const KvCache = llama.model.KvCache;
 
-/// DESIGN 14.2, M2: teacher-forced top-1 agreement with the reference, over every position fed.
-const agreement_bar = 0.99;
 /// A disagreement is put down to BF16 rounding when, in both runs, the two tokens' logits are
 /// within this many BF16 ulps (of the larger) of each other; anything wider is a bug to find.
 const rounding_ulps = 2;
@@ -67,12 +69,20 @@ const Args = struct {
     reference: ?[]const u8 = null,
     /// compare: also writes this run's records, in the reference's format.
     out: ?[]const u8 = null,
+    /// compare on the cards: the record of the CPU platform on N partitions teacher-forced on the
+    /// same reference (`--mode=compare --platform=cpu --cards=N --out=<file>`), whose agreement
+    /// with the reference is the floor (DESIGN 14.0).
+    floor: ?[]const u8 = null,
     /// generate: examples/llm's sampler (1: greedy argmax; examples/llm's default is 4).
     topk: u32 = 1,
     /// generate: runs of every prompt (timings are reported per run).
     runs: u32 = 1,
     /// Kernel JIT cache of the cards (default: the platform's).
     cache_dir: ?[]const u8 = null,
+    /// Who picks the weights' device layouts: `executable` as the Llama example
+    /// compiles (a matmul's weight in the order the matmul reads), or `default`
+    /// (the layout of its shape), to measure the difference.
+    weight_layouts: zml.Compiler.WeightLayouts = .executable,
     /// tt_dram_reserve_bytes in MiB (default: the plugin's).
     reserve_mib: ?u32 = null,
 
@@ -94,9 +104,12 @@ const Args = struct {
         \\   --prompt=<text>        generate: this prompt instead of the built-in ones
         \\   --reference=<file>     reference: output; compare: input; generate: tokens to compare with
         \\   --out=<file>           compare: also writes this run's records
+        \\   --floor=<file>         compare on the cards: the CPU's N-partition record on the same reference (written by
+        \\                          --mode=compare --platform=cpu --cards=N --out=<file>), the agreement floor
         \\   --topk=<n>             generate: examples/llm's sampler, 1 is greedy (default 1)
         \\   --runs=<n>             generate: runs of each prompt (default 1)
         \\   --cache-dir=<dir>      Kernel JIT cache of the cards
+        \\   --weight-layouts=<executable|default>  Weights in the matmul's layout (default, as examples/llm) or the shape's
         \\   --reserve-mib=<n>      DRAM per card left to TTNN (tt_dram_reserve_bytes), in MiB
         \\
     ;
@@ -376,7 +389,8 @@ pub fn main(init: std.process.Init) !void {
     const config = loaded.parsed_config.value;
 
     const backend: zml.attention.Backend = .auto(platform);
-    const params: llama.inference.CompilationParameters = .init(loaded.inner, config, args.seqlen, backend, meshes, platform.target);
+    var params: llama.inference.CompilationParameters = .init(loaded.inner, config, args.seqlen, backend, meshes, platform.target);
+    params.weight_layouts = args.weight_layouts;
 
     var ctx: Context = .{
         .allocator = allocator,
@@ -481,7 +495,7 @@ fn loadState(ctx: *Context, loaded: *const llama.LoadedModel, store: *zml.io.Ten
     defer arena.deinit();
     const layouts = try zml.Exe.commonModelLayouts(arena.allocator(), exes, &loaded.inner);
     const start: std.Io.Timestamp = .now(ctx.io, .awake);
-    const buffers = try loaded.loadBuffersInLayouts(ctx.allocator, ctx.io, ctx.platform, store, &progress, layouts);
+    const buffers = try common.loadBuffers(loaded, ctx.allocator, ctx.io, ctx.platform, store, &progress, layouts);
     ctx.timings.load_ms = msSince(ctx.io, start);
     ctx.kv = try ctx.params.kv_cache.initBuffer(ctx.io, ctx.platform);
     ctx.metadata = try ctx.params.attention_metadata.initBuffer(ctx.io, ctx.platform);
@@ -533,6 +547,7 @@ fn runLogits(ctx: *Context, loaded: *const llama.LoadedModel, store: *zml.io.Ten
         exe.* = try LogitsExe.compile(allocator, io, ctx.platform, .{
             .meshes = &ctx.params.meshes.all(),
             .program_name = phase.programName("llama", "logits"),
+            .weight_layouts = ctx.params.weight_layouts,
         }, .{.{
             .weights = loaded.inner,
             .tokens = Tensor.init(.{ .s = tokens }, .u32),
@@ -766,13 +781,20 @@ const Verdict = struct {
         return .{ self.prompt[0] + self.decode[0], self.prompt[1] + self.decode[1] };
     }
 
-    /// DESIGN 14.2 (M2) and section 14: top-1 agreement over every teacher-forced position, the
-    /// prompt's included, at least `agreement_bar`, and every disagreement within BF16 rounding.
-    fn met(self: Verdict) bool {
+    /// Agreeing positions over compared ones (0 when none was compared).
+    fn rate(self: Verdict) f64 {
         const a = self.all();
-        if (a[1] == 0) return false;
-        const rate = @as(f64, @floatFromInt(a[0])) / @as(f64, @floatFromInt(a[1]));
-        return rate >= agreement_bar and self.within_rounding == self.disagreements;
+        if (a[1] == 0) return 0;
+        return @as(f64, @floatFromInt(a[0])) / @as(f64, @floatFromInt(a[1]));
+    }
+
+    /// DESIGN 14.0, the whole-model criterion (decided under the owner's delegation): top-1
+    /// agreement over every teacher-forced position, the prompt's included, at least `floor` (the
+    /// CPU platform's own N-partition agreement with its 1-partition reference on the same
+    /// prompts; a fixed bar is below BF16's own noise), and every disagreement a near-tie.
+    fn met(self: Verdict, floor: f64) bool {
+        if (self.all()[1] == 0) return false;
+        return self.rate() >= floor and self.within_rounding == self.disagreements;
     }
 };
 
@@ -837,31 +859,36 @@ test judge {
     const got: Record = .{ .model = "", .platform = "cards1", .seqlen = 32, .prompts = &got_prompts };
 
     // Every decode position agrees and one prompt position of ten does not: 95% of all
-    // positions, below the bar although the decode positions alone are at 100%.
+    // positions, below a CPU floor of 99% although the decode positions alone are at 100%, at
+    // the floor of a CPU that disagreed as often.
     ref_tops[3] = ref_tie;
     got_tops[3] = got_tie;
     var verdict = judge(ref, got);
     try std.testing.expectEqual([2]usize{ 9, 10 }, verdict.prompt);
     try std.testing.expectEqual([2]usize{ 10, 10 }, verdict.decode);
     try std.testing.expectEqual(1, verdict.within_rounding);
-    try std.testing.expect(!verdict.met());
+    try std.testing.expectEqual(0.95, verdict.rate());
+    try std.testing.expect(!verdict.met(0.99));
+    try std.testing.expect(verdict.met(0.95));
 
-    // One near-tie in 200 positions: 99.5%, explained by rounding.
+    // One near-tie in 200 positions: 99.5%, explained by rounding; above a 99% floor, below a
+    // CPU that agreed everywhere.
     ref_prompts[0].tops = ref_tops;
     got_prompts[0].tops = got_tops;
     verdict = judge(ref, got);
     try std.testing.expectEqual(1, verdict.disagreements);
-    try std.testing.expect(verdict.met());
+    try std.testing.expect(verdict.met(0.99));
+    try std.testing.expect(!verdict.met(1.0));
 
     // The same rate, but the disagreement is not a near-tie in this run.
     got_tops[3] = got_far;
     verdict = judge(ref, got);
     try std.testing.expectEqual(0, verdict.within_rounding);
-    try std.testing.expect(!verdict.met());
+    try std.testing.expect(!verdict.met(0.99));
 
     // Outside the other run's top 8: not explained either.
     got_tops[3] = testTop(200, 20.125, 201, 20);
-    try std.testing.expect(!judge(ref, got).met());
+    try std.testing.expect(!judge(ref, got).met(0.99));
 }
 
 /// Agreement of `got` (teacher-forced on the reference's tokens) with `ref`, position by position.
@@ -869,7 +896,7 @@ fn writeComparison(ctx: *const Context, w: *std.Io.Writer, ref: Record, got: Rec
     var arena: std.heap.ArenaAllocator = .init(ctx.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    try w.print("\nteacher-forced top-1 agreement of {s} with {s} (DESIGN 14.2, M2; bar {d:.0}% of all teacher-forced positions)\n", .{ got.platform, ref.platform, agreement_bar * 100 });
+    try w.print("\nteacher-forced top-1 agreement of {s} with {s} (DESIGN 14.0 whole-model criterion)\n", .{ got.platform, ref.platform });
     try w.writeAll("prompt  prompt positions (prefill)   decode positions   worst |logit difference| on the reference's top-8, in BF16 ulps\n");
     var total_prefill: [2]usize = .{ 0, 0 };
     var total_decode: [2]usize = .{ 0, 0 };
@@ -929,13 +956,34 @@ fn writeComparison(ctx: *const Context, w: *std.Io.Writer, ref: Record, got: Rec
     const verdict = judge(ref, got);
     std.debug.assert(verdict.prompt[0] == total_prefill[0] and verdict.decode[0] == total_decode[0]);
     const all = verdict.all();
-    const met = verdict.met();
     try w.print("\ndisagreements within BF16 rounding (at most {d} ulps apart in both runs): {d} of {d}\n", .{ rounding_ulps, verdict.within_rounding, verdict.disagreements });
-    try w.print("M2 token criterion on {s}: {s} ({d:.2}% of all {d} teacher-forced positions; {d:.2}% of {d} decode positions; {d:.2}% of {d} prompt positions)\n", .{
+    // The floor: the CPU's own N-partition agreement with its 1-partition reference.
+    var floor_rate: f64 = 0;
+    var floor_source: []const u8 = "this run is the CPU's: it measures the floor";
+    if (ctx.args.platform == .cards) {
+        const file = ctx.args.floor orelse {
+            try w.print("M2 token criterion on {s}: NOT JUDGED ({d:.2}% of all {d} teacher-forced positions): the criterion's floor is the CPU platform's own N-partition agreement with the reference; pass --floor=<record of --mode=compare --platform=cpu --cards=N>\n", .{ got.platform, percent(all[0], all[1]), all[1] });
+            return false;
+        };
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(ctx.io, file, ctx.allocator, .limited(1 << 30));
+        defer ctx.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(Record, ctx.allocator, bytes, .{ .allocate = .alloc_always });
+        defer parsed.deinit();
+        if (parsed.value.prompts.len != ref.prompts.len) {
+            log.err("--floor={s} has {d} prompts, the reference {d}", .{ file, parsed.value.prompts.len, ref.prompts.len });
+            return error.InvalidArgument;
+        }
+        const floor = judge(ref, parsed.value);
+        floor_rate = floor.rate();
+        floor_source = try std.fmt.allocPrint(scratch, "floor {d:.2}%: {s} on the same reference, {d} of {d} positions", .{ floor_rate * 100, parsed.value.platform, floor.all()[0], floor.all()[1] });
+    }
+    const met = verdict.met(floor_rate);
+    try w.print("M2 token criterion on {s}: {s} ({d:.2}% of all {d} teacher-forced positions; {d:.2}% of {d} decode positions; {d:.2}% of {d} prompt positions; {s})\n", .{
         got.platform,                                if (met) "MET" else "NOT MET",
         percent(all[0], all[1]),                     all[1],
         percent(total_decode[0], total_decode[1]),   total_decode[1],
         percent(total_prefill[0], total_prefill[1]), total_prefill[1],
+        floor_source,
     });
     return met;
 }

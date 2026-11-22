@@ -20,6 +20,7 @@ const Case = struct {
 const cases = [_]Case{
     .{ .way = "return", .term = .{ .exited = 0 } },
     .{ .way = "exit", .term = .{ .exited = 3 } },
+    .{ .way = "exit_thread", .term = .{ .exited = 4 } },
     .{ .way = "panic", .term = .{ .signal = .ABRT } },
     .{ .way = "sigterm", .term = .{ .signal = .TERM } },
     .{ .way = "sigint", .term = .{ .signal = .INT } },

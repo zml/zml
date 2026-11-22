@@ -537,6 +537,8 @@ fn runOnPlatform(ctx: *const Context, comptime func: anytype, leg: Leg, platform
         exe.* = Exe.compile(allocator, io, platform, .{
             .meshes = &meshes.all(),
             .program_name = llama_layer.programName(phase),
+            // As the Llama example compiles its programs.
+            .weight_layouts = .executable,
         }, .{input.*}) catch |err| b: {
             if (!isRefusal(leg.where, err)) return err;
             refusal.* = try failure(ctx, stage.*, err);

@@ -55,10 +55,14 @@ pub const LoadedModel = union(ModelType) {
         }
     }
 
-    /// Uploads the weights for `compiled`'s programs. Llama's take the layouts
-    /// its programs report (Tenstorrent stores the weight of a matmul in the
-    /// order the matmul reads); the other families upload in the platform's
-    /// default layouts.
+    /// Uploads the weights for `compiled`'s programs, every family alike: each
+    /// weight in the device layout the programs that take the whole model
+    /// report for it (`zml.Exe.commonModelLayouts`), which is the platform's
+    /// default unless a program was compiled with `weight_layouts =
+    /// .executable` and its compiler chose another layout (Tenstorrent stores
+    /// the weight of a matmul in the order the matmul reads). A family whose
+    /// programs each take part of the model (lfm2, qwen3.5) uploads in the
+    /// default layouts, which its programs, compiled with the default, take.
     pub fn loadBuffers(
         self: *LoadedModel,
         allocator: std.mem.Allocator,
@@ -68,18 +72,14 @@ pub const LoadedModel = union(ModelType) {
         progress: *std.Progress.Node,
         compiled: *const CompiledModel,
     ) !Buffers {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
         return switch (self.*) {
-            .llama => |*m| b: {
-                var arena: std.heap.ArenaAllocator = .init(allocator);
-                defer arena.deinit();
-                const layouts = try compiled.inner.llama.weightLayouts(arena.allocator());
-                break :b .{ .llama = try m.loadBuffersInLayouts(allocator, io, platform, store, progress, layouts) };
+            inline else => |*m, t| b: {
+                const exes = wholeModelPrograms(&@field(compiled.inner, @tagName(t)));
+                const layouts = try zml.Exe.commonModelLayouts(arena.allocator(), exes.constSlice(), &m.inner);
+                break :b @unionInit(Buffers, @tagName(t), try common.loadBuffers(m, allocator, io, platform, store, progress, layouts));
             },
-            inline else => |*m, t| @unionInit(
-                Buffers,
-                @tagName(t),
-                try m.loadBuffers(allocator, io, platform, store, progress),
-            ),
         };
     }
 
@@ -117,6 +117,18 @@ pub const LoadedModel = union(ModelType) {
         };
     }
 };
+
+/// The programs of one family's compiled model that take the whole model as
+/// their first argument: its prefill and decode when each is one program
+/// (`zml.FnExe`), none when the family splits the model over several.
+fn wholeModelPrograms(compiled: anytype) zml.stdx.BoundedArray(*const zml.Exe, 2) {
+    var exes: zml.stdx.BoundedArray(*const zml.Exe, 2) = .empty;
+    inline for (.{ "prefill", "decode" }) |phase| {
+        const program = &@field(compiled, phase);
+        if (comptime @hasField(@TypeOf(program.*), "raw")) exes.appendAssumeCapacity(&program.raw);
+    }
+    return exes;
+}
 
 pub const CompiledModel = struct {
     const Inner = union(ModelType) {

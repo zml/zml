@@ -65,9 +65,12 @@ test "device-free Tenstorrent platforms of 1, 2, 3, 4 and 8 devices, in one or t
         try smoke.expectMatchesCpu(allocator, io, platform);
         try smoke.expectLoaderRoundTrip(allocator, io, platform);
         try smoke.expectLoaderRoundTripIn(allocator, io, platform, .host_pinned);
-        // The weight of a matmul is stored as the matmul reads it, [d, dout] tiles.
+        // By default every input keeps the layout of its shape, so an upload
+        // that does not ask the executable runs it (audit GL-1); opted in, the
+        // weight of a matmul is stored as the matmul reads it, [d, dout] tiles.
         var layout_buf: [64]u8 = undefined;
-        try std.testing.expectEqualStrings("{0,1:T(32,32)(16,16)}", try smoke.expectLinearLayerWeights(allocator, io, platform, &layout_buf));
+        try std.testing.expectEqualStrings("{1,0:T(32,32)(16,16)}", try smoke.expectLinearLayerWeights(allocator, io, platform, .default, &layout_buf));
+        try std.testing.expectEqualStrings("{0,1:T(32,32)(16,16)}", try smoke.expectLinearLayerWeights(allocator, io, platform, .executable, &layout_buf));
     }
 }
 

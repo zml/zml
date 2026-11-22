@@ -105,3 +105,43 @@ pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, d
 
     return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
 }
+
+/// Uploads every tensor of `loaded.inner` (a family's `LoadedModel`) into a
+/// fresh `zml.Bufferized` of it, each tensor in the device layout of
+/// `layouts` (one per tensor, `meta.visit` order: those the programs the
+/// buffers feed report, `zml.Exe.commonModelLayouts`), or in the platform's
+/// default layouts when null. Shared by every family, so none needs its own
+/// wiring for the layouts its programs take the weights in.
+pub fn loadBuffers(
+    loaded: anytype,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    store: *zml.io.TensorStore,
+    progress: *std.Progress.Node,
+    layouts: ?[]const zml.pjrt.MemoryLayout,
+) !zml.Bufferized(@TypeOf(loaded.inner)) {
+    const Model = @TypeOf(loaded.inner);
+    progress.increaseEstimatedTotalItems(store.view().count());
+    const now: std.Io.Timestamp = .now(io, .awake);
+
+    var buffers = try zml.mem.bufferize(allocator, Model, &loaded.inner);
+    errdefer loaded.unloadBuffers(&buffers, allocator);
+
+    var loader: zml.io.Loader = try .init(allocator, platform, .{
+        .dma_chunks = 32,
+        .dma_chunk_size = 256 * zml.MiB,
+        .parallelism = 16,
+    });
+    defer loader.deinit();
+
+    try loader.load(io, Model, &loaded.inner, &buffers, store, .{ .progress = progress, .layouts = layouts });
+    try loader.await(io);
+
+    const took = now.untilNow(io, .awake);
+    const total_bytes: u64 = loader.bytes_loaded.raw;
+    const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+    std.log.scoped(.llm).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+
+    return buffers;
+}
