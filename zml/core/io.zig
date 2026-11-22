@@ -7,6 +7,7 @@ const tracer = @import("zml/profiling").tracer;
 pub const VFS = @import("vfs");
 
 const Buffer = @import("buffer.zig").Buffer;
+const PjrtBufferMetadata = @import("buffer.zig").PjrtBufferMetadata;
 const Bufferized = @import("core.zig").Bufferized;
 const CreateOptions = @import("platform.zig").CreateOptions;
 const Exe = @import("exe.zig").Exe;
@@ -323,6 +324,10 @@ pub const Loader = struct {
     group: stdx.Io.LimitedGroup,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
     delivered: std.AutoHashMapUnmanaged(Tensor.Id, void) = .empty,
+    /// Tensors that `load` could not upload (a dtype or layout the platform
+    /// refuses, a read error): `await` then fails instead of returning
+    /// buffers that were never written.
+    failures: std.atomic.Value(u32) = .init(0),
 
     pub const Opts = struct {
         pub const default: Opts = .{
@@ -369,15 +374,24 @@ pub const Loader = struct {
         self.allocator.free(self.dma_allocators);
     }
 
-    pub fn await(self: *Loader, io: std.Io) std.Io.Cancelable!void {
-        return self.group.await(io);
+    pub const AwaitError = std.Io.Cancelable || error{TensorsNotLoaded};
+
+    pub fn await(self: *Loader, io: std.Io) AwaitError!void {
+        try self.group.await(io);
+        const failed = self.failures.load(.acquire);
+        if (failed > 0) {
+            log.warn("{} tensors could not be loaded (see the warnings above)", .{failed});
+            return error.TensorsNotLoaded;
+        }
     }
 
     pub const LoadOpts = struct {
         progress: ?*std.Progress.Node = null,
         /// The device layout of each of the model's tensors, in `meta.visit`
         /// order: those of the executables the buffers feed
-        /// (`Exe.modelLayouts`). Null: the platform's default layouts.
+        /// (`Exe.modelLayouts`). Null: the platform's default layouts. A
+        /// tensor whose layout is its platform default is uploaded without
+        /// one (`requestedLayout`).
         layouts: ?[]const pjrt.MemoryLayout = null,
     };
 
@@ -430,9 +444,24 @@ pub const Loader = struct {
                 if (sources.transformed) continue;
             }
 
-            const layout: ?pjrt.MemoryLayout = if (opts.layouts) |layouts| layouts[i] else null;
+            const layout: ?pjrt.MemoryLayout = if (opts.layouts) |layouts| self.requestedLayout(tensor.shape(), layouts[i]) else null;
             self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts, layout });
         }
+    }
+
+    /// `wanted`, the device layout an executable takes the tensor of `shape`
+    /// in, or null when that is the platform's default layout for the
+    /// tensor's shards: the upload then asks for no layout, as it did before
+    /// executables reported layouts. An executable takes another layout only
+    /// where its compiler chose one (Tenstorrent, compiled with
+    /// `weight_layouts = .executable`), so on every other platform the
+    /// loader writes as it always did; the direct writer of cuda, rocm,
+    /// oneapi and furiosa takes no layout at all (`MemoryWriter.initInLayout`),
+    /// and every platform with the Layouts extension reports one per input.
+    fn requestedLayout(self: *const Loader, shape: Shape, wanted: pjrt.MemoryLayout) ?pjrt.MemoryLayout {
+        // A platform that has no default for the dtype refuses the upload itself.
+        const default: PjrtBufferMetadata = PjrtBufferMetadata.init(self.platform, shape) catch return wanted;
+        return if (wanted.eql(default.layout)) null else wanted;
     }
 
     fn logNotDelivered(arena: std.mem.Allocator, tensor: *const Tensor, sources: []const *safetensors.Tensor) void {
@@ -461,8 +490,12 @@ pub const Loader = struct {
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
         self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, layout, opts) catch |e| {
-            log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
-            unreachable;
+            // A refusal of the platform (a dtype it does not take, a layout the
+            // writer cannot produce) or a read error: `await` reports it (audit
+            // GL-4; it was `unreachable`, a panic in every build mode we ship).
+            // Reported to the caller by `await`, which returns the error.
+            log.warn("Failed to load tensor {s}: {}", .{ sources.tensors[0].name, e });
+            _ = self.failures.fetchAdd(1, .acq_rel);
         };
     }
 
@@ -488,7 +521,7 @@ pub const Loader = struct {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
 
-        var writer = try MemoryWriter.init(
+        var writer = try MemoryWriter.initInLayout(
             self.allocator,
             io,
             self.platform,
@@ -612,6 +645,50 @@ test "Loader.loadExecute cleans up donated and non-donated inputs" {
     }
 }
 
+test "Loader.await reports a tensor it could not load" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = @import("testing.zig").env();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "present", .data = std.mem.asBytes(&[2]i32{ 1, 2 }) });
+    const present = try tmp.dir.realPathFileAlloc(io, "present", allocator);
+    defer allocator.free(present);
+    const path = try std.fmt.allocPrint(allocator, "{s}-gone", .{present});
+    defer allocator.free(path);
+
+    // A tensor whose file is gone: opening it fails.
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .name = "truncated", .file_uri = path, .shape = .init(.{2}, .i32), .offset = 0 });
+    var store: TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_mesh});
+    defer store.deinit();
+    const Model = struct { w: Tensor };
+    const model: Model = .{ .w = store.view().createTensor("truncated", .{.n}, .replicated, .{}) };
+    var buffers = try mem.bufferize(allocator, Model, &model);
+    var loader = try Loader.init(allocator, platform, .{ .parallelism = 1, .dma_chunks = 2, .dma_chunk_size = 4096 });
+    defer loader.deinit();
+    try loader.load(io, Model, &model, &buffers, &store, .{});
+    try std.testing.expectError(error.TensorsNotLoaded, loader.await(io));
+}
+
+test "Loader asks for a layout only where an executable chose another than the default" {
+    const allocator = std.testing.allocator;
+    const platform = @import("testing.zig").env();
+    var loader = try Loader.init(allocator, platform, .default);
+    defer loader.deinit();
+    const shape = Shape.init(.{ 64, 96 }, .f32);
+    // What an executable that chose nothing reports for the input, the platform's
+    // default: a writer that takes no layout (cuda, rocm, oneapi, furiosa) must not
+    // be asked for one, or every model refuses to load there.
+    const metadata: PjrtBufferMetadata = try .init(platform, shape);
+    try std.testing.expect(loader.requestedLayout(shape, metadata.layout) == null);
+    // A layout the compiler chose (the two dimensions stored the other way round).
+    const permuted: pjrt.MemoryLayout = .{ .tiled = .{ .minor_to_major = &.{ 0, 1 }, .tile_dims = &.{}, .tile_dims_sizes = &.{} } };
+    const requested = loader.requestedLayout(shape, permuted) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(requested.eql(permuted));
+}
+
 pub const ProgressWriter = struct {
     inner: *std.Io.Writer,
     progress: *std.Progress.Node,
@@ -692,7 +769,25 @@ pub const MemoryWriter = union(enum) {
     direct: DirectMemoryWriter,
     buffered: BufferedMemoryWriter,
 
+    /// A writer of `buffer` in the platform's default layout.
     pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        pools: []mem.DynamicBufferPool,
+        dma_allocators: []const mem.DmaAllocator,
+        dma_chunk_size: usize,
+        shape: Shape,
+        buffer: *Buffer,
+        memory: Memory.Kind,
+    ) !MemoryWriter {
+        return initInLayout(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory, null);
+    }
+
+    /// `init`, every shard in the device layout `layout` (null: the
+    /// platform's default), e.g. the one an executable reports for the
+    /// parameter the buffer feeds (`Exe.modelLayouts`).
+    pub fn initInLayout(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
@@ -714,12 +809,12 @@ pub const MemoryWriter = union(enum) {
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
-                .{ .buffered = try .init(allocator, io, platform, shape, buffer, .default, layout) },
+                .{ .buffered = try .initInLayout(allocator, io, platform, shape, buffer, .default, layout) },
             // The direct writer streams raw bytes into tiled buffers, which the
             // plugin refuses; Buffer.from goes through its tile transpose, into
             // device and pinned_host memory alike, in the layout the executable
             // reports (a matmul's weight has its two minor dims swapped).
-            .tenstorrent => .{ .buffered = try .init(allocator, io, platform, shape, buffer, memory, layout) },
+            .tenstorrent => .{ .buffered = try .initInLayout(allocator, io, platform, shape, buffer, memory, layout) },
         };
     }
 
@@ -754,7 +849,13 @@ pub const BufferedMemoryWriter = struct {
     layout: ?pjrt.MemoryLayout,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer, memory: Memory.Kind, layout: ?pjrt.MemoryLayout) !BufferedMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer) !BufferedMemoryWriter {
+        return initInLayout(allocator, io, platform, shape, buffer, .default, null);
+    }
+
+    /// `init`, into `memory`, in the device layout `layout` (null: the
+    /// platform's default).
+    pub fn initInLayout(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer, memory: Memory.Kind, layout: ?pjrt.MemoryLayout) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,

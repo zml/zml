@@ -89,12 +89,28 @@ pub const Options = struct {
     /// rematerializes aggressively. Callers set this to the per-device size of such buffers to
     /// compensate. Remove once XLA properly supports host-pinned inputs.
     extra_device_memory_bytes: u64 = 0,
+    /// Who picks the device layout of an input that holds a weight.
+    weight_layouts: WeightLayouts = .default,
     // Debugging options
     program_name: []const u8 = "zml",
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
+};
+
+/// Who picks the device layout of the inputs that hold a model's weights.
+pub const WeightLayouts = enum {
+    /// The platform's default layout for their shape: buffers uploaded
+    /// without asking the executable run it.
+    default,
+    /// The compiler, for the weights it reads faster in another layout
+    /// (Tenstorrent: a matmul's weight, its two minor dimensions swapped). The
+    /// caller then uploads those weights in the layouts the executable reports
+    /// (`Exe.modelLayouts`, the loader's `LoadOpts.layouts`), and a buffer in
+    /// another layout is refused when the executable runs. Platforms that pick
+    /// no other layout ignore it.
+    executable,
 };
 
 /// Errors surfaced while lowering and compiling a ZML program.
@@ -1004,6 +1020,10 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_ragged_dot_grouped_gemm", false, upb_arena);
             },
             else => {},
+        }
+
+        if (opts.weight_layouts == .executable and platform.target == .tenstorrent) {
+            try setXlaOverrideFlag(overrides_map, "tt_weight_layout", "matmul", upb_arena);
         }
 
         if (opts.xla_dump_to) |xla_dump_to| {

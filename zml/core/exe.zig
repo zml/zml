@@ -390,12 +390,14 @@ pub const Exe = struct {
     /// The device layouts of the inputs that hold `model`'s tensors, for a
     /// function whose first argument is `model` (a model's weights): one per
     /// tensor, in `meta.visit` order, allocated in `arena`. The loader uploads
-    /// each tensor in its layout (`zml.io.Loader.LoadOpts.layouts`). Null where
-    /// buffers take the client's default layout: on every platform but
-    /// Tenstorrent, whose compiler stores the weight of a matmul in the order
-    /// the matmul reads (its two minor dimensions swapped).
+    /// each tensor in its layout (`zml.io.Loader.LoadOpts.layouts`). They are
+    /// the platform's default layouts unless the executable was compiled with
+    /// `weight_layouts = .executable` and its compiler chose another (on
+    /// Tenstorrent, a matmul's weight in the order the matmul reads). Null on
+    /// a platform without the Layouts extension, whose buffers always take
+    /// the default layout.
     pub fn modelLayouts(self: *const Exe, arena: std.mem.Allocator, model: anytype) !?[]const pjrt.MemoryLayout {
-        if (self.platform.target != .tenstorrent) return null;
+        if (self.platform.pjrt_api.extension(.layouts) == null) return null;
         const executable = try self.exe.executable(self.platform.pjrt_api);
         defer executable.deinit(self.platform.pjrt_api);
         const parsed = try executable.parameterLayouts(self.platform.pjrt_api, arena);

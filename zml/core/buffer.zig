@@ -33,6 +33,12 @@ pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
     _shards: Shards,
+    /// Whether the shards' device layout stores the dimensions in another order
+    /// than row-major (`FromOptions.layout`, e.g. a Tenstorrent matmul weight
+    /// with its two minor dimensions swapped): reads then ask PJRT for a
+    /// row-major copy. Buffers in the client's default layout are read as
+    /// they always were, with no extra call.
+    _dims_permuted: bool = false,
 
     /// Whether executions may donate a buffer, writing their outputs into it.
     /// `HostAccessible.init` uses it to decide whether devices share allocations.
@@ -198,7 +204,13 @@ pub const Buffer = struct {
             try awaitShards(pjrt_shards.constSlice(), platform, io);
         }
 
-        return .{ ._platform = platform, ._shape = shape_, ._shards = pjrt_shards };
+        const permuted = if (opts.layout) |requested| switch (requested) {
+            .tiled => |t| for (t.minor_to_major, 0..) |d, i| {
+                if (d != @as(i64, @intCast(t.minor_to_major.len - 1 - i))) break true;
+            } else false,
+            .strides => false,
+        } else false;
+        return .{ ._platform = platform, ._shape = shape_, ._shards = pjrt_shards, ._dims_permuted = permuted };
     }
 
     /// Copies the given Zig bytes to the accelerator memory and
@@ -300,6 +312,13 @@ pub const Buffer = struct {
         return res;
     }
 
+    /// Starts copying shard `shard_index` to `destination`, row-major.
+    fn shardToHost(self: Buffer, shard_index: usize, destination: []u8) pjrt.ApiError!?*pjrt.Event {
+        const shard = self._shards.get(shard_index);
+        if (self._dims_permuted) return shard.toHostBufferRowMajor(self._platform.pjrt_api, destination, self._shape.rank());
+        return shard.toHostBuffer(self._platform.pjrt_api, destination);
+    }
+
     /// Copies the content of the Buffer to the provided slice.
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
@@ -312,7 +331,7 @@ pub const Buffer = struct {
 
             const size_bytes = placement.localShape(self._shape).byteSize();
             const destination = sub_slice.data()[0..size_bytes];
-            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
+            const maybe_event = try self.shardToHost(shard_index, destination);
 
             if (maybe_event) |event| {
                 defer event.deinit(self._platform.pjrt_api);
@@ -334,7 +353,7 @@ pub const Buffer = struct {
 
         for (0..self._platform.physical_mesh.devices_in_canonical_order.len) |shard_index| {
             const sub_slice = placement.shardSlice(shard_index, slice);
-            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
+            const maybe_event = try self.shardToHost(shard_index, shard_slice.data());
             if (maybe_event) |event| {
                 defer event.deinit(self._platform.pjrt_api);
                 try event.await(self._platform.pjrt_api, io);
@@ -429,6 +448,38 @@ test "device round-trip" {
         errdefer std.log.err(" - reference: {d}\n- actual: {d}", .{ x_h, x_h_reborn });
         try zml.testing.expectClose(io, x_h, x_h_reborn, .exact_match);
     }
+}
+
+test "a buffer uploaded in a permuted device layout reads back row-major" {
+    const zml = @import("core.zig");
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    var x: [64][96]f32 = undefined;
+    for (&x, 0..) |*row, i| {
+        for (row, 0..) |*v, j| v.* = @floatFromInt(i * 96 + j);
+    }
+    const x_h: zml.Slice = .init(Shape.init(.{ .b = 64, .d = 96 }, .f32), std.mem.asBytes(&x));
+    // Column-major: the two dimensions stored in the other order.
+    const permuted: pjrt.MemoryLayout = .{ .tiled = .{ .minor_to_major = &.{ 0, 1 }, .tile_dims = &.{}, .tile_dims_sizes = &.{} } };
+    var x_d: zml.Buffer = try .fromSliceOpts(io, platform, x_h, .{ .layout = permuted });
+    defer x_d.deinit();
+    try std.testing.expect(x_d._dims_permuted);
+
+    const back = try x_d.toSliceAlloc(allocator, io);
+    defer back.free(allocator);
+    try zml.testing.expectClose(io, x_h, back, .exact_match);
+
+    var y: [64][96]f32 = undefined;
+    const y_h: zml.Slice = .init(x_h.shape, std.mem.asBytes(&y));
+    try x_d.toSlice(io, y_h);
+    try zml.testing.expectClose(io, x_h, y_h, .exact_match);
+
+    // In the default layout, reads take no host layout, as before layouts existed.
+    var z_d: zml.Buffer = try .fromSlice(io, platform, x_h);
+    defer z_d.deinit();
+    try std.testing.expect(!z_d._dims_permuted);
 }
 
 pub const PjrtBufferMetadata = struct {

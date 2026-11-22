@@ -1351,29 +1351,29 @@ pub const Buffer = opaque {
         return ret.is_on_cpu;
     }
 
-    /// Copies the buffer to `dst`, row-major. Without a host layout PJRT
-    /// copies in the order of the buffer's device layout (tiles aside), so a
-    /// buffer whose dimensions are stored in another order (a Tenstorrent
-    /// matmul weight, its two minor dimensions swapped) is read with a
-    /// row-major host layout.
+    /// Copies the buffer to `dst`, in the order of the buffer's device layout
+    /// (tiles aside): row-major for a buffer in its client's default layout.
     pub fn toHostBuffer(self: *const Buffer, api: *const Api, dst: []u8) ApiError!?*Event {
-        var row_major: [16]i64 = undefined;
-        var host_layout: c.PJRT_Buffer_MemoryLayout = undefined;
-        const layout: ?*c.PJRT_Buffer_MemoryLayout = if (self.memoryLayout(api)) |stored| switch (stored) {
-            .tiled => |t| b: {
-                const rank = t.minor_to_major.len;
-                if (rank > row_major.len) break :b null;
-                for (row_major[0..rank], 0..) |*d, i| d.* = @intCast(rank - 1 - i);
-                if (std.mem.eql(i64, t.minor_to_major, row_major[0..rank])) break :b null;
-                const wanted: MemoryLayout = .{ .tiled = .{ .minor_to_major = row_major[0..rank], .tile_dims = &.{}, .tile_dims_sizes = &.{} } };
-                host_layout = wanted.toCStruct();
-                break :b &host_layout;
-            },
-            .strides => null,
-        } else |_| null;
         const ret = try api.call(.PJRT_Buffer_ToHostBuffer, .{
             .src = self.inner(),
-            .host_layout = layout,
+            .dst = dst.ptr,
+            .dst_size = dst.len,
+        });
+        return @ptrCast(ret.event);
+    }
+
+    /// Copies the buffer to `dst` row-major whatever order its device layout
+    /// stores its `rank` dimensions in (a Tenstorrent matmul weight has its two
+    /// minor dimensions swapped), by asking PJRT for a row-major host layout.
+    pub fn toHostBufferRowMajor(self: *const Buffer, api: *const Api, dst: []u8, rank: usize) ApiError!?*Event {
+        var row_major: [16]i64 = undefined;
+        if (rank > row_major.len) return error.InvalidArgument;
+        for (row_major[0..rank], 0..) |*d, i| d.* = @intCast(rank - 1 - i);
+        const wanted: MemoryLayout = .{ .tiled = .{ .minor_to_major = row_major[0..rank], .tile_dims = &.{}, .tile_dims_sizes = &.{} } };
+        var host_layout = wanted.toCStruct();
+        const ret = try api.call(.PJRT_Buffer_ToHostBuffer, .{
+            .src = self.inner(),
+            .host_layout = &host_layout,
             .dst = dst.ptr,
             .dst_size = dst.len,
         });

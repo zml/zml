@@ -20,75 +20,19 @@ const log = std.log.scoped(.zml);
 
 var api_map: std.enums.EnumArray(Target, ?*const pjrt.Api) = .initFill(null);
 
-/// Tenstorrent clients still alive when the process exits. A process that
-/// exits normally (return from main, `exit`) with a client never destroyed
-/// leaves the cards' Ethernet cores in fabric mode, and every later open of the
-/// cards times out until they are reset; `zml.testing`'s platform, for one, is
-/// never deinit'ed. Clients left are destroyed when the main thread exits
-/// normally, by a thread-local destructor of the main thread: glibc's `exit`
-/// runs those before any `atexit` handler, and so before the destructors of
-/// the plugin's C++ statics (an `atexit` release crashed in tt-metal's
-/// GraphTracker, already destroyed). A process that ends by abort (a Zig
-/// panic) or by SIGTERM, SIGINT or SIGHUP needs no release: the next open
-/// recovers the cards (exit_paths_hw_test). `exit` called from another thread
-/// is not covered.
-const exit_release = struct {
-    const Entry = struct { api: *const pjrt.Api, client: *pjrt.Client };
-
-    var mutex: std.atomic.Mutex = .unlocked;
-    var entries: stdx.BoundedArray(Entry, 32) = .empty;
-    var registered = false;
-
-    /// glibc's registration of thread-local destructors, as C++ `thread_local` uses it.
-    extern "c" fn __cxa_thread_atexit_impl(func: *const fn (?*anyopaque) callconv(.c) void, obj: ?*anyopaque, dso_symbol: ?*anyopaque) c_int;
-
-    fn track(api: *const pjrt.Api, client: *pjrt.Client) void {
-        if (comptime builtin.os.tag != .linux) return;
-        lock();
-        defer mutex.unlock();
-        if (!registered) {
-            // Another thread's destructors run when that thread ends, not at exit.
-            if (std.os.linux.gettid() != std.os.linux.getpid()) {
-                log.warn("Tenstorrent client created off the main thread: deinit its platform before the process ends, or the cards stay unusable until a reset", .{});
-                return;
-            }
-            if (__cxa_thread_atexit_impl(releaseAll, null, @ptrCast(&registered)) != 0) {
-                log.warn("Cannot release Tenstorrent clients at exit: deinit every platform before the process ends", .{});
-                return;
-            }
-            registered = true;
-        }
-        entries.append(.{ .api = api, .client = client }) catch {
-            log.warn("More than {} live Tenstorrent clients: the others are not released at exit", .{entries.capacity()});
-        };
-    }
-
-    fn untrack(client: *pjrt.Client) void {
-        if (comptime builtin.os.tag != .linux) return;
-        lock();
-        defer mutex.unlock();
-        for (entries.constSlice(), 0..) |entry, i| {
-            if (entry.client == client) {
-                _ = entries.swapRemove(i);
-                return;
-            }
-        }
-    }
-
-    fn releaseAll(_: ?*anyopaque) callconv(.c) void {
-        lock();
-        defer mutex.unlock();
-        for (entries.constSlice()) |entry| {
-            log.info("Closing a Tenstorrent client left open at exit", .{});
-            entry.client.deinit(entry.api);
-        }
-        entries.clear();
-    }
-
-    fn lock() void {
-        while (!mutex.tryLock()) std.atomic.spinLoopHint();
-    }
-};
+// Process exit with a Tenstorrent client never destroyed (`zml.testing`'s
+// platform is never deinit'ed): ZML registers nothing, and the plugin's own
+// handler is the one teardown. `exit` runs `atexit` handlers and C++ static
+// destructors in the reverse order of their registration; the plugin
+// registers its handler again after every open and every Load, so it runs
+// before the destructors of the statics tt-metal made meanwhile, and it
+// closes the cards on the plugin's owner thread, not in the exiting thread,
+// whose thread-locals `exit` has already destroyed (xla-private
+// runtime/device_owner.h, CloseOwnerAtExit). A process that ends by abort or a
+// signal needs no close: the next open recovers the cards.
+// `//platforms/tenstorrent:exit_paths_hw_test` checks that the cards open
+// again after a return from main, `exit` from the main thread and from
+// another, a panic and SIGTERM, SIGINT and SIGHUP.
 
 fn disableXlaLogs() void {
     // https://deepreg.readthedocs.io/en/latest/docs/logging.html#tensorflow-logging
@@ -492,7 +436,6 @@ pub const Platform = struct {
             log.warn("Failed to register FFI custom call \"zml$print\", error: {}", .{err});
         };
 
-        if ((comptime Target.tenstorrent.isEnabled()) and target == .tenstorrent) exit_release.track(api, pjrt_client);
         return platform;
     }
 
@@ -652,7 +595,6 @@ pub const Platform = struct {
             self.state.deinit();
         }
         self.physical_mesh.deinit(self.arena.allocator());
-        if ((comptime Target.tenstorrent.isEnabled()) and self.target == .tenstorrent) exit_release.untrack(self.pjrt_client);
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();
     }
