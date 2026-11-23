@@ -628,12 +628,12 @@ const Gemv = struct {
         batches: i64,
         rows: i64,
         nvfp4: i64,
-        f16_pairs: i64,
+        f16: i64,
     };
 
     /// `ids` holds one local expert per route, negative or out of bank for remote
     /// experts, whose output rows are zero. Route `r` reads input row `r / topk`.
-    /// F16 inputs are in `RoundNvfp4.Format.f16_pairs` order.
+    /// F16 inputs are NVFP4 values over their row scale, from `RoundNvfp4.Format.f16`.
     pub fn call(x: Tensor, weight: Tensor, scales: Tensor, ids: Tensor, output: zml.Shape, topk: usize) Tensor {
         const n = weight.dim(1);
         const k = x.dim(1);
@@ -661,7 +661,7 @@ const Gemv = struct {
             .batches = batches,
             .rows = @divExact(threads, lanes),
             .nvfp4 = @intFromBool(scales.dtype() == .i16),
-            .f16_pairs = @intFromBool(x.dtype() == .f16),
+            .f16 = @intFromBool(x.dtype() == .f16),
         };
         const a = x.reshape(.{ x.dim(0), cfg.x_words, 2 }).bitCast(.i32);
         const b = weight.reshape(.{ weight.dim(0), n, cfg.k_words, 4 }).bitCast(.i32);
@@ -814,13 +814,10 @@ const Gemv = struct {
             for (0..@intCast(cfg.batch)) |j| {
                 const chunk = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(chunks[j], b.constant(.i64, cfg.chunks - 1));
                 var weights: [4][4]Value = undefined;
-                inline for (0..4) |u| {
-                    weights[u] = decodeWord(b, words[j].extract(u));
-                    if (cfg.f16_pairs != 0) inline for (&weights[u]) |*pair| {
-                        pair.* = pair.to(.f16);
-                    };
-                }
-                const decoded = if (cfg.nvfp4 != 0) decodeE4m3Pair(b, scales[j]) else decodeE8m0(b, scales[j]).splat(2);
+                inline for (0..4) |u| weights[u] = if (cfg.f16 != 0) decodeF16Pairs(b, words[j].extract(u)) else decodeWord(b, words[j].extract(u));
+                var decoded = if (cfg.nvfp4 != 0) decodeE4m3Pair(b, scales[j]) else decodeE8m0(b, scales[j]).splat(2);
+                // F16 weights carry a factor 2^-14, undone in the block scales.
+                if (cfg.f16 != 0) decoded = decoded.mul(0x1p14);
                 const block_scales = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(decoded, fzero.splat(2));
                 inline for (0..group) |m| {
                     var member = b.openIfElse(count.gt(m), .{.f32});
@@ -849,8 +846,7 @@ const Gemv = struct {
         var partial: [2]Value = .{ fzero, fzero };
         inline for (0..4) |q| {
             const xs = b.copyAtomLoad(load, inputs.emitIter().addOffset(chunk.mul(16).add(base + q * 4)).view(fly.L(4, 1)));
-            if (cfg.f16_pairs != 0) {
-                // Input words pair the same weights as the decoded ones.
+            if (cfg.f16 != 0) {
                 inline for (0..4) |p| partial[q / 2] = b.dot2F16(xs.extract(p).splat(1).bitCast(.f16), weights[q][p], partial[q / 2]);
             } else inline for (0..4) |pair| {
                 const x = xs.extract(pair);
@@ -862,6 +858,22 @@ const Gemv = struct {
             }
         }
         return b.fma(partial[0], block_scales.extract(0), b.fma(partial[1], block_scales.extract(1), acc));
+    }
+
+    /// Eight FP4 weights as F16 pairs (0, 1), (2, 3), (4, 5), (6, 7), times 2^-14: an F16
+    /// with the nibble's sign at bit 15 and its magnitude bits at 9..11 is exactly
+    /// the E2M1 value times 2^-14, subnormals included. Each F16 has a zero low byte.
+    fn decodeF16Pairs(b: *Builder, word: Value) [4]Value {
+        const signs = @as(i32, @bitCast(@as(u32, 0x80808080)));
+        // F16 high bytes, sign << 7 | magnitude << 1, of the low and high nibble of each byte.
+        const low = word.shl(1).bitAnd(0x0e0e0e0e).bitOr(word.shl(4).bitAnd(signs));
+        const high = word.shrU(3).bitAnd(0x0e0e0e0e).bitOr(word.bitAnd(signs));
+        var pairs: [4]Value = undefined;
+        // Selector 0x0c yields a zero byte; byte i of `low` and of `high` take bytes 1 and 3.
+        inline for (&pairs, .{ 0x040c000c, 0x050c010c, 0x060c020c, 0x070c030c }) |*pair, selector| {
+            pair.* = b.perm(high, low, b.constant(.i32, selector)).splat(1).bitCast(.f16);
+        }
+        return pairs;
     }
 
     /// Eight FP4 weights as F32 pairs: (0, 2), (1, 3), (4, 6), (5, 7).
@@ -882,26 +894,25 @@ pub const RoundNvfp4 = struct {
     pub const Format = enum {
         /// The rounded values in BF16, which represents them exactly.
         bf16,
-        /// The rounded values over their row scale in F16, exactly, ordered within
-        /// each group of eight as 0, 2, 1, 3, 4, 6, 5, 7 like `Gemv`'s decoded weights.
-        f16_pairs,
+        /// The rounded values over their row scale in F16, which represents them exactly.
+        f16,
     };
 
     const Config = struct {
         words: i64,
         blocks: i64,
         four_or_six: i64,
-        f16_pairs: i64,
+        f16: i64,
     };
 
-    /// The rounded rows and, for `f16_pairs`, the F32 scale of each row.
+    /// The rounded rows and, for `f16`, the F32 scale of each row.
     pub fn call(x: Tensor, four_or_six: bool, format: Format) struct { Tensor, ?Tensor } {
         std.debug.assert(x.rank() == 2 and x.dtype() == .bf16 and @mod(x.dim(1), 16) == 0 and x.dim(1) <= 16 * threads);
         const cfg: Config = .{
             .words = @divExact(x.dim(1), 2),
             .blocks = @divExact(x.dim(1), 16),
             .four_or_six = @intFromBool(four_or_six),
-            .f16_pairs = @intFromBool(format == .f16_pairs),
+            .f16 = @intFromBool(format == .f16),
         };
         const words = x.reshape(.{ x.dim(0), cfg.words, 2 }).bitCast(.i32);
         const result = Kernel.call(.{ .x = words }, .{ .output = words.shape(), .row_scales = zml.Shape.init(.{x.dim(0)}, .f32) }, .{
@@ -911,7 +922,7 @@ pub const RoundNvfp4 = struct {
         });
         return switch (format) {
             .bf16 => .{ result.output.bitCast(.bf16).reshape(x.shape()), null },
-            .f16_pairs => .{ result.output.bitCast(.f16).reshape(x.shape().withDtype(.f16)), result.row_scales },
+            .f16 => .{ result.output.bitCast(.f16).reshape(x.shape().withDtype(.f16)), result.row_scales },
         };
     }
 
@@ -973,17 +984,16 @@ pub const RoundNvfp4 = struct {
             var signed: [16]Value = undefined;
             inline for (&signed, chosen.values, values) |*out, q, v| {
                 const sign = v.bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0x80000000))));
-                out.* = (if (cfg.f16_pairs != 0) q else q.mul(row_scale)).bitCast(.i32).bitOr(sign).bitCast(.f32);
+                out.* = (if (cfg.f16 != 0) q else q.mul(row_scale)).bitCast(.i32).bitOr(sign).bitCast(.f32);
             }
             inline for (0..2) |h| {
                 var words = b.constant(.i32, 0).splat(4);
                 inline for (0..4) |w| {
-                    const word = if (cfg.f16_pairs != 0) blk: {
-                        // Words hold (0, 2), (1, 3), (4, 6), (5, 7) of the group of eight.
-                        const first = h * 8 + (w / 2) * 4 + w % 2;
-                        break :blk b.constant(.f32, 0.0).splat(2).insert(0, signed[first]).insert(1, signed[first + 2]).to(.f16).bitCast(.i32).extract(0);
-                    } else signed[h * 8 + w * 2].bitCast(.i32).shrU(16)
-                        .bitOr(signed[h * 8 + w * 2 + 1].bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))));
+                    const word = if (cfg.f16 != 0)
+                        b.constant(.f32, 0.0).splat(2).insert(0, signed[h * 8 + w * 2]).insert(1, signed[h * 8 + w * 2 + 1]).to(.f16).bitCast(.i32).extract(0)
+                    else
+                        signed[h * 8 + w * 2].bitCast(.i32).shrU(16)
+                            .bitOr(signed[h * 8 + w * 2 + 1].bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))));
                     words = words.insert(w, word);
                 }
                 b.copyAtomStore(access, words, args.output.emitIter().addOffset(offset.add(h * 4)).view(fly.L(4, 1)));

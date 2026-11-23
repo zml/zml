@@ -178,7 +178,7 @@ pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linea
 fn prepareInput(x: Tensor, linear: nn.Linear, opts: Options, routing: Routing) struct { Tensor, ?Tensor } {
     if (linear.quantizationScheme() != .nvfp4) return .{ x.convert(.bf16), null };
     // Activations are rounded to BF16 before quantization, as for BF16 GEMMs.
-    return fly.RoundNvfp4.call(x.convert(.bf16), opts.nvfp4_input_scale == .four_or_six, if (routing.naive_block_assignment) .f16_pairs else .bf16);
+    return fly.RoundNvfp4.call(x.convert(.bf16), opts.nvfp4_input_scale == .four_or_six, if (routing.naive_block_assignment) .f16 else .bf16);
 }
 
 /// GEMM outputs `{.token, ..., .out}` in FP32, times each route's input row scale
@@ -323,17 +323,14 @@ fn launchConfigForTokens(num_tokens: i64) LaunchConfig {
 test "RoundNvfp4 matches quantizeNvfp4Rows" {
     const platform = zml.testing.env();
     if (platform.target != .rocm) return error.SkipZigTest;
-    const Outputs = struct { bf16: Tensor, f16_pairs: Tensor, reference: Tensor };
+    const Outputs = struct { bf16: Tensor, f16: Tensor, reference: Tensor };
     const Local = struct {
         fn forward(x: Tensor, four_or_six: bool) Outputs {
             const quantized = quantization.quantizeNvfp4Rows(x.convert(.f32), .in, four_or_six);
-            const pairs, const row_scales = fly.RoundNvfp4.call(x, four_or_six, .f16_pairs);
-            // Swap pair positions back: (0, 2, 1, 3) is its own inverse.
-            const groups = pairs.convert(.f32).mul(row_scales.?.withTags(.{.t}).broad(pairs.shape().withDtype(.f32)))
-                .splitAxis(.in, .{ .group = -1, .half = 2, .pair = 2, .pos = 2 });
+            const normalized, const row_scales = fly.RoundNvfp4.call(x, four_or_six, .f16);
             return .{
                 .bf16 = fly.RoundNvfp4.call(x, four_or_six, .bf16)[0],
-                .f16_pairs = groups.transpose(.{ .t, .group, .half, .pos, .pair }).merge(.{ .in = .{ .group, .half, .pos, .pair } }).convert(.bf16),
+                .f16 = normalized.convert(.f32).mul(row_scales.?.withTags(.{.t}).broad(normalized.shape().withDtype(.f32))).convert(.bf16),
                 .reference = quantization.dequantizeNvfp4(quantized, .in).convert(.bf16),
             };
         }
@@ -361,6 +358,6 @@ test "RoundNvfp4 matches quantizeNvfp4Rows" {
         defer zml.Buffer.deinitAll(Outputs, &outputs);
         const exact: zml.testing.CompareOpts = .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 };
         try zml.testing.expectClose(io, outputs.reference, outputs.bf16, exact);
-        try zml.testing.expectClose(io, outputs.reference, outputs.f16_pairs, exact);
+        try zml.testing.expectClose(io, outputs.reference, outputs.f16, exact);
     }
 }
