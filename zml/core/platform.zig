@@ -372,6 +372,9 @@ pub const Platform = struct {
     global_devices: []const DeviceDescription,
     /// Devices addressable by this process, sorted by id.
     devices: []const Device,
+    /// Canonical indices (into `physical_mesh.devices_in_canonical_order`) of the
+    /// devices owned by this process, ascending. Buffers hold one shard per entry.
+    local_device_indices: []const u16,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
     meshes: std.StringArrayHashMapUnmanaged(*const zml.Mesh),
@@ -447,6 +450,7 @@ pub const Platform = struct {
                 // set below
                 .global_devices = undefined,
                 .devices = undefined,
+                .local_device_indices = undefined,
                 .memories = undefined,
                 .physical_mesh = undefined,
                 .io_impl = options.io_impl,
@@ -516,6 +520,13 @@ pub const Platform = struct {
                     .custom => |builder| builder(arena, target, devices),
                 };
             }
+            var local_device_indices: std.ArrayList(u16) = try .initCapacity(arena, devices.len);
+            for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
+                if (platform.addressableDeviceById(device.id) != null) local_device_indices.appendAssumeCapacity(@intCast(device_index));
+            }
+            if (local_device_indices.items.len != devices.len) return error.InvalidDeviceTopology;
+            platform.local_device_indices = local_device_indices.items;
+
             platform.replicated_mesh = try platform.registerMesh("replicated", .mesh(.{ .all = .high_bandwidth }));
         }
 
@@ -590,6 +601,13 @@ pub const Platform = struct {
             if (device.id() == id) return device;
         }
         return null;
+    }
+
+    /// Device holding the `shard_index`-th local shard of every Buffer.
+    pub fn localShardDevice(self: *const Platform, shard_index: usize) *const Device {
+        const device_index = self.local_device_indices[shard_index];
+        const id = self.physical_mesh.devices_in_canonical_order[device_index].id;
+        return self.addressableDeviceById(id).?;
     }
 
     /// Waits for every process. No-op for single-process platforms.

@@ -690,6 +690,12 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
         memory: Memory.Kind,
     ) !MemoryWriter {
+        // The direct writer dispatches to every device of the mesh; multi-process
+        // jobs only own some of them, so they go through the buffered writer.
+        if (platform.isDistributed()) {
+            if (memory == .host_pinned) std.debug.panic("Host pinned memory is not supported for distributed platforms", .{});
+            return .{ .buffered = try .init(allocator, io, platform, shape, buffer) };
+        }
         return switch (platform.target) {
             .cuda, .rocm, .oneapi, .furiosa => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory),
@@ -1219,7 +1225,7 @@ pub const DirectMemoryWriter = struct {
         for (ordered_devices, 0..) |device, i| {
             const pool = &pools[device.id];
             const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const pjrt_mem = platform.devices[device.id].memory(memory).?;
+            const pjrt_mem = platform.addressableDeviceById(device.id).?.memory(memory).?;
 
             shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.localShape(placed_shape));
             initialized += 1;

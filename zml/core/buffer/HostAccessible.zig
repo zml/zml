@@ -249,18 +249,18 @@ pub fn init(
         ._shards = .empty,
     };
     const metadata: PjrtBufferMetadata = .init(platform, shape_);
-    const devices = platform.physical_mesh.devices_in_canonical_order;
+    const local_device_indices = platform.local_device_indices;
     const api = platform.pjrt_api;
 
     var allocations: HostPinnedAllocations = .empty;
     errdefer allocations.deinit(allocator);
 
-    try allocations.entries.ensureTotalCapacity(allocator, devices.len);
+    try allocations.entries.ensureTotalCapacity(allocator, local_device_indices.len);
     errdefer allocations.deinitHandles(api, buffer._shards.constSlice());
 
-    for (devices, 0..) |device, shard_index| {
-        const memory = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
-        const origin: Coordinates = .ofShard(&metadata.placement, shard_index, metadata.shape);
+    for (local_device_indices, 0..) |device_index, shard_index| {
+        const memory = platform.localShardDevice(shard_index).memory(.host_pinned).?.pjrt_memory;
+        const origin: Coordinates = .ofShard(&metadata.placement, device_index, metadata.shape);
         const shared_region = if (can_share_allocations) allocations.findRegion(origin, metadata.placement.localShape(metadata.shape)) else null;
 
         if (shared_region) |region_index| {
@@ -336,6 +336,20 @@ pub fn view(self: *const HostAccessible, comptime T: type) View(T) {
     std.debug.assert(@sizeOf(T) == mapping.shard_shape.dtype().sizeOf());
     stdx.debug.assert(mapping.allocations.pointersAreCurrent(self.buffer._shards.constSlice()), "await the HostAccessible after execution replaces its handles", .{});
     return .{ .mapping = mapping, .len = mapping.packed_shape.count() };
+}
+
+/// Number of host allocations this process holds: one per local shard replica.
+pub fn localAllocationCount(self: *const HostAccessible) usize {
+    return self.mapping.allocations.entries.len;
+}
+
+/// Raw bytes of local allocation `index`, e.g. to mirror the host content into
+/// another process holding the same shape and placement. Assumes the dense
+/// layout of GPU platforms. The same rules as `view` apply.
+pub fn localAllocationBytes(self: *const HostAccessible, index: usize) []u8 {
+    const mapping = self.mapping;
+    stdx.debug.assert(mapping.allocations.pointersAreCurrent(self.buffer._shards.constSlice()), "await the HostAccessible after execution replaces its handles", .{});
+    return mapping.allocations.entries.items(.ptr)[index][0..mapping.shard_shape.byteSize()];
 }
 
 /// Prints every element, read through a view: the same rules as `view` apply.
