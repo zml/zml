@@ -282,7 +282,7 @@ pub const Mfma = struct {
             std.debug.assert(capacity > 0 and block_m <= capacity and @mod(capacity, @as(i64, @intCast(block_m))) == 0 and
                 blocks == @divExact(capacity, @as(i64, @intCast(block_m))));
         }
-        if (naive and routes <= 6) return Gemv.call(input, weight, scales, expert_ids, output, topk);
+        if (naive) return Gemv.call(input, weight, scales, expert_ids, output, topk);
         return callMfma(input, weight, scales, sorted_ids, expert_ids, padded_count, output, topk, naive, block_m);
     }
 
@@ -606,148 +606,247 @@ pub const Mfma = struct {
     }
 };
 
+/// Routed GEMV for decode-sized batches. A block owns one row tile of an expert
+/// and up to `group` of the routes that select it, so each weight row is read
+/// once per group. Lanes stream 16-byte chunks of 32 weights along K; routes
+/// find their group by scanning the expert IDs, without a sorting pass.
 const Gemv = struct {
-    // Packed-word GEMV derived from the supplied moe-mi300x/fly_word.py algorithm.
-    // Several rows share a CTA, and the shorter down projection uses subwaves to
-    // expose independent outputs without paying for a full wave reduction per row.
-    const Config = struct { rows: usize, lanes: usize, unroll: usize };
+    const group = 8;
+    const threads = 256;
 
-    /// One local expert ID per original route; negative/out-of-bank IDs write zero.
-    fn call(x: Tensor, weight: Tensor, scales: Tensor, ids: Tensor, output: zml.Shape, topk: usize) Tensor {
-        const cfg: Gemv.Config = if (x.dim(1) >= 4096)
-            .{ .rows = 4, .lanes = 64, .unroll = 1 }
-        else
-            .{ .rows = 4, .lanes = 32, .unroll = 5 };
-        const rows = cfg.rows;
-        const lanes = cfg.lanes;
-        const unroll = cfg.unroll;
-        const n = weight.dim(1);
-        const k = x.dim(1);
-        const routes: i64 = @intCast(ids.count());
-        std.debug.assert(x.dtype() == .bf16 and (weight.dtype() == .u8 or weight.dtype() == .i8));
-        std.debug.assert(@mod(n, 8) == 0 and @mod(k, 32) == 0);
-        std.debug.assert(topk > 0 and routes == x.dim(0) * @as(i64, @intCast(topk)));
-        std.debug.assert(weight.dim(2) * 2 == k);
-        std.debug.assert(scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32) and
-            (scales.dtype() == .u8 or scales.dtype() == .i16));
-        const tile_rows = rows * (64 / lanes);
-        std.debug.assert(@mod(n, @as(i64, @intCast(tile_rows * 8))) == 0);
-        const fields: EmitConfig = .{ .unroll = unroll, .rows = tile_rows, .lanes = lanes, .stride = unroll * lanes, .ntiles = @divExact(n, @as(i64, @intCast(tile_rows))), .tokens = x.dim(0), .experts = weight.dim(0), .n = n, .k_pairs = @divExact(k, 2), .k_words = @divExact(k, 8), .k_scales = @divExact(k, 32), .routes = routes, .grid = @divExact(n, @as(i64, @intCast(tile_rows))) * routes, .topk = @as(i64, @intCast(topk)), .nvfp4 = @as(i64, @intFromBool(scales.dtype() == .i16)) };
-        const a = x.reshape(.{ .token = x.dim(0), .in = @divExact(k, 2), .pair = 2 }).bitCast(.i32);
-        const b = weight.reshape(.{ .expert = weight.dim(0), .out = n, .in = @divExact(weight.dim(2), 4), .word = 4 }).bitCast(.i32);
-        const matrix_output = zml.Shape.init(.{ .token = routes, .out = n }, output.dtype());
-        return Gemv.Kernel.call(.{ .a = a, .b = b, .scales = scales, .ids = ids.reshape(.{routes}) }, .{
-            .output = matrix_output,
-        }, .{
-            .cfg = fields,
-            .threads = @intCast(rows * 64),
-            .grid = .{ @intCast(fields.grid), 1, 1 },
-        }).output.reshape(output);
-    }
-
-    const EmitConfig = struct {
-        unroll: usize,
-        rows: usize,
-        lanes: usize,
-        stride: usize,
-        ntiles: i64,
-        tokens: i64,
-        experts: i64,
+    const Config = struct {
         n: i64,
-        k_pairs: i64,
-        k_words: i64,
-        k_scales: i64,
+        experts: i64,
         routes: i64,
-        grid: i64,
         topk: i64,
+        x_words: i64,
+        k_words: i64,
+        chunks: i64,
+        /// Lanes sharing one weight row, and the chunks each lane loads at once.
+        lanes: i64,
+        batch: i64,
+        batches: i64,
+        rows: i64,
         nvfp4: i64,
     };
 
-    const Kernel = zml.kernel.fly.Kernel(EmitConfig, .{
-        .name = "mxfp4_gemv",
+    /// `ids` holds one local expert per route, negative or out of bank for remote
+    /// experts, whose output rows are zero. Route `r` reads input row `r / topk`.
+    pub fn call(x: Tensor, weight: Tensor, scales: Tensor, ids: Tensor, output: zml.Shape, topk: usize) Tensor {
+        const n = weight.dim(1);
+        const k = x.dim(1);
+        const routes: i64 = @intCast(ids.count());
+        std.debug.assert(x.dtype() == .bf16 and (weight.dtype() == .u8 or weight.dtype() == .i8) and
+            weight.dim(2) * 2 == k and @mod(k, 32) == 0 and routes == x.dim(0) * @as(i64, @intCast(topk)) and routes <= threads);
+        std.debug.assert(scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32) and
+            (scales.dtype() == .u8 or scales.dtype() == .i16));
+        const chunks = @divExact(k, 32);
+        // Enough lanes per row that each loads at most 12 chunks in one batch.
+        var lanes: i64 = 4;
+        while (lanes < 16 and std.math.divCeil(i64, chunks, lanes) catch unreachable > 12) lanes *= 2;
+        const per_lane = std.math.divCeil(i64, chunks, lanes) catch unreachable;
+        const batches = std.math.divCeil(i64, per_lane, 12) catch unreachable;
+        const cfg: Config = .{
+            .n = n,
+            .experts = weight.dim(0),
+            .routes = routes,
+            .topk = @intCast(topk),
+            .x_words = @divExact(k, 2),
+            .k_words = @divExact(k, 8),
+            .chunks = chunks,
+            .lanes = lanes,
+            .batch = std.math.divCeil(i64, per_lane, batches) catch unreachable,
+            .batches = batches,
+            .rows = @divExact(threads, lanes),
+            .nvfp4 = @intFromBool(scales.dtype() == .i16),
+        };
+        const a = x.reshape(.{ x.dim(0), cfg.x_words, 2 }).bitCast(.i32);
+        const b = weight.reshape(.{ weight.dim(0), n, cfg.k_words, 4 }).bitCast(.i32);
+        return Kernel.call(.{ .a = a, .b = b, .scales = scales, .ids = ids.reshape(.{routes}) }, .{
+            .output = zml.Shape.init(.{ routes, n }, .bf16),
+        }, .{
+            .cfg = cfg,
+            .threads = threads,
+            .grid = .{ @intCast(std.math.divCeil(i64, n, cfg.rows) catch unreachable), @intCast(routes), 1 },
+        }).output.reshape(output);
+    }
+
+    const Kernel = zml.kernel.fly.Kernel(Config, .{
+        .name = "fp4_grouped_gemv",
         .inputs = &.{ "a", "b", "scales", "ids" },
         .outputs = &.{"output"},
-        .run = Gemv.run,
+        .run = run,
     });
 
-    fn run(b: *Builder, cfg: EmitConfig) fly.FinishError!void {
-        const args = Gemv.Kernel.args(b);
-        const block = b.blockId(.x).to(.i64);
-        const thread = b.threadId(.x).to(.i64);
-        const lane = thread.remUnsigned(cfg.lanes);
-        const rowgroup = thread.divUnsigned(cfg.lanes);
-        // Preserve the eight-XCD workgroup permutation and original subwave layout.
-        const pid = block.remUnsigned(8).mul(@divExact(cfg.grid, 8)).add(block.divUnsigned(8));
-        const row = pid.remUnsigned(cfg.ntiles).mul(cfg.rows).add(rowgroup);
-        const route = pid.divUnsigned(cfg.ntiles);
-        const expert32 = args.ids.at(route);
-        const expert = expert32.to(.i64);
-        const token = route.divUnsigned(cfg.topk);
-        const local = expert32.ge(0).bitAnd(expert32.lt(cfg.experts));
-        const inrow = row.cmpUnsigned(.lt, cfg.n);
+    fn run(b: *Builder, cfg: Config) fly.FinishError!void {
+        const args = Kernel.args(b);
+        const zero = b.constant(.i32, 0);
+        const one = b.constant(.i32, 1);
         const fzero = b.constant(.f32, 0.0);
-        var sum = b.openIfElse(local.bitAnd(inrow), .{fzero});
+        const route = b.blockId(.y).to(.i64);
+        const thread32 = b.threadId(.x);
+        const thread = thread32.to(.i64);
+        const lane = thread.remUnsigned(cfg.lanes);
+        const row = b.blockId(.x).to(.i64).mul(cfg.rows).add(thread.divUnsigned(cfg.lanes));
+        const in_rows = row.cmpUnsigned(.lt, cfg.n);
+        const expert32 = args.ids.at(route);
+        const local = expert32.ge(0).bitAnd(expert32.lt(cfg.experts));
+
+        var remote = b.openIfElse(local, .{});
         {
-            var k = b.openFor(lane, cfg.k_words, cfg.stride, .{fzero});
+            // Thread t ranks route t among the routes of this expert; each run of
+            // `group` consecutive ranks is one group, owned by its first route.
+            const ranks = b.sharedArray(.i32, threads, 16);
+            const waves = b.sharedArray(.i32, threads / 64, 16);
+            const slots = b.sharedArray(.i32, group, 16);
+            var routed = b.openIfElse(thread.cmpUnsigned(.lt, cfg.routes), .{zero});
             {
-                var carried = k.carried[0];
-                for (0..cfg.unroll) |u| {
-                    const pos = k.iv.add(u * cfg.lanes);
-                    var inbounds = b.openIfElse(pos.cmpUnsigned(.lt, cfg.k_words), .{fzero});
-                    {
-                        const word = args.b.at(.{ expert, row, pos });
-                        const packed_scale = args.scales.at(.{ expert, row, pos.divUnsigned(4) });
-                        const scale = if (cfg.nvfp4 != 0) blk: {
-                            const pair = decodeE4m3Pair(b, packed_scale);
-                            break :blk pos.divUnsigned(2).bitAnd(1).eq(0).select(pair.extract(0), pair.extract(1));
-                        } else decodeE8m0(b, packed_scale);
-                        const low = word.bitAnd(0x07070707);
-                        const high = word.shrU(4).bitAnd(0x07070707);
-                        const even_bits = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), low);
-                        const odd_bits = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), high);
-                        const even = even_bits.bitAnd(word.shl(4).bitOr(0x7f7f7f7f));
-                        const odd = odd_bits.bitAnd(word.bitOr(0x7f7f7f7f));
-                        // Retain the scalar decoder and its FP32 scale -> BF16 -> FP32 boundary.
-                        const weights = [_]Value{
-                            b.cvtPkF32Fp8(even, false).mul(scale).to(.bf16).to(.f32),
-                            b.cvtPkF32Fp8(odd, false).mul(scale).to(.bf16).to(.f32),
-                            b.cvtPkF32Fp8(even, true).mul(scale).to(.bf16).to(.f32),
-                            b.cvtPkF32Fp8(odd, true).mul(scale).to(.bf16).to(.f32),
-                        };
-                        var partial = fzero;
-                        inline for (0..4) |pair| {
-                            const x = args.a.at(.{ token, pos.mul(4).add(pair) });
-                            const xlo = x.to(.i16).bitCast(.bf16).to(.f32);
-                            const xhi = x.shrU(16).to(.i16).bitCast(.bf16).to(.f32);
-                            const wlo = weights[(pair / 2) * 2].extract(pair % 2);
-                            const whi = weights[(pair / 2) * 2 + 1].extract(pair % 2);
-                            // Odd then even FMA, followed by one add to the K-loop accumulator.
-                            partial = b.fma(xlo, wlo, b.fma(xhi, whi, partial));
-                        }
-                        inbounds.yieldThen(.{partial.add(carried)});
-                    }
-                    {
-                        inbounds.yieldElse(.{carried});
-                    }
-                    carried = inbounds.results[0];
+                routed.yieldThen(.{args.ids.at(thread).eq(expert32).select(one, zero)});
+            }
+            {
+                routed.yieldElse(.{zero});
+            }
+            const same = routed.results[0];
+            const wave_lane = thread32.remUnsigned(64);
+            const wave = thread32.divUnsigned(64);
+            var inclusive = same;
+            inline for (.{ 1, 2, 4, 8, 16, 32 }) |shift| {
+                const peer = inclusive.shuffle(.up, shift, 64);
+                inclusive = inclusive.add(wave_lane.cmpUnsigned(.ge, shift).select(peer, zero));
+            }
+            var last_lane = b.openIf(wave_lane.eq(63));
+            {
+                waves.set(wave, inclusive);
+                last_lane.close();
+            }
+            b.barrier();
+            var totals = b.openFor(zero, threads / 64, 1, .{ zero, zero });
+            {
+                const value = waves.at(totals.iv);
+                totals.yield(.{ totals.carried[0].add(totals.iv.lt(wave).select(value, zero)), totals.carried[1].add(value) });
+            }
+            const rank = totals.results[0].add(inclusive).sub(same);
+            ranks.set(thread32, rank);
+            b.barrier();
+            const first = ranks.at(route.to(.i32));
+            const remaining = totals.results[1].sub(first);
+            const count = remaining.lt(group).select(remaining, b.constant(.i32, group));
+            var leader = b.openIf(first.remUnsigned(group).eq(0));
+            {
+                const offset = rank.sub(first);
+                var member = b.openIf(same.eq(1).bitAnd(offset.ge(0)).bitAnd(offset.lt(group)));
+                {
+                    slots.set(offset, thread32);
+                    member.close();
                 }
-                k.yield(.{carried});
+                b.barrier();
+                var members: [group]Value = undefined;
+                var a_base: [group]Value = undefined;
+                inline for (0..group) |m| {
+                    members[m] = count.gt(m).select(slots.at(b.constant(.i32, m)), zero).to(.i64);
+                    a_base[m] = members[m].divUnsigned(cfg.topk).mul(cfg.x_words);
+                }
+                const sums = accumulate(b, args, cfg, expert32.to(.i64), row, lane, count, a_base);
+                var store = b.openIf(lane.eq(0).bitAnd(in_rows));
+                {
+                    inline for (0..group) |m| {
+                        var write = b.openIf(count.gt(m));
+                        {
+                            args.output.set(.{ members[m], row }, sums[m].to(.bf16));
+                            write.close();
+                        }
+                    }
+                    store.close();
+                }
+                leader.close();
             }
-            var reduced = k.results[0];
+            remote.elseBranch();
+        }
+        {
+            var store = b.openIf(lane.eq(0).bitAnd(in_rows));
+            {
+                args.output.set(.{ route, row }, fzero.to(.bf16));
+                store.close();
+            }
+            remote.close();
+        }
+    }
+
+    /// Each lane's partial dot products with its group's input rows, summed over the lanes of its weight row.
+    fn accumulate(b: *Builder, args: Kernel.Args, cfg: Config, expert: Value, row: Value, lane: Value, count: Value, a_base: [group]Value) [group]Value {
+        const fzero = b.constant(.f32, 0.0);
+        const load = b.copyAtom(.{ .universal = 128 }, .i32);
+        // Rows past N read row 0 and are never stored.
+        const b_base = expert.mul(cfg.n * cfg.k_words).add(row.cmpUnsigned(.lt, cfg.n).select(row, b.constant(.i64, 0)).mul(cfg.k_words));
+        const scale_row = row.cmpUnsigned(.lt, cfg.n).select(row, b.constant(.i64, 0));
+        var inits: [group]Value = undefined;
+        for (&inits) |*acc| acc.* = fzero;
+        var batches = b.openFor(b.constant(.i64, 0), cfg.batches, 1, inits);
+        {
+            // Unconditional loads keep a batch in flight together; chunks past K
+            // reread the last chunk and are zeroed through their scales.
+            var words: [12]Value = undefined;
+            var scales: [12]Value = undefined;
+            var chunks: [12]Value = undefined;
+            for (0..@intCast(cfg.batch)) |j| {
+                chunks[j] = batches.iv.mul(cfg.batch).add(@as(i64, @intCast(j))).mul(cfg.lanes).add(lane);
+                const chunk = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(chunks[j], b.constant(.i64, cfg.chunks - 1));
+                words[j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(b_base.add(chunk.mul(4))).view(fly.L(4, 1)));
+                scales[j] = args.scales.at(.{ expert, scale_row, chunk });
+            }
+            var acc: [group]Value = batches.carried;
+            for (0..@intCast(cfg.batch)) |j| {
+                const chunk = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(chunks[j], b.constant(.i64, cfg.chunks - 1));
+                var weights: [4][4]Value = undefined;
+                inline for (0..4) |u| weights[u] = decodeWord(b, words[j].extract(u));
+                const decoded = if (cfg.nvfp4 != 0) decodeE4m3Pair(b, scales[j]) else decodeE8m0(b, scales[j]).splat(2);
+                const block_scales = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(decoded, fzero.splat(2));
+                inline for (0..group) |m| {
+                    var member = b.openIfElse(count.gt(m), .{.f32});
+                    {
+                        member.yieldThen(.{dot(b, args, load, a_base[m], chunk, weights, block_scales, acc[m])});
+                    }
+                    {
+                        member.yieldElse(.{acc[m]});
+                    }
+                    acc[m] = member.results[0];
+                }
+            }
+            batches.yield(acc);
+        }
+        var sums = batches.results;
+        inline for (0..group) |m| {
             var shift: i32 = 1;
-            while (shift < @as(i32, @intCast(cfg.lanes))) : (shift *= 2) {
-                reduced = reduced.add(reduced.shuffleXor(shift, 64));
+            while (shift < cfg.lanes) : (shift *= 2) sums[m] = sums[m].add(sums[m].shuffleXor(shift, 64));
+        }
+        return sums;
+    }
+
+    /// `acc` plus one input row's dot product with a decoded 32-weight chunk.
+    fn dot(b: *Builder, args: Kernel.Args, load: Value, a_base: Value, chunk: Value, weights: [4][4]Value, block_scales: Value, acc: Value) Value {
+        const fzero = b.constant(.f32, 0.0);
+        var partial: [2]Value = .{ fzero, fzero };
+        inline for (0..4) |q| {
+            const xs = b.copyAtomLoad(load, args.a.emitIter().addOffset(a_base.add(chunk.mul(16)).add(q * 4)).view(fly.L(4, 1)));
+            inline for (0..4) |pair| {
+                const x = xs.extract(pair);
+                const lo = x.shl(16).bitCast(.f32);
+                const hi = x.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
+                // Word q holds weights 8q..8q+7; `pair` selects two of them.
+                const w = weights[q];
+                partial[q / 2] = b.fma(lo, w[(pair / 2) * 2].extract(pair % 2), b.fma(hi, w[(pair / 2) * 2 + 1].extract(pair % 2), partial[q / 2]));
             }
-            sum.yieldThen(.{reduced});
         }
-        {
-            sum.yieldElse(.{fzero});
-        }
-        var store = b.openIf(lane.eq(0).bitAnd(inrow));
-        {
-            args.output.set(.{ route, row }, sum.results[0].to(.bf16));
-            store.close();
-        }
+        return b.fma(partial[0], block_scales.extract(0), b.fma(partial[1], block_scales.extract(1), acc));
+    }
+
+    /// Eight FP4 weights as F32 pairs: (0, 2), (1, 3), (4, 6), (5, 7).
+    fn decodeWord(b: *Builder, word: Value) [4]Value {
+        const even = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), word.bitAnd(0x07070707))
+            .bitAnd(word.shl(4).bitOr(0x7f7f7f7f));
+        const odd = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), word.shrU(4).bitAnd(0x07070707))
+            .bitAnd(word.bitOr(0x7f7f7f7f));
+        return .{ b.cvtPkF32Fp8(even, false), b.cvtPkF32Fp8(odd, false), b.cvtPkF32Fp8(even, true), b.cvtPkF32Fp8(odd, true) };
     }
 };
 

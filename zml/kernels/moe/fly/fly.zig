@@ -234,8 +234,8 @@ pub fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Rou
     std.debug.assert(block_size_m > 0 and block_size_m <= 128 and @mod(block_size_m, 16) == 0);
     const ids = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_assignments = ids.dim(.token) * ids.dim(.topk);
-    // GEMV handles up to six routes; MFMA shares weights across sorted rows.
-    const naive_block_assignment = num_assignments <= 6;
+    // Decode batches use the grouped GEMV; larger ones share weights across sorted MFMA rows.
+    const naive_block_assignment = num_assignments <= 256;
     const max_num_tokens_padded = if (naive_block_assignment or num_assignments < num_experts)
         num_assignments * block_size_m
     else
