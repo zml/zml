@@ -77,14 +77,20 @@ pub fn fusedExpertsBase(
     if (gate_up_scheme) |scheme| switch (scheme) {
         .fp8_block128 => launch_config.block_size_k = 128,
         .fp8_block32 => launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .nvfp4, .fp8_per_channel, .fp8_per_tensor => {},
+        .nvfp4 => if (nvfp4LaunchConfig(num_tokens)) |config| {
+            launch_config = config;
+        },
+        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
     var down_launch_config = launchConfigForTokens(num_tokens);
     if (down_scheme) |scheme| switch (scheme) {
         .fp8_block128 => down_launch_config.block_size_k = 128,
         .fp8_block32 => down_launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .nvfp4, .fp8_per_channel, .fp8_per_tensor => {},
+        .nvfp4 => if (nvfp4LaunchConfig(num_tokens)) |config| {
+            down_launch_config = config;
+        },
+        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
@@ -898,6 +904,15 @@ const launch_configs = [_]struct { tokens: i64, config: LaunchConfig }{
     .{ .tokens = 3072, .config = .{ .block_size_m = 128, .block_size_n = 256, .block_size_k = 64, .group_size_m = 1, .num_warps = 8, .num_stages = 4 } },
     .{ .tokens = 4096, .config = .{ .block_size_m = 128, .block_size_n = 256, .block_size_k = 64, .group_size_m = 16, .num_warps = 8, .num_stages = 4 } },
 };
+
+/// CUDA's native FP4 MMAs need long K tiles to stream NVFP4 expert weights.
+/// Tuned on an RTX 5090 with Inkling-2-Mini's experts, close to vLLM's sm_120 choice.
+fn nvfp4LaunchConfig(num_tokens: i64) ?LaunchConfig {
+    if (zml.Compiler.current().platform.target != .cuda) return null;
+    // Decode reads each routed expert for a row or two; prefill shares it across more.
+    const block_size_m: usize = if (num_tokens <= 64) 16 else 64;
+    return .{ .block_size_m = block_size_m, .block_size_n = 64, .block_size_k = 256, .group_size_m = 1, .num_warps = 4, .num_stages = 3 };
+}
 
 fn launchConfigForTokens(num_tokens: i64) LaunchConfig {
     var best = launch_configs[0];
