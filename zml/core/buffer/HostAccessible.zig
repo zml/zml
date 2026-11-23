@@ -249,18 +249,18 @@ pub fn init(
         ._shards = .empty,
     };
     const metadata: PjrtBufferMetadata = .init(platform, shape_);
-    const devices = platform.physical_mesh.devices_in_canonical_order;
+    const local_device_indices = platform.local_device_indices;
     const api = platform.pjrt_api;
 
     var allocations: HostPinnedAllocations = .empty;
     errdefer allocations.deinit(allocator);
 
-    try allocations.entries.ensureTotalCapacity(allocator, devices.len);
+    try allocations.entries.ensureTotalCapacity(allocator, local_device_indices.len);
     errdefer allocations.deinitHandles(api, buffer._shards.constSlice());
 
-    for (devices, 0..) |device, shard_index| {
-        const memory = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
-        const origin: Coordinates = .ofShard(&metadata.placement, shard_index, metadata.shape);
+    for (local_device_indices, 0..) |device_index, shard_index| {
+        const memory = platform.localShardDevice(shard_index).memory(.host_pinned).?.pjrt_memory;
+        const origin: Coordinates = .ofShard(&metadata.placement, device_index, metadata.shape);
         const shared_region = if (can_share_allocations) allocations.findRegion(origin, metadata.placement.localShape(metadata.shape)) else null;
 
         if (shared_region) |region_index| {
