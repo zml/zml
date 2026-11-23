@@ -41,6 +41,9 @@ pub const Activation = union(ActivationKind) {
         limit: ?f32 = null,
         scale: ?f32 = null,
         bias: ?f32 = null,
+        /// Soft caps on the gate and up factors; the sigmoid reads the uncapped gate.
+        gate_softcap: ?f32 = null,
+        up_softcap: ?f32 = null,
     },
     swiglu_step: struct {
         limit: ?f32 = null,
@@ -81,7 +84,9 @@ pub const Activation = union(ActivationKind) {
                         // Apply bias
                         up = if (parameters.bias) |bias| up.addConstant(bias) else up;
 
-                        break :b gate.silu().mul(up);
+                        const activated = if (parameters.gate_softcap) |cap| softcap(gate, cap).mul(gate.sigmoid()) else gate.silu();
+                        up = if (parameters.up_softcap) |cap| softcap(up, cap) else up;
+                        break :b activated.mul(up);
                     },
                     .swiglu_step => |parameters| {
                         gate = gate.silu();
@@ -102,6 +107,11 @@ pub const Activation = union(ActivationKind) {
         };
     }
 };
+
+/// Smoothly bounds `x` to (-cap, cap).
+pub fn softcap(x: Tensor, cap: f32) Tensor {
+    return x.divByConst(cap).tanh().scale(cap);
+}
 
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 

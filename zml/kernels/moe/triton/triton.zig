@@ -938,6 +938,7 @@ pub fn validateOptions(opts: Options) void {
     stdx.debug.assert(opts.activation.swiglu.limit != null, "triton backend requires swiglu limit to be set", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "triton backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "triton backend requires swiglu scale to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.gate_softcap == null and opts.activation.swiglu.up_softcap == null, "triton MXFP4 backend requires swiglu soft caps to be null", .{});
 }
 
 pub const Config = struct {

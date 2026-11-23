@@ -322,6 +322,7 @@ const gated_activations = [_]Activation{
     .{ .swiglu = .{ .limit = 0.25 } },
     .{ .swiglu = .{ .bias = 1 } },
     .{ .swiglu = .{ .limit = 0.25, .bias = 1 } },
+    .{ .swiglu = .{ .gate_softcap = 0.5, .up_softcap = 0.25 } },
     .{ .swiglu_step = .{} },
     .{ .swiglu_step = .{ .limit = 0.25 } },
     .geglu,
@@ -631,6 +632,7 @@ test "Triton NVFP4 compatibility matrix" {
         .activations = &.{
             .{ .swiglu = .{} },
             .{ .swiglu = .{ .limit = 0.25 } },
+            .{ .swiglu = .{ .gate_softcap = 0.5, .up_softcap = 0.25 } },
             .{ .swiglu_step = .{} },
             .{ .swiglu_step = .{ .limit = 0.25 } },
             .geglu,

@@ -13,6 +13,7 @@ const GlobalOptions = @import("zml/kernels/moe/api").Options;
 const Activation = @import("zml/kernels/moe/api").Activation;
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const softcap = @import("zml/kernels/moe/api").softcap;
 
 pub fn activate(x: Tensor, activation: Activation) Tensor {
     return switch (activation) {
@@ -39,7 +40,10 @@ pub fn activate(x: Tensor, activation: Activation) Tensor {
                         up = up.clamp(Tensor.scalar(-limit, x.dtype()), Tensor.scalar(limit, x.dtype()));
                     }
                     if (activation.swiglu.bias) |bias| up = up.addConstant(bias);
-                    break :blk gate.div(gate.negate().exp().addConstant(1)).mul(up);
+                    if (activation.swiglu.up_softcap) |cap| up = softcap(up, cap);
+                    // The sigmoid reads the uncapped gate.
+                    const capped = if (activation.swiglu.gate_softcap) |cap| softcap(gate, cap) else gate;
+                    break :blk capped.div(gate.negate().exp().addConstant(1)).mul(up);
                 },
                 .geglu => break :blk gelu(gate).mul(up),
                 .geglu_tanh => break :blk gate.gelu().mul(up),

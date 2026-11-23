@@ -49,6 +49,7 @@ pub fn validateOptions(opts: GlobalOptions) void {
     stdx.debug.assert(opts.activation.swiglu.limit == null, "Activation thresholds require the Triton MoE backend", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "flashinfer_cutlass backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "flashinfer_cutlass backend requires swiglu scale to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.gate_softcap == null and opts.activation.swiglu.up_softcap == null, "flashinfer_cutlass backend requires swiglu soft caps to be null", .{});
 }
 
 const Inputs = contract.Inputs(zml.Tensor);
