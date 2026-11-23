@@ -3,6 +3,8 @@ const log = std.log;
 
 const zml = @import("zml");
 
+const chars = "\n !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -56,231 +58,20 @@ pub fn main(init: std.process.Init) !void {
         .bias = false,
     };
 
-    // ======== MLP ========
-    const mlp_view = model_store.view().withPrefix("transformer.h.0.mlp");
-    const mlp: Mlp = Mlp.init(mlp_view);
-    var mlp_weights = try loadWeights(
-        Mlp,
-        &mlp,
-        init.arena.allocator(),
-        io,
-        platform,
-        &model_store,
-    );
-    defer zml.Buffer.deinitAll(Mlp, &mlp_weights);
-    std.log.info("———— MLP ————", .{});
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.h.0.mlp",
-        "transformer.h.0.mlp",
-        mlp,
-        mlp_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
-
-    // ======== LayerNorm ========
-    std.log.info("———— LayerNorm ————", .{});
-
-    const ln_1_view = model_store.view().withPrefix("transformer.h.0.ln_1");
-    const ln_1: zml.nn.LayerNorm = .{
-        .weight = ln_1_view.createReplicatedTensor("weight", .{.d}),
-    };
-    const ln_1_weights = try loadWeights(
-        zml.nn.LayerNorm,
-        &ln_1,
-        init.arena.allocator(),
-        io,
-        platform,
-        &model_store,
-    );
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.h.0.ln_1",
-        "transformer.h.0.ln_1",
-        ln_1,
-        ln_1_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
-
-    const ln_2_view = model_store.view().withPrefix("transformer.h.0.ln_2");
-    const ln_2: zml.nn.LayerNorm = .{
-        .weight = ln_2_view.createReplicatedTensor("weight", .{.d}),
-    };
-    const ln_2_weights = try loadWeights(
-        zml.nn.LayerNorm,
-        &ln_2,
-        init.arena.allocator(),
-        io,
-        platform,
-        &model_store,
-    );
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.h.0.ln_2",
-        "transformer.h.0.ln_2",
-        ln_2,
-        ln_2_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
-
-    // ======== Embeddings ========
-    std.log.info("———— Embeddings ————", .{});
-    // proj embed
-    const wpe_view = model_store.view().withPrefix("transformer.wpe");
-    const wpe: zml.nn.TokenEmbedding = .{
-        .weight = wpe_view.createReplicatedTensor("weight", .{ .voc, .d }),
-    };
-    const wpe_weights = try loadWeights(
-        zml.nn.TokenEmbedding,
-        &wpe,
-        init.arena.allocator(),
-        io,
-        platform,
-        &model_store,
-    );
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.wpe",
-        "transformer.wpe",
-        wpe,
-        wpe_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
-
-    // token embed
-    const wte_view = model_store.view().withPrefix("transformer.wte");
-    const wte: zml.nn.TokenEmbedding = .{
-        .weight = wte_view.createReplicatedTensor("weight", .{ .voc, .d }),
-    };
-    const wte_weights = try loadWeights(
-        zml.nn.TokenEmbedding,
-        &wte,
-        init.arena.allocator(),
-        io,
-        platform,
-        &model_store,
-    );
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.wte",
-        "transformer.wte",
-        wte,
-        wte_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
-
-    // ======== Attention ========
-    std.log.info("———— Attention ————", .{});
-    const attn_view = model_store.view().withPrefix("transformer.h.0.attn");
-    const attn: Attn = Attn.init(attn_view, config);
-    var attn_weights = try loadWeights(
-        Attn,
-        &attn,
-        init.arena.allocator(),
-        io,
-        platform,
-        &model_store,
-    );
-    defer zml.Buffer.deinitAll(Attn, &attn_weights);
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.h.0.attn",
-        "transformer.h.0.attn",
-        attn,
-        attn_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
-
-    // ======== Block ========
-    std.log.info("———— Block ————", .{});
-    //const block: Block = Block.init(transformer_view, config);
-    const h = try init.arena.allocator().alloc(Block, config.n_layer);
-    for (h, 0..) |*block, i| {
-        block.* = Block.init(
-            model_store.view().withPrefix("transformer.h").withLayer(i),
-            config,
-        );
-    }
-    const block = h[0];
-    const block_weights = try loadWeights(
-        Block,
-        &block,
-        init.arena.allocator(),
-        io,
-        platform,
-        &model_store,
-    );
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.h.0",
-        "transformer.h.0",
-        block,
-        block_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
-
     // ======== GPT ========
     std.log.info("———— GPT ————", .{});
-    const ln_f_view = model_store.view().withPrefix("transformer.ln_f");
-    const ln_f: zml.nn.LayerNorm = .{
-        .weight = ln_f_view.createReplicatedTensor("weight", .{.d}),
-    };
-    const transformer: Transformer = .{
-        .wte = wte,
-        .wpe = wpe,
-        .h = h,
-        .ln_f = ln_f,
-    };
-    const gpt: Gpt = .{ .config = config, .transformer = transformer };
+    const arena = init.arena.allocator();
+    const gpt = try Gpt.init(arena, model_store.view(), config);
     var gpt_weights = try loadWeights(
         Gpt,
         &gpt,
-        init.arena.allocator(),
+        arena,
         io,
         platform,
         &model_store,
     );
+    try Gpt.generate(arena, io, gpt, platform, "CORIOLANUS:\nThat haz a straight stoop to his good behold! this come;\n", gpt_weights);
     defer zml.Buffer.freeDeviceMemoryButKeepHostMetadataMemory(Gpt, &gpt_weights);
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activations_store.view(),
-        "transformer.wte",
-        "lm_head",
-        gpt,
-        gpt_weights,
-        &.{},
-        .{ .absolute_tolerance = 1e-2 },
-    );
 }
 
 /// === TYPES ===
@@ -379,14 +170,35 @@ const Block = struct {
 const Transformer = struct {
     wte: zml.nn.TokenEmbedding,
     wpe: zml.nn.TokenEmbedding,
-    //h: [n_layer]Block,
     h: []Block,
     ln_f: zml.nn.LayerNorm,
+
+    pub fn init(arena: std.mem.Allocator, view: zml.io.TensorStore.View, config: Config) !Transformer {
+        const h = try arena.alloc(Block, @intCast(config.n_layer));
+        for (h, 0..) |*block, i| {
+            block.* = Block.init(view.withPrefix("h").withLayer(i), config);
+        }
+        return .{
+            .wte = .{ .weight = view.withPrefix("wte").createReplicatedTensor("weight", .{ .voc, .d }) },
+            .wpe = .{ .weight = view.withPrefix("wpe").createReplicatedTensor("weight", .{ .voc, .d }) },
+            .h = h,
+            .ln_f = .{ .weight = view.withPrefix("ln_f").createReplicatedTensor("weight", .{.d}) },
+        };
+    }
 };
 
 const Gpt = struct {
     config: Config,
     transformer: Transformer,
+
+    pub fn init(arena: std.mem.Allocator, view: zml.io.TensorStore.View, config: Config) !Gpt {
+        const transformer: Transformer = try Transformer.init(arena, view.withPrefix("transformer"), config);
+
+        return .{
+            .config = config,
+            .transformer = transformer,
+        };
+    }
 
     pub fn forward(self: Gpt, idx: zml.Tensor) zml.Tensor {
         const idx_tagged = idx.withTags(.{ .b, .t });
@@ -404,9 +216,138 @@ const Gpt = struct {
 
         return logits;
     }
+
+    pub fn forwardAll(self: Gpt, idx: zml.Tensor) zml.Tensor {
+        const idx_tagged = idx.withTags(.{ .b, .t });
+        const pos = zml.Tensor.arange(.{ .end = idx_tagged.dim(.t) }, .i64).withTags(.{.t});
+        const tok_emb = self.transformer.wte.forward(idx_tagged);
+        const pos_emb = self.transformer.wpe.forward(pos);
+        var x = tok_emb.add(pos_emb.broad(tok_emb.shape()));
+        for (self.transformer.h) |block| {
+            x = block.forward(x);
+        }
+
+        x = self.transformer.ln_f.forward(x);
+        const logits = x.dot(self.transformer.wte.weight.withTags(.{ .voc, .d }), .d);
+        return logits;
+    }
+
+    pub fn nextToken(self: Gpt, idx: zml.Tensor) zml.Tensor {
+        const idx_tagged = idx.withTags(.{ .b, .t });
+        const pos = zml.Tensor.arange(.{ .end = idx_tagged.dim(.t) }, .i64).withTags(.{.t});
+        const tok_emb = self.transformer.wte.forward(idx_tagged);
+        const pos_emb = self.transformer.wpe.forward(pos);
+        var x = tok_emb.add(pos_emb.broad(tok_emb.shape()));
+        for (self.transformer.h) |block| {
+            x = block.forward(x);
+        }
+
+        x = self.transformer.ln_f.forward(x);
+        const logits = x.dot(self.transformer.wte.weight.withTags(.{ .voc, .d }), .d);
+
+        return logits;
+    }
+
+    pub fn generate(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        layer: Gpt,
+        platform: *const zml.Platform,
+        prompt: []const u8,
+        layer_weights: zml.Bufferized(Gpt),
+    ) !void {
+        const ctx = 256;
+        const max_new_tokens = 512;
+
+        // Prompt + generated tokens
+        var history: [1024]i64 = undefined;
+        for (prompt, 0..) |c, i| {
+            history[i] = @intCast(std.mem.indexOfScalar(u8, chars, c) orelse 0);
+        }
+        var len: usize = prompt.len;
+        std.debug.print("{s}", .{prompt});
+
+        // Returns logits for every position
+        const in_tensor = zml.Tensor.init(.{ 1, ctx }, .i64);
+        const exe = try platform.compileFn(allocator, io, Gpt.forwardAll, .{ layer, in_tensor }, .{ .meshes = &.{} });
+        defer exe.deinit();
+
+        var args = try exe.args(allocator);
+        defer args.deinit(allocator);
+
+        var res = try exe.results(allocator);
+        defer res.deinit(allocator);
+
+        var prng = std.Random.DefaultPrng.init(1337);
+        const rng = prng.random();
+        // Autoregressive inference
+        while (len < prompt.len + max_new_tokens) : (len += 1) {
+            // Sliding window + padding
+            const start = len -| ctx;
+            var window: [ctx]i64 = @splat(0);
+            @memcpy(window[0 .. len - start], history[start..len]);
+
+            var in_buffer = try zml.Buffer.fromBytes(io, platform, in_tensor.shape(), std.mem.sliceAsBytes(&window));
+            defer in_buffer.deinit();
+            args.set(.{ layer_weights, in_buffer });
+
+            exe.call(io, args, &res, .{});
+            var out = res.get(zml.Buffer);
+            defer out.deinit();
+
+            const host = try out.toSliceAlloc(allocator, io);
+            defer host.free(allocator);
+
+            // Take the last token row
+            const pos = len - start - 1;
+            const scores = host.constItems(f32)[pos * chars.len ..][0..chars.len];
+
+            // var best: usize = 0;
+            // for (scores, 0..) |score, i| {
+            //     if (score > scores[best]) best = i;
+            // }
+
+            // Best + temperature
+            const temperature: f32 = 0.8;
+
+            // max
+            var max: f32 = scores[0];
+            for (scores) |s| max = @max(max, s);
+
+            // softmax
+            var probs: [chars.len]f32 = undefined;
+            var sum: f32 = 0;
+            for (scores, 0..) |s, i| {
+                probs[i] = @exp((s - max) / temperature);
+                sum += probs[i];
+            }
+
+            // sampling
+            var r = rng.float(f32) * sum;
+            var best: usize = chars.len - 1;
+            for (probs, 0..) |p, i| {
+                r -= p;
+                if (r <= 0) {
+                    best = i;
+                    break;
+                }
+            }
+
+            history[len] = @intCast(best);
+            std.debug.print("{c}", .{chars[best]});
+        }
+        std.debug.print("\n", .{});
+    }
 };
 
-const Config = struct { block_size: i64, vocab_size: i64, n_layer: i64, n_head: i64, n_embd: i64, bias: bool };
+const Config = struct {
+    block_size: i64,
+    vocab_size: i64,
+    n_layer: i64,
+    n_head: i64,
+    n_embd: i64,
+    bias: bool,
+};
 
 pub fn loadWeights(
     comptime T: type,
