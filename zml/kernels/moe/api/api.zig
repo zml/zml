@@ -140,6 +140,8 @@ pub const ExpertsLayout = struct {
         /// 128x4 atoms in MN-major order `[expert, k/128, rows/128, 512]`,
         /// represented as `[expert, k/128, rows]` i32 words of four scales.
         mxfp4_interleaved8,
+        /// Weights dequantized to BF16 at load, for backends without a kernel for the stored format.
+        dequantized,
     };
 };
 

@@ -233,6 +233,10 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
                     .reshape(.{ .expert = sf.dim(0), .scale_word = @divExact(sf.dim(2), 4), .row = sf.dim(1), .scale_byte = 4 }).bitCast(.i32)
                     .withTags(sf.shape().transpose(.{ 0, 2, 1 }));
             },
+            .dequantized => {
+                projection.weight = zml.moe.stablehlo.dequantize(projection.*).convert(.bf16);
+                projection.quantization = null;
+            },
             .plain => {},
         }
         switch (backend) {

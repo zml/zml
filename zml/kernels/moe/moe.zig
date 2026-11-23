@@ -126,7 +126,9 @@ pub const Backend = enum {
                 .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
-            .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
+            .mosaic_tpu, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
+            // Metal kernels take NVFP4 and FP8 with 128x128 block scales; other formats run in BF16.
+            .metal => .{ .gate_up = .concatenated, .packing = if (scheme == null or scheme == .nvfp4 or scheme == .fp8_block128) .plain else .dequantized },
             .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .row_interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
