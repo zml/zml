@@ -243,6 +243,8 @@ pub const Mfma = struct {
     /// `expert_ids` contains local bank indices, including -1 for remote experts.
     /// Sorted routes must contain a real prefix followed by padding per expert.
     /// `block_m` is their alignment; native tiles contain 16 or 32 rows.
+    /// `scales` holds one entry per 32 weights: an E8M0 byte (MXFP4), or an i16
+    /// pairing two E4M3FN bytes that each cover 16 weights (NVFP4).
     pub fn call(
         input: Tensor,
         weight: Tensor,
@@ -256,7 +258,7 @@ pub const Mfma = struct {
         block_m: usize,
     ) Tensor {
         std.debug.assert(input.rank() == 2 and input.dtype() == .bf16 and weight.rank() == 3 and
-            (weight.dtype() == .u8 or weight.dtype() == .i8) and scales.rank() == 3 and scales.dtype() == .u8 and
+            (weight.dtype() == .u8 or weight.dtype() == .i8) and scales.rank() == 3 and (scales.dtype() == .u8 or scales.dtype() == .i16) and
             sorted_ids.rank() == 1 and sorted_ids.dtype() == .i32 and expert_ids.rank() == 1 and expert_ids.dtype() == .i32 and
             padded_count.count() == 1 and padded_count.dtype() == .i32 and output.rank() >= 2 and output.dtype() == .bf16 and
             topk > 0 and block_m > 0 and block_m % 16 == 0);
@@ -307,6 +309,7 @@ pub const Mfma = struct {
             .stage_elements = native_m * 128,
             .shared_elements = native_m * 256,
             .naive = @as(i64, @intFromBool(naive)),
+            .nvfp4 = @as(i64, @intFromBool(scales.dtype() == .i16)),
         };
         const a = input.reshape(.{ input.dim(0), @divExact(k, 4), 4 }).bitCast(.i64);
         const b = weight.reshape(.{ weight.dim(0), n, @divExact(k, 8), 4 }).bitCast(.i32);
@@ -337,6 +340,7 @@ pub const Mfma = struct {
         stage_elements: i64,
         shared_elements: i64,
         naive: i64,
+        nvfp4: i64,
     };
 
     const Kernel = zml.kernel.fly.Kernel(Config, .{
@@ -425,6 +429,7 @@ pub const Mfma = struct {
                     .expert = expert,
                     .out_n = out_n,
                     .k_lane = k_lane,
+                    .nvfp4 = cfg.nvfp4 != 0,
                 };
                 const initial = loader.load(b, b.constant(.i64, 0), b.constant(.i64, 0));
                 b.barrier();
@@ -466,12 +471,14 @@ pub const Mfma = struct {
                         next.yieldThen(.{ next_tile.words, next_tile.scale });
                     }
                     {
-                        next.yieldElse(.{ b.constant(.i32, 0).splat(4), fzero });
+                        next.yieldElse(.{ b.constant(.i32, 0).splat(4), if (cfg.nvfp4 != 0) fzero.splat(2) else fzero });
                     }
                     var acc = k.carried[0];
                     var acc_g1 = k.carried[1];
                     inline for (0..4) |u| {
-                        const decoded = decodeWeight(b, k.carried[2].extract(u), k.carried[3]);
+                        // A lane's four words share one MXFP4 scale, or two NVFP4 scales by halves.
+                        const scale = if (cfg.nvfp4 != 0) k.carried[3].extract(u / 2) else k.carried[3];
+                        const decoded = decodeWeight(b, k.carried[2].extract(u), scale);
                         const a0 = a_fragments[u].shuffleVector(a_fragments[u], &.{ 0, 1, 2, 3 }).bitCast(.bf16);
                         const a1 = a_fragments[u].shuffleVector(a_fragments[u], &.{ 4, 5, 6, 7 }).bitCast(.bf16);
                         const w0 = decoded.shuffleVector(decoded, &.{ 0, 1, 2, 3 });
@@ -550,6 +557,7 @@ pub const Mfma = struct {
         expert: Value,
         out_n: Value,
         k_lane: Value,
+        nvfp4: bool,
 
         fn load(self: TileLoader, b: *Builder, k: Value, write_base: Value) struct { words: Value, scale: Value } {
             self.storeActivation(b, self.a_base, self.a_valid, k, self.a_store.add(write_base));
@@ -560,10 +568,8 @@ pub const Mfma = struct {
             }
             const offset = self.b_base.add(k.divUnsigned(8)).add(self.k_lane.mul(4));
             const words = b.copyAtomLoad(self.load_b, vectorView(self.weight, offset, 4));
-            const byte = self.scales.at(.{ self.expert, self.out_n, k.divUnsigned(32).add(self.k_lane) });
-            const scale = byte.toUnsigned(.i32);
-            const finite = scale.eq(0).select(b.constant(.i32, 0x00400000), scale.shl(23));
-            return .{ .words = words, .scale = scale.eq(255).select(b.constant(.i32, 0x7fc00000), finite).bitCast(.f32) };
+            const scale = self.scales.at(.{ self.expert, self.out_n, k.divUnsigned(32).add(self.k_lane) });
+            return .{ .words = words, .scale = if (self.nvfp4) decodeE4m3Pair(b, scale) else decodeE8m0(b, scale) };
         }
 
         fn storeActivation(self: TileLoader, b: *Builder, base: Value, valid: Value, k: Value, destination: Value) void {
@@ -622,14 +628,15 @@ const Gemv = struct {
         std.debug.assert(@mod(n, 8) == 0 and @mod(k, 32) == 0);
         std.debug.assert(topk > 0 and routes == x.dim(0) * @as(i64, @intCast(topk)));
         std.debug.assert(weight.dim(2) * 2 == k);
-        std.debug.assert(scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32));
+        std.debug.assert(scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32) and
+            (scales.dtype() == .u8 or scales.dtype() == .i16));
         const tile_rows = rows * (64 / lanes);
         std.debug.assert(@mod(n, @as(i64, @intCast(tile_rows * 8))) == 0);
-        const fields: EmitConfig = .{ .unroll = unroll, .rows = tile_rows, .lanes = lanes, .stride = unroll * lanes, .ntiles = @divExact(n, @as(i64, @intCast(tile_rows))), .tokens = x.dim(0), .experts = weight.dim(0), .n = n, .k_pairs = @divExact(k, 2), .k_words = @divExact(k, 8), .k_scales = @divExact(k, 32), .routes = routes, .grid = @divExact(n, @as(i64, @intCast(tile_rows))) * routes, .topk = @as(i64, @intCast(topk)) };
+        const fields: EmitConfig = .{ .unroll = unroll, .rows = tile_rows, .lanes = lanes, .stride = unroll * lanes, .ntiles = @divExact(n, @as(i64, @intCast(tile_rows))), .tokens = x.dim(0), .experts = weight.dim(0), .n = n, .k_pairs = @divExact(k, 2), .k_words = @divExact(k, 8), .k_scales = @divExact(k, 32), .routes = routes, .grid = @divExact(n, @as(i64, @intCast(tile_rows))) * routes, .topk = @as(i64, @intCast(topk)), .nvfp4 = @as(i64, @intFromBool(scales.dtype() == .i16)) };
         const a = x.reshape(.{ .token = x.dim(0), .in = @divExact(k, 2), .pair = 2 }).bitCast(.i32);
         const b = weight.reshape(.{ .expert = weight.dim(0), .out = n, .in = @divExact(weight.dim(2), 4), .word = 4 }).bitCast(.i32);
         const matrix_output = zml.Shape.init(.{ .token = routes, .out = n }, output.dtype());
-        return Gemv.Kernel.call(.{ .a = a, .b = b, .scales = scales.bitCast(.u8), .ids = ids.reshape(.{routes}) }, .{
+        return Gemv.Kernel.call(.{ .a = a, .b = b, .scales = scales, .ids = ids.reshape(.{routes}) }, .{
             .output = matrix_output,
         }, .{
             .cfg = fields,
@@ -653,6 +660,7 @@ const Gemv = struct {
         routes: i64,
         grid: i64,
         topk: i64,
+        nvfp4: i64,
     };
 
     const Kernel = zml.kernel.fly.Kernel(EmitConfig, .{
@@ -688,8 +696,11 @@ const Gemv = struct {
                     var inbounds = b.openIfElse(pos.cmpUnsigned(.lt, cfg.k_words), .{fzero});
                     {
                         const word = args.b.at(.{ expert, row, pos });
-                        const scale8 = args.scales.at(.{ expert, row, pos.divUnsigned(4) });
-                        const scale = decodeScale(b, scale8);
+                        const packed_scale = args.scales.at(.{ expert, row, pos.divUnsigned(4) });
+                        const scale = if (cfg.nvfp4 != 0) blk: {
+                            const pair = decodeE4m3Pair(b, packed_scale);
+                            break :blk pos.divUnsigned(2).bitAnd(1).eq(0).select(pair.extract(0), pair.extract(1));
+                        } else decodeE8m0(b, packed_scale);
                         const low = word.bitAnd(0x07070707);
                         const high = word.shrU(4).bitAnd(0x07070707);
                         const even_bits = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), low);
@@ -738,10 +749,17 @@ const Gemv = struct {
             store.close();
         }
     }
-
-    fn decodeScale(b: *Builder, byte: Value) Value {
-        const scale = byte.toUnsigned(.i32);
-        const finite = scale.eq(0).select(b.constant(.i32, 0x00400000), scale.shl(23));
-        return scale.eq(255).select(b.constant(.i32, 0x7fc00000), finite).bitCast(.f32);
-    }
 };
+
+fn decodeE8m0(b: *Builder, byte: Value) Value {
+    const scale = byte.toUnsigned(.i32);
+    const finite = scale.eq(0).select(b.constant(.i32, 0x00400000), scale.shl(23));
+    return scale.eq(255).select(b.constant(.i32, 0x7fc00000), finite).bitCast(.f32);
+}
+
+/// Two E4M3FN scales, low byte first. CDNA3 converts E4M3FNUZ, whose exponent
+/// bias is one larger, so the same bits decode to half the value. Scales are
+/// nonnegative and finite, avoiding the formats' differing NaN and -0 encodings.
+fn decodeE4m3Pair(b: *Builder, pair: Value) Value {
+    return b.cvtPkF32Fp8(pair.toUnsigned(.i32), false).mul(2.0);
+}

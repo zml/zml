@@ -3,7 +3,8 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const nn = @import("zml/nn");
-const Quantization = @import("zml/quantization").Quantization;
+const quantization = @import("zml/quantization");
+const Quantization = quantization.Quantization;
 
 const zml = @import("zml/core");
 const Tensor = zml.Tensor;
@@ -38,18 +39,16 @@ pub fn fusedExperts(
     const gate_up_scheme = gate_up_.quantizationScheme();
     const down_scheme = down_.quantizationScheme();
     if (gate_up_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("fly backend doesn't support gate_up nvfp4 quantization scheme", .{}),
         .fp8_block128 => launch_config.block_size_k = 128,
         .fp8_block32 => launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
+        .mxfp4, .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
     var down_launch_config = launchConfigForTokens(num_tokens);
     if (down_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("fly backend doesn't support down nvfp4 quantization scheme", .{}),
         .fp8_block128 => down_launch_config.block_size_k = 128,
         .fp8_block32 => down_launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
+        .mxfp4, .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
     };
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
@@ -59,21 +58,21 @@ pub fn fusedExperts(
     const ids = routing_.ids.reshape(.{ .token = num_tokens, .in = routing_.ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "fly backend expected BF16 hidden states, got {}", .{hidden.dtype()});
-    if (gate_up_scheme == .mxfp4) {
-        stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4, got {}", .{gate_up.dtype()});
+    if (gate_up_scheme == .mxfp4 or gate_up_scheme == .nvfp4) {
+        stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4 or nvfp4, got {}", .{gate_up.dtype()});
     } else {
         stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "fly backend expected gate_up data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{gate_up.dtype()});
     }
-    if (down_scheme == .mxfp4) {
-        stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4, got {}", .{down.dtype()});
+    if (down_scheme == .mxfp4 or down_scheme == .nvfp4) {
+        stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4 or nvfp4, got {}", .{down.dtype()});
     } else {
         stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "fly backend expected down data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{down.dtype()});
     }
 
     stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "fly backend expected f32 or bf16 routing weights, got {}", .{routing_weights.dtype()});
     stdx.debug.assert(ids.dtype() == .i32, "fly backend expected i32 expert ids, got {}", .{ids.dtype()});
-    const gate_up_k = gate_up.dim(.in) * @as(i64, if (gate_up_scheme == .mxfp4 and gate_up.dtype() != .f4e2m1) 2 else 1);
-    const down_k = down.dim(.mid) * @as(i64, if (down_scheme == .mxfp4 and down.dtype() != .f4e2m1) 2 else 1);
+    const gate_up_k = gate_up.dim(.in) * @as(i64, if (gate_up.dtype() == .u8 or gate_up.dtype() == .i8) 2 else 1);
+    const down_k = down.dim(.mid) * @as(i64, if (down.dtype() == .u8 or down.dtype() == .i8) 2 else 1);
     stdx.debug.assert(hidden.dim(.in) == gate_up_k, "fly backend expected hidden width to match gate/up input width, got {} and {}", .{ hidden.dim(.in), gate_up_k });
     const activation_reduction: i64 = switch (opts.activation) {
         .gelu, .relu, .silu => 1,
@@ -95,13 +94,12 @@ pub fn fusedExperts(
     else
         routing.expert_ids;
 
-    const hidden_quant, const input_scale = prepareInput(hidden, gate_up_scheme, gate_up.dtype(), opts.quantize_input);
+    const local_ids = routing_.localIds().reshape(ids.shape());
 
     const gate_up_out = gemm(.{
-        .input = hidden_quant,
+        .input = prepareInput(hidden, gate_up_, opts),
         .weight = gate_up,
         .bias = gate_up_.bias,
-        .input_scale = input_scale,
         .weight_scale = gate_up_.quantizationScales(),
         .routing = routing,
         .expert_ids = expert_ids,
@@ -111,18 +109,16 @@ pub fn fusedExperts(
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    var activated = opts.activation.applyActivation(gate_up_out, layout);
+    var activated = opts.activation.applyActivation(scaleRoutes(gate_up_out, gate_up_, local_ids), layout);
     if (opts.routing_weight_placement == .before_down) {
         const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
     }
-    const activated_quant, const down_input_scale = prepareInput(activated, down_scheme, down.dtype(), opts.quantize_input);
 
     const down_out = gemm(.{
-        .input = activated_quant,
+        .input = prepareInput(activated, down_, opts),
         .weight = down,
         .bias = down_.bias,
-        .input_scale = down_input_scale,
         .weight_scale = down_.quantizationScales(),
         .routing_weights = if (opts.routing_weight_placement == .after_down) routing_weights else null,
         .routing = routing,
@@ -133,7 +129,7 @@ pub fn fusedExperts(
         .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
-    const output = down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
+    const output = scaleRoutes(down_out, down_, local_ids).sum(.topk).squeeze(.topk).convert(.bf16);
 
     return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
@@ -173,16 +169,32 @@ pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linea
     return routes > 0 and routes <= @divTrunc(std.math.maxInt(i32), max_width);
 }
 
-pub fn prepareInput(x: Tensor, scheme: ?Quantization.Scheme, _: zml.DataType, _: bool) struct { Tensor, ?Tensor } {
-    std.debug.assert(scheme == .mxfp4);
-    return .{ x.convert(.bf16), null };
+/// The BF16 GEMM input. NVFP4 GEMMs take FP4 activations, but CDNA3 has no FP4 MFMA:
+/// activations are rounded to NVFP4 and widened back to BF16, which holds them exactly.
+fn prepareInput(x: Tensor, linear: nn.Linear, opts: Options) Tensor {
+    if (linear.quantizationScheme() != .nvfp4) return x.convert(.bf16);
+    // Activations are rounded to BF16 before quantization, as for BF16 GEMMs.
+    const rows = x.withTags(.{ .token, .in }).convert(.bf16).optimizationBarrier().convert(.f32);
+    const quantized = quantization.quantizeNvfp4Rows(rows, .in, opts.nvfp4_input_scale == .four_or_six);
+    return quantization.dequantizeNvfp4(quantized, .in).convert(.bf16);
+}
+
+/// GEMM outputs `{.token, ..., .out}` in FP32, times the NVFP4 per-expert multiplier of
+/// each route in `ids`.
+fn scaleRoutes(x: Tensor, linear: nn.Linear, ids: Tensor) Tensor {
+    const result = x.convert(.f32);
+    const scale = (linear.quantization orelse return result).global_scale orelse return result;
+    const global = scale.asMultiplier();
+    if (global.rank() == 0) return result.mul(global.broad(result.shape()));
+    // Nonlocal routes produce zeros; any valid expert works for them.
+    const per_route = global.withTags(.{.expert}).gather(.{ .expert = ids.maximum(.scalar(0, .i32)) }, .{});
+    return result.mul(per_route.reshape(result.shape().setDim(-1, 1).withDtype(.f32)).broad(result.shape()));
 }
 
 pub const GemmOptions = struct {
     input: Tensor,
     weight: Tensor,
     bias: ?Tensor = null,
-    input_scale: ?Tensor = null,
     weight_scale: ?Tensor = null,
     routing_weights: ?Tensor = null,
     routing: Routing,
@@ -194,12 +206,18 @@ pub const GemmOptions = struct {
 };
 
 pub fn gemm(opts: GemmOptions) zml.Tensor {
-    stdx.debug.assert(opts.quant_scheme == .mxfp4 and opts.bias == null and opts.routing_weights == null and opts.input_scale == null, "Fly MoE requires MXFP4 weights, BF16 activations and routing weights before the down projection", .{});
+    stdx.debug.assert((opts.quant_scheme == .mxfp4 or opts.quant_scheme == .nvfp4) and opts.bias == null and opts.routing_weights == null, "Fly MoE requires MXFP4 or NVFP4 weights, BF16 activations and routing weights before the down projection", .{});
     const weight = if (opts.weight.dtype() == .f4e2m1)
         opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8)
     else
         opts.weight;
-    return fly.Mfma.call(opts.input, weight, opts.weight_scale.?.bitCast(.u8), opts.routing.sorted_token_ids, opts.expert_ids, opts.routing.num_tokens_post_padded, opts.output_shape, opts.top_k, opts.routing.naive_block_assignment, opts.launch_config.block_size_m);
+    // The kernels read one scale word per 32 weights: NVFP4 pairs its 16-weight E4M3 scales.
+    const bytes = opts.weight_scale.?.bitCast(.u8);
+    const scales = if (opts.quant_scheme == .nvfp4)
+        bytes.reshape(bytes.shape().setDim(2, @divExact(bytes.dim(2), 2)).append(.{ .pair = 2 })).bitCast(.i16)
+    else
+        bytes;
+    return fly.Mfma.call(opts.input, weight, scales, opts.routing.sorted_token_ids, opts.expert_ids, opts.routing.num_tokens_post_padded, opts.output_shape, opts.top_k, opts.routing.naive_block_assignment, opts.launch_config.block_size_m);
 }
 
 pub const Routing = struct {

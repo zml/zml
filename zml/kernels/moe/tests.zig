@@ -744,6 +744,29 @@ test "Fly general projection shapes" {
     }, .{});
 }
 
+test "Fly NVFP4 compatibility matrix" {
+    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+
+    // The default shapes cover GEMV and sorted MFMA. Fly rounds activations to NVFP4 as
+    // Triton does, which the reference only matches closely at these widths.
+    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
+        .formats = &.{
+            .{ .scheme = .nvfp4 },
+            .{ .scheme = .nvfp4, .non_unit_scales = true },
+        },
+        .activations = &.{
+            .{ .swiglu = .{} },
+            .{ .swiglu = .{ .limit = 0.25 } },
+            .{ .swiglu = .{ .gate_softcap = 0.5, .up_softcap = 0.25 } },
+            .{ .swiglu_step = .{} },
+            .{ .swiglu_step = .{ .limit = 0.25 } },
+            .geglu,
+            .geglu_tanh,
+        },
+        .placements = &.{.before_down},
+    }, .{});
+}
+
 test "Metal compatibility matrix" {
     const platform = zml.testing.env();
 
