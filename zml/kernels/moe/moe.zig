@@ -53,6 +53,8 @@ pub const Backend = enum {
                         .cute
                     else if (flashinfer_cutlass.isNvfp4Supported(platform))
                         .flashinfer_cutlass
+                    else if (triton.isNvfp4Supported(platform))
+                        .triton
                     else
                         error.UnsupportedQuantization,
                     .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,

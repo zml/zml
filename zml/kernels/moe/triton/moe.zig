@@ -190,7 +190,7 @@ fn writeZerosToOutput(
 // fused_moe_kernel
 // =============================================================================
 
-/// Routed GEMM supporting BF16, MXFP4, MXFP8, and per-tensor, per-channel, or
+/// Routed GEMM supporting BF16, MXFP4, MXFP8, NVFP4, and per-tensor, per-channel, or
 /// 128x128 block-scaled FP8 weights.
 pub const FusedMoe = struct {
     pub const Cfg = struct {
@@ -234,6 +234,11 @@ pub const FusedMoe = struct {
             return error.InvalidMlir;
         }
 
+        if (cfg.quant_scheme == .nvfp4 and (cfg.block_size_k % 32 != 0 or cfg.a_scale_dtype == null or cfg.b_scale_dtype == null)) {
+            log.err("fused_moe_kernel: NVFP4 requires BLOCK_SIZE_K divisible by 32 and block scales for both operands", .{});
+            return error.InvalidMlir;
+        }
+
         const a = try b.declareArgs(.{
             .a_ptr = .{ .ptr = cfg.a_dtype },
             .b_ptr = .{ .ptr = cfg.b_dtype },
@@ -267,8 +272,11 @@ pub const FusedMoe = struct {
         const block_size_m: i64 = @intCast(cfg.block_size_m);
         const block_size_n: i64 = @intCast(cfg.block_size_n);
         const block_size_k: i64 = @intCast(cfg.block_size_k);
-        const weight_packing: i64 = if (cfg.quant_scheme == .mxfp4) 2 else 1;
+        const weight_packing: i64 = if (cfg.quant_scheme == .mxfp4 or cfg.quant_scheme == .nvfp4) 2 else 1;
         const block_size_bk = @divExact(block_size_k, weight_packing);
+        // NVFP4 activations are byte-packed FP4 like the weights.
+        const input_packing: i64 = if (cfg.quant_scheme == .nvfp4) 2 else 1;
+        const block_size_ak = @divExact(block_size_k, input_packing);
         const group_size_m: i64 = @intCast(cfg.group_size_m);
         const top_k: i64 = @intCast(cfg.top_k);
         const compute_type = cfg.compute_type;
@@ -361,7 +369,7 @@ pub const FusedMoe = struct {
         const offs_bn = pid_n_block_n.add(b.arange(0, block_size_n, .i64)).rem(n_block);
 
         // offs_k stays i32 through expand_dims; extsi to i64 happens on the 2D form.
-        const offs_k_i32 = b.arange(0, block_size_k, .i32);
+        const offs_k_i32 = b.arange(0, block_size_ak, .i32);
 
         // a_ptrs: `offs_token[:, None] // top_k * stride_am + offs_k[None, :]`.
         // (stride_ak == 1 here, so `* stride_ak` folds away.) Build with explicit
@@ -369,8 +377,8 @@ pub const FusedMoe = struct {
         const offs_token_col = b.expandDims(offs_token, 1);
         const am_col = offs_token_col.div(top_k).mul(stride_am_block);
         const offs_k_row = b.expandDims(offs_k_i32, 0).to(.i64);
-        const am_term = b.broadcastTo(am_col, &.{ block_size_m, block_size_k });
-        const ak_term = b.broadcastTo(offs_k_row, &.{ block_size_m, block_size_k });
+        const am_term = b.broadcastTo(am_col, &.{ block_size_m, block_size_ak });
+        const ak_term = b.broadcastTo(offs_k_row, &.{ block_size_m, block_size_ak });
         const a_ptrs_init = a.a_ptr.addPtr(am_term.add(ak_term));
 
         // b_ptrs: `b_ptr + off_experts * stride_be` (scalar addptr) THEN
@@ -378,7 +386,7 @@ pub const FusedMoe = struct {
         // addptr) — matches Python's left-to-right evaluation. Defer extsi
         // for offs_k to after offs_bn's expand_dims/mul (Python emit order).
         const b_ptr_shifted = a.b_ptr.addPtr(off_experts.mul(stride_be_block));
-        // MXFP4 packs two K values per byte; activation K remains unpacked.
+        // MXFP4 and NVFP4 weights pack two K values per byte.
         const offs_bk_i32 = b.arange(0, block_size_bk, .i32);
         const offs_k_col_i32 = b.expandDims(offs_bk_i32, 1);
         const offs_bn_row = b.expandDims(offs_bn, 0);
@@ -405,14 +413,15 @@ pub const FusedMoe = struct {
             // mask_a = token_mask[:, None] & (offs_k[None, :] < k_remaining).
             const token_mask_col_a = b.expandDims(token_mask, 1);
             const offs_k_row_a = b.expandDims(offs_k_i32, 0).to(.i64);
-            const offs_k_lt_a = offs_k_row_a.lt(b.splat(k_remaining, &.{ 1, block_size_k }));
-            const token_mask_full_a = b.broadcastTo(token_mask_col_a, &.{ block_size_m, block_size_k });
-            const offs_k_lt_a_full = b.broadcastTo(offs_k_lt_a, &.{ block_size_m, block_size_k });
+            const k_remaining_a = if (input_packing == 1) k_remaining else k_remaining.cdiv(input_packing);
+            const offs_k_lt_a = offs_k_row_a.lt(b.splat(k_remaining_a, &.{ 1, block_size_ak }));
+            const token_mask_full_a = b.broadcastTo(token_mask_col_a, &.{ block_size_m, block_size_ak });
+            const offs_k_lt_a_full = b.broadcastTo(offs_k_lt_a, &.{ block_size_m, block_size_ak });
             const mask_a = token_mask_full_a.bitAnd(offs_k_lt_a_full);
 
             const a_val = b.loadOpts(a_ptrs, .{
                 .mask = mask_a,
-                .other = b.zeros(&.{ block_size_m, block_size_k }, cfg.a_dtype),
+                .other = b.zeros(&.{ block_size_m, block_size_ak }, cfg.a_dtype),
             });
 
             const offs_k_col_b = b.expandDims(offs_bk_i32, 1).to(.i64);
@@ -425,8 +434,11 @@ pub const FusedMoe = struct {
             });
 
             const new_acc = if (cfg.quant_scheme) |scheme| switch (scheme) {
-                .mxfp4, .mxfp8 => scaled: {
-                    const scale_k = @divExact(block_size_k, 32);
+                .mxfp4, .mxfp8, .nvfp4 => scaled: {
+                    // NVFP4 has one E4M3 scale per 16 values, MX formats one E8M0 scale per 32.
+                    const nvfp4 = scheme == .nvfp4;
+                    const group: i64 = if (nvfp4) 16 else 32;
+                    const scale_k = @divExact(block_size_k, group);
                     const groups = k_iter.mul(scale_k).add(b.arange(0, scale_k, .i64));
                     const stride_bse = b.load(a.stride_bse_ptr);
                     const stride_bsk = b.load(a.stride_bsk_ptr);
@@ -437,10 +449,10 @@ pub const FusedMoe = struct {
                     const offsets = b.broadcastTo(rows, &.{ block_size_n, scale_k })
                         .add(b.broadcastTo(cols, &.{ block_size_n, scale_k }));
                     const n_mask = b.broadcastTo(offs_bn.lt(n_block).expandDims(1), &.{ block_size_n, scale_k });
-                    const k_mask = b.broadcastTo(groups.lt(k_block.cdiv(32)).expandDims(0), &.{ block_size_n, scale_k });
+                    const k_mask = b.broadcastTo(groups.lt(k_block.cdiv(group)).expandDims(0), &.{ block_size_n, scale_k });
                     const scales = b.loadOpts(a.b_scale_ptr.addPtr(offsets), .{
                         .mask = n_mask.bitAnd(k_mask),
-                        .other = b.full(&.{ block_size_n, scale_k }, 127, .i8),
+                        .other = if (nvfp4) b.zeros(&.{ block_size_n, scale_k }, cfg.b_scale_dtype.?) else b.full(&.{ block_size_n, scale_k }, 127, .i8),
                     });
                     const a_scales: ?Value = if (cfg.a_scale_dtype != null) input_scales: {
                         const a_rows = offs_token.div(top_k).mul(b.load(a.stride_asm_ptr)).expandDims(1);
@@ -448,13 +460,13 @@ pub const FusedMoe = struct {
                         const a_offsets = b.broadcastTo(a_rows, &.{ block_size_m, scale_k })
                             .add(b.broadcastTo(a_cols, &.{ block_size_m, scale_k }));
                         const a_mask = b.broadcastTo(token_mask.expandDims(1), &.{ block_size_m, scale_k })
-                            .bitAnd(b.broadcastTo(groups.lt(k_block.cdiv(32)).expandDims(0), &.{ block_size_m, scale_k }));
+                            .bitAnd(b.broadcastTo(groups.lt(k_block.cdiv(group)).expandDims(0), &.{ block_size_m, scale_k }));
                         break :input_scales b.loadOpts(a.a_scale_ptr.addPtr(a_offsets), .{
                             .mask = a_mask,
-                            .other = b.full(&.{ block_size_m, scale_k }, 127, .i8),
+                            .other = if (nvfp4) b.zeros(&.{ block_size_m, scale_k }, cfg.a_scale_dtype.?) else b.full(&.{ block_size_m, scale_k }, 127, .i8),
                         });
                     } else null;
-                    break :scaled b.dotScaledOpts(a_val, b_val, acc, a_scales, scales, if (a_scales != null) .e4m3 else .bf16, if (scheme == .mxfp4) .e2m1 else .e4m3, .{});
+                    break :scaled b.dotScaledOpts(a_val, b_val, acc, a_scales, scales, if (nvfp4) .e2m1 else if (a_scales != null) .e4m3 else .bf16, if (scheme == .mxfp8) .e4m3 else .e2m1, .{});
                 },
                 .fp8_per_channel, .fp8_per_tensor => b.dotOpts(a_val, if (cfg.a_scale_dtype != null) b_val else b_val.to(.bf16), acc, .{
                     .input_precision = .tf32,
@@ -494,15 +506,14 @@ pub const FusedMoe = struct {
                     }
                     break :scaled acc.add(scaled_dot);
                 },
-                .nvfp4 => unreachable,
             } else b.dotOpts(a_val, b_val, acc, .{
                 .input_precision = .tf32,
                 .max_num_imprecise_acc = 0,
             });
 
             // BLOCK_SIZE_K is `tl.constexpr` → i32 dense splat (stride_ak == 1).
-            const bsk_i32: i32 = @intCast(cfg.block_size_k);
-            const new_a_ptrs = a_ptrs.addPtr(b.splat(bsk_i32, &.{ block_size_m, block_size_k }));
+            const bsk_i32: i32 = @intCast(block_size_ak);
+            const new_a_ptrs = a_ptrs.addPtr(b.splat(bsk_i32, &.{ block_size_m, block_size_ak }));
             const new_b_ptrs = b_ptrs.addPtr(b.splat(@as(i32, @intCast(block_size_bk)), &.{ block_size_bk, block_size_n }));
 
             loop.yield(.{

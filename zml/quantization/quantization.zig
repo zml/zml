@@ -243,7 +243,8 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
         .clamp(.scalar(scale_min_normal, dt), .scalar(scale_max, dt))
         .max(.blk);
 
-    const scales = amax.convert(.f8e4m3fn);
+    // Keep the stored rounding boundary: values must be divided by the scale as stored.
+    const scales = amax.convert(.f8e4m3fn).optimizationBarrier();
 
     const divisor = scales.convert(dt)
         .maximum(.scalar(scale_min_normal, dt))
