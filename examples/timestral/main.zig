@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Dummy input
-    const input: zml.Tensor = .init(.{ .batch = 1, .variates = 1, .time = 320 }, .f32);
+    const input: zml.Tensor = .init(.{ .batch = 1, .variate = 1, .time = 320 }, .f32);
 
     var executable = try platform.compile(allocator, io, forecaster, .forward, .{input}, .{});
     defer executable.deinit();

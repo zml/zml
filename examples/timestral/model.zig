@@ -52,13 +52,16 @@ pub const PreProcessor = struct {
 
         /// Compute mask from infinite and NaN data and replace missing values.
         ///
-        /// Input tensor with dimensions {.batch, .variates, .time}
+        /// Input tensor with dimensions {.batch, .variate, .time}
         pub fn make(targets: Tensor) TargetsSeries {
-            assertTags(targets, .{ .batch, .variates, .time });
+            assertTags(targets, .{ .batch, .variate, .time });
+
             const mask = targets.isFinite(); // exclude NaN and inf
+            const values = mask.select(targets, .scalar(0, targets.dtype()));
+
             return .{
-                .values = mask.select(targets, .scalar(0, targets.dtype())),
-                .mask = mask,
+                .values = assertedTags(values, .{ .batch, .variate, .time }),
+                .mask = assertedTags(mask, .{ .batch, .variate, .time }),
             };
         }
     };
@@ -69,17 +72,25 @@ pub const PreProcessor = struct {
         roles: Tensor,
 
         pub fn make(targets: TargetsSeries) Rows {
-            assertTags(targets.values, .{ .batch, .variates, .time });
-            assertTags(targets.mask, .{ .batch, .variates, .time });
+            assertTags(targets.values, .{ .batch, .variate, .time });
+            assertTags(targets.mask, .{ .batch, .variate, .time });
+
             const n_batch = targets.values.dim(.batch);
-            const n_targets = targets.values.dim(.variates);
+            const n_targets = targets.values.dim(.variate);
+            const values = ffillMissing(targets.values, targets.mask, .time);
             const target_roles = Tensor.scalar(@backingInt(Roles.target), .u8)
-                .broad(.init(.{ .variates = n_targets }, .u8));
+                .broad(.init(.{ .variate = n_targets }, .u8));
+            const roles = target_roles.broad(.init(.{ .batch = n_batch, .variate = n_targets }, .u8));
+
             return .{
-                .values = ffillMissing(targets.values, targets.mask, .time),
-                .mask = targets.mask,
-                .roles = target_roles.repeat1d(.variates, @intCast(n_batch)),
+                .values = assertedTags(asRows(values), .{ .row, .time }),
+                .mask = assertedTags(asRows(targets.mask), .{ .row, .time }),
+                .roles = assertedTags(asRows(roles), .{.row}),
             };
+        }
+
+        pub fn asRows(x: Tensor) Tensor {
+            return x.merge(.{ .row = .{ .batch, .variate } });
         }
 
         /// Forward-fill unobserved positions.
@@ -103,7 +114,7 @@ pub const PreProcessor = struct {
     };
 
     pub fn forward(targets: Tensor) Rows {
-        assertTags(targets, .{ .batch, .variates, .time });
+        assertTags(targets, .{ .batch, .variate, .time });
         return .make(.make(targets));
     }
 };
@@ -138,8 +149,8 @@ pub const PatchBuilder = struct {
     ///
     /// Input are expected in shape `{.row, .time}` and the output is `{.row, .h, .token}`.
     pub fn forward(self: PatchBuilder, rows: PreProcessor.Rows) Output {
-        assertTags(rows.values, .{ .batch, .variates, .time });
-        assertTags(rows.mask, .{ .batch, .variates, .time });
+        assertTags(rows.values, .{ .row, .time });
+        assertTags(rows.mask, .{ .row, .time });
         // Scaling locations and scale for all timesteps
         var stats = scaling.computeCausalStatistics(
             rows.values,
@@ -158,7 +169,10 @@ pub const PatchBuilder = struct {
         const scaled = scaling.scaleByAffineAsinh(rows.values, rows.mask, stats, self.options.use_asinh);
 
         return .{
-            .rows = .{ .values = self.toPatches(scaled), .mask = self.toPatches(rows.mask) },
+            .rows = .{
+                .values = assertedTags(self.toPatches(scaled), .{ .row, .token, .h }),
+                .mask = assertedTags(self.toPatches(rows.mask), .{ .row, .token, .h }),
+            },
             .stats = stats,
         };
     }
@@ -177,11 +191,12 @@ const PatchRepresentation = struct {
     }
 
     pub fn forward(self: *const PatchRepresentation, rows: PatchBuilder.PatchRows) Tensor {
-        assertTags(rows.values, .{ .batch, .variates, .token, .h });
-        assertTags(rows.mask, .{ .batch, .variates, .token, .h });
+        assertTags(rows.values, .{ .row, .token, .h });
+        assertTags(rows.mask, .{ .row, .token, .h });
         const dtype = rows.values.dtype();
         const x: Tensor = .concatenate(&[_]Tensor{ rows.values, rows.mask.not().convert(dtype) }, .h);
-        return self.patch_proj.forward(x.renameTag(.h, .d));
+        const out = self.patch_proj.forward(x.renameTag(.h, .d)).renameTag(.out, .h);
+        return assertedTags(out, .{ .row, .token, .h });
     }
 
     pub fn forecast_tokens(self: *const PatchRepresentation, rows: u32, n_patches: u32) Tensor {
@@ -196,7 +211,7 @@ pub const Model = struct {
     representation: PatchRepresentation,
 
     pub fn forward(self: Model, targets: Tensor) Tensor {
-        assertTags(targets, .{ .batch, .variates, .time });
+        assertTags(targets, .{ .batch, .variate, .time });
         const preprocessed = PreProcessor.forward(targets);
         const patches = self.patcher.forward(preprocessed);
         const reprs = self.representation.forward(patches.rows);
@@ -204,8 +219,8 @@ pub const Model = struct {
     }
 };
 
-/// Debug-assert that `x` has exactly the given tags (in any order).
-fn assertTags(x: Tensor, comptime tags: anytype) void {
+/// Debug-assert that `x` has exactly the given tags (in any order), and return it.
+fn assertedTags(x: Tensor, comptime tags: anytype) Tensor {
     const n_tags = tags.len;
     const expected = comptime blk: {
         // Braces are doubled because this is spliced into a format string.
@@ -220,4 +235,10 @@ fn assertTags(x: Tensor, comptime tags: anytype) void {
         "Expected tensor with tags " ++ expected ++ ", got {f}",
         .{x},
     );
+    return x;
+}
+
+/// Debug-assert that `x` has exactly the given tags (in any order).
+fn assertTags(x: Tensor, comptime tags: anytype) void {
+    _ = assertedTags(x, tags);
 }
