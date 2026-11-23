@@ -274,6 +274,13 @@ pub fn quantizeNvfp4FourOrSix(x: Tensor, input_global_scale: ?Tensor, axis: anyt
     };
 }
 
+/// NVFP4 quantization of activation rows over their `nvfp4RowScale`, which becomes
+/// the result's global scale, with the reduced axis kept as size 1.
+pub fn quantizeNvfp4Rows(rows: Tensor, axis: anytype, four_or_six: bool) QuantizedInput {
+    const row_scale = nvfp4RowScale(rows, axis);
+    return if (four_or_six) quantizeNvfp4FourOrSix(rows, row_scale, axis) else quantizeNvfp4(rows, row_scale, axis);
+}
+
 fn nvfp4Blocks(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Tensor {
     stdx.debug.assert(x.shape().hasTag(axis) != null, "quantizeNvfp4 expects x to have {any} tag, got {f}", .{ axis, x.shape() });
     stdx.debug.assert(@rem(x.dim(axis), nvfp4_block_size) == 0, "quantizeNvfp4 expects {any} to be a multiple of {}, got {f}", .{ axis, nvfp4_block_size, x.shape() });
