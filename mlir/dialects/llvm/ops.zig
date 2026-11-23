@@ -243,6 +243,15 @@ pub fn ptrtoint(ctx: *mlir.Context, pointer: *const mlir.Value, result_type: *co
     });
 }
 
+/// llvm.addrspacecast — `pointer` in the address space of `result_type`.
+pub fn addrspacecast(ctx: *mlir.Context, pointer: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.addrspacecast", .{
+        .operands = .{ .flat = &.{pointer} },
+        .results = .{ .flat = &.{result_type} },
+        .location = location,
+    });
+}
+
 /// llvm.bitcast — reinterpret `value` as `result_type` (same bit width).
 pub fn bitcast(ctx: *mlir.Context, value: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "llvm.bitcast", .{

@@ -85,6 +85,13 @@ the actual IR regions.
 | `cute.arch.alloc_smem(T, n, align)`        | `b.allocSmem(.f32, n, align)`                   |
 | `cute.arch.sync_threads()`                 | `b.syncThreads()`                               |
 | `cute.arch.shuffle_sync_bfly(v, lane)`     | `b.shuffleXor(v, lane)`                         |
+| `shuffle_sync`, `shuffle_sync_up`, `shuffle_sync_down` | `shuffleIdx`, `shuffleUp`, `shuffleDown` |
+| `cute.arch.popc(x)`                        | `b.popc(x)`                                     |
+| `cute.arch.red(p, v, op="or", dtype="b32")` | `b.red(p, .shared, v, .{ .op = .@"or", .type = .b32 })` |
+| `cute.arch.inline_ptx(ptx, ...)`           | `b.inlinePtx(ptx, &.{.i32}, &.{x}, .{ .side_effects = false })` |
+| `add_packed_bf16x2`, `fma_packed_bf16x2`   | `b.addPackedBf16x2(a, b)`, `b.fmaPackedBf16x2(a, b, c)` |
+| `cute.arch.mbarrier_wait(bar, phase)`      | `b.mbarrierWait(bar, phase, .{})`               |
+| `LaunchConfig(min_blocks_per_mp=n)`        | `b.setMinBlocksPerMp(n)`                        |
 | `cute.arch.griddepcontrol_launch_dependents()` | `b.launchDependents()`                      |
 | `x.to(Float32)`                            | `x.to(.f32)`                                    |
 | `if cond:` / `for i in range(...)`         | `b.openIf(cond)` / `b.openFor(0, n, 1, .{})`    |
@@ -96,6 +103,18 @@ the actual IR regions.
 | `cute.gemm(...)`                           | `b.gemm(...)`                                   |
 | `cute.arch.alloc_tmem(...)`                | `b.allocTmem(...)`                              |
 | `cute.arch.retrieve_tmem_ptr(...)`         | `b.retrieveTmemPtr(...)`                        |
+| `tcgen05.MmaMXF4Op(...)`                   | `BlockScaledMmaConfig{ .kind = .mxfp4_mxfp4 }`  |
+
+Hand-scheduled kernels that address shared memory and TMEM with integers
+rather than layouts (from `allocSmemStorageAddress`) use the raw primitives
+of `cutlass.experimental.primitives`: `cpAsyncBulkSharedClusterGlobal`,
+`cpAsyncBulkTensorSharedCtaGlobal`, `tcgen05Cp`, and `tcgen05MmaBlockScaled`
+with `Tcgen05MxInstrDesc` (`Tcgen05SmemDesc` and `Tcgen05InstrDesc` for the
+other descriptors).
+
+`inlinePtx` numbers operands like LLVM, `$0 ..` for the outputs then the
+inputs, where Python's `inline_ptx` names them `{$w0}`, `{$r0}`; and it is
+side-effecting only when asked, where Python's always is.
 
 * **Layouts accept static and dynamic extents.** `makeLayout` takes Zig slices
   for a tracked static `Layout`, or nested tuples of integers and SSA `Value`s
