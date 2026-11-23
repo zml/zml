@@ -168,18 +168,7 @@ pub fn upload(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, i
         if (index < initialized) @field(result, name).deinit();
     };
     inline for (@typeInfo(Inputs).@"struct".field_names) |name| {
-        if (comptime std.mem.eql(u8, name, "q") or std.mem.eql(u8, name, "k") or std.mem.eql(u8, name, "v")) {
-            if (@field(inputs, name).dtype() == .f16) {
-                const values = try a.alloc(f16, @field(f, name).len);
-                defer a.free(values);
-                for (values, @field(f, name)) |*dst, src| dst.* = @floatCast(src.toF32());
-                @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(values));
-            } else {
-                @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(@field(f, name)));
-            }
-        } else {
-            @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(@field(f, name)));
-        }
+        @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(@field(f, name)));
         initialized += 1;
     }
     return result;
