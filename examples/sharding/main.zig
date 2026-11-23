@@ -19,6 +19,12 @@ const CliMesh = enum {
 const CliArgs = struct {
     partitioner: ?zml.Sharding.Partitioner = null,
     mesh: CliMesh = .auto,
+    target: ?zml.Target = null,
+    coordinator: ?std.Io.net.IpAddress = null,
+    process_index: usize = 0,
+    process_count: usize = 1,
+    namespace: []const u8 = "zml-sharding",
+    local_devices: std.ArrayList(i64) = .empty,
 };
 
 const DemoModel = struct {
@@ -65,7 +71,9 @@ const DemoModel = struct {
 
 fn usage() void {
     std.debug.print(
-        \\Usage: sharding [--partitioner=shardy|gspmd] [--mesh=auto|mock]
+        \\Usage: sharding [--partitioner=shardy|gspmd] [--mesh=auto|mock] [--target=cuda|rocm|...]
+        \\                [--coordinator=IP:PORT --process-index=N --process-count=N
+        \\                 [--local-devices=0,1,...] [--namespace=NAME]]
         \\
         \\Simple sharding demo:
         \\  - explicit partitioning on data/model axes
@@ -76,10 +84,17 @@ fn usage() void {
         \\  - auto: physical_mesh=auto, inferred cpu device_count=2
         \\  - mock: physical_mesh=mock topology, inferred cpu device_count=9
         \\
+        \\Multi-process (GPU only): start one process per rank with the same
+        \\--coordinator (hosted by process 0), --process-count and --namespace.
+        \\The data axis then spans processes and the model axis stays within one.
+        \\Example, 2 processes x 4 GPUs on one 8-GPU host:
+        \\  sharding --coordinator=127.0.0.1:8476 --process-count=2 --process-index=0 --local-devices=0,1,2,3
+        \\  sharding --coordinator=127.0.0.1:8476 --process-count=2 --process-index=1 --local-devices=4,5,6,7
+        \\
     , .{});
 }
 
-fn parseArgs(init: std.process.Init) !CliArgs {
+fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init) !CliArgs {
     var args: CliArgs = .{};
     var it = init.minimal.args.iterate();
     _ = it.next(); // program name
@@ -110,6 +125,19 @@ fn parseArgs(init: std.process.Init) !CliArgs {
                 usage();
                 return error.InvalidMeshMode;
             }
+        } else if (std.mem.startsWith(u8, arg, "--target=")) {
+            args.target = std.meta.stringToEnum(zml.Target, arg["--target=".len..]) orelse return error.InvalidTarget;
+        } else if (std.mem.startsWith(u8, arg, "--coordinator=")) {
+            args.coordinator = try std.Io.net.IpAddress.parseLiteral(arg["--coordinator=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--process-index=")) {
+            args.process_index = try std.fmt.parseInt(usize, arg["--process-index=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--process-count=")) {
+            args.process_count = try std.fmt.parseInt(usize, arg["--process-count=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--namespace=")) {
+            args.namespace = arg["--namespace=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--local-devices=")) {
+            var ids = std.mem.splitScalar(u8, arg["--local-devices=".len..], ',');
+            while (ids.next()) |id| try args.local_devices.append(allocator, try std.fmt.parseInt(i64, id, 10));
         } else {
             std.debug.print("error: unknown argument '{s}'\n\n", .{arg});
             usage();
@@ -166,17 +194,32 @@ fn createSequenceBuffer(
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    var args = try parseArgs(init);
+    var args = try parseArgs(allocator, init);
+    defer args.local_devices.deinit(allocator);
 
-    const create_options: zml.platform.CreateOptions = switch (args.mesh) {
+    var create_options: zml.platform.CreateOptions = switch (args.mesh) {
         .auto => .{},
         .mock => .{
             .cpu = .{ .device_count = 8 },
             .physical_mesh = .{ .custom = buildMockMesh },
         },
     };
+    if (args.coordinator) |coordinator| {
+        create_options.distributed = .{
+            .coordinator_address = coordinator,
+            .process_index = args.process_index,
+            .process_count = args.process_count,
+            .namespace = args.namespace,
+            .local_device_ids = args.local_devices.items,
+        };
+    }
 
-    var platform: *zml.Platform = try .auto(allocator, io, create_options);
+    // Multi-process platforms need an explicit target; default to CUDA.
+    const target: ?zml.Target = args.target orelse if (args.coordinator != null) .cuda else null;
+    var platform: *zml.Platform = if (target) |t|
+        try .init(allocator, io, t, create_options)
+    else
+        try .auto(allocator, io, create_options);
     defer platform.deinit(allocator, io);
 
     log.info("\n{f}", .{platform.fmtVerbose()});
@@ -255,7 +298,14 @@ pub fn main(init: std.process.Init) !void {
     var out = exe_results.get(zml.Buffer);
     defer out.deinit();
 
-    const out_slice = try out.toSliceAlloc(allocator, io);
+    const out_slice = out.toSliceAlloc(allocator, io) catch |err| switch (err) {
+        error.GlobalReadRequiresGather => {
+            // `dense_out` above is printed by each device of each process.
+            log.info("output is split across processes, skipping host preview", .{});
+            return;
+        },
+        else => return err,
+    };
     defer out_slice.free(allocator);
     const out_items = out_slice.items(f32);
     const preview_len = @min(out_items.len, @as(usize, 16));
