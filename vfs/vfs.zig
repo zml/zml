@@ -11,7 +11,7 @@ pub const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/vfs");
 
-const CWD_HANDLE: u32 = 0;
+const CWD_HANDLE: u32 = 3;
 
 const VFS = @This();
 const Handle = struct { handle: u32, backend_idx: ?usize, flags: std.Io.File.Flags = .{ .nonblocking = false } };
@@ -29,10 +29,10 @@ pub fn init(allocator: std.mem.Allocator, base_io: std.Io) !VFS {
     const base = VFSBase.init(base_io);
 
     var handles: @FieldType(@This(), "handles") = .{};
-    try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDIN_FILENO, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDOUT_FILENO, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDERR_FILENO, .backend_idx = null });
+    try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
 
     return .{
         .allocator = allocator,
