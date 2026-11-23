@@ -21,6 +21,7 @@ pub const Compiler = core.Compiler;
 pub const dtype = core.dtype;
 pub const Data = core.Data;
 pub const DataType = core.DataType;
+pub const distributed = core.distributed;
 pub const exe = core.exe;
 pub const Exe = core.Exe;
 pub const FnExe = core.FnExe;
