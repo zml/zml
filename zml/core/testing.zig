@@ -372,7 +372,7 @@ fn BufferizedWithArgs(comptime T: type) type {
 
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
     var count: usize = 0;
-    var it = store.store.registry.iterator();
+    var it = store.store.registry.tensors.iterator();
     while (it.next()) |entry| {
         if (std.mem.startsWith(u8, entry.key_ptr.*, prefix)) {
             count += 1;
@@ -454,7 +454,13 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
+    var args_buffers = try zml.mem.bufferize(arena.allocator(), ArgsT, &args);
+    {
+        var loader: zml.io.Loader = try .init(allocator, platform, .default);
+        defer loader.deinit();
+        try loader.load(io, ArgsT, &args, &args_buffers, activation_store.store, .{});
+        try loader.await(io);
+    }
     defer meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
