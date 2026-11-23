@@ -850,6 +850,138 @@ const Gemv = struct {
     }
 };
 
+/// NVFP4 rounding of BF16 activation rows as `quantization.quantizeNvfp4Rows`,
+/// widened back to BF16, which represents the rounded values exactly. A block
+/// rounds one row; each thread rounds one 16-value block of it.
+pub const RoundNvfp4 = struct {
+    const threads = 256;
+
+    const Config = struct {
+        words: i64,
+        blocks: i64,
+        four_or_six: i64,
+    };
+
+    pub fn call(x: Tensor, four_or_six: bool) Tensor {
+        std.debug.assert(x.rank() == 2 and x.dtype() == .bf16 and @mod(x.dim(1), 16) == 0 and x.dim(1) <= 16 * threads);
+        const cfg: Config = .{
+            .words = @divExact(x.dim(1), 2),
+            .blocks = @divExact(x.dim(1), 16),
+            .four_or_six = @intFromBool(four_or_six),
+        };
+        const words = x.reshape(.{ x.dim(0), cfg.words, 2 }).bitCast(.i32);
+        return Kernel.call(.{ .x = words }, .{ .output = words.shape() }, .{
+            .cfg = cfg,
+            .threads = threads,
+            .grid = .{ @intCast(x.dim(0)), 1, 1 },
+        }).output.bitCast(.bf16).reshape(x.shape());
+    }
+
+    const Kernel = zml.kernel.fly.Kernel(Config, .{
+        .name = "round_nvfp4",
+        .inputs = &.{"x"},
+        .outputs = &.{"output"},
+        .run = run,
+    });
+
+    fn run(b: *Builder, cfg: Config) fly.FinishError!void {
+        const args = Kernel.args(b);
+        const fzero = b.constant(.f32, 0.0);
+        const thread32 = b.threadId(.x);
+        const block = thread32.to(.i64);
+        const valid = block.cmpUnsigned(.lt, cfg.blocks);
+        const offset = b.blockId(.x).to(.i64).mul(cfg.words).add(valid.select(block, b.constant(.i64, 0)).mul(8));
+        const access = b.copyAtom(.{ .universal = 128 }, .i32);
+        var values: [16]Value = undefined;
+        inline for (0..2) |h| {
+            const words = b.copyAtomLoad(access, args.x.emitIter().addOffset(offset.add(h * 4)).view(fly.L(4, 1)));
+            inline for (0..4) |w| {
+                const word = words.extract(w);
+                values[h * 8 + w * 2] = word.shl(16).bitCast(.f32);
+                values[h * 8 + w * 2 + 1] = word.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
+            }
+        }
+        var block_max = fzero;
+        inline for (values) |v| block_max = block_max.maximum(abs(v));
+        block_max = valid.select(block_max, fzero);
+
+        const maxima = b.sharedArray(.f32, threads / 64, 16);
+        var row_max = block_max;
+        inline for (.{ 32, 16, 8, 4, 2, 1 }) |shift| row_max = row_max.maximum(row_max.shuffleXor(shift, 64));
+        var first_lane = b.openIf(thread32.remUnsigned(64).eq(0));
+        {
+            maxima.set(thread32.divUnsigned(64), row_max);
+            first_lane.close();
+        }
+        b.barrier();
+        inline for (0..threads / 64) |w| row_max = row_max.maximum(maxima.at(b.constant(.i32, w)));
+
+        var store = b.openIf(valid);
+        {
+            // The smallest power of two at least row_max / 1536 keeps block scales in E4M3's normal range.
+            const scaled_max = row_max.mul(1.0 / 1536.0).maximum(std.math.floatMin(f32)).bitCast(.i32);
+            const row_scale = scaled_max.add(0x7fffff).bitAnd(@as(i32, @bitCast(@as(u32, 0xff800000)))).bitCast(.f32);
+            var magnitudes: [16]Value = undefined;
+            inline for (&magnitudes, values) |*m, v| m.* = abs(v).div(row_scale);
+            const normalized_max = block_max.div(row_scale);
+            const six = candidate(b, magnitudes, normalized_max, 6.0);
+            var chosen = six;
+            if (cfg.four_or_six != 0) {
+                // Ties keep amax / 6.
+                const four = candidate(b, magnitudes, normalized_max, 4.0);
+                const use_four = four.err.lt(six.err);
+                inline for (&chosen.values, four.values) |*c, f| c.* = use_four.select(f, c.*);
+            }
+            inline for (0..2) |h| {
+                var words = b.constant(.i32, 0).splat(4);
+                inline for (0..4) |w| {
+                    var halves: [2]Value = undefined;
+                    inline for (&halves, 0..) |*half, j| {
+                        const i = h * 8 + w * 2 + j;
+                        const sign = values[i].bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0x80000000))));
+                        half.* = chosen.values[i].mul(row_scale).bitCast(.i32).bitOr(sign);
+                    }
+                    words = words.insert(w, halves[0].shrU(16).bitOr(halves[1].bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000))))));
+                }
+                b.copyAtomStore(access, words, args.output.emitIter().addOffset(offset.add(h * 4)).view(fly.L(4, 1)));
+            }
+            store.close();
+        }
+    }
+
+    /// Rounded magnitudes of one block for an E4M3 scale of block_max / `max`, and their absolute error.
+    const Candidate = struct { values: [16]Value, err: Value };
+
+    fn candidate(b: *Builder, magnitudes: [16]Value, block_max: Value, comptime max: f32) Candidate {
+        const clamped = block_max.mul(1.0 / max).maximum(0x1p-6);
+        const raw = clamped.gt(448.0).select(b.constant(.f32, 448.0), clamped);
+        // Round to E4M3's three mantissa bits, to nearest even; `raw` is a normal E4M3 magnitude.
+        const bits = raw.bitCast(.i32);
+        const scale = bits.add(0x7ffff).add(bits.shrU(20).bitAnd(1)).bitAnd(@as(i32, @bitCast(@as(u32, 0xfff00000)))).bitCast(.f32);
+        // E2M1 rounds to nearest, ties to even, saturating at 6. Each threshold and
+        // value times the scale is exact, and a BF16 magnitude never falls within
+        // half an ulp of a scaled threshold, so comparing the magnitude against
+        // scaled thresholds decides as rounding magnitude / scale would.
+        var thresholds: [7]Value = undefined;
+        var levels: [8]Value = undefined;
+        inline for (&thresholds, .{ 5.0, 3.5, 2.5, 1.75, 1.25, 0.75, 0.25 }) |*t, value| t.* = scale.mul(value);
+        inline for (&levels, .{ 6.0, 4.0, 3.0, 2.0, 1.5, 1.0, 0.5, 0.0 }) |*l, value| l.* = scale.mul(value);
+        var result: Candidate = .{ .values = undefined, .err = b.constant(.f32, 0.0) };
+        inline for (&result.values, magnitudes) |*q, m| {
+            q.* = levels[0];
+            inline for (thresholds, levels[1..], 0..) |t, level, i| {
+                q.* = (if (i % 2 == 0) m.le(t) else m.lt(t)).select(level, q.*);
+            }
+            result.err = result.err.add(abs(q.*.sub(m)));
+        }
+        return result;
+    }
+
+    fn abs(x: Value) Value {
+        return x.bitCast(.i32).bitAnd(0x7fffffff).bitCast(.f32);
+    }
+};
+
 fn decodeE8m0(b: *Builder, byte: Value) Value {
     const scale = byte.toUnsigned(.i32);
     const finite = scale.eq(0).select(b.constant(.i32, 0x00400000), scale.shl(23));

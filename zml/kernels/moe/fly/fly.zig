@@ -174,9 +174,7 @@ pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linea
 fn prepareInput(x: Tensor, linear: nn.Linear, opts: Options) Tensor {
     if (linear.quantizationScheme() != .nvfp4) return x.convert(.bf16);
     // Activations are rounded to BF16 before quantization, as for BF16 GEMMs.
-    const rows = x.withTags(.{ .token, .in }).convert(.bf16).optimizationBarrier().convert(.f32);
-    const quantized = quantization.quantizeNvfp4Rows(rows, .in, opts.nvfp4_input_scale == .four_or_six);
-    return quantization.dequantizeNvfp4(quantized, .in).convert(.bf16);
+    return fly.RoundNvfp4.call(x.convert(.bf16), opts.nvfp4_input_scale == .four_or_six);
 }
 
 /// GEMM outputs `{.token, ..., .out}` in FP32, times the NVFP4 per-expert multiplier of
@@ -312,4 +310,42 @@ fn launchConfigForTokens(num_tokens: i64) LaunchConfig {
         }
     }
     return best.config;
+}
+
+test "RoundNvfp4 matches quantizeNvfp4Rows" {
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+    const Outputs = struct { kernel: Tensor, reference: Tensor };
+    const Local = struct {
+        fn forward(x: Tensor, four_or_six: bool) Outputs {
+            const quantized = quantization.quantizeNvfp4Rows(x.convert(.f32), .in, four_or_six);
+            return .{
+                .kernel = fly.RoundNvfp4.call(x, four_or_six),
+                .reference = quantization.dequantizeNvfp4(quantized, .in).convert(.bf16),
+            };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // Rows of 144 blocks leave part of each 256-thread block idle; magnitudes vary by row.
+    const x: Tensor = .init(.{ .t = 13, .in = 2304 }, .bf16);
+    var host = try zml.Slice.alloc(allocator, x.shape());
+    defer host.free(allocator);
+    for (host.items(zml.floats.BFloat16), 0..) |*value, i| {
+        const row: i32 = @intCast(i / 2304);
+        const pattern: f32 = @floatFromInt(@as(i32, @intCast((i * 37 + i / 7) % 97)) - 48);
+        value.* = .fromF32(pattern / 16 * std.math.pow(f32, 2, @floatFromInt(@mod(row * 5, 11) - 5)));
+    }
+    var input = try zml.Buffer.fromSlice(io, platform, host);
+    defer input.deinit();
+    for ([_]bool{ false, true }) |four_or_six| {
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, four_or_six }, .{});
+        defer exe.deinit();
+        var runner = try exe.runner(allocator);
+        defer runner.deinit(allocator);
+        var outputs: zml.Bufferized(Outputs) = undefined;
+        runner.run(io, .{input}, .{&outputs}, .{ .wait = true });
+        defer zml.Buffer.deinitAll(Outputs, &outputs);
+        try zml.testing.expectClose(io, outputs.reference, outputs.kernel, .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 });
+    }
 }
