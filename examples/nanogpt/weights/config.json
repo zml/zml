@@ -1,0 +1,17 @@
+{
+  "model_args": {
+    "n_layer": 6,
+    "n_head": 6,
+    "n_embd": 384,
+    "block_size": 256,
+    "bias": false,
+    "vocab_size": 65,
+    "dropout": 0.2
+  },
+  "iter_num": 750,
+  "best_val_loss": 1.6016440391540527,
+  "weight_tying": [
+    "transformer.wte.weight",
+    "lm_head.weight"
+  ]
+}
