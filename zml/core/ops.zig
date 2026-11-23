@@ -93,9 +93,47 @@ pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@
 /// `.parse(.{ .t = .data })` keeps tokens split across `.data` and declares the
 /// result replicated along `.experts`.
 pub fn allReduceOnAxis(inputs: anytype, comptime func_: anytype, mesh: *const Sharding.Mesh, axis: anytype) AllReduceReturnType(@TypeOf(inputs)) {
-    const logical_axis = mesh.resolveLogicalAxis(Shape.toTag(axis)) orelse @panic("Unknown logical reduction axis");
-    const size = mesh.grid.axis_sizes[logical_axis];
     var groups: [Platform.MAX_NUM_DEVICES]i64 = undefined;
+    const size = axisGroups(mesh, axis, &groups);
+    return allReduceGroups(inputs, func_, groups[0..mesh.numDevices()], size);
+}
+
+/// Concatenates the local tensors of the processes in each group defined by
+/// `axis` in `mesh` (see `allReduceOnAxis` for how groups are formed), along
+/// `tensor_axis`, in group order. Every member gets the same result.
+///
+/// Use this inside a manual computation: the result's `tensor_axis` is the input
+/// dimension times the size of `axis`. An axis of size one returns `input`.
+pub fn allGatherOnAxis(input: Tensor, mesh: *const Sharding.Mesh, axis: anytype, tensor_axis: anytype) Tensor {
+    var groups: [Platform.MAX_NUM_DEVICES]i64 = undefined;
+    const size = axisGroups(mesh, axis, &groups);
+    if (size <= 1) return input;
+
+    const ctx = Compiler.current();
+    const mlir_ctx = ctx.mlir_ctx;
+    const ax = input.axis(tensor_axis);
+    const result_shape = input.shape().setDim(ax, input.dim(ax) * @as(i64, size));
+    const replica_groups_attr = mlir.Attribute.denseElements(
+        .rankedTensor(&.{ @intCast(mesh.numDevices() / size), @intCast(size) }, .int(mlir_ctx, .i64)),
+        groups[0..mesh.numDevices()],
+    );
+    const op = stablehlo.allGather(
+        mlir_ctx,
+        input.value(),
+        mlirx.Type.rankedTensor(mlir_ctx, result_shape),
+        @intCast(ax),
+        replica_groups_attr,
+        stablehlo.channelHandleAttr(mlir_ctx, ctx.nextChannelId(), .collective),
+        ctx.location,
+    ).appendTo(ctx.currentScope().block);
+    return Tensor._result(result_shape, op.result(0));
+}
+
+/// Fills `groups` with the partition ids of the groups along `axis`, one group
+/// after the other, and returns the group size.
+fn axisGroups(mesh: *const Sharding.Mesh, axis: anytype, groups: *[Platform.MAX_NUM_DEVICES]i64) u32 {
+    const logical_axis = mesh.resolveLogicalAxis(Shape.toTag(axis)) orelse @panic("Unknown logical axis");
+    const size = mesh.grid.axis_sizes[logical_axis];
     var replica_indices: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
     const replicas = mesh.numReplicas();
     for (0..mesh.numDevices()) |device| {
@@ -110,7 +148,55 @@ pub fn allReduceOnAxis(inputs: anytype, comptime func_: anytype, mesh: *const Sh
         replica_indices[tile] += 1;
         groups[group * size + coords[logical_axis]] = @intCast(device);
     }
-    return allReduceGroups(inputs, func_, groups[0..mesh.numDevices()], size);
+    return size;
+}
+
+test allGatherOnAxis {
+    const zml = @import("core.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const mesh = zml.testing.tpMesh();
+
+    const Gather = struct {
+        x: Tensor,
+        mesh: *const Sharding.Mesh,
+
+        fn body(self: @This(), _: Shape) Tensor {
+            return allGatherOnAxis(self.x, self.mesh, .model, .x);
+        }
+
+        fn forward(x: Tensor, mesh_: *const Sharding.Mesh) Tensor {
+            return manualComputation(
+                body,
+                .{ .x = x, .mesh = mesh_ },
+                x.shape(),
+                mesh_,
+                .{ .in_specs = .{ .x = .parse(.{ .x = .model }) }, .out_specs = .replicated },
+            );
+        }
+    };
+
+    // Each shard holds two values; gathering gives every shard the full vector.
+    const shape: Shape = .init(.{ .x = 2 * mesh.numPartitionsForLogicalAxis(.model) }, .i32);
+    const values = try allocator.alloc(i32, shape.count());
+    defer allocator.free(values);
+    for (values, 0..) |*value, i| value.* = @intCast(i + 1);
+
+    var input = try zml.Buffer.fromBytes(io, platform, shape, std.mem.sliceAsBytes(values));
+    defer input.deinit();
+
+    const exe = try platform.compileFn(allocator, io, Gather.forward, .{ .fromShape(shape), mesh }, .{
+        .meshes = &.{ platform.replicated_mesh, mesh },
+    });
+    defer exe.deinit();
+
+    var output = try exe.eval(allocator, io, .{input});
+    defer output.deinit();
+
+    const actual = try output.toSliceAlloc(allocator, io);
+    defer actual.free(allocator);
+    try std.testing.expectEqualSlices(i32, values, actual.constItems(i32));
 }
 
 /// Reduces corresponding tensor elements independently within each process group.
