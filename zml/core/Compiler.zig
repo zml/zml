@@ -962,8 +962,14 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_update_mode", "SKIP_TEMP", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "COLLECTIVE_KERNEL_ALL_REDUCE", upb_arena);
-                // Add collectives to the default list
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "COLLECTIVES_KERNEL,COLLECTIVES,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
+                // Add collectives to the default list, except in multi-process jobs: there
+                // collectives go through NCCL's network proxy, and NCCL puts a host callback
+                // before each one captured in a CUDA graph (hostStreamPlanCallback in NCCL's
+                // enqueue.cc). Each costs ~0.4 ms on GB10, more than the collective itself.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", if (platform.isDistributed())
+                    "CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION"
+                else
+                    "COLLECTIVES_KERNEL,COLLECTIVES,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
                 // With SKIP_TEMP, captured NCCL collectives can retain stale physical mappings
                 // if VMM reclaims their backing under memory pressure, causing silent corruption.
                 // Enable user buffers to assign color 1 and receive the reclaim exemption:
