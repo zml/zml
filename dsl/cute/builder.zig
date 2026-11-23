@@ -625,6 +625,132 @@ pub const Tcgen05InstrDesc = struct {
     }
 };
 
+/// The kinds of block-scaled `tcgen05.mma`, each with its scale-vector size
+/// (`.block_scale.blockN`): `kind::mxf4nvf4` takes either.
+pub const Tcgen05BlockScaledKind = enum {
+    /// `kind::mxf8f6f4`: E4M3, E5M2 or E2M1 inputs, UE8M0 scales every 32
+    /// elements, K = 32.
+    mxf8f6f4,
+    /// `kind::mxf4.block32`: E2M1 inputs, UE8M0 scales every 32 elements, K = 64.
+    mxf4,
+    /// `kind::mxf4nvf4.block16`: E2M1 inputs, UE4M3 or UE8M0 scales every 16
+    /// elements, K = 64.
+    mxf4nvf4_block16,
+    /// `kind::mxf4nvf4.block32`: E2M1 inputs, UE8M0 scales every 32 elements, K = 64.
+    mxf4nvf4_block32,
+
+    fn mmaKind(self: Tcgen05BlockScaledKind) nvvm.Tcgen05MmaKind {
+        return switch (self) {
+            .mxf8f6f4 => .mxf8f6f4,
+            .mxf4 => .mxf4,
+            .mxf4nvf4_block16, .mxf4nvf4_block32 => .mxf4nvf4,
+        };
+    }
+
+    /// The `blockN` the PTX names; `kind::mxf8f6f4` has only its default.
+    fn blockScale(self: Tcgen05BlockScaledKind) ?nvvm.ops.Tcgen05MMABlockScale {
+        return switch (self) {
+            .mxf8f6f4 => null,
+            .mxf4, .mxf4nvf4_block32 => .block32,
+            .mxf4nvf4_block16 => .block16,
+        };
+    }
+};
+
+/// Block-scaled SM100 instruction descriptor, Python's `Tcgen05MxInstrDesc`
+/// (`kind::mxf8f6f4`) and `Tcgen05MxOmmaInstrDesc` (`kind::mxf4`,
+/// `kind::mxf4nvf4`): the MMA kind selects the input encodings.
+pub const Tcgen05MxInstrDesc = struct {
+    pub const Options = struct {
+        /// The `kind` of the MMA that will use the descriptor.
+        kind: Tcgen05BlockScaledKind,
+        a_dtype: DType,
+        b_dtype: DType,
+        /// `.f8e8m0fnu` (UE8M0), or `.f8e4m3fn` (UE4M3) for `.mxf4nvf4_block16`.
+        scale_dtype: DType,
+        /// 128, or 256 for a CTA pair.
+        m_dim: u16,
+        n_dim: u16,
+        /// The byte of each 32-bit TMEM scale-factor column holding the
+        /// MMA's first scale (K = 64 over 32-element blocks reads 2 bytes).
+        a_sf_id: u2,
+        b_sf_id: u2,
+        a_major: OperandMajorMode = .k,
+        b_major: OperandMajorMode = .k,
+        a_negate: bool = false,
+        b_negate: bool = false,
+    };
+
+    pub fn build(comptime opts: Options) u32 {
+        if (opts.m_dim != 128 and opts.m_dim != 256) @compileError("block-scaled tcgen05 MMA takes M = 128, or 256 for a CTA pair");
+        if (opts.n_dim < 8 or opts.n_dim > 256 or opts.n_dim % 8 != 0) @compileError("block-scaled tcgen05 MMA takes N a multiple of 8 in [8, 256]");
+        const scale_format: u32 = switch (opts.scale_dtype) {
+            .f8e4m3fn => if (opts.kind == .mxf4nvf4_block16) 0 else @compileError("UE4M3 scales need kind::mxf4nvf4.block16"),
+            .f8e8m0fnu => 1,
+            else => @compileError("block-scaled tcgen05 MMA scales are UE8M0 or UE4M3"),
+        };
+        return (@as(u32, opts.b_sf_id) << 4) |
+            (inputFormat(opts.kind, opts.a_dtype) << 7) | (inputFormat(opts.kind, opts.b_dtype) << 10) |
+            (@as(u32, @intFromBool(opts.a_negate)) << 13) |
+            (@as(u32, @intFromBool(opts.b_negate)) << 14) |
+            (@as(u32, @backingInt(opts.a_major)) << 15) |
+            (@as(u32, @backingInt(opts.b_major)) << 16) |
+            (@as(u32, opts.n_dim >> 3) << 17) | (scale_format << 23) |
+            (@as(u32, opts.m_dim >> 7) << 27) | (@as(u32, opts.a_sf_id) << 29);
+    }
+
+    fn inputFormat(comptime kind: Tcgen05BlockScaledKind, comptime dtype: DType) u32 {
+        return switch (kind) {
+            .mxf8f6f4 => switch (dtype) {
+                .f8e4m3fn => 0,
+                .f8e5m2 => 1,
+                .f4e2m1fn => 5,
+                else => @compileError("kind::mxf8f6f4 takes E4M3, E5M2 or E2M1 inputs"),
+            },
+            .mxf4, .mxf4nvf4_block16, .mxf4nvf4_block32 => switch (dtype) {
+                .f4e2m1fn => 1,
+                else => @compileError("kind::mxf4 and kind::mxf4nvf4 take E2M1 inputs"),
+            },
+        };
+    }
+};
+
+/// `tcgen05.cp` operations, a shape with its warp multicast, named after
+/// Python's `tcgen05.Cp*Op`: the PTX ties each shape to its multicasts.
+pub const Tcgen05CpOp = enum {
+    /// `.128x256b`
+    @"128x256b",
+    /// `.4x256b`
+    @"4x256b",
+    /// `.128x128b`
+    @"128x128b",
+    /// `.64x128b.warpx2::02_13`
+    @"2x64x128b_0213",
+    /// `.64x128b.warpx2::01_23`
+    @"2x64x128b_0123",
+    /// `.32x128b.warpx4`
+    @"4x32x128b",
+
+    fn shape(self: Tcgen05CpOp) nvvm.ops.Tcgen05CpShape {
+        return switch (self) {
+            .@"128x256b" => .shape_128x256b,
+            .@"4x256b" => .shape_4x256b,
+            .@"128x128b" => .shape_128x128b,
+            .@"2x64x128b_0213", .@"2x64x128b_0123" => .shape_64x128b,
+            .@"4x32x128b" => .shape_32x128b,
+        };
+    }
+
+    fn multicast(self: Tcgen05CpOp) ?nvvm.ops.Tcgen05CpMulticast {
+        return switch (self) {
+            .@"128x256b", .@"4x256b", .@"128x128b" => null,
+            .@"2x64x128b_0213" => .warpx2_02_13,
+            .@"2x64x128b_0123" => .warpx2_01_23,
+            .@"4x32x128b" => .warpx4,
+        };
+    }
+};
+
 /// Typed description of a non-multicast tiled TMA atom: the element type,
 /// bits moved per copy, basis of one box, and coordinate layout of the tensor.
 pub const TmaConfig = struct {
@@ -665,32 +791,35 @@ pub const BlockScaledMmaConfig = struct {
         /// NVFP4 x NVFP4: E4M3 scales every 16 elements, K = 64 (PTX
         /// `kind::mxf4nvf4.block16`).
         nvfp4_nvfp4,
+        /// MXFP4 x MXFP4: E8M0 scales every 32 elements, K = 64 (PTX
+        /// `kind::mxf4`, Python's `MmaMXF4Op`).
+        mxfp4_mxfp4,
     };
 
     pub fn k(self: BlockScaledMmaConfig) u16 {
         return switch (self.kind) {
             .mxfp4_mxfp8 => 32,
-            .nvfp4_nvfp4 => 64,
+            .nvfp4_nvfp4, .mxfp4_mxfp4 => 64,
         };
     }
 
     fn bType(self: BlockScaledMmaConfig) DType {
         return switch (self.kind) {
             .mxfp4_mxfp8 => .f8e4m3fn,
-            .nvfp4_nvfp4 => .f4e2m1fn,
+            .nvfp4_nvfp4, .mxfp4_mxfp4 => .f4e2m1fn,
         };
     }
 
     fn scaleType(self: BlockScaledMmaConfig) DType {
         return switch (self.kind) {
-            .mxfp4_mxfp8 => .f8e8m0fnu,
+            .mxfp4_mxfp8, .mxfp4_mxfp4 => .f8e8m0fnu,
             .nvfp4_nvfp4 => .f8e4m3fn,
         };
     }
 
     fn vecSize(self: BlockScaledMmaConfig) u8 {
         return switch (self.kind) {
-            .mxfp4_mxfp8 => 32,
+            .mxfp4_mxfp8, .mxfp4_mxfp4 => 32,
             .nvfp4_nvfp4 => 16,
         };
     }
@@ -1061,6 +1190,13 @@ pub const Builder = struct {
     pub fn setFunctionAttribute(self: *Builder, attribute: mlir.NamedAttribute) void {
         const function = self.func_op orelse @panic("setFunctionAttribute called before declareArgs");
         function.setAttribute(attribute);
+    }
+
+    /// Python's `LaunchConfig.min_blocks_per_mp` (`nvvm.minctasm`) for the
+    /// current kernel: CTAs that must fit on one SM at once, which caps the
+    /// registers a thread may use.
+    pub fn setMinBlocksPerMp(self: *Builder, ctas: i32) void {
+        self.setFunctionAttribute(nvvm.minctasm(self.ctx, ctas));
     }
 
     // ==================== cuda host launch ====================
@@ -1810,6 +1946,16 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
+    /// One compiler-visible storage object of `bytes` bytes, as the `i32`
+    /// shared-memory address the raw-address primitives take: the shared
+    /// memory of a kernel that lays it out by hand.
+    pub fn allocSmemStorageAddress(self: *Builder, bytes: i64, alignment: u64) Value {
+        const field = std.fmt.allocPrint(self.arena.allocator(), "storage:{d}:0", .{bytes}) catch @panic("OOM");
+        const storage = self.allocSmemStorage(.i8, alignment, self.layoutType(self.layoutSpec(.{bytes}, .{1})), 0, &.{field});
+        const base = self.getIter(storage, self.ptrTy(.i8, .smem, alignment) catch @panic("invalid shared-memory pointer"));
+        return self.ptrToInt(base, .i32);
+    }
+
     /// Allocate a register-memory tensor whose layout is represented by a
     /// normal CuTe layout value.
     pub fn allocRmem(self: *Builder, dtype: DType, alignment: u64, layout: anytype) View {
@@ -2423,7 +2569,7 @@ pub const Builder = struct {
     pub fn tcgen05Commit(self: *Builder, mbar: Value, opts: Tcgen05CommitOptions) void {
         self.emitVoid(nvvm.tcgen05_commit(
             self.ctx,
-            self.sharedBarrierPtr(mbar).inner,
+            self.sharedPtr(mbar).inner,
             opts.cta_group.toNvvm(),
             if (opts.multicast_mask) |mask| mask.to(.i16).inner else null,
             self.loc(),
@@ -2719,8 +2865,6 @@ pub const Builder = struct {
         return self.emit(nvvm.elect_sync(self.ctx, self.loc()));
     }
 
-    /// `cute.arch.shuffle_sync_bfly`: exchange a scalar with the lane at
-    /// `lane_id ^ offset` in the current warp.
     /// Warp-wide maximum of a non-negative float, as one `redux.sync` instead
     /// of a shuffle reduction: IEEE bit patterns of non-negative floats order
     /// like unsigned integers.
@@ -2738,34 +2882,53 @@ pub const Builder = struct {
         return if (dtype == .i32) reduced else reduced.bitCast(dtype);
     }
 
-    pub fn shuffleXor(self: *Builder, value: Value, offset: i32) Value {
-        const dtype = value.dtype();
-        if (dtypeBitwidth(dtype) != 32) @panic("shuffleXor currently requires a 32-bit scalar");
-        const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const shuffled = self.emit(llvm.inline_asm(
-            self.ctx,
-            "shfl.sync.bfly.b32 $0, $1, $2, 31, 0xffffffff;",
-            &.{ bits.inner, self.constant(.i32, offset).inner },
-            .{ .constraints = "=r,r,r", .result_type = .int(self.ctx, .i32) },
-            self.loc(),
-        ));
-        return if (dtype == .i32) shuffled else shuffled.bitCast(dtype);
+    /// `cute.arch.shuffle_sync_bfly`: the `value` of lane `lane_id ^ offset`.
+    pub fn shuffleXor(self: *Builder, value: Value, offset: anytype) Value {
+        return self.shuffleSync(.bfly, value, offset);
     }
 
-    /// `cute.arch.shuffle_sync`: read a scalar from lane `lane` of the
-    /// current warp. Every lane must participate.
+    /// `cute.arch.shuffle_sync`: the `value` of lane `lane`.
     pub fn shuffleIdx(self: *Builder, value: Value, lane: anytype) Value {
+        return self.shuffleSync(.idx, value, lane);
+    }
+
+    /// `cute.arch.shuffle_sync_up`: the `value` of lane `lane_id - delta`;
+    /// the first `delta` lanes keep their own.
+    pub fn shuffleUp(self: *Builder, value: Value, delta: anytype) Value {
+        return self.shuffleSync(.up, value, delta);
+    }
+
+    /// `cute.arch.shuffle_sync_down`: the `value` of lane `lane_id + delta`;
+    /// the last `delta` lanes keep their own.
+    pub fn shuffleDown(self: *Builder, value: Value, delta: anytype) Value {
+        return self.shuffleSync(.down, value, delta);
+    }
+
+    /// `cute.arch.shuffle_sync_op` of a 32-bit scalar across the whole warp,
+    /// in which every lane must take part.
+    fn shuffleSync(self: *Builder, kind: nvvm.ops.ShflKind, value: Value, offset: anytype) Value {
         const dtype = value.dtype();
-        if (dtypeBitwidth(dtype) != 32) @panic("shuffleIdx currently requires a 32-bit scalar");
-        const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const shuffled = self.emit(llvm.inline_asm(
+        if (dtypeBitwidth(dtype) != 32) @panic("warp shuffles take a 32-bit scalar");
+        const bits = if (dtype == .i32 or dtype == .f32) value else value.bitCast(.i32);
+        // One 32-lane segment, clamped at lane 0 going up and lane 31 otherwise.
+        const clamp: i32 = if (kind == .up) 0 else 31;
+        const shuffled = self.emit(nvvm.ops.shfl_sync(
             self.ctx,
-            "shfl.sync.idx.b32 $0, $1, $2, 31, 0xffffffff;",
-            &.{ bits.inner, self.constant(.i32, lane).inner },
-            .{ .constraints = "=r,r,r", .result_type = .int(self.ctx, .i32) },
+            self.constant(.i32, -1).inner,
+            bits.inner,
+            self.lift(offset).to(.i32).inner,
+            self.constant(.i32, clamp).inner,
+            bits.type_(),
+            (nvvm.ops.ShflKindAttr.get(self.ctx, .{ .value = kind }) catch @panic("invalid shuffle kind")).attribute(),
+            .{},
             self.loc(),
         ));
-        return if (dtype == .i32) shuffled else shuffled.bitCast(dtype);
+        return if (bits.dtype() == dtype) shuffled else shuffled.bitCast(dtype);
+    }
+
+    /// `cute.arch.popc`: the number of set bits of an integer.
+    pub fn popc(self: *Builder, value: Value) Value {
+        return self.emit(math.ctpop(self.ctx, value.inner, self.loc()));
     }
 
     /// Four FP32 values rounded to FP8 E4M3 (saturating) and packed into one
@@ -2853,22 +3016,22 @@ pub const Builder = struct {
 
     // mbarriers, async-proxy fences and bulk-copy groups.
 
-    /// mbarrier operands are `!llvm.ptr<3>` for NVVM. A barrier is either a CuTe
-    /// shared-memory pointer or a raw `i32` shared-memory address.
-    fn sharedBarrierPtr(self: *Builder, mbar: Value) Value {
-        if (mbar.isInt()) return self.addressPtr(mbar, .shared);
-        return self.emit(mlir.unrealized_conversion_cast(self.ctx, &.{mbar.inner}, &.{llvm.pointerType(self.ctx, NVPTXAddressSpace.shared)}, self.loc()));
+    /// A CuTe shared-memory pointer or a raw `i32` shared-memory address (an
+    /// mbarrier, a copy destination) as the `!llvm.ptr<3>` NVVM takes.
+    fn sharedPtr(self: *Builder, address: Value) Value {
+        if (address.isInt()) return self.addressPtr(address, .shared);
+        return self.emit(mlir.unrealized_conversion_cast(self.ctx, &.{address.inner}, &.{llvm.pointerType(self.ctx, NVPTXAddressSpace.shared)}, self.loc()));
     }
 
     /// Initialize a shared-memory mbarrier expecting `arrivals` per phase.
     pub fn mbarrierInit(self: *Builder, mbar: Value, arrivals: u32) void {
-        self.emitVoid(nvvm.mbarrier_init(self.ctx, self.sharedBarrierPtr(mbar).inner, self.constant(.i32, arrivals).inner, self.loc()));
+        self.emitVoid(nvvm.mbarrier_init(self.ctx, self.sharedPtr(mbar).inner, self.constant(.i32, arrivals).inner, self.loc()));
     }
 
     /// Arrive and expect `bytes` of asynchronous transactions (SM90+), as a
     /// TMA producer does before issuing its copies.
     pub fn mbarrierArriveExpectTx(self: *Builder, mbar: Value, bytes: anytype) void {
-        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(mbar).inner, self.lift(bytes).to(.i32).inner, .cta, self.loc()));
+        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedPtr(mbar).inner, self.lift(bytes).to(.i32).inner, .cta, self.loc()));
     }
 
     pub const MBarrierArriveOptions = struct {
@@ -2881,7 +3044,7 @@ pub const Builder = struct {
     /// Arrive locally or at the same offset in a peer CTA. Local arrivals
     /// return the opaque state token; remote arrivals have no state result.
     pub fn mbarrierArrive(self: *Builder, mbar: Value, opts: MBarrierArriveOptions) ?Value {
-        var ptr = self.sharedBarrierPtr(mbar);
+        var ptr = self.sharedPtr(mbar);
         if (opts.peer_cta_rank_in_cluster) |rank| {
             ptr = self.emit(nvvm.mapa(self.ctx, ptr.inner, rank.inner, llvm.pointerType(self.ctx, NVPTXAddressSpace.shared_cluster), self.loc()));
         }
@@ -2908,7 +3071,7 @@ pub const Builder = struct {
     /// briefly and return false before completion. `scope` selects which
     /// threads this wait can synchronize with; the barrier remains local.
     pub fn mbarrierTryWait(self: *Builder, mbar: Value, phase: Value, opts: MBarrierTryWaitOptions) Value {
-        const ptr = self.sharedBarrierPtr(mbar);
+        const ptr = self.sharedPtr(mbar);
         if (opts.time_limit) |ticks| {
             return self.emit(nvvm.mbarrier_try_wait_parity_timelimit(self.ctx, ptr.inner, phase.inner, ticks.to(.i32).inner, opts.scope, self.loc()));
         }
@@ -2919,12 +3082,14 @@ pub const Builder = struct {
         scope: MBarrierScope = .cta,
         /// Hardware suspend hint in nanoseconds per attempt, not a total timeout.
         time_limit: u32 = 10_000_000,
-        /// Probe before suspending, as in CuTe's pipeline consumer wait.
-        test_first: bool = true,
     };
 
-    fn mbarrierWaitLoop(self: *Builder, mbar: Value, phase: Value, opts: MBarrierWaitOptions) void {
-        const ptr = self.sharedBarrierPtr(mbar);
+    /// Acquire phase `phase` of `mbar` at `scope`, suspending until it
+    /// completes, as `cute.arch.mbarrier_wait`. CuTe pipelines'
+    /// `consumer_wait(state, try_wait_token)` is this wait inside
+    /// `openIf(token.eq(false))`, the token from an earlier `mbarrierTryWait`.
+    pub fn mbarrierWait(self: *Builder, mbar: Value, phase: Value, opts: MBarrierWaitOptions) void {
+        const ptr = self.sharedPtr(mbar);
         const ticks = self.constant(.i32, opts.time_limit);
         switch (opts.scope) {
             // Preserve the operation recognized by CuTe's pipeline compiler.
@@ -2935,21 +3100,6 @@ pub const Builder = struct {
                 pending.yieldBefore(ready.eq(false), .{});
                 pending.yieldAfter(.{});
             },
-        }
-    }
-
-    /// Acquire a pipeline phase at `scope`: test without suspending, then
-    /// block only when the phase is still outstanding. The initial test matters when
-    /// a producer reaches a full ring and must yield to the consumer that
-    /// recycles its next stage.
-    pub fn mbarrierWait(self: *Builder, mbar: Value, phase: Value, opts: MBarrierWaitOptions) void {
-        if (opts.test_first) {
-            const ready = self.mbarrierTestWait(mbar, phase, .{ .scope = opts.scope });
-            var pending = self.openIf(ready.eq(false));
-            self.mbarrierWaitLoop(mbar, phase, opts);
-            pending.close();
-        } else {
-            self.mbarrierWaitLoop(mbar, phase, opts);
         }
     }
 
@@ -3040,6 +3190,49 @@ pub const Builder = struct {
         self.emitVoid(llvm.store(self.ctx, word.to(.i16).inner, self.addressPtr(address, space).inner, .{ .alignment = 2 }, self.loc()));
     }
 
+    pub const RedOptions = struct {
+        op: nvvm.ops.ReductionOp,
+        /// The PTX type, which also sets the signedness of `min` and `max`.
+        type: nvvm.ops.ReductionType,
+        /// PTX defaults to `relaxed`.
+        sem: ?enum { relaxed, release } = null,
+        /// PTX defaults to `gpu`.
+        scope: ?nvvm.ops.MemScopeKind = null,
+    };
+
+    /// `cute.arch.red`: atomically combine `value` into the scalar at
+    /// `address` (an integer address or a pointer in `space`), without
+    /// returning the old value.
+    pub fn red(self: *Builder, address: Value, comptime space: NVPTXAddressSpace, value: anytype, comptime opts: RedOptions) void {
+        const dtype: DType = switch (opts.type) {
+            .b32, .u32, .s32 => .i32,
+            .b64, .u64, .s64 => .i64,
+            .f16 => .f16,
+            .bf16 => .bf16,
+            .f32 => .f32,
+            .f64 => .f64,
+            .f16x2, .bf16x2 => @compileError("red: packed reductions are not supported"),
+        };
+        const operand = self.constant(dtype, value);
+        if (operand.dtype() != dtype) std.debug.panic("red: a {s} value for a .{s} reduction", .{ @tagName(operand.dtype()), @tagName(opts.type) });
+        const ptr = if (address.isInt()) self.addressPtr(address, space) else self.llvmPointer(address, space);
+        self.emitVoid(nvvm.ops.red(
+            self.ctx,
+            ptr.inner,
+            operand.inner,
+            (nvvm.ops.ReductionOpAttr.get(self.ctx, .{ .value = opts.op }) catch @panic("invalid reduction op")).attribute(),
+            (nvvm.ops.ReductionTypeAttr.get(self.ctx, .{ .value = opts.type }) catch @panic("invalid reduction type")).attribute(),
+            .{
+                .memOrder = if (opts.sem) |sem| (nvvm.ops.MemOrderKindAttr.get(self.ctx, .{ .value = switch (sem) {
+                    .relaxed => .relaxed,
+                    .release => .release,
+                } }) catch @panic("invalid memory order")).attribute() else null,
+                .memScope = if (opts.scope) |scope| (nvvm.ops.MemScopeKindAttr.get(self.ctx, .{ .value = scope }) catch @panic("invalid memory scope")).attribute() else null,
+            },
+            self.loc(),
+        ));
+    }
+
     /// `bar.red.or.pred`: named barrier over `threads` threads that also returns whether
     /// `predicate` (i1) is true in any of them.
     pub fn barrierReduceOr(self: *Builder, id: i32, threads: i32, predicate: Value) Value {
@@ -3054,7 +3247,7 @@ pub const Builder = struct {
     /// Non-blocking acquire test of mbarrier phase `parity` (i32, 0 or 1).
     pub fn mbarrierTestWait(self: *Builder, mbar: Value, parity: Value, opts: MBarrierTryWaitOptions) Value {
         std.debug.assert(opts.time_limit == null);
-        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedBarrierPtr(mbar).inner, parity.inner, .@"test", opts.scope, self.loc()));
+        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedPtr(mbar).inner, parity.inner, .@"test", opts.scope, self.loc()));
     }
 
     /// Call an LLVM intrinsic by name (e.g. an `llvm.nvvm.*` intrinsic the NVVM dialect of
@@ -3069,6 +3262,63 @@ pub const Builder = struct {
             return null;
         }
         return self.emit(op);
+    }
+
+    pub const InlinePtxOptions = struct {
+        /// The code does more than compute its outputs from its inputs (it
+        /// accesses memory or synchronizes), so it is never removed, merged
+        /// or moved across other side effects.
+        side_effects: bool,
+    };
+
+    /// `cute.arch.inline_ptx`, with LLVM's operand numbering: `$0 ..` name the
+    /// `outputs`, then the `inputs`, and their register constraints follow
+    /// their types (`b` i1, `h` 16-bit, `r` i32, `l` i64, `f` f32, `d` f64).
+    /// Without outputs, it returns nothing. Clobbers and tied operands need
+    /// `llvm.inline_asm`.
+    pub fn inlinePtx(
+        self: *Builder,
+        ptx: []const u8,
+        comptime outputs: []const DType,
+        inputs: []const Value,
+        comptime opts: InlinePtxOptions,
+    ) if (outputs.len == 0) void else [outputs.len]Value {
+        if (outputs.len == 0 and !opts.side_effects) @compileError("inline PTX without outputs or side effects does nothing");
+        const alloc = self.arena.allocator();
+        var constraints: std.ArrayList(u8) = .empty;
+        for (outputs) |dt| constraints.print(alloc, "={c},", .{ptxConstraint(dt)}) catch @panic("OOM");
+        for (inputs) |v| constraints.print(alloc, "{c},", .{ptxConstraint(v.dtype())}) catch @panic("OOM");
+        const operands = alloc.alloc(*const mlir.Value, inputs.len) catch @panic("OOM");
+        for (inputs, operands) |v, *x| x.* = v.inner;
+        var types: [outputs.len]*const mlir.Type = undefined;
+        for (&types, outputs) |*t, dt| t.* = dt.toMlir(self.ctx);
+        const op = llvm.inline_asm(self.ctx, ptx, operands, .{
+            .result_type = switch (outputs.len) {
+                0 => null,
+                1 => types[0],
+                else => llvm.structType(self.ctx, &types),
+            },
+            .constraints = constraints.items[0..constraints.items.len -| 1],
+            .has_side_effects = opts.side_effects,
+        }, self.loc());
+        if (outputs.len == 0) return self.emitVoid(op);
+        if (outputs.len == 1) return .{self.emit(op)};
+        const results = self.emit(op);
+        var out: [outputs.len]Value = undefined;
+        for (&out, types, 0..) |*o, t, i| o.* = self.emit(llvm.extractvalue(self.ctx, results.inner, t, &.{@intCast(i)}, self.loc()));
+        return out;
+    }
+
+    fn ptxConstraint(dt: DType) u8 {
+        return switch (dt) {
+            .i1 => 'b',
+            .i16, .f16, .bf16 => 'h',
+            .i32 => 'r',
+            .i64 => 'l',
+            .f32 => 'f',
+            .f64 => 'd',
+            else => std.debug.panic("inline PTX has no register class for {s}", .{@tagName(dt)}),
+        };
     }
 
     /// 16-byte `cp.async.cg` global -> shared. With `valid` (i1) false, the destination is
@@ -3086,7 +3336,7 @@ pub const Builder = struct {
     /// Arrive on `barrier` once this thread's prior cp.async copies have landed; with
     /// `noinc`, the arrival is counted in the barrier's expected count.
     pub fn cpAsyncMbarrierArrive(self: *Builder, mbar: Value, comptime noinc: bool) void {
-        _ = self.callIntrinsic(if (noinc) "llvm.nvvm.cp.async.mbarrier.arrive.noinc.shared" else "llvm.nvvm.cp.async.mbarrier.arrive.shared", &.{self.sharedBarrierPtr(mbar)}, null);
+        _ = self.callIntrinsic(if (noinc) "llvm.nvvm.cp.async.mbarrier.arrive.noinc.shared" else "llvm.nvvm.cp.async.mbarrier.arrive.shared", &.{self.sharedPtr(mbar)}, null);
     }
 
     /// Wait until all of this thread's cp.async copies have landed.
@@ -3126,6 +3376,86 @@ pub const Builder = struct {
     /// instruction descriptor `idesc` (i32).
     pub fn tcgen05MmaF16(self: *Builder, d: Value, adesc: Value, bdesc: Value, idesc: Value, accumulate: Value) void {
         self.emitVoid(nvvm.tcgen05_mma(self.ctx, self.addressPtr(d, .tensor).inner, adesc.inner, bdesc.inner, idesc.inner, accumulate.inner, .f16, .cta_1, self.loc()));
+    }
+
+    pub const Tcgen05MmaBlockScaledArgs = struct {
+        kind: Tcgen05BlockScaledKind,
+        /// Must match the group of every other tcgen05 operation of the kernel.
+        cta_group: CtaGroup,
+        /// TMEM accumulator.
+        d: Value,
+        a: OperandSource,
+        /// Shared-memory descriptor of B.
+        b: Value,
+        /// i32 `Tcgen05MxInstrDesc.build(...)` for the same `kind`.
+        idesc: Value,
+        /// i1: D += A.B when true, D = A.B otherwise.
+        accumulate: Value,
+        /// TMEM addresses of the scale factors of A and B.
+        scale_a: Value,
+        scale_b: Value,
+    };
+
+    /// Python primitives' `tcgen05_mma_block_scale`: one block-scaled MMA,
+    /// issued by a single thread (of either CTA of a pair for `.two`). The
+    /// issuer commits it before D or the scales are read or reused.
+    pub fn tcgen05MmaBlockScaled(self: *Builder, args: Tcgen05MmaBlockScaledArgs) void {
+        const a = switch (args.a) {
+            .smem => |desc| self.smemDescriptorToInt(desc),
+            .tmem => |ptr| self.tmemPtr(ptr),
+        };
+        self.emitVoid(nvvm.ops.tcgen05_mma_block_scale(
+            self.ctx,
+            self.tmemPtr(args.d).inner,
+            a.inner,
+            self.smemDescriptorToInt(args.b).inner,
+            expectDType(args.idesc, .i32, "tcgen05MmaBlockScaled: idesc").inner,
+            expectDType(args.accumulate, .i1, "tcgen05MmaBlockScaled: accumulate").inner,
+            self.tmemPtr(args.scale_a).inner,
+            self.tmemPtr(args.scale_b).inner,
+            (nvvm.ops.Tcgen05MMAKindAttr.get(self.ctx, .{ .value = args.kind.mmaKind() }) catch @panic("invalid tcgen05 MMA kind")).attribute(),
+            (nvvm.ops.CTAGroupKindAttr.get(self.ctx, .{ .value = args.cta_group.toNvvm() }) catch @panic("invalid CTA group")).attribute(),
+            .{ .blockScale = if (args.kind.blockScale()) |block| (nvvm.ops.Tcgen05MMABlockScaleAttr.get(self.ctx, .{ .value = block }) catch @panic("invalid tcgen05 block scale")).attribute() else null },
+            self.loc(),
+        ));
+    }
+
+    pub const Tcgen05CpArgs = struct {
+        op: Tcgen05CpOp,
+        /// Must match the group of every other tcgen05 operation of the kernel.
+        cta_group: CtaGroup,
+        /// TMEM destination.
+        taddr: Value,
+        /// Shared-memory descriptor of the source matrix.
+        smem_desc: Value,
+    };
+
+    /// Python primitives' `tcgen05_cp`: an asynchronous shared-memory to
+    /// TMEM copy, issued by one thread and tracked by `tcgen05Commit`.
+    pub fn tcgen05Cp(self: *Builder, args: Tcgen05CpArgs) void {
+        self.emitVoid(nvvm.ops.tcgen05_cp(
+            self.ctx,
+            self.tmemPtr(args.taddr).inner,
+            self.smemDescriptorToInt(args.smem_desc).inner,
+            (nvvm.ops.Tcgen05CpShapeAttr.get(self.ctx, .{ .value = args.op.shape() }) catch @panic("invalid tcgen05.cp shape")).attribute(),
+            .{
+                .group = (nvvm.ops.CTAGroupKindAttr.get(self.ctx, .{ .value = args.cta_group.toNvvm() }) catch @panic("invalid CTA group")).attribute(),
+                .multicast = if (args.op.multicast()) |multicast| (nvvm.ops.Tcgen05CpMulticastAttr.get(self.ctx, .{ .value = multicast }) catch @panic("invalid tcgen05.cp multicast")).attribute() else null,
+            },
+            self.loc(),
+        ));
+    }
+
+    /// A TMEM address (i32 `lane << 16 | column`) or pointer as the LLVM pointer NVVM takes.
+    fn tmemPtr(self: *Builder, taddr: Value) Value {
+        return if (taddr.isInt()) self.addressPtr(taddr, .tensor) else self.llvmPointer(taddr, .tensor);
+    }
+
+    /// `value`, which must already be a `dt`: an operand of the wrong width
+    /// fails here instead of being truncated or extended.
+    fn expectDType(value: Value, dt: DType, comptime what: []const u8) Value {
+        if (value.dtype() != dt) std.debug.panic(what ++ " must be {s}, not {s}", .{ @tagName(dt), @tagName(value.dtype()) });
+        return value;
     }
 
     /// `tcgen05.ld.32x32b.x{n}`: thread i of the warp gets TMEM lane (warp base + i),
@@ -3217,6 +3547,29 @@ pub const Builder = struct {
         return self.bitcastTo(p, mlir.Type.int(self.ctx, .i32));
     }
 
+    /// `cute.arch.add_packed_bf16x2(rnd="rn")`: `add.rn.bf16x2` of bf16 pairs
+    /// packed in i32s, never contracted into an FMA.
+    pub fn addPackedBf16x2(self: *Builder, a: Value, b: Value) Value {
+        return self.inlinePtx("add.rn.bf16x2 $0, $1, $2;", &.{.i32}, &.{ a, b }, .{ .side_effects = false })[0];
+    }
+
+    /// `cute.arch.fma_packed_bf16x2`: `fma.rn.bf16x2` (one rounding) of bf16
+    /// pairs packed in i32s.
+    pub fn fmaPackedBf16x2(self: *Builder, a: Value, b: Value, c: Value) Value {
+        const ty = self.pairType(.bf16);
+        const result = self.emit(nvvm.ops.fma(
+            self.ctx,
+            self.bitcastTo(a, ty).inner,
+            self.bitcastTo(b, ty).inner,
+            self.bitcastTo(c, ty).inner,
+            ty,
+            (nvvm.ops.FPRoundingModeAttr.get(self.ctx, .{ .value = .rn }) catch @panic("invalid rounding mode")).attribute(),
+            .{},
+            self.loc(),
+        ));
+        return self.bitcastTo(result, mlir.Type.int(self.ctx, .i32));
+    }
+
     /// Two f32 -> a packed pair of `dt` (bf16 or f16) in an i32, `lo` in the low half.
     pub fn packHalf2(self: *Builder, lo: Value, hi: Value, comptime dt: DType) Value {
         const pair = self.emit(vector.from_elements(self.ctx, &.{ lo.to(dt).inner, hi.to(dt).inner }, self.pairType(dt), self.loc()));
@@ -3262,6 +3615,76 @@ pub const Builder = struct {
         self.emitVoid(nvvm.ops.cp_async_bulk_prefetch(self.ctx, address.inner, self.lift(bytes).to(.i32).inner, .{
             .l2CacheHint = if (opts.l2_cache_hint) |hint| hint.to(.i64).inner else null,
         }, self.loc()));
+    }
+
+    pub const CpAsyncBulkSharedClusterGlobalArgs = struct {
+        /// Shared destination (i32 address or pointer), 16-byte aligned.
+        dst: Value,
+        /// Global source (i64 address or pointer), 16-byte aligned.
+        src: Value,
+        /// i32 byte count, a multiple of 16: the transaction bytes `mbar` expects.
+        bytes: Value,
+        /// Shared mbarrier whose transaction count the copy completes.
+        mbar: Value,
+        /// i16 mask of the CTAs of the cluster that receive the bytes, at the
+        /// same offsets; null for this CTA only.
+        multicast_mask: ?Value = null,
+        /// i64 L2 cache policy (e.g. `CacheHintSm100`).
+        l2_cache_hint: ?Value = null,
+    };
+
+    /// Python primitives' `cp_async_bulk_shared_cluster_global`
+    /// (`cpasync.CopyBulkG2SOp`): a byte range from global to shared memory,
+    /// without a tensor map.
+    pub fn cpAsyncBulkSharedClusterGlobal(self: *Builder, args: CpAsyncBulkSharedClusterGlobalArgs) void {
+        // NVVM accepts a shared::cta destination, but LLVM's intrinsic takes shared::cluster.
+        const dst = self.emit(llvm.addrspacecast(self.ctx, self.sharedPtr(args.dst).inner, llvm.pointerType(self.ctx, NVPTXAddressSpace.shared_cluster), self.loc()));
+        self.emitVoid(nvvm.ops.cp_async_bulk_shared_cluster_global(
+            self.ctx,
+            dst.inner,
+            (if (args.src.isInt()) self.addressPtr(args.src, .global) else self.llvmPointer(args.src, .global)).inner,
+            self.sharedPtr(args.mbar).inner,
+            expectDType(args.bytes, .i32, "cpAsyncBulkSharedClusterGlobal: bytes").inner,
+            .{
+                .multicastMask = if (args.multicast_mask) |mask| expectDType(mask, .i16, "cpAsyncBulkSharedClusterGlobal: multicast_mask").inner else null,
+                .l2CacheHint = if (args.l2_cache_hint) |hint| expectDType(hint, .i64, "cpAsyncBulkSharedClusterGlobal: l2_cache_hint").inner else null,
+            },
+            self.loc(),
+        ));
+    }
+
+    pub const CpAsyncBulkTensorSharedCtaGlobalArgs = struct {
+        /// This CTA's shared destination (i32 address or pointer), 128-byte aligned.
+        dst: Value,
+        /// The `CUtensorMap`: a generic address (i64, e.g. `tensorMapAddress`) or pointer.
+        tma_descriptor: Value,
+        /// i32 element coordinates of the box, innermost first (1 to 5).
+        coordinates: []const Value,
+        /// Shared mbarrier whose transaction count the copy completes.
+        mbar: Value,
+        /// i64 L2 cache policy (e.g. `CacheHintSm100`).
+        l2_cache_hint: ?Value = null,
+    };
+
+    /// Python primitives' `cp_async_bulk_tensor_shared_cta_global`: a TMA tile
+    /// load into this CTA's shared memory.
+    pub fn cpAsyncBulkTensorSharedCtaGlobal(self: *Builder, args: CpAsyncBulkTensorSharedCtaGlobalArgs) void {
+        if (args.coordinates.len < 1 or args.coordinates.len > 5) std.debug.panic("cpAsyncBulkTensorSharedCtaGlobal: {d} coordinates, TMA boxes have 1 to 5", .{args.coordinates.len});
+        const coordinates = self.arena.allocator().alloc(*const mlir.Value, args.coordinates.len) catch @panic("OOM");
+        for (args.coordinates, coordinates) |c, *x| x.* = expectDType(c, .i32, "cpAsyncBulkTensorSharedCtaGlobal: coordinates").inner;
+        self.emitVoid(nvvm.ops.cp_async_bulk_tensor_shared_cluster_global(
+            self.ctx,
+            self.sharedPtr(args.dst).inner,
+            (if (args.tma_descriptor.isInt()) self.addressPtr(args.tma_descriptor, .generic) else self.llvmPointer(args.tma_descriptor, .generic)).inner,
+            coordinates,
+            self.sharedPtr(args.mbar).inner,
+            &.{},
+            .{
+                .l2CacheHint = if (args.l2_cache_hint) |hint| expectDType(hint, .i64, "cpAsyncBulkTensorSharedCtaGlobal: l2_cache_hint").inner else null,
+                .isCTAOnly = .boolean(self.ctx, true),
+            },
+            self.loc(),
+        ));
     }
 
     pub fn prefetchL1(self: *Builder, addr: Value) void {
@@ -3851,7 +4274,7 @@ test "casts, select, if-else, integer widening" {
     try expectContains(kernel, "arith.trunci");
     try expectContains(kernel, "arith.extui");
     try expectContains(kernel, "arith.select");
-    try expectContains(kernel, "shfl.sync.bfly.b32");
+    try expectContains(kernel, "#nvvm<shfl_kind bfly>");
     try expectContains(kernel, "\"scf.if\"");
     try expectContains(kernel, "}, {");
     const parsed = try mlir.Module.parse(ctx, kernel);
@@ -3934,6 +4357,7 @@ test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {
     _ = b.makeBlockScaledMma(.{ .m = 256, .n = 128, .cta_group = .two }, sf_ptr);
     const nvfp4_sf_ptr = b.intToPtr(0, .f8e4m3fn, .tmem, 1);
     _ = b.makeBlockScaledMma(.{ .kind = .nvfp4_nvfp4, .n = 16 }, nvfp4_sf_ptr);
+    _ = b.makeBlockScaledMma(.{ .kind = .mxfp4_mxfp4, .n = 128 }, sf_ptr);
 
     const ir = try b.finish(.{ 192, 1, 1 });
     defer std.testing.allocator.free(ir);
@@ -3944,6 +4368,7 @@ test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {
     try expectContains(ir, "sm100.mma_bs<256x16x32, num_cta = 2");
     try expectContains(ir, "sm100.mma_bs<256x128x32, num_cta = 2");
     try expectContains(ir, "sm100.mma_bs<128x16x64, num_cta = 1, ab_major = (k, k), elem_type = (f4E2M1FN, f4E2M1FN, f32), sf_type = f8E4M3FN, frag_kind = ss, vec_size = 16>");
+    try expectContains(ir, "sm100.mma_bs<128x128x64, num_cta = 1, ab_major = (k, k), elem_type = (f4E2M1FN, f4E2M1FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = 32>");
     try expectContains(ir, "non_exec_tiled_tma_load<sm_90,");
     try expectContains(ir, "non_exec_tiled_tma_load<sm_100_2sm,");
     try expectContains(ir, "tma_load<f8E4M3FN, copy_bits = 16384, mode = tiled, num_cta = 1,");
@@ -4001,23 +4426,23 @@ test "mbarrier waits preserve acquire scope through polling and blocking retries
         const phase = b.constant(.i32, 0);
         _ = b.mbarrierTestWait(barrier, phase, .{ .scope = scope });
         _ = b.mbarrierTryWait(barrier, phase, .{ .scope = scope });
-        b.mbarrierWait(barrier, phase, .{ .scope = scope, .time_limit = 1234, .test_first = false });
+        b.mbarrierWait(barrier, phase, .{ .scope = scope, .time_limit = 1234 });
         b.mbarrierWait(barrier, phase, .{ .scope = scope });
 
         const ir = try b.finish(.{ 32, 1, 1 });
         defer std.testing.allocator.free(ir);
-        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "#nvvm.mbar_wait<test>"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "#nvvm.mbar_wait<test>"));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "#nvvm.mbar_wait<try>"));
         try expectContains(ir, "value = 1234 : i32");
-        try expectContains(ir, "\"scf.if\"");
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, ir, "\"scf.if\""));
         switch (scope) {
             .cta => {
-                try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, ir, "#nvvm.mbar_scope<cta>"));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "#nvvm.mbar_scope<cta>"));
                 try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"nvvm.mbarrier.try_wait.parity\""));
                 try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, ir, "\"scf.while\""));
             },
             .cluster => {
-                try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, ir, "#nvvm.mbar_scope<cluster>"));
+                try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, ir, "#nvvm.mbar_scope<cluster>"));
                 try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "#nvvm.mem_order<acquire>"));
                 try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"nvvm.mbarrier.try_wait.parity.timelimit\""));
                 try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"scf.while\""));
@@ -4030,6 +4455,184 @@ test "mbarrier waits preserve acquire scope through polling and blocking retries
         defer parsed.deinit();
         try std.testing.expect(parsed.operation().verify());
     }
+}
+
+test "warp, reduction, packed BF16 and inline PTX primitives lower like Python's cute.arch" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "cute_arch_primitives");
+    defer b.deinit();
+    const a = try b.declareArgs(.{ .gmem = .{ .ptr = DType.i32 } });
+
+    const word = b.threadIdx().x.mul(3);
+    const xor = b.shuffleXor(word, 1);
+    const idx = b.shuffleIdx(word.to(.f32), 0);
+    const up = b.shuffleUp(word, b.constant(.i32, 2));
+    const down = b.shuffleDown(word.to(.f32), 4);
+    const bits = b.popc(xor.bitOr(up));
+    const smem = b.allocSmemStorageAddress(4096, 1024);
+    const gmem = b.ptrToInt(a.gmem, .i64);
+    b.red(smem, .shared, bits, .{ .op = .add, .type = .u32 });
+    b.red(smem.add(4), .shared, xor, .{ .op = .@"or", .type = .b32 });
+    b.red(gmem, .global, 1, .{ .op = .add, .type = .s32, .sem = .release, .scope = .gpu });
+    b.red(b.mapaShared(smem, b.constant(.i32, 1)), .shared_cluster, 1, .{ .op = .max, .type = .u32, .scope = .cluster });
+    const sum = b.addPackedBf16x2(word, up);
+    const fused = b.fmaPackedBf16x2(sum, word, sum);
+    const lowest = b.inlinePtx("{ .reg .b32 t; brev.b32 t, $1; bfind.shiftamt.u32 $0, t; }", &.{.i32}, &.{fused}, .{ .side_effects = false })[0];
+    const halves = b.inlinePtx("mov.b64 {$0, $1}, $2;", &.{ .i32, .i32 }, &.{gmem}, .{ .side_effects = false });
+    b.inlinePtx("st.global.f32 [$0], $1;", &.{}, &.{ gmem, idx.add(down) }, .{ .side_effects = true });
+    b.storeWords(4, gmem, .global, .{ lowest, halves[0], halves[1], bits });
+    b.setMinBlocksPerMp(1);
+
+    const ir = try b.finish(.{ 128, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, ir, "\"nvvm.shfl.sync\""));
+    for ([_][]const u8{
+        "#nvvm<shfl_kind bfly>",   "#nvvm<shfl_kind idx>",      "#nvvm<shfl_kind up>", "#nvvm<shfl_kind down>",
+        "\"math.ctpop\"",          "storage:4096:0",            "#nvvm.red_op<add>",   "#nvvm.red_op<or>",
+        "#nvvm.red_type<u32>",     "#nvvm.red_type<b32>",       "#nvvm.red_type<s32>", "#nvvm.mem_order<release>",
+        "#nvvm.mem_scope<gpu>",    "add.rn.bf16x2 $0, $1, $2;", "\"nvvm.fma\"",        "#nvvm.red_op<max>",
+        "bfind.shiftamt.u32",      "\"=r,r\"",                  "\"=r,=r,l\"",         "\"l,f\"",
+        "nvvm.minctasm = 1 : i32",
+    }) |op| try expectContains(ir, op);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, ir, "\"nvvm.red\""));
+    try expectContains(ir, "(!llvm.ptr<7>, i32) -> ()");
+
+    const parsed = try mlir.Module.parse(ctx, ir);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
+}
+
+test "SM100 block-scaled instruction descriptors encode each MMA kind's formats" {
+    // kind::mxf4: E2M1 is format 1; M = 128, N = 128, scales from byte 2.
+    try std.testing.expectEqual(
+        @as(u32, (2 << 4) | (1 << 7) | (1 << 10) | ((128 >> 3) << 17) | (1 << 23) | ((128 >> 7) << 27) | (2 << 29)),
+        Tcgen05MxInstrDesc.build(.{ .kind = .mxf4, .a_dtype = .f4e2m1fn, .b_dtype = .f4e2m1fn, .scale_dtype = .f8e8m0fnu, .m_dim = 128, .n_dim = 128, .a_sf_id = 2, .b_sf_id = 2 }),
+    );
+    // kind::mxf8f6f4: E2M1 is format 5 and E4M3 format 0; M = 256 for a CTA pair.
+    try std.testing.expectEqual(
+        @as(u32, (3 << 4) | (5 << 7) | (0 << 10) | ((256 >> 3) << 17) | (1 << 23) | ((256 >> 7) << 27)),
+        Tcgen05MxInstrDesc.build(.{ .kind = .mxf8f6f4, .a_dtype = .f4e2m1fn, .b_dtype = .f8e4m3fn, .scale_dtype = .f8e8m0fnu, .m_dim = 256, .n_dim = 256, .a_sf_id = 0, .b_sf_id = 3 }),
+    );
+    // kind::mxf4nvf4 with UE4M3 scales (scale format 0), MN-major B.
+    try std.testing.expectEqual(
+        @as(u32, (1 << 7) | (1 << 10) | (1 << 16) | ((64 >> 3) << 17) | ((128 >> 7) << 27)),
+        Tcgen05MxInstrDesc.build(.{ .kind = .mxf4nvf4_block16, .a_dtype = .f4e2m1fn, .b_dtype = .f4e2m1fn, .scale_dtype = .f8e4m3fn, .m_dim = 128, .n_dim = 64, .a_sf_id = 0, .b_sf_id = 0, .b_major = .mn }),
+    );
+}
+
+test "SM100 block-scaled MMA, tcgen05.cp and bulk copies lower like Python's primitives" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "sm100_block_scaled_primitives");
+    defer b.deinit();
+    const a = try b.declareArgs(.{ .gmem = .{ .ptr = DType.i8 } });
+
+    const smem = b.allocSmemStorageAddress(65536, 1024);
+    const bar = smem.add(65528);
+    const gmem = b.ptrToInt(a.gmem, .i64);
+    const tmem = b.constant(.i32, 0);
+    const operand = Tcgen05SmemDesc.build(&b, smem, .{ .leading_byte_offset = 16, .stride_byte_offset = 512, .layout = .swizzle_64b });
+    const scales = Tcgen05SmemDesc.build(&b, smem.add(32768), .{ .stride_byte_offset = 128 });
+    b.tcgen05Cp(.{ .op = .@"4x32x128b", .cta_group = .one, .taddr = tmem.add(256), .smem_desc = scales });
+    b.tcgen05Cp(.{ .op = .@"2x64x128b_0123", .cta_group = .two, .taddr = tmem.add(260), .smem_desc = scales });
+    b.tcgen05MmaBlockScaled(.{
+        .kind = .mxf4,
+        .cta_group = .one,
+        .d = tmem,
+        .a = .{ .smem = operand },
+        .b = operand,
+        .idesc = b.constant(.i32, Tcgen05MxInstrDesc.build(.{ .kind = .mxf4, .a_dtype = .f4e2m1fn, .b_dtype = .f4e2m1fn, .scale_dtype = .f8e8m0fnu, .m_dim = 128, .n_dim = 128, .a_sf_id = 2, .b_sf_id = 2 })),
+        .accumulate = b.constant(.i1, true),
+        .scale_a = tmem.add(256),
+        .scale_b = tmem.add(260),
+    });
+    b.tcgen05MmaBlockScaled(.{
+        .kind = .mxf4nvf4_block16,
+        .cta_group = .two,
+        .d = tmem,
+        .a = .{ .tmem = tmem.add(128) },
+        .b = operand,
+        .idesc = b.constant(.i32, Tcgen05MxInstrDesc.build(.{ .kind = .mxf4nvf4_block16, .a_dtype = .f4e2m1fn, .b_dtype = .f4e2m1fn, .scale_dtype = .f8e4m3fn, .m_dim = 256, .n_dim = 128, .a_sf_id = 0, .b_sf_id = 0 })),
+        .accumulate = b.constant(.i1, false),
+        .scale_a = tmem.add(256),
+        .scale_b = tmem.add(260),
+    });
+    b.cpAsyncBulkSharedClusterGlobal(.{ .dst = smem.add(1024), .src = gmem, .bytes = b.constant(.i32, 512), .mbar = bar });
+    b.cpAsyncBulkSharedClusterGlobal(.{
+        .dst = smem.add(2048),
+        .src = gmem,
+        .bytes = b.constant(.i32, 512),
+        .mbar = bar,
+        .multicast_mask = b.constant(.i16, 3),
+        .l2_cache_hint = b.constant(.i64, CacheHintSm100.evict_last),
+    });
+    b.cpAsyncBulkTensorSharedCtaGlobal(.{ .dst = smem.add(4096), .tma_descriptor = gmem, .coordinates = &.{ tmem, tmem.add(128) }, .mbar = bar });
+
+    const ir = try b.finish(.{ 128, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    for ([_][]const u8{
+        "#nvvm.tcgen05_cp_shape<shape_32x128b>",    "#nvvm.tcgen05_cp_multicast<warpx4>",                  "#nvvm.tcgen05_cp_shape<shape_64x128b>",
+        "#nvvm.tcgen05_cp_multicast<warpx2_01_23>", "\"nvvm.tcgen05.mma.block_scale\"",                    "#nvvm.tcgen05_mma_kind<mxf4>",
+        "#nvvm.tcgen05_mma_kind<mxf4nvf4>",         "#nvvm.tcgen05_mma_block_scale<block32>",              "#nvvm.tcgen05_mma_block_scale<block16>",
+        "#nvvm.cta_group<cta_2>",                   "#nvvm.cta_group<cta_1>",                              "\"llvm.addrspacecast\"",
+        "!llvm.ptr<7>",                             "\"nvvm.cp.async.bulk.tensor.shared.cluster.global\"", "isCTAOnly = true",
+        "!llvm.ptr<6>",
+    }) |op| try expectContains(ir, op);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"nvvm.tcgen05.cp\""));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"nvvm.cp.async.bulk.shared.cluster.global\""));
+
+    const parsed = try mlir.Module.parse(ctx, ir);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
+}
+
+test "shuffles clamp at lane 0 going up and at lane 31 otherwise, as Python's shuffle_sync_op" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    for ([_]nvvm.ops.ShflKind{ .up, .down }) |kind| {
+        var b = try Builder.open(std.testing.allocator, ctx, "shuffle_clamp");
+        defer b.deinit();
+        _ = try b.declareArgs(.{});
+        const lane = b.threadIdx().x;
+        _ = if (kind == .up) b.shuffleUp(lane, 2) else b.shuffleDown(lane, 2);
+        const ir = try b.finish(.{ 32, 1, 1 });
+        defer std.testing.allocator.free(ir);
+        try std.testing.expectEqual(@as(usize, @intFromBool(kind == .up)), std.mem.count(u8, ir, "value = 0 : i32"));
+        try std.testing.expectEqual(@as(usize, @intFromBool(kind == .down)), std.mem.count(u8, ir, "value = 31 : i32"));
+    }
+}
+
+test "free primitives forward to the Builder's" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "free_primitives");
+    defer b.deinit();
+    const a = try b.declareArgs(.{ .gmem = .{ .ptr = DType.i32 } });
+
+    const smem = b.allocSmemStorageAddress(4096, 1024);
+    const gmem = b.ptrToInt(a.gmem, .i64);
+    const tmem = b.constant(.i32, 0);
+    const desc = Tcgen05SmemDesc.build(&b, smem, .{ .stride_byte_offset = 128 });
+    const lane = b.threadIdx().x;
+    redAddU32(&b, gmem, popc(&b, shflUpSync(&b, lane, 1)));
+    redXorRel(&b, gmem, b.constant(.i64, 1));
+    tmaLoad1d(&b, smem.add(1024), gmem, smem, 512, @backingInt(CacheHintSm100.evict_first));
+    utccp4x32dp128bit2cta(&b, desc, tmem.add(256));
+    mmaMxf8f6f42x1SmSs(&b, desc, desc, tmem, lane, b.constant(.i64, @as(i64, Tcgen05MxInstrDesc.build(.{ .kind = .mxf8f6f4, .a_dtype = .f8e4m3fn, .b_dtype = .f8e4m3fn, .scale_dtype = .f8e8m0fnu, .m_dim = 256, .n_dim = 128, .a_sf_id = 0, .b_sf_id = 0 })) << 32), tmem.add(256), tmem.add(260));
+
+    const ir = try b.finish(.{ 128, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    for ([_][]const u8{
+        "\"nvvm.red\"",                     "#nvvm.red_type<b64>",                          "#nvvm<shfl_kind up>",
+        "\"math.ctpop\"",                   "\"nvvm.cp.async.bulk.shared.cluster.global\"", "\"nvvm.tcgen05.cp\"",
+        "\"nvvm.tcgen05.mma.block_scale\"", "#nvvm.tcgen05_mma_kind<mxf8f6f4>",             "#nvvm.cta_group<cta_2>",
+    }) |op| try expectContains(ir, op);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, ir, "llvm.inline_asm"));
+
+    const parsed = try mlir.Module.parse(ctx, ir);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
 }
 
 test "SM100 raw primitives preserve operand types and round-trip through MLIR" {
@@ -4430,24 +5033,29 @@ pub fn stRelSys(b: *Builder, ptr: Value, value: Value) void {
     asmVoid(b, "st.release.sys.global.u64 [$0], $1;", &.{ ptr, value }, "l,l,~{memory}");
 }
 
+/// `red.gpu.global.add.s32` (`Builder.red`).
 pub fn redAddS32(b: *Builder, ptr: Value, value: anytype) void {
-    asmVoid(b, "red.gpu.global.add.s32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r");
+    b.red(ptr, .global, value, .{ .op = .add, .type = .s32, .scope = .gpu });
 }
 
+/// `red.gpu.global.add.u32` (`Builder.red`).
 pub fn redAddU32(b: *Builder, ptr: Value, value: anytype) void {
-    asmVoid(b, "red.gpu.global.add.u32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r");
+    b.red(ptr, .global, value, .{ .op = .add, .type = .u32, .scope = .gpu });
 }
 
+/// `red.release.gpu.global.xor.b64` (`Builder.red`).
 pub fn redXorRel(b: *Builder, ptr: Value, value: Value) void {
-    asmVoid(b, "red.release.gpu.global.xor.b64 [$0], $1;", &.{ ptr, value }, "l,l,~{memory}");
+    b.red(ptr, .global, value, .{ .op = .xor, .type = .b64, .sem = .release, .scope = .gpu });
 }
 
+/// `red.release.gpu.global.add.u32` (`Builder.red`).
 pub fn redAddRel(b: *Builder, ptr: Value, value: anytype) void {
-    asmVoid(b, "red.release.gpu.global.add.u32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r,~{memory}");
+    b.red(ptr, .global, value, .{ .op = .add, .type = .u32, .sem = .release, .scope = .gpu });
 }
 
+/// `red.release.sys.global.add.s32` (`Builder.red`).
 pub fn redAddRelSys(b: *Builder, ptr: Value, value: anytype) void {
-    asmVoid(b, "red.release.sys.global.add.s32 [$0], $1;", &.{ ptr, liftAs(b, value, .i32) }, "l,r,~{memory}");
+    b.red(ptr, .global, value, .{ .op = .add, .type = .s32, .sem = .release, .scope = .sys });
 }
 
 pub fn atomicAddBlockShared(b: *Builder, smem: Value, value: anytype) Value {
@@ -4689,12 +5297,7 @@ pub fn tma2SmLoad4d(b: *Builder, desc: Value, mbar: Value, cache_hint: u64, smem
 /// `ptx::tma_load_1d(dst, src, mbar, num_bytes, hint = EVICT_FIRST)`: non-tensor bulk copy of
 /// `num_bytes` from a global (possibly peer) address into this CTA's shared memory.
 pub fn tmaLoad1d(b: *Builder, dst: Value, src: Value, mbar: Value, num_bytes: anytype, cache_hint: u64) void {
-    asmVoid(
-        b,
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [$0], [$1], $2, [$3], $4;\n",
-        &.{ dst, src, liftAs(b, num_bytes, .i32), mbar, cst64(b, cache_hint) },
-        "r,l,r,r,l,~{memory}",
-    );
+    b.cpAsyncBulkSharedClusterGlobal(.{ .dst = dst, .src = src, .bytes = liftAs(b, num_bytes, .i32), .mbar = mbar, .l2_cache_hint = cst64(b, cache_hint) });
 }
 
 /// `ptx::tma_store_1d(dst, src, num_bytes, hint = EVICT_NORMAL)`.
@@ -4768,20 +5371,24 @@ pub fn tmemLoad16dp256b1x(b: *Builder, taddr: Value) [4]Value {
 
 /// `cute::SM100_UTCCP_4x32dp128bit_2cta::copy(src_desc, dst_taddr)`.
 pub fn utccp4x32dp128bit2cta(b: *Builder, src_desc: Value, dst_taddr: Value) void {
-    asmVoid(b, "tcgen05.cp.cta_group::2.32x128b.warpx4 [$0], $1;", &.{ dst_taddr, src_desc }, "r,l");
+    b.tcgen05Cp(.{ .op = .@"4x32x128b", .cta_group = .two, .taddr = dst_taddr, .smem_desc = src_desc });
 }
 
 /// `ptx::SM100_MMA_MXF8F6F4_2x1SM_SS::fma(desc_a, desc_b, tmem_c, scale_c, desc, tmem_sfa,
 /// tmem_sfb)`: `desc` is the 64-bit runtime descriptor (`instr << 32`), `scale_c` (i32)
 /// nonzero accumulates.
 pub fn mmaMxf8f6f42x1SmSs(b: *Builder, desc_a: Value, desc_b: Value, tmem_c: Value, scale_c: Value, desc: Value, tmem_sfa: Value, tmem_sfb: Value) void {
-    const idesc = b.emit(arith.trunci(b.ctx, desc.shrLogical(32).inner, DType.i32.toMlir(b.ctx), b.loc()));
-    asmVoid(
-        b,
-        "{\n\t.reg .pred p;\n\tsetp.ne.b32 p, $4, 0;\n\ttcgen05.mma.cta_group::2.kind::mxf8f6f4.block_scale [$0], $1, $2, $3, [$5], [$6], p; \n\t}\n",
-        &.{ tmem_c, desc_a, desc_b, idesc, scale_c, tmem_sfa, tmem_sfb },
-        "r,l,l,r,r,r,r",
-    );
+    b.tcgen05MmaBlockScaled(.{
+        .kind = .mxf8f6f4,
+        .cta_group = .two,
+        .d = tmem_c,
+        .a = .{ .smem = desc_a },
+        .b = desc_b,
+        .idesc = b.emit(arith.trunci(b.ctx, desc.shrLogical(32).inner, DType.i32.toMlir(b.ctx), b.loc())),
+        .accumulate = scale_c.ne(0),
+        .scale_a = tmem_sfa,
+        .scale_b = tmem_sfb,
+    });
 }
 
 /// `cutlass::arch::umma_arrive_multicast_2x1SM(barrier, cta_mask)`: inside `elect_one_sync`,
@@ -4809,20 +5416,17 @@ pub fn fromBits32(v: Value, dt: DType) Value {
 
 /// `__shfl_sync(0xffffffff, v, src_lane)` / `ptx::exchange` (32-bit).
 pub fn shflSync(b: *Builder, v: Value, src_lane: anytype) Value {
-    const r = asmValue(b, "shfl.sync.idx.b32 $0, $1, $2, 31, -1;", &.{ bits32(v), liftAs(b, src_lane, .i32) }, .i32, "=r,r,r", true);
-    return fromBits32(r, v.dtype());
+    return b.shuffleIdx(v, src_lane);
 }
 
 /// `__shfl_xor_sync(0xffffffff, v, lane_mask)`.
 pub fn shflXorSync(b: *Builder, v: Value, lane_mask: anytype) Value {
-    const r = asmValue(b, "shfl.sync.bfly.b32 $0, $1, $2, 31, -1;", &.{ bits32(v), liftAs(b, lane_mask, .i32) }, .i32, "=r,r,r", true);
-    return fromBits32(r, v.dtype());
+    return b.shuffleXor(v, lane_mask);
 }
 
 /// `__shfl_up_sync(0xffffffff, v, delta)`.
 pub fn shflUpSync(b: *Builder, v: Value, delta: anytype) Value {
-    const r = asmValue(b, "shfl.sync.up.b32 $0, $1, $2, 0, -1;", &.{ bits32(v), liftAs(b, delta, .i32) }, .i32, "=r,r,r", true);
-    return fromBits32(r, v.dtype());
+    return b.shuffleUp(v, delta);
 }
 
 /// `__reduce_add_sync(0xffffffff, v)` (u32).
@@ -4842,7 +5446,7 @@ pub fn allSync(b: *Builder, pred: Value) Value {
 }
 
 pub fn popc(b: *Builder, v: Value) Value {
-    return b.callIntrinsic("llvm.ctpop.i32", &.{v}, DType.i32.toMlir(b.ctx)).?;
+    return b.popc(v);
 }
 
 /// `__ffs(v)`: 1-based index of the lowest set bit, 0 for 0 (nvcc: `brev` + `bfind.shiftamt`).
@@ -4934,7 +5538,7 @@ test "canonical primitives preserve aligned barriers and runtime transaction cou
     b.fenceMbarrierInit();
     b.mbarrierArriveExpectTx(bar, bytes);
     b.mbarrierArriveExpectTx(bar, 16);
-    b.mbarrierWait(bar, phase, .{ .test_first = false });
+    b.mbarrierWait(bar, phase, .{});
     _ = phase.bitXor(1);
     b.fenceProxyAsyncShared();
     b.fenceProxyAsyncShared();

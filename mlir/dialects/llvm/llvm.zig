@@ -23,6 +23,7 @@ pub const AtomicBinOp = ops.AtomicBinOp;
 pub const AtomicOrdering = ops.AtomicOrdering;
 pub const inttoptr = ops.inttoptr;
 pub const ptrtoint = ops.ptrtoint;
+pub const addrspacecast = ops.addrspacecast;
 pub const bitcast = ops.bitcast;
 pub const fmul = ops.fmul;
 pub const extractvalue = ops.extractvalue;
