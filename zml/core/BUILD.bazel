@@ -27,6 +27,8 @@ zig_library(
         "Sharding.zig",
         "buffer.zig",
         "buffer/HostAccessible.zig",
+        "distributed.zig",
+        "distributed/kv_store.zig",
         "dtype.zig",
         "exe.zig",
         "flashinfer_cutlass/contract.zig",
