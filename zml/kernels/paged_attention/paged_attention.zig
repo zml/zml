@@ -216,6 +216,11 @@ const Attention = struct {
     opts: AttentionOptions,
 
     fn forward(args: @This(), _: zml.Shape) zml.Tensor {
+        if (args.parameters != .triton) stdx.debug.assert(
+            args.opts.rel_bias == null and (args.opts.sink == null or args.opts.sink.?.rank() == 1),
+            "relative biases and per-token sinks require the Triton backend",
+            .{},
+        );
         return switch (args.parameters) {
             .cute => |p| switch (args.kv_cache) {
                 .split => |split| cute.pagedAttention(p, args.q, split.k, split.v, args.opts),

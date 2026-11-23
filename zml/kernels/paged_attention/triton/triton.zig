@@ -374,6 +374,11 @@ pub const paged = struct {
             .scale = opts.scale,
         };
 
+        if (isOneapiTarget()) stdx.debug.assert(
+            opts.rel_bias == null and (opts.sink == null or opts.sink.?.rank() == 1),
+            "oneAPI paged attention supports neither relative biases nor per-token sinks",
+            .{},
+        );
         const use_2d_kernel = use2dKernel(
             paged_attention_opts.all_decode,
             paged_attention_opts.batch_size,
@@ -617,6 +622,8 @@ pub const paged = struct {
             .use_qq_bias = false,
             .use_softcap = false,
             .use_sinks = (opts.sink != null),
+            .per_token_sinks = if (opts.sink) |sink| sink.rank() == 2 else false,
+            .rel_bias_extent = if (opts.rel_bias) |bias| bias.dim(-1) else 0,
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.block_q),
             .block_m = @intCast(config.block_m),
@@ -647,6 +654,7 @@ pub const paged = struct {
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
                 .qq_bias_ptr = dummy,
+                .rel_bias_ptr = if (opts.rel_bias) |bias| bias.convert(.f32) else dummy,
                 .scale_ptr = .scalar(scale, .f32),
                 .k_scale_ptr = dummy,
                 .v_scale_ptr = dummy,
@@ -693,6 +701,8 @@ pub const paged = struct {
             .use_qq_bias = false,
             .use_softcap = false,
             .use_sinks = (opts.sink != null),
+            .per_token_sinks = if (opts.sink) |sink| sink.rank() == 2 else false,
+            .rel_bias_extent = if (opts.rel_bias) |bias| bias.dim(-1) else 0,
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.attention.block_q),
             .block_m = @intCast(config.attention.block_m),
@@ -741,6 +751,7 @@ pub const paged = struct {
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
                 .qq_bias_ptr = dummy,
+                .rel_bias_ptr = if (opts.rel_bias) |bias| bias.convert(.f32) else dummy,
                 .scale_ptr = .scalar(scale, .f32),
                 .k_scale_ptr = dummy,
                 .v_scale_ptr = dummy,
