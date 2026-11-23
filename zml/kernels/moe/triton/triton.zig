@@ -462,8 +462,7 @@ fn prepareOperand(x: Tensor, linear: nn.Linear, ids: Tensor, opts: Options) stru
     const rows = x.withTags(.{ .token, .in }).convert(.bf16).optimizationBarrier().convert(.f32);
     // Each row is normalized by a power of two that keeps its block scales in
     // E4M3's normal range; a calibrated input scale is one such choice, so it is not needed.
-    const row_scale = rows.abs().max(.in).scale(1.0 / 1536.0).maximum(.scalar(std.math.floatMin(f32), .f32))
-        .bitCast(.u32).addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
+    const row_scale = @import("zml/quantization").nvfp4RowScale(rows, .in);
     const quantized = switch (opts.nvfp4_input_scale) {
         .six => @import("zml/quantization").quantizeNvfp4(rows, row_scale, .in),
         .four_or_six => @import("zml/quantization").quantizeNvfp4FourOrSix(rows, row_scale, .in),

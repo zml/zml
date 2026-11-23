@@ -188,6 +188,34 @@ fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
     return bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
 }
 
+/// E2M1 round-to-nearest, ties-to-even, in FP32 and independent of native FP4 lowering.
+/// Even encoding indices win midpoint ties; magnitudes above 5 round to 6.
+pub fn roundE2m1(x: Tensor) Tensor {
+    const magnitude = x.abs();
+    var rounded = Tensor.scalar(6, .f32).broad(x.shape());
+    const thresholds = [_]f32{ 5, 3.5, 2.5, 1.75, 1.25, 0.75, 0.25 };
+    const values = [_]f32{ 4, 3, 2, 1.5, 1, 0.5, 0 };
+    inline for (thresholds, values, 0..) |threshold, value, i| {
+        rounded = magnitude.cmp(if (i % 2 == 0) .LE else .LT, Tensor.scalar(threshold, .f32))
+            .select(Tensor.scalar(value, .f32).broad(x.shape()), rounded);
+    }
+    return x.cmp(.LT, Tensor.scalar(0, .f32)).select(rounded.negate(), rounded);
+}
+
+/// E4M3 round-to-nearest, ties-to-even, in FP32, for positive values in E4M3's normal range
+/// [2^-6, 448]: keeps three mantissa bits.
+pub fn roundE4m3Normal(x: Tensor) Tensor {
+    const bits = x.bitCast(.u32);
+    const odd = bits.shiftRightLogical(.scalar(20, .u32)).logical(.AND, .scalar(1, .u32));
+    return bits.add(odd).addConstant(0x7ffff).logical(.AND, .scalar(0xfff00000, .u32)).bitCast(.f32);
+}
+
+/// A power of two per row that keeps the NVFP4 block scales of `rows / scale` in E4M3's normal range.
+/// Dynamic activation quantization uses it in place of a calibrated input scale.
+pub fn nvfp4RowScale(rows: Tensor, axis: anytype) Tensor {
+    return ceilPowerOfTwo(rows.abs().max(axis).scale(1.0 / 1536.0).maximum(.scalar(std.math.floatMin(f32), .f32)));
+}
+
 /// Quantize activation blocks, preserving the input's axes.
 /// E8M0 scales round upward to a power of two to avoid overflowing FP8 values.
 pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataType, scale_dtype: DataType) QuantizedInput {
@@ -525,6 +553,44 @@ test "NVFP4 four-or-six keeps the block scale with the lower error" {
     for (host[0..nvfp4_block_size], six.constItems(f32)[0..nvfp4_block_size]) |expected, actual| six_error += @abs(expected - actual);
     try std.testing.expect(six_error > 0);
     try std.testing.expectEqualSlices(f32, host[nvfp4_block_size..], six.constItems(f32)[nvfp4_block_size..]);
+}
+
+test "E4M3 tensor-math rounding matches the FP8 conversion on normal values" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const Local = struct {
+        fn forward(x: Tensor) Tensor {
+            return Tensor.stack(&.{ x.convert(.f8e4m3fn).optimizationBarrier().convert(.f32), roundE4m3Normal(x) }, 0, .method);
+        }
+    };
+    // Every E4M3 normal value, the midpoints to its neighbors and one ulp around each midpoint.
+    var host: [4 * 8 * 16]f32 = undefined;
+    for (&host, 0..) |*value, i| {
+        const mantissa: f32 = @floatFromInt(8 + i / 4 % 8);
+        const code: f32 = std.math.ldexp(mantissa, @as(i32, @intCast(i / 32)) - 9);
+        const midpoint: u32 = @bitCast(code + std.math.ldexp(@as(f32, 0.5), @as(i32, @intCast(i / 32)) - 9));
+        value.* = @min(448, switch (i % 4) {
+            0 => code,
+            1 => @as(f32, @bitCast(midpoint - 1)),
+            2 => @as(f32, @bitCast(midpoint)),
+            else => @as(f32, @bitCast(midpoint + 1)),
+        });
+    }
+    const x: Tensor = .init(.{ .i = host.len }, .f32);
+    var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
+    defer exe.deinit();
+    var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&host));
+    defer buffer.deinit();
+    var output: zml.Buffer = undefined;
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    runner.run(io, .{buffer}, .{&output}, .{ .wait = true });
+    defer output.deinit();
+    var result = try output.toSliceAlloc(allocator, io);
+    defer result.free(allocator);
+    const values = result.constItems(f32);
+    try std.testing.expectEqualSlices(f32, values[0..host.len], values[host.len..]);
 }
 
 test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" {

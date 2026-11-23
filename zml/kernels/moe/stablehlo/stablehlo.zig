@@ -14,6 +14,7 @@ const Activation = @import("zml/kernels/moe/api").Activation;
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const softcap = @import("zml/kernels/moe/api").softcap;
+const roundE2m1 = @import("zml/quantization").roundE2m1;
 
 pub fn activate(x: Tensor, activation: Activation) Tensor {
     return switch (activation) {
@@ -91,20 +92,6 @@ pub fn dequantize(linear: nn.Linear) Tensor {
     return result;
 }
 
-// E2M1 round-to-nearest, ties-to-even expressed independently of native
-// float-to-FP4 lowering. Even encoding indices win midpoint ties.
-fn roundFp4(x: Tensor) Tensor {
-    const magnitude = x.abs();
-    var rounded = Tensor.scalar(6, .f32).broad(x.shape());
-    const thresholds = [_]f32{ 5, 3.5, 2.5, 1.75, 1.25, 0.75, 0.25 };
-    const values = [_]f32{ 4, 3, 2, 1.5, 1, 0.5, 0 };
-    inline for (thresholds, values, 0..) |threshold, value, i| {
-        rounded = magnitude.cmp(if (i % 2 == 0) .LE else .LT, Tensor.scalar(threshold, .f32))
-            .select(Tensor.scalar(value, .f32).broad(x.shape()), rounded);
-    }
-    return x.cmp(.LT, Tensor.scalar(0, .f32)).select(rounded.negate(), rounded);
-}
-
 // Quantize and dequantize activation groups using tensor math, independently of
 // Triton's quantizer. The return value is the represented value in FP32.
 fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType) Tensor {
@@ -122,7 +109,7 @@ fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType
             .minimum(Tensor.scalar(448, .f32))
             .convert(.f8e4m3fn).optimizationBarrier().convert(.f32).broad(grouped.shape());
         const divisor = scale.cmp(.NE, Tensor.scalar(0, .f32)).select(scale, Tensor.scalar(1, .f32).broad(scale.shape()));
-        return roundFp4(grouped.mul(Tensor.scalar(1, .f32).div(divisor))).mul(scale)
+        return roundE2m1(grouped.mul(Tensor.scalar(1, .f32).div(divisor))).mul(scale)
             .reshape(x.shape().withDtype(.f32)).mul(global.asScalar());
     }
     if (opts.input_quantization == .automatic and (!opts.quantize_input or scheme == .mxfp4)) return x.convert(dtype).convert(.f32);
@@ -210,7 +197,7 @@ pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: nn.Linear, do
 test "MoE compliance: FP4 midpoint rounding" {
     const Local = struct {
         fn call(x: Tensor) Tensor {
-            return roundFp4(x);
+            return roundE2m1(x);
         }
     };
     const values = [_]f32{ -7, -5, -3.5, -2.5, -1.75, -1.25, -0.75, -0.25, 0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 7 };
