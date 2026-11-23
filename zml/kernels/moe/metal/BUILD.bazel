@@ -11,5 +11,6 @@ zig_library(
         "//zml/kernels/moe/api",
         "//zml/kernels/moe/weights",
         "//zml/nn",
+        "//zml/quantization",
     ],
 )

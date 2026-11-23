@@ -10,13 +10,9 @@ const Activation = @import("zml/kernels/moe/api").Activation;
 const GlobalOptions = @import("zml/kernels/moe/api").Options;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const unpackedWeight = @import("zml/kernels/moe/weights").unpackedWeight;
+const quantization = @import("zml/quantization");
 
 const log = std.log.scoped(.@"zml/moe/metal");
-
-fn validateOptions(opts: GlobalOptions) void {
-    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
-    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
-}
 
 const QuantMode = enum { none, fp8, nvfp4 };
 
@@ -45,28 +41,50 @@ fn moeGemm(
     };
 }
 
-fn applyGateUpGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tensor) Tensor {
-    const scale = global_scale orelse return output;
-    stdx.debug.assert(scale.dtype() == .f32, "metal backend expected gate_up scale data type to be f32, got {}", .{scale.dtype()});
-    stdx.debug.assert(scale.rank() == 2 and scale.dim(.proj) == 2, "metal backend expected gate_up scale to be a 2D tensor with a .proj dim equal to 2, got {}", .{scale.shape()});
+/// Multiplies each route's output in FP32 by its expert's global scale. Gate/up scales may hold
+/// one value per projection, `{.expert, .proj = 2}`, for the halves of the concatenated output.
+fn applyGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tensor) Tensor {
+    const scale = global_scale orelse return output.convert(.f32);
+    stdx.debug.assert(scale.dtype() == .f32 and (scale.rank() == 1 or (scale.rank() == 2 and scale.dim(.proj) == 2)), "metal backend expected an f32 global scale {{.expert}} or {{.expert, .proj = 2}}, got {f}", .{scale.shape()});
 
-    const mid = @divExact(output.dim(.out), 2);
-    const selected = scale.gather(.{ .expert = expert_ids }, .{});
-    const expanded = selected.appendAxes(.{.mid})
-        .broad(zml.Shape.init(.{ .r = output.dim(.r), .proj = 2, .mid = mid }, .f32))
-        .merge(.{ .out = .{ .proj, .mid } });
-    return output.convert(.f32).mul(expanded).convert(output.dtype());
+    var selected = scale.gather(.{ .expert = expert_ids }, .{});
+    if (scale.rank() == 2) {
+        const mid = @divExact(output.dim(.out), 2);
+        selected = selected.appendAxes(.{.mid})
+            .broad(zml.Shape.init(.{ .r = output.dim(.r), .proj = 2, .mid = mid }, .f32))
+            .merge(.{ .out = .{ .proj, .mid } });
+    }
+    return output.convert(.f32).mul(selected.broad(output.shape().withDtype(.f32)));
 }
 
-fn applyDownGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tensor) Tensor {
-    const scale = global_scale orelse return output;
-    stdx.debug.assert(scale.dtype() == .f32, "metal backend expected down scale data type to be f32, got {}", .{scale.dtype()});
-    stdx.debug.assert(scale.rank() == 1, "metal backend expected down scale to be a 1D tensor, got {}", .{scale.shape()});
+/// BF16 rows holding exactly the NVFP4 activations the Triton backend multiplies: each row is
+/// divided by a power of two, and each block of 16 gets an E4M3 scale and E2M1 values (the
+/// lower-error one of amax/6 and amax/4 with `.four_or_six`). Products of E2M1 values, E4M3
+/// scales and powers of two are exact in BF16. Rounding uses tensor math, which fuses better
+/// than FP8 and FP4 conversions and avoids FP4 vector stores Metal cannot emit for every shape.
+fn emulateNvfp4Input(x: Tensor, axis: anytype, opts: GlobalOptions) Tensor {
+    // Triton rounds activations to BF16 before quantizing; the barrier keeps that rounding.
+    const rows = (if (x.dtype() == .bf16) x else x.convert(.bf16).optimizationBarrier()).convert(.f32);
+    const row_scale = quantization.nvfp4RowScale(rows, axis).broad(rows.shape());
+    const blocks = rows.div(row_scale).splitAxis(axis, .{ .sc = -1, .blk = quantization.nvfp4_block_size });
+    const six = nvfp4Candidate(blocks, 6);
+    const values = switch (opts.nvfp4_input_scale) {
+        .six => six.values,
+        .four_or_six => blk: {
+            const four = nvfp4Candidate(blocks, 4);
+            // Ties keep amax/6.
+            break :blk four.err.cmp(.LT, six.err).broad(blocks.shape().withDtype(.bool)).select(four.values, six.values);
+        },
+    };
+    return values.reshape(rows.shape()).mul(row_scale).convert(.bf16);
+}
 
-    const selected = scale.gather(.{ .expert = expert_ids }, .{})
-        .appendAxes(.{.d})
-        .broad(output.shape().withDtype(.f32));
-    return output.convert(.f32).mul(selected).convert(output.dtype());
+/// Dequantized blocks whose largest magnitude maps to `value_max`, and each block's absolute error.
+fn nvfp4Candidate(blocks: Tensor, value_max: f32) struct { values: Tensor, err: Tensor } {
+    const amax = blocks.abs().max(.blk).scale(1.0 / value_max);
+    const scale = quantization.roundE4m3Normal(amax.clamp(.scalar(0x1p-6, .f32), .scalar(448, .f32))).broad(blocks.shape());
+    const values = quantization.roundE2m1(blocks.div(scale)).mul(scale);
+    return .{ .values = values, .err = values.sub(blocks).abs().sum(.blk) };
 }
 
 pub fn fusedExperts(
@@ -76,7 +94,6 @@ pub fn fusedExperts(
     down_: nn.Linear,
     opts: GlobalOptions,
 ) zml.Tensor {
-    validateOptions(opts);
     stdx.debug.assert(gate_up_.bias == null, "metal backend doesn't support gate_up bias", .{});
     stdx.debug.assert(down_.bias == null, "metal backend doesn't support down bias", .{});
 
@@ -90,6 +107,8 @@ pub fn fusedExperts(
     const down = unpackedWeight(down_);
     stdx.debug.assert(gate_up.dtype() == down.dtype(), "metal backend expected gate_up and down data type to match, got {} and {}", .{ gate_up.dtype(), down.dtype() });
     const mode = quantMode(gate_up.dtype());
+    // Metal reproduces Triton's NVFP4 activations; other weight formats keep BF16 activations.
+    const quantize_input = opts.quantize_input and mode == .nvfp4;
     switch (mode) {
         .none => {
             stdx.debug.assert(gate_up_scales == null and down_scales == null, "metal backend expected gate_up and down scale to be null when the weights are not quantized", .{});
@@ -132,35 +151,38 @@ pub fn fusedExperts(
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .d = d }).withTags(.{ .token, .d });
     const x_rows = hidden.insertAxes(.d, .{.topk})
-        .broad(zml.Shape.init(.{ .token = num_tokens, .topk = topk, .d = d }, act_dtype))
+        .broad(zml.Shape.init(.{ .token = num_tokens, .topk = topk, .d = d }, hidden.dtype()))
         .merge(.{ .r = .{ .token, .topk } });
+    // Each route quantizes a copy of its token, so the quantizer writes the GEMM input.
+    const gate_up_input = if (quantize_input) emulateNvfp4Input(x_rows, .d, opts) else x_rows.convert(act_dtype);
     const expert_ids = routing.ids.reshape(.{ .token = num_tokens, .topk = topk }).withTags(.{ .token, .topk })
         .merge(.{ .r = .{ .token, .topk } }).convert(.i32);
+    const weights = routing.weights.reshape(.{ .token = num_tokens, .topk = topk }).withTags(.{ .token, .topk })
+        .merge(.{ .r = .{ .token, .topk } }).convert(.f32);
 
-    const gate_up_out = applyGateUpGlobalScale(moeGemm(
-        x_rows,
+    const gate_up_out = applyGlobalScale(moeGemm(
+        gate_up_input,
         gate_up,
         gate_up_scales,
         expert_ids,
         zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
         mode,
     ), gate_up_global_scale, expert_ids);
-    const activated = opts.activation.applyActivation(gate_up_out, .concatenated).convert(act_dtype);
+    var activated = opts.activation.applyActivation(gate_up_out, .concatenated);
+    if (opts.routing_weight_placement == .before_down) activated = activated.mul(weights.broad(activated.shape()));
+    const down_input = if (quantize_input) emulateNvfp4Input(activated, .out, opts) else activated.convert(act_dtype);
 
-    const down_out = applyDownGlobalScale(moeGemm(
-        activated,
+    var down_out = applyGlobalScale(moeGemm(
+        down_input,
         down,
         down_scales,
         expert_ids,
         zml.Shape.init(.{ .r = num_routes, .d = down.dim(.d) }, act_dtype),
         mode,
     ), down_global_scale, expert_ids);
-
-    const weights = routing.weights.reshape(.{ .token = num_tokens, .topk = topk }).withTags(.{ .token, .topk })
-        .merge(.{ .r = .{ .token, .topk } });
-    const weighted = down_out.mul(weights.convert(down_out.dtype()).broad(down_out.shape()));
-    const combined = weighted.splitAxis(.r, .{ .token = num_tokens, .topk = topk })
-        .sum(.topk).squeeze(.topk);
+    if (opts.routing_weight_placement == .after_down) down_out = down_out.mul(weights.broad(down_out.shape()));
+    const combined = down_out.splitAxis(.r, .{ .token = num_tokens, .topk = topk })
+        .sum(.topk).squeeze(.topk).convert(act_dtype);
 
     return combined.reshape(.{ .t = num_tokens, .d = down.dim(.d) });
 }
