@@ -934,24 +934,64 @@ pub const Executable = opaque {
         };
     }
 
+    /// Static memory estimates reported by PJRT for a compiled executable, in bytes.
+    /// Fields that the plugin does not populate remain zero, so zero can also mean
+    /// that a statistic is unavailable. These are not runtime allocator measurements.
     pub const CompiledMemoryStats = struct {
-        /// Mirrors xla::CompiledMemoryStats.
-        /// Device default memory (e.g., HBM for GPU/TPU) usage stats.
+        /// Size of generated device code, separate from buffer allocations below.
         generated_code_size_in_bytes: u64,
+        /// Device memory occupied by input argument buffers, including any storage
+        /// shared with outputs.
         argument_size_in_bytes: u64,
+        /// Device memory occupied by output buffers, including any storage shared
+        /// with input arguments.
         output_size_in_bytes: u64,
-        /// much: How argument is reused for output.
+        /// Input argument storage reused by outputs. Subtract this overlap when
+        /// adding argument and output sizes to avoid counting the same storage twice.
         alias_size_in_bytes: u64,
+        /// Preallocated device temporary buffers, excluding inputs, constants,
+        /// buffers that may escape as outputs, and thread-local allocations.
+        /// Can include temporary heaps in non-default device memory spaces.
         temp_size_in_bytes: u64,
+        /// Peak live-buffer bytes estimated from buffer-assignment heap traces,
+        /// including inputs, constants, outputs, and buffer padding. Accounts for
+        /// buffer sharing; excludes generated code and unused gaps in the heaps.
+        peak_memory_in_bytes: u64,
+        /// Backend-reported total usage of device default memory (e.g. HBM).
+        /// Accounting is backend-specific; this can be unavailable even when the
+        /// individual buffer statistics are populated.
+        total_size_in_bytes: u64,
+        /// Sum of buffer allocation sizes in device default memory (XLA color 0),
+        /// excluding thread-local allocations and generated code. Includes heap
+        /// padding and counts each allocation once, even when buffers alias.
+        total_allocation_bytes: u64,
+        /// Bytes in the subset of `total_allocation_bytes` occupied by inputs,
+        /// constants, or allocations that may escape as outputs, counted once.
+        /// "Indefinite" refers to their lifetime, not an unknown size or a count.
+        /// `total_allocation_bytes - indefinite_allocations` is the temporary
+        /// allocation size in default memory, excluding non-default heaps.
+        indefinite_allocations: u64,
+        /// Peak live-buffer estimate like `peak_memory_in_bytes`, but using logical
+        /// buffer sizes without layout padding. This is not a heap reservation size.
+        peak_unpadded_heap_bytes: u64,
 
-        /// memory: Host usage stats.
+        /// Size of generated host code, separate from host buffer allocations.
         host_generated_code_size_in_bytes: u64,
+        /// Host memory occupied by input argument buffers, including storage shared
+        /// with outputs.
         host_argument_size_in_bytes: u64,
+        /// Host memory occupied by output buffers, including storage shared with
+        /// input arguments.
         host_output_size_in_bytes: u64,
+        /// Host input argument storage reused by outputs. Subtract this overlap
+        /// when adding the host argument and output sizes.
         host_alias_size_in_bytes: u64,
+        /// Preallocated host temporary buffers, excluding inputs, constants,
+        /// buffers that may escape as outputs, and thread-local allocations.
         host_temp_size_in_bytes: u64,
     };
 
+    /// Returned values can be 0 if unsupported by the backend and/or old PJRT plugins.
     pub fn getCompiledMemoryStats(self: *const Executable, api: *const Api) ApiError!CompiledMemoryStats {
         const ret = try api.call(.PJRT_Executable_GetCompiledMemoryStats, .{
             .executable = self.inner(),
@@ -962,6 +1002,11 @@ pub const Executable = opaque {
             .output_size_in_bytes = @intCast(ret.output_size_in_bytes),
             .alias_size_in_bytes = @intCast(ret.alias_size_in_bytes),
             .temp_size_in_bytes = @intCast(ret.temp_size_in_bytes),
+            .peak_memory_in_bytes = @intCast(ret.peak_memory_in_bytes),
+            .total_size_in_bytes = @intCast(ret.total_size_in_bytes),
+            .total_allocation_bytes = @intCast(ret.total_allocation_bytes),
+            .indefinite_allocations = @intCast(ret.indefinite_allocations),
+            .peak_unpadded_heap_bytes = @intCast(ret.peak_unpadded_heap_bytes),
             .host_generated_code_size_in_bytes = @intCast(ret.host_generated_code_size_in_bytes),
             .host_argument_size_in_bytes = @intCast(ret.host_argument_size_in_bytes),
             .host_output_size_in_bytes = @intCast(ret.host_output_size_in_bytes),
