@@ -65,7 +65,7 @@ pub const Config = struct {
 };
 
 pub const Kernel = cute.Kernel(Config, .{
-    .name = "paged_attention_cute_indexed_grouped",
+    .name = "cute_paged_sparse_attention_indexed_grouped",
     .inputs = &.{ "q", "k", "v", "table", "lengths", "starts", "sink", "indices" },
     .outputs = &.{"out"},
     .run = run,
@@ -74,7 +74,7 @@ pub const Kernel = cute.Kernel(Config, .{
 // Small MHA selections use SIMT: warps evaluate independent selected
 // slots, then reduce their weighted values within one CTA and one launch.
 pub const Tiny = cute.Kernel(Config, .{
-    .name = "paged_attention_cute_indexed_tiny",
+    .name = "cute_paged_sparse_attention_indexed_tiny",
     .inputs = &.{ "q", "k", "v", "table", "lengths", "starts", "sink", "indices" },
     .outputs = &.{"out"},
     .run = runTiny,
