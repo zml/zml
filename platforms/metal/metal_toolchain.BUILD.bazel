@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-# Static BUILD file for the 17B54 MetalToolchain asset.
+# Static BUILD file for the 17F109 MetalToolchain asset.
 
 filegroup(
     name = "toolchain_runtime",
@@ -68,16 +68,16 @@ exports_files([
     "Metal.xctoolchain/usr/metal/32023/lib/amd_13/AMDShared.bundle/Contents/PlugIns/libGCNASM.dylib",
     "Metal.xctoolchain/usr/metal/32023/lib/amd_13/AMDShared.bundle/Contents/PlugIns/libSC.dylib",
     "Metal.xctoolchain/usr/metal/32023/lib/amd_13/libAMDNTPlugin.dylib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_ios.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_iosmac.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_iossim.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_osx.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_tvos.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_tvossim.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_watchos.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_watchossim.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_xros.metallib",
-    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_xrossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_ios.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_iosmac.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_iossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_osx.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_tvos.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_tvossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_watchos.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_watchossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_xros.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/lib/darwin/libtracepoint_rt_xrossim.metallib",
     "Metal.xctoolchain/usr/metal/32023/lib/libAMDNTPlugin.dylib",
     "Metal.xctoolchain/usr/metal/32023/lib/libMTLIGCCompilerPlugin.dylib",
     "Metal.xctoolchain/usr/metal/32023/lib/libMTLPasses.dylib",
@@ -377,6 +377,6 @@ filegroup(
 filegroup(
     name = "metal_compile_runtime",
     srcs = glob([
-        "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/**",
+        "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.883/**",
     ]),
 )
