@@ -48,6 +48,7 @@ pub const KernelUnifiedAttention2dPtr = struct {
         /// Width of a `[token, head, distance]` logit bias indexed by the distance from
         /// the query to the key; zero disables it.
         rel_bias_extent: i64 = 0,
+        rel_bias_dtype: DType = .f32,
 
         stride_k_cache_3: i64 = 1,
         stride_v_cache_3: i64 = 1,
@@ -85,7 +86,7 @@ pub const KernelUnifiedAttention2dPtr = struct {
             .seq_lens_ptr = .{ .ptr = .i32 },
             .alibi_slopes_ptr = .{ .ptr = cfg.scale_dtype },
             .qq_bias_ptr = .{ .ptr = cfg.scale_dtype },
-            .rel_bias_ptr = .{ .ptr = cfg.scale_dtype },
+            .rel_bias_ptr = .{ .ptr = cfg.rel_bias_dtype },
             .scale_ptr = .{ .ptr = .f32 },
             .k_scale_ptr = .{ .ptr = .f32 },
             .v_scale_ptr = .{ .ptr = .f32 },
@@ -172,6 +173,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
         /// Width of a `[token, head, distance]` logit bias indexed by the distance from
         /// the query to the key; zero disables it.
         rel_bias_extent: i64 = 0,
+        rel_bias_dtype: DType = .f32,
 
         stride_k_cache_3: i64 = 1,
         stride_v_cache_3: i64 = 1,
@@ -206,7 +208,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
             .seq_lens_ptr = .{ .ptr = .i32 },
             .alibi_slopes_ptr = .{ .ptr = cfg.scale_dtype },
             .qq_bias_ptr = .{ .ptr = cfg.scale_dtype },
-            .rel_bias_ptr = .{ .ptr = cfg.scale_dtype },
+            .rel_bias_ptr = .{ .ptr = cfg.rel_bias_dtype },
             .scale_ptr = .{ .ptr = .f32 },
             .k_scale_ptr = .{ .ptr = .f32 },
             .v_scale_ptr = .{ .ptr = .f32 },
@@ -674,7 +676,7 @@ fn kernelUnifiedAttention2d(
             const rel_bias_ptrs = k.broadcastTo(rel_bias_row_ptrs.expandDims(1), &.{ BLOCK_M, TILE_SIZE });
             const rel_bias = k.loadOpts(rel_bias_ptrs.addPtr(distance), .{
                 .mask = in_range.bitAnd(qm0_2d).bitAnd(qm1_2d),
-                .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
+                .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.rel_bias_dtype),
             });
             S = S.add(rel_bias.to(.f32).mul(RCP_LN2));
         }
@@ -995,7 +997,7 @@ fn kernelUnifiedAttention3d(
             const rel_bias_ptrs = k.broadcastTo(rel_bias_row_ptrs.expandDims(1), &.{ BLOCK_M, TILE_SIZE });
             const rel_bias = k.loadOpts(rel_bias_ptrs.addPtr(distance), .{
                 .mask = in_range.bitAnd(qm0_2d).bitAnd(qm1_2d),
-                .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
+                .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.rel_bias_dtype),
             });
             S = S.add(rel_bias.to(.f32).mul(RCP_LN2));
         }

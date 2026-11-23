@@ -129,6 +129,12 @@ fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Co
         }
         num_stages_2d = 1;
         num_warps = 4;
+        // A few long sequences cannot fill the GPU with large query tiles.
+        while (block_m > 16 and block_m >= 2 * options.numQueriesPerKv() and
+            options.num_kv_heads * (options.num_tokens * options.numQueriesPerKv() / block_m + options.batch_size) < 2 * options.cu_count)
+        {
+            block_m /= 2;
+        }
     }
     const platform = zml.Compiler.current().platform;
     if (platform.target == .oneapi) {
@@ -624,6 +630,7 @@ pub const paged = struct {
             .use_sinks = (opts.sink != null),
             .per_token_sinks = if (opts.sink) |sink| sink.rank() == 2 else false,
             .rel_bias_extent = if (opts.rel_bias) |bias| bias.dim(-1) else 0,
+            .rel_bias_dtype = if (opts.rel_bias) |bias| triton.from(bias.dtype()) else .f32,
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.block_q),
             .block_m = @intCast(config.block_m),
@@ -654,7 +661,7 @@ pub const paged = struct {
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
                 .qq_bias_ptr = dummy,
-                .rel_bias_ptr = if (opts.rel_bias) |bias| bias.convert(.f32) else dummy,
+                .rel_bias_ptr = opts.rel_bias orelse dummy,
                 .scale_ptr = .scalar(scale, .f32),
                 .k_scale_ptr = dummy,
                 .v_scale_ptr = dummy,
@@ -703,6 +710,7 @@ pub const paged = struct {
             .use_sinks = (opts.sink != null),
             .per_token_sinks = if (opts.sink) |sink| sink.rank() == 2 else false,
             .rel_bias_extent = if (opts.rel_bias) |bias| bias.dim(-1) else 0,
+            .rel_bias_dtype = if (opts.rel_bias) |bias| triton.from(bias.dtype()) else .f32,
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.attention.block_q),
             .block_m = @intCast(config.attention.block_m),
@@ -751,7 +759,7 @@ pub const paged = struct {
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
                 .qq_bias_ptr = dummy,
-                .rel_bias_ptr = if (opts.rel_bias) |bias| bias.convert(.f32) else dummy,
+                .rel_bias_ptr = opts.rel_bias orelse dummy,
                 .scale_ptr = .scalar(scale, .f32),
                 .k_scale_ptr = dummy,
                 .v_scale_ptr = dummy,
