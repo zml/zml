@@ -131,7 +131,7 @@ pub fn fusedExpertsBase(
         routing.expert_ids;
 
     const local_ids = routing_.localIds().reshape(ids.shape());
-    const hidden_quant, const input_scale, const gate_up_scale = prepareOperand(hidden, gate_up_, local_ids, opts.quantize_input);
+    const hidden_quant, const input_scale, const gate_up_scale = prepareOperand(hidden, gate_up_, local_ids, opts);
 
     const gate_up_out = gemm(.{
         .input = hidden_quant,
@@ -153,7 +153,7 @@ pub fn fusedExpertsBase(
         const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
     }
-    const activated_quant, const down_input_scale, const down_scale = prepareOperand(activated, down_, local_ids, opts.quantize_input);
+    const activated_quant, const down_input_scale, const down_scale = prepareOperand(activated, down_, local_ids, opts);
     const down_weights = if (opts.routing_weight_placement == .after_down) routing_weights else null;
 
     const down_out = gemm(.{
@@ -451,10 +451,10 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
 
 /// The GEMM input of a projection, its block scales, and for NVFP4 the multiplier
 /// that dequantizes the GEMM output of each route in `ids`.
-fn prepareOperand(x: Tensor, linear: nn.Linear, ids: Tensor, quantize: bool) struct { Tensor, ?Tensor, ?Tensor } {
+fn prepareOperand(x: Tensor, linear: nn.Linear, ids: Tensor, opts: Options) struct { Tensor, ?Tensor, ?Tensor } {
     const scheme = linear.quantizationScheme();
     if (scheme != .nvfp4) {
-        const input, const scale = prepareInput(x, scheme, linear.weight.dtype(), quantize);
+        const input, const scale = prepareInput(x, scheme, linear.weight.dtype(), opts.quantize_input);
         return .{ input, scale, null };
     }
     const quantization = linear.quantization.?;
@@ -464,7 +464,10 @@ fn prepareOperand(x: Tensor, linear: nn.Linear, ids: Tensor, quantize: bool) str
     // E4M3's normal range; a calibrated input scale is one such choice, so it is not needed.
     const row_scale = rows.abs().max(.in).scale(1.0 / 1536.0).maximum(.scalar(std.math.floatMin(f32), .f32))
         .bitCast(.u32).addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
-    const quantized = @import("zml/quantization").quantizeNvfp4(rows, row_scale, .in);
+    const quantized = switch (opts.nvfp4_input_scale) {
+        .six => @import("zml/quantization").quantizeNvfp4(rows, row_scale, .in),
+        .four_or_six => @import("zml/quantization").quantizeNvfp4FourOrSix(rows, row_scale, .in),
+    };
     // Gate/up rows are tokens and down rows are routes: expand both to routes.
     var output_scale = row_scale.reshape(.{ .token = ids.dim(.token), .topk = .auto }).broad(ids.shape().withDtype(.f32));
     if (quantization.global_scale) |scale| {
@@ -709,13 +712,18 @@ test "NVFP4 routed GEMM matches dequantized operands" {
             return blocks.mul(scales.convert(.f32).appendAxes(.{.blk}).broad(blocks.shape())).merge(.{ .in = .{ .sc, .blk } });
         }
 
-        fn forward(x: Tensor, w: Tensor, scales: Tensor, ids: Tensor) Outputs {
+        fn forward(x: Tensor, w: Tensor, scales: Tensor, ids: Tensor, four_or_six: bool) Outputs {
             const linear: nn.Linear = .{
                 .weight = w.convert(.f4e2m1),
                 .tag = Shape.toTag(.in),
                 .quantization = .{ .scheme = .nvfp4, .scales = scales.convert(.f8e4m3fn) },
             };
-            const input, const input_scale, const output_scale = prepareOperand(x, linear, ids, false);
+            const input, const input_scale, const output_scale = prepareOperand(x, linear, ids, .{
+                .activation = .{ .swiglu = .{} },
+                .quantize_input = true,
+                .routing_weight_placement = .before_down,
+                .nvfp4_input_scale = if (four_or_six) .four_or_six else .six,
+            });
             const config = launchConfigForTokens(x.dim(.token));
             const routing = prepareRouting(ids, w.dim(.expert), @intCast(config.block_size_m));
             const actual = gemm(.{
@@ -739,12 +747,12 @@ test "NVFP4 routed GEMM matches dequantized operands" {
         }
     };
 
-    for ([_]i64{ 1, 17, 40 }) |tokens| {
+    for ([_]i64{ 1, 17, 40, 17 }, [_]bool{ false, false, false, true }) |tokens, four_or_six| {
         const x: Tensor = .init(.{ .token = tokens, .in = 256 }, .bf16);
         const w: Tensor = .init(.{ .expert = 8, .out = 48, .in = 256 }, .f32);
         const scales: Tensor = .init(.{ .expert = 8, .out = 48, .sc = 16 }, .f32);
         const ids: Tensor = .init(.{ .token = tokens, .topk = 1 }, .i32);
-        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, scales, ids }, .{});
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, scales, ids, four_or_six }, .{});
         defer exe.deinit();
         var buffers: [4]zml.Buffer = undefined;
         var initialized: usize = 0;

@@ -12,6 +12,8 @@ pub const Options = struct {
     quantize_input: bool,
     /// Where routing weights are applied; FlashInfer, Mosaic, Metal and TCL require after_down.
     routing_weight_placement: RoutingWeightPlacement,
+    /// How Triton scales NVFP4 activation blocks: amax/6, or the better of amax/6 and amax/4.
+    nvfp4_input_scale: enum { six, four_or_six } = .six,
 };
 
 pub const ActivationKind = enum {
