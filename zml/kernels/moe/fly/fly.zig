@@ -96,8 +96,9 @@ pub fn fusedExperts(
 
     const local_ids = routing_.localIds().reshape(ids.shape());
 
+    const gate_up_input, const gate_up_row_scales = prepareInput(hidden, gate_up_, opts, routing);
     const gate_up_out = gemm(.{
-        .input = prepareInput(hidden, gate_up_, opts),
+        .input = gate_up_input,
         .weight = gate_up,
         .bias = gate_up_.bias,
         .weight_scale = gate_up_.quantizationScales(),
@@ -109,14 +110,15 @@ pub fn fusedExperts(
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    var activated = opts.activation.applyActivation(scaleRoutes(gate_up_out, gate_up_, local_ids), layout);
+    var activated = opts.activation.applyActivation(scaleRoutes(gate_up_out, gate_up_, local_ids, gate_up_row_scales), layout);
     if (opts.routing_weight_placement == .before_down) {
         const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
     }
 
+    const down_input, const down_row_scales = prepareInput(activated, down_, opts, routing);
     const down_out = gemm(.{
-        .input = prepareInput(activated, down_, opts),
+        .input = down_input,
         .weight = down,
         .bias = down_.bias,
         .weight_scale = down_.quantizationScales(),
@@ -129,7 +131,7 @@ pub fn fusedExperts(
         .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
-    const output = scaleRoutes(down_out, down_, local_ids).sum(.topk).squeeze(.topk).convert(.bf16);
+    const output = scaleRoutes(down_out, down_, local_ids, down_row_scales).sum(.topk).squeeze(.topk).convert(.bf16);
 
     return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
@@ -169,24 +171,30 @@ pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linea
     return routes > 0 and routes <= @divTrunc(std.math.maxInt(i32), max_width);
 }
 
-/// The BF16 GEMM input. NVFP4 GEMMs take FP4 activations, but CDNA3 has no FP4 MFMA:
-/// activations are rounded to NVFP4 and widened back to BF16, which holds them exactly.
-fn prepareInput(x: Tensor, linear: nn.Linear, opts: Options) Tensor {
-    if (linear.quantizationScheme() != .nvfp4) return x.convert(.bf16);
+/// The GEMM input and, if the GEMM output needs them, the scales of its rows.
+/// NVFP4 GEMMs take FP4 activations, but CDNA3 has no FP4 MFMA: activations are
+/// rounded to NVFP4 and widened to a format that holds them exactly. Decode
+/// GEMVs take them over their row scales in F16, others in BF16.
+fn prepareInput(x: Tensor, linear: nn.Linear, opts: Options, routing: Routing) struct { Tensor, ?Tensor } {
+    if (linear.quantizationScheme() != .nvfp4) return .{ x.convert(.bf16), null };
     // Activations are rounded to BF16 before quantization, as for BF16 GEMMs.
-    return fly.RoundNvfp4.call(x.convert(.bf16), opts.nvfp4_input_scale == .four_or_six);
+    return fly.RoundNvfp4.call(x.convert(.bf16), opts.nvfp4_input_scale == .four_or_six, if (routing.naive_block_assignment) .f16_pairs else .bf16);
 }
 
-/// GEMM outputs `{.token, ..., .out}` in FP32, times the NVFP4 per-expert multiplier of
-/// each route in `ids`.
-fn scaleRoutes(x: Tensor, linear: nn.Linear, ids: Tensor) Tensor {
+/// GEMM outputs `{.token, ..., .out}` in FP32, times each route's input row scale
+/// and the NVFP4 per-expert multiplier of its expert in `ids`.
+fn scaleRoutes(x: Tensor, linear: nn.Linear, ids: Tensor, row_scales: ?Tensor) Tensor {
     const result = x.convert(.f32);
-    const scale = (linear.quantization orelse return result).global_scale orelse return result;
-    const global = scale.asMultiplier();
-    if (global.rank() == 0) return result.mul(global.broad(result.shape()));
-    // Nonlocal routes produce zeros; any valid expert works for them.
-    const per_route = global.withTags(.{.expert}).gather(.{ .expert = ids.maximum(.scalar(0, .i32)) }, .{});
-    return result.mul(per_route.reshape(result.shape().setDim(-1, 1).withDtype(.f32)).broad(result.shape()));
+    // Gate/up input rows are tokens and down input rows are routes: expand both to routes.
+    var per_route: ?Tensor = if (row_scales) |scales| scales.reshape(.{ .token = ids.dim(.token), .topk = .auto }).broad(ids.shape().withDtype(.f32)) else null;
+    if (linear.quantization) |q| if (q.global_scale) |scale| {
+        const global = scale.asMultiplier();
+        // Nonlocal routes produce zeros; any valid expert works for them.
+        const by_expert = if (global.rank() == 0) global.broad(ids.shape().withDtype(.f32)) else global.withTags(.{.expert}).gather(.{ .expert = ids.maximum(.scalar(0, .i32)) }, .{});
+        per_route = if (per_route) |r| r.mul(by_expert) else by_expert;
+    };
+    const multiplier = per_route orelse return result;
+    return result.mul(multiplier.reshape(result.shape().setDim(-1, 1).withDtype(.f32)).broad(result.shape()));
 }
 
 pub const GemmOptions = struct {
@@ -315,12 +323,17 @@ fn launchConfigForTokens(num_tokens: i64) LaunchConfig {
 test "RoundNvfp4 matches quantizeNvfp4Rows" {
     const platform = zml.testing.env();
     if (platform.target != .rocm) return error.SkipZigTest;
-    const Outputs = struct { kernel: Tensor, reference: Tensor };
+    const Outputs = struct { bf16: Tensor, f16_pairs: Tensor, reference: Tensor };
     const Local = struct {
         fn forward(x: Tensor, four_or_six: bool) Outputs {
             const quantized = quantization.quantizeNvfp4Rows(x.convert(.f32), .in, four_or_six);
+            const pairs, const row_scales = fly.RoundNvfp4.call(x, four_or_six, .f16_pairs);
+            // Swap pair positions back: (0, 2, 1, 3) is its own inverse.
+            const groups = pairs.convert(.f32).mul(row_scales.?.withTags(.{.t}).broad(pairs.shape().withDtype(.f32)))
+                .splitAxis(.in, .{ .group = -1, .half = 2, .pair = 2, .pos = 2 });
             return .{
-                .kernel = fly.RoundNvfp4.call(x, four_or_six),
+                .bf16 = fly.RoundNvfp4.call(x, four_or_six, .bf16)[0],
+                .f16_pairs = groups.transpose(.{ .t, .group, .half, .pos, .pair }).merge(.{ .in = .{ .group, .half, .pos, .pair } }).convert(.bf16),
                 .reference = quantization.dequantizeNvfp4(quantized, .in).convert(.bf16),
             };
         }
@@ -346,6 +359,8 @@ test "RoundNvfp4 matches quantizeNvfp4Rows" {
         var outputs: zml.Bufferized(Outputs) = undefined;
         runner.run(io, .{input}, .{&outputs}, .{ .wait = true });
         defer zml.Buffer.deinitAll(Outputs, &outputs);
-        try zml.testing.expectClose(io, outputs.reference, outputs.kernel, .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 });
+        const exact: zml.testing.CompareOpts = .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 };
+        try zml.testing.expectClose(io, outputs.reference, outputs.bf16, exact);
+        try zml.testing.expectClose(io, outputs.reference, outputs.f16_pairs, exact);
     }
 }

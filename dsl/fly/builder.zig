@@ -1142,6 +1142,11 @@ pub const Builder = struct {
         ));
     }
 
+    /// `a.x * b.x + a.y * b.y + c` for `vector<2xf16>` operands, accumulated in F32.
+    pub fn dot2F16(self: *Builder, a: Value, b: Value, c: Value) Value {
+        return self.emit(rocdl.ops.fdot2(self.ctx, a.inner, b.inner, c.inner, .float(self.ctx, .f32), .{ .clamp = .boolean(self.ctx, false) }, self.loc()));
+    }
+
     /// CDNA3 packed FP8 conversion, selecting two bytes from the low/high word.
     pub fn cvtPkF32Fp8(self: *Builder, bits: Value, high: bool) Value {
         return self.emit(rocdl.cvtPkF32Fp8(self.ctx, bits.inner, high, self.loc()));
