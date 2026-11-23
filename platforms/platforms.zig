@@ -1,4 +1,3 @@
-// Cleanup: keep the MUSA target and loader registration.
 const std = @import("std");
 
 const cpu = @import("platforms/cpu");

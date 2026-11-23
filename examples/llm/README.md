@@ -1,4 +1,3 @@
-<!-- Merge cleanup: keep the block regression instructions. The marked archive override paragraph is temporary. -->
 # LLM
 
 `//examples/llm` runs interactive or one-shot text generation from a model repository from HuggingFace.
@@ -34,7 +33,29 @@ For a single non-interactive prompt:
 bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct --prompt="Write a haiku about Zig"
 ```
 
-## Check one Llama block on an S4000
+## Run Llama on an S4000
+
+Until the SDK 5.1.0 plugin archive is published to the ZML mirror, build the sandbox in the sibling XLA checkout. Copy it to a directory dedicated to this generated override. `rsync -a` preserves compiler and library symlinks, and `--delete` removes files dropped from later sandbox builds.
+
+```bash
+# From the ZML checkout
+override="$(cd .. && pwd)/xla-override"
+(cd ../xla-private && bazel build --config=musa_remote -c opt --remote_download_outputs=toplevel //zml/musa:sandbox)
+mkdir -p "$override"
+rsync -a --delete --chmod=Du+w ../xla-private/bazel-bin/zml/musa/sandbox/ "$override/"
+install -m644 platforms/musa/libzml_musa.BUILD.bazel "$override/BUILD.bazel"
+touch "$override/REPO.bazel"
+
+MUSA_VISIBLE_DEVICES=0 bazel run --config=release \
+  --//platforms:cpu=false --//platforms:musa=true \
+  --override_repository="+musa_packages+libzml_musa=$override" \
+  //examples/llm:llm -- --model=/path/to/Llama-3.2-3B-Instruct \
+  --backend=stablehlo --topk=1 --seqlen=16 --prompt=Paris
+```
+
+Run the inference command on the machine with the card. When building elsewhere, deploy the resulting executable, its repository mapping and SDK runfiles to the S4000 and use the same model arguments there.
+
+### Check one Llama block against the CPU reference
 
 The hardware regression uses layer 0 of a local BF16 Llama 3.2 3B Instruct checkpoint. Generate the fixture on the CPU machine with PyTorch 2.8.0, Transformers 4.56.2 and safetensors installed.
 
@@ -43,9 +64,6 @@ python3 examples/llm/models/llama_block_fixture.py /path/to/Llama-3.2-3B-Instruc
 ```
 
 Build `//examples/llm:llama_block_test` with `--@zml//platforms:musa=true` and select one S4000 with `MUSA_VISIBLE_DEVICES=0`. The test runner takes `--target=musa --fixture=/path/to/llama-block`. It compares hidden states, keys and values after a four-token prefill and four one-token decodes. It also checks that previously written cache positions stay unchanged and unused positions stay zero. The S4000 needs the executable, its Bazel runfiles and the two generated fixture files. Keep the weights outside the source tree.
-
-<!-- Merge cleanup: remove this paragraph once MODULE.bazel pins the published archive URL. -->
-While the XLA archive is unpublished, pass `--repo_env=ZML_MUSA_ARCHIVE_URL=file:///absolute/path/to/archive.tar.zst` to Bazel.
 
 ## Options
 

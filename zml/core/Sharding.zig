@@ -1,4 +1,3 @@
-// Cleanup: keep the MUSA target cases for the SDK 5.1 PJRT backend.
 //! Explain how to split a buffer across different devices.
 const std = @import("std");
 const builtin = @import("builtin");

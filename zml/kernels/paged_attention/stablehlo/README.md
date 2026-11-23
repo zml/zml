@@ -1,4 +1,3 @@
-<!-- Merge cleanup: keep the MUSA dispatch and supported-configuration documentation. -->
 # StableHLO paged attention
 
 CPU and MUSA select StableHLO by default. Furiosa can select it explicitly. See the

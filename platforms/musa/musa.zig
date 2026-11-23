@@ -1,4 +1,3 @@
-// Cleanup: keep this file. It loads the PJRT plugin and SDK packaged by XLA.
 const std = @import("std");
 
 const bazel = @import("bazel");

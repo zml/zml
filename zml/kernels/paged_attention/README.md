@@ -1,4 +1,3 @@
-<!-- Merge cleanup: keep the MUSA backend entry. -->
 # Paged attention semantics
 
 [paged_attention.zig](paged_attention.zig) evaluates attention over a KV cache

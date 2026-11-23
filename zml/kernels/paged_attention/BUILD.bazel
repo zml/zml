@@ -1,4 +1,3 @@
-# Merge cleanup: keep the MUSA hardware regression test and its compatibility constraint.
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(

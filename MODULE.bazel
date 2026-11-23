@@ -246,12 +246,8 @@ use_repo(oneapi, "libzml_oneapi")
 furiosa = use_extension("//platforms/furiosa:furiosa.bzl", "furiosa_packages")
 use_repo(furiosa, "libzml_furiosa")
 
-# Cleanup: keep this pin. Before merging, set url to the published XLA archive.
-musa_archive = use_repo_rule("//platforms/musa:musa.bzl", "musa_archive")
-musa_archive(
-    name = "libzml_musa",
-    sha256 = "46e2cb7267a2f6b288223f0fa503f69297c3b1c93d096e69d558ac0b2992c7aa",
-)
+musa = use_extension("//platforms/musa:musa.bzl", "musa_packages")
+use_repo(musa, "libzml_musa")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libzml_tpu")

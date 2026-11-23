@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     //
     // Load the model and compile it
     //
-    var progress = std.Progress.start(io, .{ .root_name = args.model });
+    var progress = std.Progress.start(init.io, .{ .root_name = args.model });
     errdefer progress.end();
 
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
@@ -142,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
     //
     // We're ready to go! Let's start a chat...
     //
-    try printZmlLogo(io, init.environ_map);
+    try printZmlLogo(init.io, init.environ_map);
 
     const interactive = args.prompt == null;
     const prompt = if (args.prompt) |prompt_arg| b: {
@@ -158,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
 
     var llm_chat = try chat.Chat.init(
         allocator,
-        io,
+        init.io,
         platform,
         tokenizer,
         compiled_model,

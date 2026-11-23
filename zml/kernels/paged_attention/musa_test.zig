@@ -1,4 +1,3 @@
-// Merge cleanup: keep this S4000 hardware regression test with the MUSA plugin integration.
 const std = @import("std");
 
 const zml = @import("zml/core");

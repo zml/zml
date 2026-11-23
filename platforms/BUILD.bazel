@@ -1,4 +1,3 @@
-# Cleanup: keep the opt-in Linux x86_64 MUSA platform.
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:zig_options.bzl", "zig_option", "zig_options")

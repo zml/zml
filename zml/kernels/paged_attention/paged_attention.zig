@@ -1,4 +1,3 @@
-// Merge cleanup: keep the MUSA backend selection and attention option checks.
 const std = @import("std");
 
 const stdx = @import("stdx");

@@ -1,5 +1,3 @@
-# Keep for master: generates the independent CPU oracle for llama_block_test.
-# Generated fixture directories contain checkpoint weights. Remove them after validation.
 """Usage: python llama_block_fixture.py LOCAL_LLAMA_REPO OUTPUT_DIRECTORY
 
 The fixture uses meta-llama/Llama-3.2-3B-Instruct, revision

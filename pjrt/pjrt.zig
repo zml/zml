@@ -696,7 +696,7 @@ pub const Device = opaque {
 
     pub const Attributes = struct {
         values: []const NamedValue,
-        // Keep: the plugin's deleter accepts its original owner, including null for static data.
+        // The plugin may use a null owner for static attributes.
         state: ?*c.PJRT_Device_Attributes,
         deleter: *const fn (?*c.PJRT_Device_Attributes) callconv(.c) void,
 

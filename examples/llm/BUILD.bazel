@@ -1,4 +1,3 @@
-# Cleanup: keep the checkpoint-backed llama_block_test target for master.
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")

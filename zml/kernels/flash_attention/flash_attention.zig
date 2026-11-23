@@ -1,4 +1,3 @@
-// Merge cleanup: keep the MUSA availability checks until a MUSA flash-attention kernel exists.
 const std = @import("std");
 
 const stdx = @import("stdx");
