@@ -1,13 +1,78 @@
 const std = @import("std");
 const zml = @import("zml");
 
-const Model = @import("model.zig").Gradium_Phonon_TTS_For_Conditional_Generation;
-const util = @import("../util.zig");
+const phonon = @import("phonon/model.zig");
+const Phonon_Model = phonon.Gradium_Phonon_TTS_For_Conditional_Generation;
+const Mimi_Model = @import("mimi/model.zig").Pocket_TTS_Audio_Tokenizer_Model;
+const util = @import("util.zig");
+
+/// One device execution generates a latent frame and decodes its history window.
+/// Phonon weights, six K/V cache pairs and Mimi weights are runtime model inputs.
+/// Other inputs are prompt/decode IDs [B,S] i64, voice [B,P,512] in the selected
+/// dtype, history [B,A,32] f32, flow endpoints [B,1] f32, counts [2] i32, RNG state
+/// and backend attention metadata. The host retains the returned donated state.
+/// Only the raw EOS scalar and the newest [B,1,1920] f32 PCM chunk are read back.
+const Model = struct {
+    phonon: Phonon_Model,
+    mimi: Mimi_Model,
+
+    pub const Output = struct {
+        eos_score: zml.Tensor,
+        waveform: zml.Tensor,
+        active_lengths: zml.Tensor,
+        history: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        kv_caches: phonon.Gradium_Phonon_TTS_Model.KV_Caches,
+    };
+
+    pub fn bufferize(self: *const Model, allocator: std.mem.Allocator) !zml.Bufferized(Model) {
+        var phonon_buffers = try self.phonon.bufferize(allocator);
+        errdefer zml.Buffer.deinitAll(Phonon_Model, &phonon_buffers);
+        return .{ .phonon = phonon_buffers, .mimi = try self.mimi.bufferize(allocator) };
+    }
+
+    /// .b is batch (1); .s is incoming token positions (prompt capacity or 1);
+    /// .p is voice frames; .ad is 512 voice features; .a is history capacity;
+    /// .ld is 32 latent coordinates; .t is one flow-time scalar per batch row.
+    /// Mimi consumes the post-step counts and 34-frame window directly as graph
+    /// values. Its .s output contains the newest 1920 mono waveform samples.
+    pub fn forward(
+        self: Model,
+        token_ids: zml.Tensor,
+        voice: zml.Tensor,
+        history: zml.Tensor,
+        start_time: zml.Tensor,
+        end_time: zml.Tensor,
+        active_lengths: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
+    ) Output {
+        var span = zml.tracer.span_at(@src(), @typeName(@This()) ++ ".forward", .{});
+        defer span.end();
+        const compiler = zml.Compiler.current();
+        compiler.pushLocationFmt(@src(), @typeName(@This()) ++ ".forward", .{});
+        defer compiler.popLocation();
+
+        const next = self.phonon.forward(token_ids, voice, history, start_time, end_time, active_lengths, rng, attention_metadata, attention_parameters); // [B,S] IDs + device state -> updated history [B,A,32] f32 and window [B,34,32] f32
+        const waveform = self.mimi.forward(next.active_lengths, next.history34); // [B,34,32] f32 -> [B,1,1920] f32
+        return .{
+            .eos_score = next.eos_score,
+            .waveform = waveform,
+            .active_lengths = next.active_lengths,
+            .history = next.history,
+            .rng = next.rng,
+            .kv_caches = next.kv_caches,
+        };
+    }
+};
 
 // ---
 
-/// Text to latent audio.
-pub const Phonon = struct {
+/// Text to 24 kHz mono waveforms, with one combined device call per frame.
+pub const Pipeline = struct {
+    pub const sampling_rate = 24_000;
+    pub const samples_per_frame = 1920;
     io: std.Io,
     gpa: std.mem.Allocator,
 
@@ -31,12 +96,7 @@ pub const Phonon = struct {
     /// Initialized to [num_tokens, 0]; both counters increment once per step.
     /// Gets swapped with the donated output buffer after each execution.
     active_lengths: zml.Buffer,
-    /// Storage space for the generated latent frame. Written to by Phonon, read from by Mimi.
-    //
-    // TODO: double-buffering this would make TSS<>Decoding pipelining possible -- no idea if that's useful though.
-    frame: zml.Buffer,
     history: zml.Buffer,
-    history34: zml.Buffer,
     rng: zml.Tensor.Rng.Buffer,
 
     /// Shared backend metadata, read-only across layers and generation steps.
@@ -66,8 +126,9 @@ pub const Phonon = struct {
     decode_exe: zml.Exe,
     decode_runner: zml.Exe.Runner,
 
-    /// Prepared host inputs, borrowed only until init_in_place returns.
-    /// The caller owns both slices; Phonon uploads its own device copies.
+    /// Prepared utterance inputs, borrowed only during start_chunk. The token
+    /// slice is uploaded there; voice is the shared selection already uploaded
+    /// by init_in_place. The caller owns both host slices.
     pub const Input = struct {
         tokens: zml.Slice,
         voice: zml.Slice,
@@ -81,11 +142,12 @@ pub const Phonon = struct {
     };
 
     /// `self` can be fully undefined, as long as it's heap allocated.
-    /// Loads f32 voice frames [1,P,512] and compiles fixed-capacity executables.
+    /// Loads both models and voice frames [1,P,512], then compiles combined
+    /// prefill/decode graphs at fixed capacities.
     /// The instance is idle until start_chunk supplies expanded prompt IDs and
     /// generation limits. No text processing occurs here.
     pub fn init_in_place(
-        self: *Phonon,
+        self: *Pipeline,
         io: std.Io,
         gpa: std.mem.Allocator,
         platform: *const zml.Platform,
@@ -121,6 +183,12 @@ pub const Phonon = struct {
         defer registry.deinit();
         var store: zml.io.TensorStore = .fromRegistry(gpa, &registry, &.{});
         defer store.deinit();
+        const mimi_path = try util.assetPath(gpa, util.gradium_phonon_mimi);
+        defer gpa.free(mimi_path);
+        var mimi_registry = try zml.safetensors.TensorRegistry.fromPath(gpa, io, mimi_path);
+        defer mimi_registry.deinit();
+        var mimi_store: zml.io.TensorStore = .fromRegistry(gpa, &mimi_registry, &.{});
+        defer mimi_store.deinit();
         {}
         span_load_registry.end();
 
@@ -132,16 +200,19 @@ pub const Phonon = struct {
         // Token and frame indices must fit the i32 counters.
         if (self.max_tokens > std.math.maxInt(i32)) return error.SequenceTooLong;
 
-        self.model = .init(store.view(), self.max_tokens);
-        for (&self.model.model.layers) |*layer| {
+        self.model = .{
+            .phonon = .init(store.view(), self.max_tokens),
+            .mimi = .init(store.view(), mimi_store.view()),
+        };
+        for (&self.model.phonon.model.layers) |*layer| {
             const cache = &layer.self_attn.kv_cache;
             cache.k = .fromShape(cache.k.shape().withDtype(dtype));
             cache.v = .fromShape(cache.v.shape().withDtype(dtype));
         }
-        try self.load(&store);
+        try self.load(&store, &mimi_store);
         errdefer zml.Buffer.deinitAll(Model, &self.weights);
 
-        for (&self.model.model.layers, &self.weights.model.layers) |*layer, *buffers| {
+        for (&self.model.phonon.model.layers, &self.weights.phonon.model.layers) |*layer, *buffers| {
             const spec = layer.self_attn.kv_cache;
             const cache = &buffers.self_attn.kv_cache;
 
@@ -193,8 +264,6 @@ pub const Phonon = struct {
         self.decode_ids = try zml.Buffer.fromBytes(io, platform, .init(.{ .b = 1, .s = 1 }, .i64), std.mem.asBytes(&audio_marker));
         errdefer self.decode_ids.deinit();
 
-        self.frame = try zml.Buffer.uninitialized(io, platform, .init(.{ .b = 1, .s = 1, .ld = 32 }, .f32), .{});
-        errdefer self.frame.deinit();
         const rng_spec: zml.Tensor.Rng = .init();
         self.rng = try rng_spec.initBuffer(io, platform, 42);
         errdefer zml.Tensor.Rng.deinitBuffer(&self.rng);
@@ -207,9 +276,6 @@ pub const Phonon = struct {
             break :blk try zml.Buffer.fromSlice(io, platform, zeros);
         };
         errdefer self.history.deinit();
-        self.history34 = try zml.Buffer.uninitialized(io, platform, .init(.{ .b = 1, .a = 34, .ld = 32 }, .f32), .{});
-
-        errdefer self.history34.deinit();
 
         const attention_backend = zml.attention.Backend.auto(platform);
         self.attention_parameters = .init(.fromBackend(attention_backend));
@@ -217,47 +283,47 @@ pub const Phonon = struct {
         self.attention_metadata_buffers = try self.attention_metadata.initBuffer(io, platform);
         errdefer zml.attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
 
-        self.prefill_exe = try platform.compile(gpa, io, self.model, .forward, .{
-            zml.Tensor.fromShape(self.ids.shape()),
-            zml.Tensor.fromShape(self.voice.shape()),
-            zml.Tensor.fromShape(self.history.shape()),
-            zml.Tensor.fromShape(self.history34.shape()),
-            zml.Tensor.fromShape(self.start_time.shape()),
-            zml.Tensor.fromShape(self.end_time.shape()),
-            zml.Tensor.fromShape(self.active_lengths.shape()),
-            zml.Tensor.fromShape(self.frame.shape()),
-            zml.Tensor.Rng.init(),
-            self.attention_metadata,
-            self.attention_parameters,
-        }, .{
-            .program_name = @typeName(@This()) ++ ".prefill",
-        });
+        // Compile both shape variants concurrently. Runners are created only
+        // after the executables have reached their stable, heap-owned addresses.
+        const prefill_context: zml.tracer.Context = .init(.generic);
+        var prefill_dispatch = zml.tracer.span_at_for(@src(), here ++ "/dispatch_prefill", .{}, .{ .producer = prefill_context });
+        var future_prefill = io.async(Pipeline.compile_variant, .{ self, true, prefill_context });
+        prefill_dispatch.end();
+        const decode_context: zml.tracer.Context = .init(.generic);
+        var decode_dispatch = zml.tracer.span_at_for(@src(), here ++ "/dispatch_decode", .{}, .{ .producer = decode_context });
+        decode_dispatch.end();
+        self.decode_exe = self.compile_variant(false, decode_context) catch |err| {
+            if (future_prefill.await(io)) |compiled| {
+                var owned = compiled;
+                owned.deinit();
+            } else |_| {}
+            return err;
+        };
+        errdefer self.decode_exe.deinit();
+        self.prefill_exe = try future_prefill.await(io);
         errdefer self.prefill_exe.deinit();
-        util.dumpMemoryStats(@typeName(@This()) ++ ".prefill", &self.prefill_exe);
-
         self.prefill_runner = try self.prefill_exe.runner(gpa);
         errdefer self.prefill_runner.deinit(gpa);
+        self.decode_runner = try self.decode_exe.runner(gpa);
+    }
 
-        self.decode_exe = try platform.compile(gpa, io, self.model, .forward, .{
-            zml.Tensor.fromShape(self.decode_ids.shape()),
+    fn compile_variant(self: *Pipeline, prefill: bool, context: zml.tracer.Context) !zml.Exe {
+        const name = if (prefill) @typeName(@This()) ++ ".prefill" else @typeName(@This()) ++ ".decode";
+        var span = zml.tracer.span_at_for(@src(), @typeName(@This()) ++ ".compile_variant", .{ .prefill = prefill }, .{ .consumer = context });
+        defer span.end();
+        var exe = try self.platform.compile(self.gpa, self.io, self.model, .forward, .{
+            zml.Tensor.fromShape(if (prefill) self.ids.shape() else self.decode_ids.shape()),
             zml.Tensor.fromShape(self.voice.shape()),
             zml.Tensor.fromShape(self.history.shape()),
-            zml.Tensor.fromShape(self.history34.shape()),
             zml.Tensor.fromShape(self.start_time.shape()),
             zml.Tensor.fromShape(self.end_time.shape()),
             zml.Tensor.fromShape(self.active_lengths.shape()),
-            zml.Tensor.fromShape(self.frame.shape()),
             zml.Tensor.Rng.init(),
             self.attention_metadata,
             self.attention_parameters,
-        }, .{
-            .program_name = @typeName(@This()) ++ ".decode",
-        });
-        errdefer self.decode_exe.deinit();
-        util.dumpMemoryStats(@typeName(@This()) ++ ".decode", &self.decode_exe);
-
-        self.decode_runner = try self.decode_exe.runner(gpa);
-        errdefer self.decode_runner.deinit(gpa);
+        }, .{ .program_name = name });
+        util.dumpMemoryStats(name, &exe);
+        return exe;
     }
 
     /// Start an independent utterance without loading weights or recompiling.
@@ -266,7 +332,7 @@ pub const Phonon = struct {
     /// causal attention ignores every retained entry beyond the new valid length.
     /// History and RNG are reset so previous utterances cannot condition Mimi or
     /// Phonon, and each chunk starts from the same deterministic seed (42).
-    pub fn start_chunk(self: *Phonon, input: Input) !void {
+    pub fn start_chunk(self: *Pipeline, input: Input) !void {
         var span = zml.tracer.span_at(@src(), @typeName(@This()) ++ ".start_chunk", .{});
         defer span.end();
         const num_tokens = input.tokens.constItems(i64).len;
@@ -313,8 +379,8 @@ pub const Phonon = struct {
         return zml.Buffer.fromSlice(io, platform, padded);
     }
 
-    /// Load all Phonon parameters through one loader; inner modules only describe tensors.
-    pub fn load(self: *Phonon, store: *const zml.io.TensorStore) !void {
+    /// Load both checkpoints once; Mimi normalization statistics belong to Phonon.
+    pub fn load(self: *Pipeline, store: *const zml.io.TensorStore, mimi_store: *const zml.io.TensorStore) !void {
         var span = zml.tracer.span_at(@src(), @typeName(@This()) ++ ".load", .{});
         defer span.end();
 
@@ -322,11 +388,14 @@ pub const Phonon = struct {
         errdefer zml.Buffer.deinitAll(Model, &self.weights);
         var loader: zml.io.Loader = try .init(self.gpa, self.platform, .default);
         defer loader.deinit();
-        try loader.load(self.io, Model, &self.model, &self.weights, store, .{});
+        try loader.load(self.io, Phonon_Model, &self.model.phonon, &self.weights.phonon, store, .{});
+        try loader.load(self.io, Mimi_Model, &self.model.mimi, &self.weights.mimi, mimi_store, .{});
+        loader.loadBuffer(self.io, &self.weights.mimi.mean, &self.model.mimi.mean, store, .{});
+        loader.loadBuffer(self.io, &self.weights.mimi.stddev, &self.model.mimi.stddev, store, .{});
         try loader.await(self.io);
     }
 
-    pub fn deinit(self: *Phonon) void {
+    pub fn deinit(self: *Pipeline) void {
         const here = @typeName(@This()) ++ ".deinit";
 
         const gpa = self.gpa;
@@ -343,8 +412,6 @@ pub const Phonon = struct {
         self.ids.deinit();
         self.decode_ids.deinit();
         self.active_lengths.deinit();
-        self.frame.deinit();
-        self.history34.deinit();
         self.history.deinit();
         zml.Tensor.Rng.deinitBuffer(&self.rng);
 
@@ -354,21 +421,14 @@ pub const Phonon = struct {
         self.prefill_exe.deinit();
     }
 
-    pub fn frames(self: *const Phonon) usize {
+    pub fn frames(self: *const Pipeline) usize {
         return @as(usize, @intCast(self.active_token_length_host)) - self.num_tokens;
     }
 
-    pub const Step_Result = struct {
-        eos_score: f32,
-        /// Borrowed [2] i32 buffer: token and frame counts after this step.
-        active_lengths: zml.Buffer,
-        frame: zml.Buffer,
-        history: zml.Buffer,
-        history34: zml.Buffer,
-    };
-
-    /// Generates and retains one normalized frame, returning its raw EOS score.
-    pub fn forward(self: *Phonon) !Step_Result {
+    /// Generate one frame and decode it in the same device execution. Reads the
+    /// EOS score only after launching the complete graph, then downloads the PCM.
+    /// The caller owns the returned waveform slice; all donated state stays here.
+    pub fn forward(self: *Pipeline) !zml.Slice {
         if (self.done) return error.GenerationFinished;
 
         const here = @typeName(@This()) ++ ".forward";
@@ -376,7 +436,6 @@ pub const Phonon = struct {
         var span = zml.tracer.span_at(@src(), here, .{});
         defer span.end();
 
-        // const gpa = self.gpa;
         const io = self.io;
 
         var result: zml.Bufferized(Model.Output) = undefined;
@@ -388,11 +447,9 @@ pub const Phonon = struct {
             ids,
             self.voice,
             self.history,
-            self.history34,
             self.start_time,
             self.end_time,
             self.active_lengths,
-            self.frame,
             self.rng,
             self.attention_metadata_buffers,
             self.attention_parameters,
@@ -400,16 +457,14 @@ pub const Phonon = struct {
 
         self.active_token_length_host += 1;
         self.active_lengths = result.active_lengths;
-        self.frame = result.frame;
         self.history = result.history;
-        self.history34 = result.history34;
         self.rng = result.rng;
         // Runner destroyed the donated handles; retain the replacement handles for the next call.
-        for (&self.weights.model.layers, result.kv_caches) |*layer, cache| {
+        for (&self.weights.phonon.model.layers, result.kv_caches) |*layer, cache| {
             layer.self_attn.kv_cache = cache;
         }
         defer result.eos_score.deinit();
-        // defer zml.Buffer.deinitAll(Model.Output, &result);
+        defer result.waveform.deinit();
 
         const score = try result.eos_score.getValue(f32, io);
 
@@ -423,12 +478,6 @@ pub const Phonon = struct {
         }
         if (self.frames() >= self.max_frames) self.done = true;
 
-        return .{
-            .eos_score = score,
-            .active_lengths = self.active_lengths,
-            .frame = self.frame,
-            .history = self.history,
-            .history34 = self.history34,
-        };
+        return result.waveform.toSliceAlloc(self.gpa, io);
     }
 };

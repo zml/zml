@@ -40,10 +40,9 @@ zig_binary(
     srcs = [
         "src/Audio_Player.zig",
         "src/mimi/model.zig",
-        "src/mimi/root.zig",
         "src/phonon/Tokenizer.zig",
         "src/phonon/model.zig",
-        "src/phonon/root.zig",
+        "src/pipeline.zig",
         "src/util.zig",
     ],
     data = [
@@ -73,11 +72,10 @@ zig_test(
         "src/Audio_Player.zig",
         "src/main.zig",
         "src/mimi/model.zig",
-        "src/mimi/root.zig",
         "src/mimi/root_test_data.zig",
         "src/phonon/Tokenizer.zig",
         "src/phonon/model.zig",
-        "src/phonon/root.zig",
+        "src/pipeline.zig",
         "src/util.zig",
     ],
     data = [

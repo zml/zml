@@ -3,8 +3,7 @@ const zml = @import("zml");
 
 const util = @import("util.zig");
 const Audio_Player = @import("Audio_Player.zig");
-const Mimi = @import("mimi/root.zig").Mimi;
-const Phonon = @import("phonon/root.zig").Phonon;
+const Pipeline = @import("pipeline.zig").Pipeline;
 const Tokenizer = @import("phonon/Tokenizer.zig");
 
 const Args = struct {
@@ -144,45 +143,27 @@ pub fn main(init: std.process.Init) !void {
         prepared.capacity.max_frames,
     });
 
-    const phonon = try gpa.create(Phonon);
-    defer gpa.destroy(phonon);
-    const mimi = try gpa.create(Mimi);
-    defer gpa.destroy(mimi);
-
-    var fut_phonon = blk: {
+    const pipeline = try gpa.create(Pipeline);
+    defer gpa.destroy(pipeline);
+    {
         const context: zml.tracer.Context = .init(.generic);
-        var span = zml.tracer.span_at_for(@src(), here ++ "/init/dispatch_phonon", .{}, .{
-            .producer = context,
+        var dispatch = zml.tracer.span_at_for(@src(), here ++ "/init/dispatch_pipeline", .{}, .{ .producer = context });
+        var future = io.async(Pipeline.init_in_place, .{
+            pipeline, io, gpa, platform, prepared.voice, prepared.capacity,
+            switch (args.dtype) {
+                .f32 => zml.DataType.f32,
+                .f16 => .f16,
+                .bf16 => .bf16,
+            },
+            context,
         });
-        defer span.end();
-
-        const dtype: zml.DataType = switch (args.dtype) {
-            .f32 => .f32,
-            .f16 => .f16,
-            .bf16 => .bf16,
-        };
-        break :blk io.async(Phonon.init_in_place, .{ phonon, io, gpa, platform, prepared.voice, prepared.capacity, dtype, context });
-    };
-    var fut_mimi = blk: {
-        const context: zml.tracer.Context = .init(.generic);
-        var span = zml.tracer.span_at_for(@src(), here ++ "/init/dispatch_mimi", .{}, .{
-            .producer = context,
-        });
-        defer span.end();
-
-        break :blk io.async(Mimi.init_in_place, .{ mimi, io, gpa, platform, context });
-    };
-
-    fut_phonon.await(io) catch |err| {
-        if (fut_mimi.await(io)) |_| mimi.deinit() else |_| {}
-        return err;
-    };
-    defer phonon.deinit();
-    try fut_mimi.await(io);
-    defer mimi.deinit();
+        dispatch.end();
+        try future.await(io);
+    }
+    defer pipeline.deinit();
 
     // TODO: no reason for this to init on the same thread right?
-    const player_opt: ?Audio_Player = if (args.no_play) null else try .init(Mimi.sampling_rate);
+    const player_opt: ?Audio_Player = if (args.no_play) null else try .init(Pipeline.sampling_rate);
     defer if (player_opt) |audio| audio.deinit();
 
     var sample_queue_buf: [32]Sample = undefined;
@@ -220,9 +201,6 @@ pub fn main(init: std.process.Init) !void {
     {}
     span_init.end();
 
-    var history: ?zml.Buffer = null;
-    var active_lengths: ?zml.Buffer = null;
-
     var iteration: usize = 0;
     if (!args.noop) while (true) {
         const queued = chunk_queue.getOne(io) catch |err| switch (err) {
@@ -233,20 +211,15 @@ pub fn main(init: std.process.Init) !void {
         const chunk_index = queued.index;
         var chunk_span = zml.tracer.span_at_for(@src(), here ++ "/chunk", .{ .chunk = chunk_index }, .{ .consumer = queued.context });
         defer chunk_span.end();
-        try phonon.start_chunk(queued.input);
-        while (!phonon.done) : (iteration += 1) {
+        try pipeline.start_chunk(queued.input);
+        while (!pipeline.done) : (iteration += 1) {
             const context: zml.tracer.Context = .init(.generic);
             var span_iteration = zml.tracer.span_at_for(@src(), here ++ "/iteration", .{ .chunk = chunk_index, .iteration = iteration }, .{
                 .producer = context,
             });
             defer span_iteration.end();
 
-            const out = try phonon.forward();
-
-            history = out.history;
-            active_lengths = out.active_lengths;
-
-            const chunk = try mimi.forward(out.active_lengths, out.history34);
+            const chunk = try pipeline.forward();
             {
                 errdefer chunk.free(gpa);
                 if (display_enabled) {
@@ -254,7 +227,7 @@ pub fn main(init: std.process.Init) !void {
                     errdefer gpa.free(samples);
                     // The display owns a caption only on the first frame. It
                     // retains that caption until the next utterance arrives.
-                    const caption = if (phonon.frames() == 1) try gpa.dupe(u8, queued.text) else null;
+                    const caption = if (pipeline.frames() == 1) try gpa.dupe(u8, queued.text) else null;
                     errdefer if (caption) |value| gpa.free(value);
                     try display_queue.putOneUncancelable(io, .{
                         .waveform = samples,
@@ -285,14 +258,6 @@ pub fn main(init: std.process.Init) !void {
             {
                 try player.write(waveform.items);
             }
-
-            if (history) |hist| {
-                if (active_lengths) |al| {
-                    const wav = try mimi.forward(al, hist);
-                    defer wav.free(gpa);
-                    try player.write(wav.constItems(f32));
-                }
-            }
         }
     }
 
@@ -309,7 +274,7 @@ pub fn main(init: std.process.Init) !void {
 
         try save_wav(io, wav_path, waveform.items);
 
-        try stdout.interface.print("Saved {s}: {d} mono samples at {d} Hz.\n", .{ wav_path, waveform.items.len, Mimi.sampling_rate });
+        try stdout.interface.print("Saved {s}: {d} mono samples at {d} Hz.\n", .{ wav_path, waveform.items.len, Pipeline.sampling_rate });
         try stdout.interface.flush();
     }
 }
@@ -322,7 +287,7 @@ pub const chunk_queue_capacity = 4;
 
 pub const Prepared_Prompt = struct {
     voice: zml.Slice,
-    capacity: Phonon.Capacity,
+    capacity: Pipeline.Capacity,
 
     pub fn deinit(self: Prepared_Prompt, allocator: std.mem.Allocator) void {
         self.voice.free(allocator);
@@ -351,7 +316,7 @@ pub fn prepare_prompt(io: std.Io, gpa: std.mem.Allocator) !Prepared_Prompt {
 /// input.voice borrows the shared Prepared_Prompt, which outlives the producer
 /// and every queued item. The context correlates preparation with main-thread use.
 pub const Prepared_Chunk = struct {
-    input: Phonon.Input,
+    input: Pipeline.Input,
     text: []const u8,
     index: usize,
     context: zml.tracer.Context,
@@ -538,7 +503,7 @@ fn visual_playback(io: std.Io, gpa: std.mem.Allocator, queue: *std.Io.Queue(Wave
     const height = 8 * 2;
     const columns = width * 2;
     const dots = height * 4;
-    const samples_per_column = Mimi.sampling_rate * 3 / columns;
+    const samples_per_column = Pipeline.sampling_rate * 3 / columns;
     const Range = struct { min: f32 = 0, max: f32 = 0 };
     var history: [columns]Range = @splat(.{});
     var next: usize = 0;
@@ -573,7 +538,7 @@ fn visual_playback(io: std.Io, gpa: std.mem.Allocator, queue: *std.Io.Queue(Wave
                 }
             } else {
                 const duration: std.Io.Clock.Duration = .{
-                    .raw = .fromNanoseconds(@divTrunc(@as(i96, @intCast(values.len)) * std.time.ns_per_s, Mimi.sampling_rate)),
+                    .raw = .fromNanoseconds(@divTrunc(@as(i96, @intCast(values.len)) * std.time.ns_per_s, Pipeline.sampling_rate)),
                     .clock = .awake,
                 };
                 const now = std.Io.Clock.Timestamp.now(io, .awake);
@@ -688,8 +653,8 @@ fn save_wav(io: std.Io, path: []const u8, samples: []const f32) !void {
     std.mem.writeInt(u32, header[16..20], 16, .little);
     std.mem.writeInt(u16, header[20..22], 1, .little);
     std.mem.writeInt(u16, header[22..24], 1, .little);
-    std.mem.writeInt(u32, header[24..28], Mimi.sampling_rate, .little);
-    std.mem.writeInt(u32, header[28..32], Mimi.sampling_rate * 2, .little);
+    std.mem.writeInt(u32, header[24..28], Pipeline.sampling_rate, .little);
+    std.mem.writeInt(u32, header[28..32], Pipeline.sampling_rate * 2, .little);
     std.mem.writeInt(u16, header[32..34], 2, .little);
     std.mem.writeInt(u16, header[34..36], 16, .little);
     @memcpy(header[36..40], "data");

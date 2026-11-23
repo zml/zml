@@ -1,8 +1,7 @@
 const std = @import("std");
 const zml = @import("zml");
 
-const Phonon = @import("phonon/root.zig").Phonon;
-const Mimi = @import("mimi/root.zig").Mimi;
+const Pipeline = @import("pipeline.zig").Pipeline;
 const main = @import("main.zig");
 
 const reference = @import("mimi/root_test_data.zig");
@@ -52,17 +51,12 @@ fn run_pipeline(prompt: []const u8) !zml.Slice {
         while (queue.getOneUncancelable(io)) |chunk| chunk.deinit(allocator) else |_| {}
     }
 
-    var phonon = try allocator.create(Phonon);
-    defer allocator.destroy(phonon);
-    try phonon.init_in_place(io, allocator, platform, prepared.voice, prepared.capacity, .f32, null);
-    defer phonon.deinit();
+    const pipeline = try allocator.create(Pipeline);
+    defer allocator.destroy(pipeline);
+    try pipeline.init_in_place(io, allocator, platform, prepared.voice, prepared.capacity, .f32, null);
+    defer pipeline.deinit();
 
-    const mimi = try allocator.create(Mimi);
-    defer allocator.destroy(mimi);
-    try mimi.init_in_place(io, allocator, platform, null);
-    defer mimi.deinit();
-
-    // Match playback: Mimi receives the fixed window and returns the newest waveform chunk.
+    // Match playback: each combined device call returns the newest waveform chunk.
     var samples: std.ArrayList(f32) = .empty;
     defer samples.deinit(allocator);
     while (true) {
@@ -73,10 +67,9 @@ fn run_pipeline(prompt: []const u8) !zml.Slice {
         defer queued.deinit(allocator);
         var span = zml.tracer.span_at_for(@src(), "pipeline_test.chunk", .{ .chunk = queued.index }, .{ .consumer = queued.context });
         defer span.end();
-        try phonon.start_chunk(queued.input);
-        while (!phonon.done) {
-            const out = try phonon.forward();
-            const chunk = try mimi.forward(out.active_lengths, out.history34);
+        try pipeline.start_chunk(queued.input);
+        while (!pipeline.done) {
+            const chunk = try pipeline.forward();
             defer chunk.free(allocator);
             try samples.appendSlice(allocator, chunk.constItems(f32));
         }

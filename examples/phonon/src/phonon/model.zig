@@ -68,13 +68,13 @@ threadlocal var debug_selected_depth: ?usize = null;
 /// The transformer builds contextual features from text, voice, and preceding
 /// audio. Only its last position conditions the two heads: EOS produces a raw
 /// stopping score, while the flow head predicts a velocity for a sampler-supplied
-/// candidate audio latent and flow interval. The caller updates that candidate,
-/// retains the completed frame, and applies the stopping policy.
+/// candidate audio latent and flow interval. The graph updates the candidate
+/// and retains the completed frame; the host applies the stopping policy.
 ///
 /// `forward` consumes the prompt or one decode position and returns EOS scores
-/// `[B, 1]` in f32, a completed frame `[B, 1, 32]` in the candidate dtype, and updated
-/// audio history and active length. The one-step sampler adds the predicted
-/// velocity to the candidate within the graph.
+/// `[B, 1]` in f32, updated audio history and active length, and the newest
+/// 34-frame window for Mimi. The one-step sampler adds the predicted velocity
+/// to fresh on-device noise within the graph.
 /// B counts independent sequences; active_lengths identifies the valid prefill prefix.
 ///
 /// Parameters come from the root checkpoint view: `model` owns the transformer,
@@ -266,17 +266,17 @@ pub const Gradium_Phonon_TTS_For_Conditional_Generation = struct {
     ///
     /// `eos_score`: floating-point `[.b=B, .dout=1]`, a raw stopping logit from the last
     /// transformer position. The host generation loop interprets it using its policy.
-    /// `frame`: floating-point `[.b=B, .s=1, .ld=32]`, candidate plus predicted velocity.
+    /// `history34`: f32 `[.b=B, .a=34, .ld=32]`, the newest decoder window,
+    /// including the completed frame. It remains an intermediate in the combined graph.
     /// `history`: `[.b=B, .a=max_frames, .ld=32]`, including the completed frame.
     /// `active_lengths`: [2] i32, valid token positions followed by completed frames.
-    /// Both counters increment by one. Frame, history, and active lengths donate
+    /// Both counters increment by one. History and active lengths donate
     /// their input storage; the caller retains returned handles.
-    /// EOS follows the voice dtype; frame follows the candidate dtype. The caller
+    /// EOS is returned in f32; history follows the candidate dtype. The caller
     /// releases the EOS buffer separately from the retained generation state.
     pub const Output = struct {
         eos_score: zml.Tensor,
         active_lengths: zml.Tensor,
-        frame: zml.Tensor,
         history: zml.Tensor,
         history34: zml.Tensor,
         rng: zml.Tensor.Rng,
@@ -300,8 +300,8 @@ pub const Gradium_Phonon_TTS_For_Conditional_Generation = struct {
 
     /// Shared prefill/decode graph: consume incoming positions and generate one frame.
     ///
-    /// `token_ids`: integer `[B, S]`, normally i64. Prefill uses the largest
-    /// chunk's prompt width, padded with ID 6 after this chunk's valid prefix.
+    /// `token_ids`: integer `[B, S]`, normally i64. Prefill uses the configured
+    /// prompt capacity, padded with ID 6 after this chunk's valid prefix.
     /// Decode supplies one ID 6. The valid token count is in `active_lengths`.
     /// `attention_metadata` supplies backend runtime tensors (Metal's live-query
     /// count is zero to process every supplied query). `attention_parameters`
@@ -314,8 +314,8 @@ pub const Gradium_Phonon_TTS_For_Conditional_Generation = struct {
     /// `audio_latents`: floating-point `[B, A, 32]`, the generation loop's complete normalized
     /// audio history, with completed frames in its valid prefix and zeros initially.
     /// The graph selects only the relevant history slice before input projection.
-    /// `candidate`: floating-point `[B, 32]`, the sampler's current candidate for the next
-    /// frame in normalized latent space; freshly drawn noise in the one-step sampler.
+    /// `rng`: on-device randomizer state, advanced to draw fresh `[B,32]` f32
+    /// Gaussian noise for this frame's one-step sampler.
     /// `active_lengths`: [2] i32 containing valid token positions and completed frames
     /// before this step. Both slots contain integer counts used directly for indexing.
     /// `start_time`: floating-point `[B, 1]`, starting flow progress supplied by the sampler.
@@ -323,12 +323,11 @@ pub const Gradium_Phonon_TTS_For_Conditional_Generation = struct {
     /// Times normally lie in [0, 1]; the current sampler uses 0 and 1. They describe
     /// flow progress, rather than audio timestamps. All inputs share batch size B.
     ///
-    /// Returns EOS logits `[B, 1]`, a generated frame `[B, 1, 32]`, updated history,
+    /// Returns EOS logits `[B, 1]`, a decoder window `[B, 34, 32]`, updated history,
     /// counters, RNG state and all six caches. The graph applies the one-step
-    /// velocity update; the caller applies the stopping policy and retains state. EOS uses
-    /// `voice.dtype()`; velocity uses `candidate.dtype()`. The transformer converts
-    /// history and parameters to the voice dtype; the flow head converts its
-    /// condition and times to the candidate dtype.
+    /// velocity update; the caller applies the stopping policy and retains state.
+    /// EOS is converted to f32. The transformer converts history and parameters
+    /// to the voice dtype; the flow head uses f32 noise, conditions and times.
     ///
     /// Dimension tags:
     /// - `.b`: batch; independent prompts, candidates and sampling intervals.
@@ -342,19 +341,17 @@ pub const Gradium_Phonon_TTS_For_Conditional_Generation = struct {
     /// - `.dout`: one raw EOS score per batch row; no sigmoid or threshold applied.
     ///
     /// Inputs: integer IDs `[b,s]`, floating-point voice `[b,p,ad=512]`, complete
-    /// history `[b,a,ld=32]`, candidate `[b,ld=32]`, and times `[b,t=1]` each.
-    /// Outputs: eos_score `[b,dout=1]` in the voice dtype and velocity `[b,ld=32]`
-    /// in the candidate dtype.
+    /// history `[b,a,ld=32]`, RNG state, and times `[b,t=1]` each.
+    /// Outputs: f32 EOS `[b,dout=1]`, f32 history `[b,a,ld=32]`,
+    /// f32 decoder window `[b,34,32]`, and updated counters, RNG and K/V caches.
     pub fn forward(
         self: Gradium_Phonon_TTS_For_Conditional_Generation,
         token_ids: zml.Tensor,
         voice: zml.Tensor,
         audio_latents: zml.Tensor,
-        history34: zml.Tensor,
         start_time: zml.Tensor,
         end_time: zml.Tensor,
         active_lengths: zml.Tensor,
-        frame: zml.Tensor,
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
@@ -366,11 +363,9 @@ pub const Gradium_Phonon_TTS_For_Conditional_Generation = struct {
         debug_value("token_ids", token_ids);
         debug_value("voice", voice);
         debug_value("audio_latents", audio_latents);
-        debug_value("history34", history34);
         debug_value("start_time", start_time);
         debug_value("end_time", end_time);
         debug_value("active_lengths", active_lengths);
-        debug_value("frame", frame);
         debug_value("rng", rng);
 
         var span = zml.tracer.span_at(@src(), here, .{});
@@ -426,18 +421,15 @@ pub const Gradium_Phonon_TTS_For_Conditional_Generation = struct {
         const out: Output = .{
             .eos_score = predict_output.eos_score.convert(.f32), // Scalar host readback remains f32 for every transformer dtype.
             .active_lengths = next_active_lengths.reuseBuffer(active_lengths),
-            .frame = next_frame.reuseBuffer(frame),
             .history = next_history.reuseBuffer(audio_latents),
-            .history34 = next_history34.reuseBuffer(history34),
+            .history34 = next_history34,
             .rng = next_rng,
             .kv_caches = transformer_output.kv_caches,
         };
         debug_value("out", out);
 
         std.debug.assert(active_lengths.shape().eqlWithTags(out.active_lengths.shape()));
-        std.debug.assert(frame.shape().eqlWithTags(out.frame.shape()));
         std.debug.assert(audio_latents.shape().eqlWithTags(out.history.shape()));
-        std.debug.assert(history34.shape().eqlWithTags(out.history34.shape()));
         std.debug.assert(rng._state.shape().eqlWithTags(out.rng._state.shape()));
 
         debug_value("output", out);
