@@ -51,7 +51,7 @@ const Model = struct {
     fn deinit(self: *Model) void {
         self.process_table.deinit(self.allocator);
         self.overview.deinit(self.allocator);
-        image_cache.global.deinit(self.allocator);
+        image_cache.global.deinit();
     }
 
     pub fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
@@ -117,7 +117,7 @@ const Model = struct {
             self.prev_viewing_device = self.viewing_device;
         }
 
-        self.process_table.prepare(self.state, self.viewing_device);
+        self.process_table.prepare(self.state, self.viewing_device, ctx.arena);
 
         var content_surf: vxfw.Surface = undefined;
 

@@ -53,7 +53,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
     }
 
     image_cache.global.loadAll(&vx, allocator, tty.writer());
-    defer image_cache.global.deinit(allocator);
+    defer image_cache.global.deinit();
 
     vxfw.DrawContext.init(vx.screen.width_method);
 

@@ -48,7 +48,7 @@ pub fn deinit(self: *Overview, allocator: std.mem.Allocator) void {
 }
 
 fn drawNarrowBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
-    const logo: Logo = .{ .image = image_cache.global.get("logo") };
+    const logo: Logo = .{ .image = image_cache.global.zml };
     const info_lines: InfoLines = .{ .state = self.state };
 
     const children = [2]vxfw.Widget{
@@ -60,7 +60,7 @@ fn drawNarrowBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16
 }
 
 fn drawWideBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
-    const logo: Logo = .{ .image = image_cache.global.get("logo") };
+    const logo: Logo = .{ .image = image_cache.global.zml };
     const info_lines: InfoLines = .{ .state = self.state };
 
     const logo_box_w = Logo.logo_width + 6; // +4 centering + 2 absorbed page margin
