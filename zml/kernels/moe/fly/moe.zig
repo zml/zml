@@ -1040,6 +1040,93 @@ pub const RoundNvfp4 = struct {
     }
 };
 
+/// Sigmoid top-k routing from gate logits in one kernel. A wave routes one token:
+/// each lane holds two experts' scores, and k rounds of shuffles pick the largest
+/// biased scores, preferring lower experts on ties like a stable sort.
+pub const Route = struct {
+    const lanes = 64;
+    const max_top_k = 16;
+
+    const Config = struct {
+        experts: i64,
+        top_k: i64,
+        renormalize: i64,
+        scale: f32,
+    };
+
+    /// `logits` is [tokens, experts] F32 and `bias` [experts] F32.
+    pub fn call(logits: Tensor, bias: Tensor, top_k: u32, renormalize: bool, scale: f32) struct { Tensor, Tensor } {
+        std.debug.assert(logits.rank() == 2 and logits.dtype() == .f32 and bias.dtype() == .f32 and
+            logits.dim(1) <= 2 * lanes and top_k <= max_top_k);
+        const result = Kernel.call(.{ .logits = logits, .bias = bias }, .{
+            .ids = zml.Shape.init(.{ logits.dim(0), top_k }, .i32),
+            .weights = zml.Shape.init(.{ logits.dim(0), top_k }, .f32),
+        }, .{
+            .cfg = .{ .experts = logits.dim(1), .top_k = top_k, .renormalize = @intFromBool(renormalize), .scale = scale },
+            .threads = lanes,
+            .grid = .{ @intCast(logits.dim(0)), 1, 1 },
+        });
+        return .{ result.ids, result.weights };
+    }
+
+    const Kernel = zml.kernel.fly.Kernel(Config, .{
+        .name = "sigmoid_top_k_route",
+        .inputs = &.{ "logits", "bias" },
+        .outputs = &.{ "ids", "weights" },
+        .run = run,
+    });
+
+    fn run(b: *Builder, cfg: Config) fly.FinishError!void {
+        const args = Kernel.args(b);
+        const token = b.blockId(.x).to(.i64);
+        const lane = b.threadId(.x);
+        const none = b.constant(.f32, -std.math.inf(f32));
+        var key: [2]Value = undefined;
+        var score: [2]Value = undefined;
+        var index: [2]Value = undefined;
+        inline for (0..2) |i| {
+            index[i] = lane.add(i * lanes);
+            const in_bank = index[i].lt(cfg.experts);
+            const expert = in_bank.select(index[i], b.constant(.i32, 0)).to(.i64);
+            score[i] = b.constant(.f32, 1.0).div(b.exp(args.logits.at(.{ token, expert }).neg()).add(1.0));
+            key[i] = in_bank.select(score[i].add(args.bias.at(expert)), none);
+        }
+        var picks: [max_top_k]Value = undefined;
+        var picked: [max_top_k]Value = undefined;
+        var total = b.constant(.f32, 0.0);
+        for (0..@intCast(cfg.top_k)) |k| {
+            // The better of the lane's two, then of all lanes; ties keep the lower expert.
+            const second = key[1].gt(key[0]);
+            var best = second.select(key[1], key[0]);
+            var best_index = second.select(index[1], index[0]);
+            var best_score = second.select(score[1], score[0]);
+            inline for (.{ 32, 16, 8, 4, 2, 1 }) |shift| {
+                const other = best.shuffleXor(shift, lanes);
+                const other_index = best_index.shuffleXor(shift, lanes);
+                const other_score = best_score.shuffleXor(shift, lanes);
+                const take = other.gt(best).bitOr(other.eq(best).bitAnd(other_index.lt(best_index)));
+                best = take.select(other, best);
+                best_index = take.select(other_index, best_index);
+                best_score = take.select(other_score, best_score);
+            }
+            picks[k] = best_index;
+            picked[k] = best_score;
+            total = total.add(best_score);
+            inline for (0..2) |i| key[i] = index[i].eq(best_index).select(none, key[i]);
+        }
+        var first_lane = b.openIf(lane.eq(0));
+        {
+            for (0..@intCast(cfg.top_k)) |k| {
+                const slot = b.constant(.i64, @as(i64, @intCast(k)));
+                const weight = if (cfg.renormalize != 0) picked[k].div(total.add(1e-20)) else picked[k];
+                args.ids.set(.{ token, slot }, picks[k]);
+                args.weights.set(.{ token, slot }, weight.mul(cfg.scale));
+            }
+            first_lane.close();
+        }
+    }
+};
+
 fn decodeE8m0(b: *Builder, byte: Value) Value {
     const scale = byte.toUnsigned(.i32);
     const finite = scale.eq(0).select(b.constant(.i32, 0x00400000), scale.shl(23));

@@ -19,6 +19,7 @@ pub const metal = @import("zml/kernels/moe/metal");
 pub const mosaic_tpu = @import("zml/kernels/moe/mosaic_tpu");
 pub const Options = @import("zml/kernels/moe/api").Options;
 pub const ProjectionLayout = @import("zml/kernels/moe/api").ProjectionLayout;
+pub const RouteOptions = @import("zml/kernels/moe/api").RouteOptions;
 pub const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 pub const stablehlo = @import("zml/kernels/moe/stablehlo");
 pub const tcl = @import("zml/kernels/moe/tcl");
@@ -145,6 +146,25 @@ pub const Backend = enum {
         };
     }
 };
+
+pub const Routes = struct { ids: zml.Tensor, weights: zml.Tensor };
+
+/// Routes tokens `x` {.t, .d} to experts by `gate_weight` {.expert, .d}, as
+/// `forwardMoe` expects: i32 ids and f32 weights, both {.t, .topk}. A bias
+/// {.expert} enters only the selection. Backends with a fused kernel select from the logits with it.
+pub fn route(backend: Backend, x: zml.Tensor, gate_weight: zml.Tensor, gate_bias: ?zml.Tensor, opts: RouteOptions) Routes {
+    const logits = x.convert(.f32).dot(gate_weight.convert(.f32), .d);
+    switch (backend) {
+        .fly => if (fly.route(logits, gate_bias, opts)) |routes| return .{ .ids = routes[0], .weights = routes[1] },
+        else => {},
+    }
+    const scores = logits.sigmoid();
+    const keys = if (gate_bias) |bias| scores.add(bias.convert(.f32).broad(scores.shape())) else scores;
+    const ids = keys.topK(.{ .topk = .expert }, opts.top_k, .{ .descending = true }).indices.convert(.i32);
+    const selected = scores.gather(.{ .expert = ids }, .{});
+    const weights = if (opts.renormalize) selected.div(selected.sum(.topk).addConstant(1e-20)) else selected;
+    return .{ .ids = ids, .weights = weights.scale(opts.scale) };
+}
 
 /// Check the shared token-wise contract for activations and routing tensors.
 pub fn validateRoutingInputs(input: zml.Tensor, ids: zml.Tensor, weights: zml.Tensor) void {

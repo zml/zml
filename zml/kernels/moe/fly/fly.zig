@@ -138,6 +138,16 @@ pub fn fusedExperts(
     return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
 
+/// Ids and weights of sigmoid top-k routing from gate `logits` {.t, .expert} in one
+/// kernel, or null when Fly cannot route them.
+pub fn route(logits: Tensor, gate_bias: ?Tensor, opts: @import("zml/kernels/moe/api").RouteOptions) ?[2]Tensor {
+    if (logits.rank() != 2 or logits.dim(.expert) > 128 or opts.top_k > 16) return null;
+    const bias = if (gate_bias) |b| b.convert(.f32) else Tensor.zeroes(Shape.init(.{logits.dim(.expert)}, .f32));
+    const ids, const weights = fly.Route.call(logits.convert(.f32).transpose(.{ .t, .expert }), bias, opts.top_k, opts.renormalize, opts.scale);
+    const routed = Shape.init(.{ .t = logits.dim(.t), .topk = opts.top_k }, .i32);
+    return .{ ids.reshape(routed), weights.reshape(routed.withDtype(.f32)) };
+}
+
 // TODO(Corentin): unused for now
 pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linear, down_: nn.Linear, opts: Options) bool {
     if (hidden_states.dtype() != .bf16 or gate_up_.quantizationScheme() != .mxfp4 or

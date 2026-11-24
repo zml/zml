@@ -788,6 +788,45 @@ test "Fly routes without an expert" {
     }, .{});
 }
 
+test "Fly routing matches the XLA routing" {
+    const platform = zml.testing.env();
+    if (!zml.moe.Backend.fly.isAvailable(platform)) return error.SkipZigTest;
+    const Local = struct {
+        fn forward(x: Tensor, gate: Tensor, bias: Tensor) [4]Tensor {
+            const opts: zml.moe.RouteOptions = .{ .top_k = 8, .scale = 8 };
+            const fly = zml.moe.route(.fly, x, gate, bias, opts);
+            const xla = zml.moe.route(.stablehlo, x, gate, bias, opts);
+            return .{ fly.ids, xla.ids, fly.weights, xla.weights };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const x: Tensor = .init(.{ .t = 16, .d = 2304 }, .bf16);
+    const gate: Tensor = .init(.{ .expert = 128, .d = 2304 }, .bf16);
+    const bias: Tensor = .init(.{ .expert = 128 }, .f32);
+    var hosts: [3]zml.Slice = undefined;
+    for (&hosts, [_]Shape{ x.shape(), gate.shape(), bias.shape() }) |*host, shape| host.* = try zml.Slice.alloc(allocator, shape);
+    defer for (hosts) |host| host.free(allocator);
+    for (hosts[0].items(zml.floats.BFloat16), 0..) |*v, i| v.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast((i * 37 + i / 2304) % 101)) - 50)) / 64);
+    for (hosts[1].items(zml.floats.BFloat16), 0..) |*v, i| v.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast((i * 53 + i / 2304 * 7) % 97)) - 48)) / 512);
+    for (hosts[2].items(f32), 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.01;
+    var buffers: [3]zml.Buffer = undefined;
+    for (&buffers, hosts) |*buffer, host| buffer.* = try zml.Buffer.fromSlice(io, platform, host);
+    defer for (&buffers) |*buffer| buffer.deinit();
+    var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, gate, bias }, .{});
+    defer exe.deinit();
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    var outputs: [4]zml.Buffer = undefined;
+    runner.run(io, .{ buffers[0], buffers[1], buffers[2] }, .{ &outputs[0], &outputs[1], &outputs[2], &outputs[3] }, .{ .wait = true });
+    defer for (&outputs) |*output| output.deinit();
+    var ids: [2]zml.Slice = undefined;
+    for (&ids, outputs[0..2]) |*slice, output| slice.* = try output.toSliceAlloc(allocator, io);
+    defer for (ids) |slice| slice.free(allocator);
+    try std.testing.expectEqualSlices(i32, ids[1].items(i32), ids[0].items(i32));
+    try zml.testing.expectClose(io, outputs[3], outputs[2], .{ .absolute_tolerance = 1e-5, .relative_tolerance = 1e-4, .minimum_close_fraction = 1 });
+}
+
 test "Metal compatibility matrix" {
     const platform = zml.testing.env();
 

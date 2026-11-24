@@ -115,6 +115,17 @@ pub fn softcap(x: Tensor, cap: f32) Tensor {
 
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
+/// How `zml.moe.route` picks experts from gate logits.
+pub const RouteOptions = struct {
+    top_k: u32,
+    /// Sigmoid scores; a bias steers the selection without entering the weights.
+    scoring: enum { sigmoid } = .sigmoid,
+    /// Divide the selected scores by their sum.
+    renormalize: bool = true,
+    /// Multiplies every routing weight.
+    scale: f32 = 1,
+};
+
 pub const ProjectionLayout = enum {
     concatenated, // G0 G1 … Gn U0 U1 … Un
     row_interleaved_1, // G0 U0 G1 U1 …
