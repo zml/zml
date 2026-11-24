@@ -206,6 +206,79 @@ const PatchRepresentation = struct {
     }
 };
 
+pub const MaskBuilder = struct {
+    pub const Options = struct {
+        attend_missing_patches: bool,
+    };
+
+    options: Options,
+    horizon: u32,
+
+    pub fn make(self: *const MaskBuilder, observed: Tensor) Tensor {
+        assertTags(observed, .{ .row, .token, .h });
+        const observed_patch = observed.any(.h);
+
+        // Leading all-unobserved patches are left-padding and are never valid keys.
+        const key_valid: Tensor = if (self.attend_missing_patches)
+            // A patch is a valid key if the row's series has started at or before it.
+            .logical(observed_patch, .OR, observed_patch.cumulativeMax(.token))
+        else
+            // A patch is a valid key if it is observed
+            observed_patch;
+
+        const token_win_mask = buildForcastTimeMask(key_valid);
+        return token_win_mask;
+    }
+
+    /// Causal encoder-encoder mask `(R, L, L)` over valid keys, with the diagonal always open.
+    fn encoderCausalMask(key_valid: Tensor) Tensor {
+        assertTags(key_valid, .{ .row, .token_q, .token_k });
+        const shape = key_valid.shape();
+
+        const l = key_valid.dim(.token);
+        const causal = zml.nn.causalAttnMask(.{ .token_q = l, .token_k = l }, .bool)
+            .insertAxes(.token_q, .{.row});
+        const eye: Tensor = .cmp(.iota(shape, .token_q), .EQ, .iota(shape, .token_k));
+        const out: Tensor = .cmp(.cmp(causal, .AND, key_valid), .OR, eye);
+
+        assertTags(out, .{ .row, .token_q, .token_k });
+        return out;
+    }
+
+    fn keyValidityAsMask(key_valid: Tensor) Tensor {
+        assertTags(key_valid, .{ .row, .token });
+        const shape = key_valid.shape();
+        const n = shape.dim(.token);
+        const out = key_valid.broad(shape.insert(.token, .{ .token_past_q = n }))
+            .renameTag(.token, .token_k);
+        return assertedTags(out, .{ .row, .token_q, .token_k });
+    }
+
+    /// Time mask `(R, 1, L+h, L+h)` for one block without covariates.
+    ///
+    /// The encoder is causal; every decoder token reads the whole valid context and its
+    /// own causal decoder chain; the context never reads the horizon.
+    fn buildForcastTimeMask(self: *const MaskBuilder, key_valid: Tensor) Tensor {
+        assertTags(key_valid, .{ .row, .token });
+        const rows = key_valid.dim(.row);
+        const past = key_valid.dim(.token);
+        const fut = self.horizon;
+
+        const key_valid_mask = keyValidityAsMask(key_valid);
+        const enc_enc = assertedTags(encoderCausalMask(key_valid_mask), .{ .row, .token_q, .token_k });
+        const enc_dec: Tensor = .zeroes(.init(.{ .row = rows, .token_q = past, .token_k = past }, .bool));
+        const dec_enc = key_valid.broad(key_valid.shape().insert(.token, .{ .token_q = fut }))
+            .renameTag(.token, .token_k);
+        var dec_dec = zml.nn.causalAttnMask(.{ .token_q = fut, .token_k = fut }, .bool);
+        dec_dec = dec_dec.broad(dec_dec.shape().insert(.token_q, .{ .row = fut }));
+
+        const top: Tensor = .concatenate(.{ enc_enc, enc_dec }, .token_k);
+        const bottom: Tensor = .concatenate(.{ dec_enc, dec_dec }, .token_k);
+        const out: Tensor = .concatenate(.{ top, bottom }, .token_q);
+        return assertedTags(out, .{ .row, .token_q, .token_k });
+    }
+};
+
 pub const Model = struct {
     patcher: PatchBuilder,
     representation: PatchRepresentation,
