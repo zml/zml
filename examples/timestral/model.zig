@@ -67,25 +67,34 @@ pub const PreProcessor = struct {
     };
 
     const Rows = struct {
+        /// Time series and covariate values.
         values: Tensor,
+        /// Validity mask.
         mask: Tensor,
+        /// Type of the time series covariate (target, past only, or known future).
         roles: Tensor,
+        /// Index in the batch.
+        group: Tensor,
 
         pub fn make(targets: TargetsSeries) Rows {
             assertTags(targets.values, .{ .batch, .variate, .time });
             assertTags(targets.mask, .{ .batch, .variate, .time });
 
             const n_batch = targets.values.dim(.batch);
-            const n_targets = targets.values.dim(.variate);
+            const n_variate = targets.values.dim(.variate);
+
             const values = ffillMissing(targets.values, targets.mask, .time);
-            const target_roles = Tensor.scalar(@backingInt(Roles.target), .u8)
-                .broad(.init(.{ .variate = n_targets }, .u8));
-            const roles = target_roles.broad(.init(.{ .batch = n_batch, .variate = n_targets }, .u8));
+            const roles = Tensor.scalar(@backingInt(Roles.target), .u8)
+                .broad(.init(.{ .batch = n_batch, .variate = n_variate }, .u8));
+            const group = Tensor.arange(.{ .end = n_batch }, .u32)
+                .withTags(.{.batch})
+                .broad(roles.shape().withDtype(.u32));
 
             return .{
                 .values = assertedTags(asRows(values), .{ .row, .time }),
                 .mask = assertedTags(asRows(targets.mask), .{ .row, .time }),
                 .roles = assertedTags(asRows(roles), .{.row}),
+                .group = assertedTags(asRows(group), .{.row}),
             };
         }
 
