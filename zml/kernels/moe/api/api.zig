@@ -3,15 +3,19 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const Tensor = @import("zml/core").Tensor;
+const Nvfp4BlockScale = @import("zml/quantization").Nvfp4BlockScale;
 
 const log = std.log.scoped(.@"zml/moe");
 
 pub const Options = struct {
     activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
+    /// NVFP4 experts always quantize their activations.
     quantize_input: bool,
     /// Where routing weights are applied; FlashInfer, Mosaic, Metal and TCL require after_down.
     routing_weight_placement: RoutingWeightPlacement,
+    /// How quantized NVFP4 activations pick the E4M3 scale of each block.
+    nvfp4_input_scale: Nvfp4BlockScale = .six,
 };
 
 pub const ActivationKind = enum {

@@ -34,6 +34,7 @@ pub fn validateOptions(opts: Options) void {
     stdx.debug.assert(opts.activation == .swiglu, "cute backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
+    stdx.debug.assert(opts.nvfp4_input_scale == .six, "cute backend scales NVFP4 activation blocks by amax/6", .{});
 }
 
 /// MXFP4 weights are `u8` (or `i8`) packed FP4 with E8M0 block scales. NVFP4
