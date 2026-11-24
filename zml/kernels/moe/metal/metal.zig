@@ -228,9 +228,9 @@ pub fn fusedExperts(
     const expert_ids = if (mode == .nvfp4 or mode == .mxfp8) sorted_ids else sorted_ids.maximum(.scalar(0, .i32));
     const weights = has_expert.select(permute(route_weights, order), .scalar(0, .f32));
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .d = d }).withTags(.{ .token, .d });
-    const x_rows = hidden.gather(.{ .token = order.divByConst(topk).withTags(.{.r}) }, .{});
-    // Each route quantizes a copy of its token, so the quantizer writes the GEMM input.
-    const gate_up_input = if (quantize_input) emulateInput(x_rows, .d, mode, opts) else x_rows.convert(act_dtype);
+    // Tokens are quantized once, before each route copies its own.
+    const tokens = if (quantize_input) emulateInput(hidden, .d, mode, opts) else hidden.convert(act_dtype);
+    const gate_up_input = tokens.gather(.{ .token = order.divByConst(topk).withTags(.{.r}) }, .{});
 
     // The grouped kernel reads each expert's weights once. It runs MXFP8 experts, which the
     // plugin has no kernel for, and packed NVFP4 experts where it is faster.
