@@ -301,12 +301,20 @@ pub const Client = struct {
             self.io,
             &result_buffer,
         );
-        select.async(
+        // Both tasks need their own unit of concurrency: `async` may run a task
+        // on this thread, and a timer run inline sleeps until the deadline
+        // without ever starting the request.
+        select.concurrent(.timeout, waitUntil, .{ self.io, deadline }) catch {
+            return error.ResourceExhausted;
+        };
+        select.concurrent(
             .request,
             requestOnce,
             .{ self, operation, key, value, allocator },
-        );
-        select.async(.timeout, waitUntil, .{ self.io, deadline });
+        ) catch {
+            cancelRequest(&select, allocator);
+            return error.ResourceExhausted;
+        };
 
         const selected = select.await() catch {
             cancelRequest(&select, allocator);
