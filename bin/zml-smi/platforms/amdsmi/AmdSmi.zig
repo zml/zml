@@ -17,35 +17,22 @@ last_poll: ?std.Io.Timestamp = null,
 const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .deinit = deinit };
 
 const Api = struct {
-    amdsmi_init: Checked(c.amdsmi_init),
-    amdsmi_status_code_to_string: Checked(c.amdsmi_status_code_to_string),
-    amdsmi_get_socket_handles: Checked(c.amdsmi_get_socket_handles),
-    amdsmi_get_processor_handles: Checked(c.amdsmi_get_processor_handles),
-    amdsmi_get_gpu_asic_info: Checked(c.amdsmi_get_gpu_asic_info),
-    amdsmi_get_gpu_driver_info: Checked(c.amdsmi_get_gpu_driver_info),
-    amdsmi_get_gpu_bdf_id: Checked(c.amdsmi_get_gpu_bdf_id),
-    amdsmi_get_gpu_metrics_info: Checked(c.amdsmi_get_gpu_metrics_info),
-    amdsmi_get_power_info: Checked(c.amdsmi_get_power_info),
-    amdsmi_get_temp_metric: Checked(c.amdsmi_get_temp_metric),
-    amdsmi_get_gpu_fan_speed: Checked(c.amdsmi_get_gpu_fan_speed),
-    amdsmi_get_gpu_activity: Checked(c.amdsmi_get_gpu_activity),
-    amdsmi_get_clock_info: Checked(c.amdsmi_get_clock_info),
-    amdsmi_get_gpu_memory_total: Checked(c.amdsmi_get_gpu_memory_total),
-    amdsmi_get_gpu_memory_usage: Checked(c.amdsmi_get_gpu_memory_usage),
-    amdsmi_get_pcie_info: Checked(c.amdsmi_get_pcie_info),
-    amdsmi_get_gpu_process_list: Checked(c.amdsmi_get_gpu_process_list),
-
-    fn Checked(comptime function: anytype) type {
-        return smi.dynlib.Checked(@TypeOf(function), check);
-    }
-
-    fn check(status: c.amdsmi_status_t) error{ Unsupported, AmdSmiError }!void {
-        return switch (status) {
-            c.AMDSMI_STATUS_SUCCESS => {},
-            c.AMDSMI_STATUS_NOT_SUPPORTED, c.AMDSMI_STATUS_NOT_YET_IMPLEMENTED, c.AMDSMI_STATUS_NO_DATA => error.Unsupported,
-            else => error.AmdSmiError,
-        };
-    }
+    amdsmi_init: *const @TypeOf(c.amdsmi_init),
+    amdsmi_get_socket_handles: *const @TypeOf(c.amdsmi_get_socket_handles),
+    amdsmi_get_processor_handles: *const @TypeOf(c.amdsmi_get_processor_handles),
+    amdsmi_get_gpu_asic_info: *const @TypeOf(c.amdsmi_get_gpu_asic_info),
+    amdsmi_get_gpu_driver_info: *const @TypeOf(c.amdsmi_get_gpu_driver_info),
+    amdsmi_get_gpu_bdf_id: *const @TypeOf(c.amdsmi_get_gpu_bdf_id),
+    amdsmi_get_gpu_metrics_info: *const @TypeOf(c.amdsmi_get_gpu_metrics_info),
+    amdsmi_get_power_info: *const @TypeOf(c.amdsmi_get_power_info),
+    amdsmi_get_temp_metric: *const @TypeOf(c.amdsmi_get_temp_metric),
+    amdsmi_get_gpu_fan_speed: *const @TypeOf(c.amdsmi_get_gpu_fan_speed),
+    amdsmi_get_gpu_activity: *const @TypeOf(c.amdsmi_get_gpu_activity),
+    amdsmi_get_clock_info: *const @TypeOf(c.amdsmi_get_clock_info),
+    amdsmi_get_gpu_memory_total: *const @TypeOf(c.amdsmi_get_gpu_memory_total),
+    amdsmi_get_gpu_memory_usage: *const @TypeOf(c.amdsmi_get_gpu_memory_usage),
+    amdsmi_get_pcie_info: *const @TypeOf(c.amdsmi_get_pcie_info),
+    amdsmi_get_gpu_process_list: *const @TypeOf(c.amdsmi_get_gpu_process_list),
 };
 
 pub fn detect(io: std.Io) bool {
@@ -61,40 +48,33 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
         return error.LibraryNotFound;
     };
     const api = try smi.dynlib.lookupStruct(library, Api);
-
-    const status = api.amdsmi_init.function(c.AMDSMI_INIT_AMD_GPUS);
-    Api.check(status) catch |err| {
-        var message: [*c]const u8 = "unknown status";
-        api.amdsmi_status_code_to_string.call(.{ status, &message }) catch {};
-        log.warn("amdsmi_init: {s}", .{std.mem.span(message)});
-        return err;
-    };
+    try check(api.amdsmi_init(c.AMDSMI_INIT_AMD_GPUS));
 
     var socket_count: u32 = 0;
-    try api.amdsmi_get_socket_handles.call(.{ &socket_count, null });
+    try check(api.amdsmi_get_socket_handles(&socket_count, null));
     const sockets = try gpa.alloc(c.amdsmi_socket_handle, socket_count);
     defer gpa.free(sockets);
-    try api.amdsmi_get_socket_handles.call(.{ &socket_count, sockets.ptr });
+    try check(api.amdsmi_get_socket_handles(&socket_count, sockets.ptr));
 
     var gpus: std.ArrayList(Gpu) = .empty;
     var devices: std.ArrayList(smi.Device) = .empty;
     for (sockets[0..socket_count]) |socket| {
         var count: u32 = 0;
-        try api.amdsmi_get_processor_handles.call(.{ socket, &count, null });
+        try check(api.amdsmi_get_processor_handles(socket, &count, null));
         const handles = try gpa.alloc(c.amdsmi_processor_handle, count);
         defer gpa.free(handles);
-        try api.amdsmi_get_processor_handles.call(.{ socket, &count, handles.ptr });
+        try check(api.amdsmi_get_processor_handles(socket, &count, handles.ptr));
 
         for (handles[0..count]) |handle| {
             var bdf: u64 = 0;
             var asic: c.amdsmi_asic_info_t = undefined;
             var driver: c.amdsmi_driver_info_t = undefined;
-            try gpus.append(arena, .{ .handle = handle, .address = if (api.amdsmi_get_gpu_bdf_id.call(.{ handle, &bdf })) |_| pciAddress(bdf) else |_| null });
+            try gpus.append(arena, .{ .handle = handle, .address = if (ok(api.amdsmi_get_gpu_bdf_id(handle, &bdf))) pciAddress(bdf) else null });
             // amdsmi reports the version of an in-tree driver, which has none, as N/A.
-            const version = if (api.amdsmi_get_gpu_driver_info.call(.{ handle, &driver })) |_| std.mem.sliceTo(&driver.driver_version, 0) else |_| "N/A";
+            const version = if (ok(api.amdsmi_get_gpu_driver_info(handle, &driver))) std.mem.sliceTo(&driver.driver_version, 0) else "N/A";
             try devices.append(arena, .{
                 .target = .rocm,
-                .name = if (api.amdsmi_get_gpu_asic_info.call(.{ handle, &asic })) |_| try arena.dupe(u8, std.mem.sliceTo(&asic.market_name, 0)) else |_| null,
+                .name = if (ok(api.amdsmi_get_gpu_asic_info(handle, &asic))) try arena.dupe(u8, std.mem.sliceTo(&asic.market_name, 0)) else null,
                 .driver_version = if (std.mem.eql(u8, version, "N/A")) null else try arena.dupe(u8, version),
             });
         }
@@ -118,52 +98,52 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
         const handle = gpu.handle;
 
         var metrics: c.amdsmi_gpu_metrics_t = undefined;
-        if (api.amdsmi_get_gpu_metrics_info.call(.{ handle, &metrics })) |_| {
+        if (ok(api.amdsmi_get_gpu_metrics_info(handle, &metrics))) {
             if (known(metrics.current_socket_power) orelse known(metrics.average_socket_power)) |watts| fields.power_mw = watts * 1000;
-        } else |_| {}
+        }
         var power: c.amdsmi_power_info_t = undefined;
-        if (api.amdsmi_get_power_info.call(.{ handle, &power })) |_| {
+        if (ok(api.amdsmi_get_power_info(handle, &power))) {
             if (known(power.power_limit)) |microwatts| fields.power_limit_mw = microwatts / 1000;
-        } else |_| {}
+        }
         var celsius: i64 = 0;
-        if (api.amdsmi_get_temp_metric.call(.{ handle, c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT, &celsius })) |_| {
+        if (ok(api.amdsmi_get_temp_metric(handle, c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT, &celsius))) {
             fields.temperature = std.math.cast(u64, celsius);
-        } else |_| {}
+        }
         var speed: i64 = 0;
-        if (api.amdsmi_get_gpu_fan_speed.call(.{ handle, 0, &speed })) |_| {
+        if (ok(api.amdsmi_get_gpu_fan_speed(handle, 0, &speed))) {
             if (std.math.cast(u64, speed)) |pwm| fields.fan_speed_percent = smi.hwmon.pwmPercent(pwm);
-        } else |_| {}
+        }
         var activity: c.amdsmi_engine_usage_t = undefined;
-        if (api.amdsmi_get_gpu_activity.call(.{ handle, &activity })) |_| {
+        if (ok(api.amdsmi_get_gpu_activity(handle, &activity))) {
             // Not a percentage when unsupported: 0xFFFF.
             if (activity.gfx_activity <= 100) fields.util_percent = activity.gfx_activity;
-        } else |_| {}
+        }
 
         var clock: c.amdsmi_clk_info_t = undefined;
-        if (api.amdsmi_get_clock_info.call(.{ handle, c.AMDSMI_CLK_TYPE_SYS, &clock })) |_| {
+        if (ok(api.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_SYS, &clock))) {
             fields.clock_graphics_mhz = known(clock.clk);
             fields.clock_graphics_max_mhz = known(clock.max_clk);
-        } else |_| {}
-        if (api.amdsmi_get_clock_info.call(.{ handle, c.AMDSMI_CLK_TYPE_SOC, &clock })) |_| {
+        }
+        if (ok(api.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_SOC, &clock))) {
             fields.clock_soc_mhz = known(clock.clk);
-        } else |_| {}
-        if (api.amdsmi_get_clock_info.call(.{ handle, c.AMDSMI_CLK_TYPE_MEM, &clock })) |_| {
+        }
+        if (ok(api.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_MEM, &clock))) {
             fields.clock_mem_mhz = known(clock.clk);
             fields.clock_mem_max_mhz = known(clock.max_clk);
-        } else |_| {}
+        }
 
         var bytes: u64 = 0;
-        fields.mem_used_bytes = if (api.amdsmi_get_gpu_memory_usage.call(.{ handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes })) |_| bytes else |_| null;
-        fields.mem_total_bytes = if (api.amdsmi_get_gpu_memory_total.call(.{ handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes })) |_| bytes else |_| null;
+        fields.mem_used_bytes = if (ok(api.amdsmi_get_gpu_memory_usage(handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes))) bytes else null;
+        fields.mem_total_bytes = if (ok(api.amdsmi_get_gpu_memory_total(handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes))) bytes else null;
 
         var pcie: c.amdsmi_pcie_info_t = undefined;
-        if (api.amdsmi_get_pcie_info.call(.{ handle, &pcie })) |_| {
+        if (ok(api.amdsmi_get_pcie_info(handle, &pcie))) {
             const link: smi.pci.Link = .{ .gen = known(pcie.pcie_static.pcie_interface_version), .width = known(pcie.pcie_metric.pcie_width) };
             fields.pcie_link_gen = link.gen;
             fields.pcie_link_width = link.width;
             // The rate comes from the generation: the speed amdsmi reports stays at 2.5 GT/s on an R9700 whose link runs at 32.
             fields.pcie_bandwidth_mbps = link.mbps();
-        } else |_| {}
+        }
     }
 }
 
@@ -233,12 +213,12 @@ const Gpu = struct {
 
 fn processList(self: *AmdSmi, scratch: std.mem.Allocator, handle: c.amdsmi_processor_handle) ![]const c.amdsmi_proc_info_t {
     var count: u32 = 0;
-    try Api.check(self.listQuietly(handle, &count, null));
+    try check(self.listQuietly(handle, &count, null));
     if (count == 0) return &.{};
 
     const list = try scratch.alloc(c.amdsmi_proc_info_t, count);
     const status = self.listQuietly(handle, &count, list.ptr);
-    if (status != c.AMDSMI_STATUS_OUT_OF_RESOURCES) try Api.check(status);
+    if (status != c.AMDSMI_STATUS_OUT_OF_RESOURCES) try check(status);
     return list[0..@min(count, list.len)];
 }
 
@@ -256,7 +236,47 @@ fn listQuietly(self: *AmdSmi, handle: c.amdsmi_processor_handle, count: *u32, li
         _ = std.c.dup2(saved, std.c.STDERR_FILENO);
         _ = std.c.close(saved);
     };
-    return self.api.amdsmi_get_gpu_process_list.function(handle, count, list);
+    return self.api.amdsmi_get_gpu_process_list(handle, count, list);
+}
+
+fn ok(status: c.amdsmi_status_t) bool {
+    return status == c.AMDSMI_STATUS_SUCCESS;
+}
+
+fn check(status: c.amdsmi_status_t) !void {
+    return switch (status) {
+        c.AMDSMI_STATUS_SUCCESS => {},
+        c.AMDSMI_STATUS_INVAL => error.InvalidArgument,
+        c.AMDSMI_STATUS_NOT_SUPPORTED => error.NotSupported,
+        c.AMDSMI_STATUS_NOT_YET_IMPLEMENTED => error.NotYetImplemented,
+        c.AMDSMI_STATUS_FAIL_LOAD_MODULE => error.FailLoadModule,
+        c.AMDSMI_STATUS_FAIL_LOAD_SYMBOL => error.FailLoadSymbol,
+        c.AMDSMI_STATUS_DRM_ERROR => error.DrmError,
+        c.AMDSMI_STATUS_API_FAILED => error.ApiFailed,
+        c.AMDSMI_STATUS_TIMEOUT => error.Timeout,
+        c.AMDSMI_STATUS_RETRY => error.Retry,
+        c.AMDSMI_STATUS_NO_PERM => error.NoPermission,
+        c.AMDSMI_STATUS_INTERRUPT => error.Interrupt,
+        c.AMDSMI_STATUS_IO => error.IoError,
+        c.AMDSMI_STATUS_ADDRESS_FAULT => error.AddressFault,
+        c.AMDSMI_STATUS_FILE_ERROR => error.FileError,
+        c.AMDSMI_STATUS_OUT_OF_RESOURCES => error.OutOfResources,
+        c.AMDSMI_STATUS_INTERNAL_EXCEPTION => error.InternalException,
+        c.AMDSMI_STATUS_INPUT_OUT_OF_BOUNDS => error.InputOutOfBounds,
+        c.AMDSMI_STATUS_INIT_ERROR => error.InitError,
+        c.AMDSMI_STATUS_REFCOUNT_OVERFLOW => error.RefcountOverflow,
+        c.AMDSMI_STATUS_DIRECTORY_NOT_FOUND => error.DirectoryNotFound,
+        c.AMDSMI_STATUS_BUSY => error.Busy,
+        c.AMDSMI_STATUS_NOT_FOUND => error.NotFound,
+        c.AMDSMI_STATUS_NOT_INIT => error.NotInit,
+        c.AMDSMI_STATUS_NO_SLOT => error.NoSlot,
+        c.AMDSMI_STATUS_DRIVER_NOT_LOADED => error.DriverNotLoaded,
+        c.AMDSMI_STATUS_NO_DATA => error.NoData,
+        c.AMDSMI_STATUS_INSUFFICIENT_SIZE => error.InsufficientSize,
+        c.AMDSMI_STATUS_UNEXPECTED_SIZE => error.UnexpectedSize,
+        c.AMDSMI_STATUS_UNEXPECTED_DATA => error.UnexpectedData,
+        else => error.Unknown,
+    };
 }
 
 fn deviceOf(self: *const AmdSmi, pdev: []const u8) ?u16 {

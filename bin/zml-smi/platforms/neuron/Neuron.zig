@@ -18,23 +18,19 @@ rows: ?[]const smi.ProcessInfo = null,
 const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .deinit = deinit };
 
 const Api = struct {
-    nrt_get_total_nc_count: Checked(c.nrt_get_total_nc_count),
-    nrt_get_version: Checked(c.nrt_get_version),
+    nrt_get_total_nc_count: *const @TypeOf(c.nrt_get_total_nc_count),
+    nrt_get_version: *const @TypeOf(c.nrt_get_version),
 };
 
 /// The functions libnrt does not export, found in its symbol table.
 const Private = struct {
     ndl_available_devices: *const @TypeOf(c.ndl_available_devices),
-    ndl_open_device: Checked(c.ndl_open_device),
-    ndl_get_all_apps_info: Checked(c.ndl_get_all_apps_info),
-    nds_open: Checked(c.nds_open),
+    ndl_open_device: *const @TypeOf(c.ndl_open_device),
+    ndl_get_all_apps_info: *const @TypeOf(c.ndl_get_all_apps_info),
+    nds_open: *const @TypeOf(c.nds_open),
     nds_close: *const @TypeOf(c.nds_close),
-    nds_get_nc_counter: Checked(c.nds_get_nc_counter),
+    nds_get_nc_counter: *const @TypeOf(c.nds_get_nc_counter),
 };
-
-fn Checked(comptime function: anytype) type {
-    return smi.dynlib.Checked(@TypeOf(function), check);
-}
 
 fn check(status: i64) error{NrtError}!void {
     if (status != 0) return error.NrtError;
@@ -46,14 +42,14 @@ pub fn detect(io: std.Io) bool {
 
 pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuron {
     const api = try open(gpa, io);
-    const nrt = try findPrivate(io, api.nrt_get_version.function);
+    const nrt = try findPrivate(io, api.nrt_get_version);
     var core_count: u32 = 0;
-    try api.nrt_get_total_nc_count.call(.{&core_count});
+    try check(api.nrt_get_total_nc_count(&core_count));
 
     var version = std.mem.zeroes(c.nrt_version_t);
-    const driver_version = if (api.nrt_get_version.call(.{ &version, @sizeOf(c.nrt_version_t) })) |_|
+    const driver_version = if (api.nrt_get_version(&version, @sizeOf(c.nrt_version_t)) == 0)
         try arena.dupe(u8, std.mem.sliceTo(&version.rt_detail, 0))
-    else |_|
+    else
         null;
 
     var indices: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
@@ -62,7 +58,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuro
     for (indices[0..count]) |index| {
         var params: c.ndl_device_init_param_t = .{ .initialize_device = false, .num_dram_regions = 0, .map_hbm = false, .skip_copy_bufs = true };
         var handle: ?*c.ndl_device_t = null;
-        nrt.ndl_open_device.call(.{ index, &params, &handle }) catch continue;
+        if (nrt.ndl_open_device(index, &params, &handle) != 0) continue;
         opened.appendAssumeCapacity(.{ index, handle orelse continue });
     }
 
@@ -204,7 +200,7 @@ fn memoryInUse(memory: []const ?smi.sysfs.Dir) ?u64 {
 fn scan(self: *Neuron, scratch: std.mem.Allocator, handle: *c.ndl_device_t, first: u16, elapsed: ?std.Io.Duration, cores: []smi.Sample, rows: *std.ArrayList(smi.ProcessInfo)) !void {
     var list: ?[*]c.struct_neuron_app_info = null;
     var count: usize = 0;
-    try self.nrt.ndl_get_all_apps_info.call(.{ handle, &list, &count, c.APP_INFO_ALL });
+    try check(self.nrt.ndl_get_all_apps_info(handle, &list, &count, c.APP_INFO_ALL));
     defer std.c.free(list);
     const apps: []const c.struct_neuron_app_info = if (list) |items| items[0..count] else &.{};
 
@@ -213,13 +209,13 @@ fn scan(self: *Neuron, scratch: std.mem.Allocator, handle: *c.ndl_device_t, firs
     for (apps) |app| {
         if (app.pid <= 0) continue;
         var instance: ?*c.nds_instance_t = null;
-        self.nrt.nds_open.call(.{ handle, app.pid, &instance }) catch continue;
+        if (self.nrt.nds_open(handle, app.pid, &instance) != 0) continue;
         const nds = instance orelse continue;
         defer _ = self.nrt.nds_close(nds);
 
         for (busy, 0..) |*sum, core| {
             var micros: u64 = 0;
-            self.nrt.nds_get_nc_counter.call(.{ nds, @intCast(core), c.NDS_NC_COUNTER_TIME_IN_USE, &micros }) catch continue;
+            if (self.nrt.nds_get_nc_counter(nds, @intCast(core), c.NDS_NC_COUNTER_TIME_IN_USE, &micros) != 0) continue;
             const key: Key = .{ .pid = @intCast(app.pid), .core = first + @as(u16, @intCast(core)) };
             const duration: std.Io.Duration = .fromMicroseconds(std.math.cast(i64, micros) orelse continue);
             try self.curr_busy.put(self.gpa, key, duration);
@@ -258,11 +254,10 @@ fn findPrivate(io: std.Io, known: *const anyopaque) !Private {
         for (std.mem.bytesAsSlice(elf.Sym, image[section.offset..][0..section.size])) |symbol| {
             if (symbol.value == 0) continue;
             const name = std.mem.sliceTo(strings[symbol.name..], 0);
-            inline for (info.field_names, info.field_types, &found) |field, Field, *seen| {
+            inline for (info.field_names, &found) |field, *seen| {
                 if (!seen.* and std.mem.eql(u8, name, field)) {
                     seen.* = true;
-                    const address = @intFromPtr(library.fbase) + symbol.value;
-                    @field(private, field) = if (@typeInfo(Field) == .@"struct") .{ .function = @ptrFromInt(address) } else @ptrFromInt(address);
+                    @field(private, field) = @ptrFromInt(@intFromPtr(library.fbase) + symbol.value);
                 }
             }
         }
@@ -288,7 +283,7 @@ extern fn dladdr(address: *const anyopaque, info: *DlInfo) c_int;
 test findPrivate {
     const io = std.testing.io;
     const api = try open(std.testing.allocator, io);
-    const nrt = try findPrivate(io, api.nrt_get_version.function);
+    const nrt = try findPrivate(io, api.nrt_get_version);
     var indices: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
     try std.testing.expect(nrt.ndl_available_devices(&indices, indices.len) >= 0);
 }

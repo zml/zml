@@ -13,43 +13,30 @@ tick: u8 = 0,
 const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes };
 
 const Api = struct {
-    nvmlInit_v2: Checked(c.nvmlInit_v2),
-    nvmlErrorString: *const @TypeOf(c.nvmlErrorString),
-    nvmlSystemGetDriverVersion: Checked(c.nvmlSystemGetDriverVersion),
-    nvmlSystemGetCudaDriverVersion_v2: Checked(c.nvmlSystemGetCudaDriverVersion_v2),
-    nvmlDeviceGetCount_v2: Checked(c.nvmlDeviceGetCount_v2),
-    nvmlDeviceGetHandleByIndex_v2: Checked(c.nvmlDeviceGetHandleByIndex_v2),
-    nvmlDeviceGetName: Checked(c.nvmlDeviceGetName),
-    nvmlDeviceGetPowerUsage: Checked(c.nvmlDeviceGetPowerUsage),
-    nvmlDeviceGetEnforcedPowerLimit: Checked(c.nvmlDeviceGetEnforcedPowerLimit),
-    nvmlDeviceGetTemperature: Checked(c.nvmlDeviceGetTemperature),
-    nvmlDeviceGetFanSpeed: Checked(c.nvmlDeviceGetFanSpeed),
-    nvmlDeviceGetUtilizationRates: Checked(c.nvmlDeviceGetUtilizationRates),
-    nvmlDeviceGetEncoderUtilization: Checked(c.nvmlDeviceGetEncoderUtilization),
-    nvmlDeviceGetDecoderUtilization: Checked(c.nvmlDeviceGetDecoderUtilization),
-    nvmlDeviceGetClockInfo: Checked(c.nvmlDeviceGetClockInfo),
-    nvmlDeviceGetMaxClockInfo: Checked(c.nvmlDeviceGetMaxClockInfo),
-    nvmlDeviceGetMemoryInfo: Checked(c.nvmlDeviceGetMemoryInfo),
-    nvmlDeviceGetMemoryBusWidth: Checked(c.nvmlDeviceGetMemoryBusWidth),
-    nvmlDeviceGetPcieThroughput: Checked(c.nvmlDeviceGetPcieThroughput),
-    nvmlDeviceGetPcieSpeed: Checked(c.nvmlDeviceGetPcieSpeed),
-    nvmlDeviceGetCurrPcieLinkGeneration: Checked(c.nvmlDeviceGetCurrPcieLinkGeneration),
-    nvmlDeviceGetCurrPcieLinkWidth: Checked(c.nvmlDeviceGetCurrPcieLinkWidth),
-    nvmlDeviceGetComputeRunningProcesses_v3: Checked(c.nvmlDeviceGetComputeRunningProcesses_v3),
-    nvmlDeviceGetGraphicsRunningProcesses_v3: Checked(c.nvmlDeviceGetGraphicsRunningProcesses_v3),
-    nvmlDeviceGetProcessUtilization: Checked(c.nvmlDeviceGetProcessUtilization),
-
-    fn Checked(comptime function: anytype) type {
-        return smi.dynlib.Checked(@TypeOf(function), check);
-    }
-
-    fn check(status: c.nvmlReturn_t) error{ Unsupported, NvmlError }!void {
-        return switch (status) {
-            c.NVML_SUCCESS => {},
-            c.NVML_ERROR_NOT_SUPPORTED, c.NVML_ERROR_NO_DATA => error.Unsupported,
-            else => error.NvmlError,
-        };
-    }
+    nvmlInit_v2: *const @TypeOf(c.nvmlInit_v2),
+    nvmlSystemGetDriverVersion: *const @TypeOf(c.nvmlSystemGetDriverVersion),
+    nvmlSystemGetCudaDriverVersion_v2: *const @TypeOf(c.nvmlSystemGetCudaDriverVersion_v2),
+    nvmlDeviceGetCount_v2: *const @TypeOf(c.nvmlDeviceGetCount_v2),
+    nvmlDeviceGetHandleByIndex_v2: *const @TypeOf(c.nvmlDeviceGetHandleByIndex_v2),
+    nvmlDeviceGetName: *const @TypeOf(c.nvmlDeviceGetName),
+    nvmlDeviceGetPowerUsage: *const @TypeOf(c.nvmlDeviceGetPowerUsage),
+    nvmlDeviceGetEnforcedPowerLimit: *const @TypeOf(c.nvmlDeviceGetEnforcedPowerLimit),
+    nvmlDeviceGetTemperature: *const @TypeOf(c.nvmlDeviceGetTemperature),
+    nvmlDeviceGetFanSpeed: *const @TypeOf(c.nvmlDeviceGetFanSpeed),
+    nvmlDeviceGetUtilizationRates: *const @TypeOf(c.nvmlDeviceGetUtilizationRates),
+    nvmlDeviceGetEncoderUtilization: *const @TypeOf(c.nvmlDeviceGetEncoderUtilization),
+    nvmlDeviceGetDecoderUtilization: *const @TypeOf(c.nvmlDeviceGetDecoderUtilization),
+    nvmlDeviceGetClockInfo: *const @TypeOf(c.nvmlDeviceGetClockInfo),
+    nvmlDeviceGetMaxClockInfo: *const @TypeOf(c.nvmlDeviceGetMaxClockInfo),
+    nvmlDeviceGetMemoryInfo: *const @TypeOf(c.nvmlDeviceGetMemoryInfo),
+    nvmlDeviceGetMemoryBusWidth: *const @TypeOf(c.nvmlDeviceGetMemoryBusWidth),
+    nvmlDeviceGetPcieThroughput: *const @TypeOf(c.nvmlDeviceGetPcieThroughput),
+    nvmlDeviceGetPcieSpeed: *const @TypeOf(c.nvmlDeviceGetPcieSpeed),
+    nvmlDeviceGetCurrPcieLinkGeneration: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkGeneration),
+    nvmlDeviceGetCurrPcieLinkWidth: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkWidth),
+    nvmlDeviceGetComputeRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetComputeRunningProcesses_v3),
+    nvmlDeviceGetGraphicsRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetGraphicsRunningProcesses_v3),
+    nvmlDeviceGetProcessUtilization: *const @TypeOf(c.nvmlDeviceGetProcessUtilization),
 };
 
 pub fn detect(io: std.Io) bool {
@@ -63,38 +50,33 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
         return error.LibraryNotFound;
     };
     const api = try smi.dynlib.lookupStruct(library, Api);
-
-    const status = api.nvmlInit_v2.function();
-    Api.check(status) catch |err| {
-        log.warn("nvmlInit: {s}", .{std.mem.span(api.nvmlErrorString(status))});
-        return err;
-    };
+    try check(api.nvmlInit_v2());
 
     var version: [c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE]u8 = undefined;
-    const driver_version = if (api.nvmlSystemGetDriverVersion.call(.{ &version, version.len })) |_|
+    const driver_version = if (ok(api.nvmlSystemGetDriverVersion(&version, version.len)))
         try arena.dupe(u8, std.mem.sliceTo(&version, 0))
-    else |_|
+    else
         null;
     var cuda: c_int = 0;
-    const details: []const smi.Device.Detail = if (api.nvmlSystemGetCudaDriverVersion_v2.call(.{&cuda})) |_| try arena.dupe(smi.Device.Detail, &.{.{
+    const details: []const smi.Device.Detail = if (ok(api.nvmlSystemGetCudaDriverVersion_v2(&cuda))) try arena.dupe(smi.Device.Detail, &.{.{
         .key = "cuda_version",
         .label = "CUDA",
         .value = try std.fmt.allocPrint(arena, "{d}.{d}", .{ @divTrunc(cuda, 1000), @divTrunc(@mod(cuda, 1000), 10) }),
         .in_title = true,
-    }}) else |_| &.{};
+    }}) else &.{};
 
     var count: c_uint = 0;
-    try api.nvmlDeviceGetCount_v2.call(.{&count});
+    try check(api.nvmlDeviceGetCount_v2(&count));
     var gpus: std.ArrayList(Gpu) = try .initCapacity(arena, count);
     var devices: std.ArrayList(smi.Device) = try .initCapacity(arena, count);
     for (0..count) |index| {
         var handle: c.nvmlDevice_t = undefined;
-        api.nvmlDeviceGetHandleByIndex_v2.call(.{ @intCast(index), &handle }) catch continue;
+        if (!ok(api.nvmlDeviceGetHandleByIndex_v2(@intCast(index), &handle))) continue;
         var name: [c.NVML_DEVICE_NAME_V2_BUFFER_SIZE]u8 = undefined;
         gpus.appendAssumeCapacity(.{ .handle = handle });
         devices.appendAssumeCapacity(.{
             .target = .cuda,
-            .name = if (api.nvmlDeviceGetName.call(.{ handle, &name, name.len })) |_| try arena.dupe(u8, std.mem.sliceTo(&name, 0)) else |_| null,
+            .name = if (ok(api.nvmlDeviceGetName(handle, &name, name.len))) try arena.dupe(u8, std.mem.sliceTo(&name, 0)) else null,
             .driver_version = driver_version,
             .details = details,
         });
@@ -119,40 +101,40 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
         const handle = gpu.handle;
 
         var value: c_uint = 0;
-        fields.power_mw = if (api.nvmlDeviceGetPowerUsage.call(.{ handle, &value })) |_| value else |_| null;
-        fields.power_limit_mw = if (api.nvmlDeviceGetEnforcedPowerLimit.call(.{ handle, &value })) |_| value else |_| null;
-        fields.temperature = if (api.nvmlDeviceGetTemperature.call(.{ handle, c.NVML_TEMPERATURE_GPU, &value })) |_| value else |_| null;
-        fields.fan_speed_percent = if (api.nvmlDeviceGetFanSpeed.call(.{ handle, &value })) |_| value else |_| null;
+        fields.power_mw = if (ok(api.nvmlDeviceGetPowerUsage(handle, &value))) value else null;
+        fields.power_limit_mw = if (ok(api.nvmlDeviceGetEnforcedPowerLimit(handle, &value))) value else null;
+        fields.temperature = if (ok(api.nvmlDeviceGetTemperature(handle, c.NVML_TEMPERATURE_GPU, &value))) value else null;
+        fields.fan_speed_percent = if (ok(api.nvmlDeviceGetFanSpeed(handle, &value))) value else null;
         var rates: c.nvmlUtilization_t = undefined;
-        fields.util_percent = if (api.nvmlDeviceGetUtilizationRates.call(.{ handle, &rates })) |_| rates.gpu else |_| null;
+        fields.util_percent = if (ok(api.nvmlDeviceGetUtilizationRates(handle, &rates))) rates.gpu else null;
 
         var util: c_uint, var period: c_uint = .{ 0, 0 };
-        fields.encoder_util_percent = if (api.nvmlDeviceGetEncoderUtilization.call(.{ handle, &util, &period })) |_| util else |_| null;
-        fields.decoder_util_percent = if (api.nvmlDeviceGetDecoderUtilization.call(.{ handle, &util, &period })) |_| util else |_| null;
+        fields.encoder_util_percent = if (ok(api.nvmlDeviceGetEncoderUtilization(handle, &util, &period))) util else null;
+        fields.decoder_util_percent = if (ok(api.nvmlDeviceGetDecoderUtilization(handle, &util, &period))) util else null;
 
-        fields.clock_graphics_mhz = if (api.nvmlDeviceGetClockInfo.call(.{ handle, c.NVML_CLOCK_GRAPHICS, &value })) |_| value else |_| null;
-        fields.clock_sm_mhz = if (api.nvmlDeviceGetClockInfo.call(.{ handle, c.NVML_CLOCK_SM, &value })) |_| value else |_| null;
-        fields.clock_mem_mhz = if (api.nvmlDeviceGetClockInfo.call(.{ handle, c.NVML_CLOCK_MEM, &value })) |_| value else |_| null;
-        fields.clock_graphics_max_mhz = if (api.nvmlDeviceGetMaxClockInfo.call(.{ handle, c.NVML_CLOCK_GRAPHICS, &value })) |_| value else |_| null;
-        fields.clock_mem_max_mhz = if (api.nvmlDeviceGetMaxClockInfo.call(.{ handle, c.NVML_CLOCK_MEM, &value })) |_| value else |_| null;
+        fields.clock_graphics_mhz = if (ok(api.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_GRAPHICS, &value))) value else null;
+        fields.clock_sm_mhz = if (ok(api.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_SM, &value))) value else null;
+        fields.clock_mem_mhz = if (ok(api.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_MEM, &value))) value else null;
+        fields.clock_graphics_max_mhz = if (ok(api.nvmlDeviceGetMaxClockInfo(handle, c.NVML_CLOCK_GRAPHICS, &value))) value else null;
+        fields.clock_mem_max_mhz = if (ok(api.nvmlDeviceGetMaxClockInfo(handle, c.NVML_CLOCK_MEM, &value))) value else null;
 
         var memory: c.nvmlMemory_t = undefined;
-        if (api.nvmlDeviceGetMemoryInfo.call(.{ handle, &memory })) |_| {
+        if (ok(api.nvmlDeviceGetMemoryInfo(handle, &memory))) {
             fields.mem_used_bytes = memory.used;
             fields.mem_total_bytes = memory.total;
-        } else |_| {}
-        fields.mem_bus_width = if (api.nvmlDeviceGetMemoryBusWidth.call(.{ handle, &value })) |_| value else |_| null;
+        }
+        fields.mem_bus_width = if (ok(api.nvmlDeviceGetMemoryBusWidth(handle, &value))) value else null;
 
-        fields.pcie_link_gen = if (api.nvmlDeviceGetCurrPcieLinkGeneration.call(.{ handle, &value })) |_| value else |_| null;
-        fields.pcie_link_width = if (api.nvmlDeviceGetCurrPcieLinkWidth.call(.{ handle, &value })) |_| value else |_| null;
+        fields.pcie_link_gen = if (ok(api.nvmlDeviceGetCurrPcieLinkGeneration(handle, &value))) value else null;
+        fields.pcie_link_width = if (ok(api.nvmlDeviceGetCurrPcieLinkWidth(handle, &value))) value else null;
         // NVML gives the speed of one lane.
-        if (api.nvmlDeviceGetPcieSpeed.call(.{ handle, &value })) |_| {
+        if (ok(api.nvmlDeviceGetPcieSpeed(handle, &value))) {
             if (fields.pcie_link_width) |width| fields.pcie_bandwidth_mbps = value * width;
-        } else |_| {}
+        }
 
         if (read_pcie) {
-            gpu.pcie_tx_kbps = if (api.nvmlDeviceGetPcieThroughput.call(.{ handle, c.NVML_PCIE_UTIL_TX_BYTES, &value })) |_| value else |_| null;
-            gpu.pcie_rx_kbps = if (api.nvmlDeviceGetPcieThroughput.call(.{ handle, c.NVML_PCIE_UTIL_RX_BYTES, &value })) |_| value else |_| null;
+            gpu.pcie_tx_kbps = if (ok(api.nvmlDeviceGetPcieThroughput(handle, c.NVML_PCIE_UTIL_TX_BYTES, &value))) value else null;
+            gpu.pcie_rx_kbps = if (ok(api.nvmlDeviceGetPcieThroughput(handle, c.NVML_PCIE_UTIL_RX_BYTES, &value))) value else null;
         }
         fields.pcie_tx_kbps = gpu.pcie_tx_kbps;
         fields.pcie_rx_kbps = gpu.pcie_rx_kbps;
@@ -197,22 +179,63 @@ const Gpu = struct {
 
 fn running(scratch: std.mem.Allocator, query: anytype, handle: c.nvmlDevice_t) ![]const c.nvmlProcessInfo_t {
     var count: c_uint = 0;
-    const status = query.function(handle, &count, null);
-    if (status == c.NVML_SUCCESS) return &.{};
-    if (status != c.NVML_ERROR_INSUFFICIENT_SIZE) try Api.check(status);
+    const status = query(handle, &count, null);
+    if (ok(status)) return &.{};
+    if (status != c.NVML_ERROR_INSUFFICIENT_SIZE) try check(status);
 
     const list = try scratch.alloc(c.nvmlProcessInfo_t, count);
-    try query.call(.{ handle, &count, list.ptr });
+    try check(query(handle, &count, list.ptr));
     return list[0..count];
 }
 
 fn processUtilization(self: *Nvml, scratch: std.mem.Allocator, handle: c.nvmlDevice_t, since: u64) ![]const c.nvmlProcessUtilizationSample_t {
     var count: c_uint = 0;
-    const status = self.api.nvmlDeviceGetProcessUtilization.function(handle, null, &count, since);
-    if (status == c.NVML_SUCCESS) return &.{};
-    if (status != c.NVML_ERROR_INSUFFICIENT_SIZE) try Api.check(status);
+    const status = self.api.nvmlDeviceGetProcessUtilization(handle, null, &count, since);
+    if (ok(status)) return &.{};
+    if (status != c.NVML_ERROR_INSUFFICIENT_SIZE) try check(status);
 
     const samples = try scratch.alloc(c.nvmlProcessUtilizationSample_t, count);
-    try self.api.nvmlDeviceGetProcessUtilization.call(.{ handle, samples.ptr, &count, since });
+    try check(self.api.nvmlDeviceGetProcessUtilization(handle, samples.ptr, &count, since));
     return samples[0..count];
+}
+
+fn ok(status: c.nvmlReturn_t) bool {
+    return status == c.NVML_SUCCESS;
+}
+
+fn check(status: c.nvmlReturn_t) !void {
+    return switch (status) {
+        c.NVML_SUCCESS => {},
+        c.NVML_ERROR_UNINITIALIZED => error.Uninitialized,
+        c.NVML_ERROR_INVALID_ARGUMENT => error.InvalidArgument,
+        c.NVML_ERROR_NOT_SUPPORTED => error.NotSupported,
+        c.NVML_ERROR_NO_PERMISSION => error.NoPermission,
+        c.NVML_ERROR_ALREADY_INITIALIZED => error.AlreadyInitialized,
+        c.NVML_ERROR_NOT_FOUND => error.NotFound,
+        c.NVML_ERROR_INSUFFICIENT_SIZE => error.InsufficientSize,
+        c.NVML_ERROR_INSUFFICIENT_POWER => error.InsufficientPower,
+        c.NVML_ERROR_DRIVER_NOT_LOADED => error.DriverNotLoaded,
+        c.NVML_ERROR_TIMEOUT => error.Timeout,
+        c.NVML_ERROR_IRQ_ISSUE => error.IrqIssue,
+        c.NVML_ERROR_LIBRARY_NOT_FOUND => error.LibraryNotFound,
+        c.NVML_ERROR_FUNCTION_NOT_FOUND => error.FunctionNotFound,
+        c.NVML_ERROR_CORRUPTED_INFOROM => error.CorruptedInforom,
+        c.NVML_ERROR_GPU_IS_LOST => error.GpuIsLost,
+        c.NVML_ERROR_RESET_REQUIRED => error.ResetRequired,
+        c.NVML_ERROR_OPERATING_SYSTEM => error.OperatingSystem,
+        c.NVML_ERROR_LIB_RM_VERSION_MISMATCH => error.LibRmVersionMismatch,
+        c.NVML_ERROR_IN_USE => error.InUse,
+        c.NVML_ERROR_MEMORY => error.Memory,
+        c.NVML_ERROR_NO_DATA => error.NoData,
+        c.NVML_ERROR_VGPU_ECC_NOT_SUPPORTED => error.VgpuEccNotSupported,
+        c.NVML_ERROR_INSUFFICIENT_RESOURCES => error.InsufficientResources,
+        c.NVML_ERROR_FREQ_NOT_SUPPORTED => error.FreqNotSupported,
+        c.NVML_ERROR_ARGUMENT_VERSION_MISMATCH => error.ArgumentVersionMismatch,
+        c.NVML_ERROR_DEPRECATED => error.Deprecated,
+        c.NVML_ERROR_NOT_READY => error.NotReady,
+        c.NVML_ERROR_GPU_NOT_FOUND => error.GpuNotFound,
+        c.NVML_ERROR_INVALID_STATE => error.InvalidState,
+        c.NVML_ERROR_RESET_TYPE_NOT_SUPPORTED => error.ResetTypeNotSupported,
+        else => error.Unknown,
+    };
 }
