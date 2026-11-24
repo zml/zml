@@ -614,6 +614,8 @@ pub const Mfma = struct {
 const Gemv = struct {
     const group = 4;
     const threads = 256;
+    /// Most weight rows per thread: each input chunk read from LDS serves all of them.
+    const max_row_block = 2;
 
     const Config = struct {
         n: i64,
@@ -628,6 +630,8 @@ const Gemv = struct {
         batch: i64,
         batches: i64,
         rows: i64,
+        /// Weight rows per thread.
+        row_block: i64,
         nvfp4: i64,
         f16: i64,
         /// E4M3 weights, one byte each, rather than packed E2M1.
@@ -648,10 +652,13 @@ const Gemv = struct {
         std.debug.assert(scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32) and
             (scales.dtype() == .u8 or (!fp8 and scales.dtype() == .i16)));
         const chunks = @divExact(k, 32);
-        // Enough lanes per row that each has at most 12 loads of 16 bytes in flight in one batch.
-        const most: i64 = if (fp8) 6 else 12;
+        // Staged inputs over a quarter of LDS already hold a CU to three blocks; two rows
+        // per thread then halve the LDS reads without lowering occupancy further.
+        const row_block: i64 = if (group * @divExact(k, 2) * 4 > 16 * 1024) max_row_block else 1;
+        // Enough lanes per row block that each has at most 12 loads of 16 bytes in flight in one batch.
+        const most: i64 = @divExact(@as(i64, if (fp8) 6 else 12), row_block);
         var lanes: i64 = 4;
-        while (lanes < 16 and std.math.divCeil(i64, chunks, lanes) catch unreachable > most) lanes *= 2;
+        while (lanes < 32 and std.math.divCeil(i64, chunks, lanes) catch unreachable > most) lanes *= 2;
         const per_lane = std.math.divCeil(i64, chunks, lanes) catch unreachable;
         const batches = std.math.divCeil(i64, per_lane, most) catch unreachable;
         const cfg: Config = .{
@@ -665,7 +672,8 @@ const Gemv = struct {
             .lanes = lanes,
             .batch = std.math.divCeil(i64, per_lane, batches) catch unreachable,
             .batches = batches,
-            .rows = @divExact(threads, lanes),
+            .rows = @divExact(threads, lanes) * row_block,
+            .row_block = row_block,
             .nvfp4 = @intFromBool(scales.dtype() == .i16),
             .f16 = @intFromBool(x.dtype() == .f16),
             .fp8 = @intFromBool(fp8),
@@ -697,8 +705,9 @@ const Gemv = struct {
         const thread32 = b.threadId(.x);
         const thread = thread32.to(.i64);
         const lane = thread.remUnsigned(cfg.lanes);
-        const row = b.blockId(.x).to(.i64).mul(cfg.rows).add(thread.divUnsigned(cfg.lanes));
-        const in_rows = row.cmpUnsigned(.lt, cfg.n);
+        var row_storage: [max_row_block]Value = undefined;
+        const rows = row_storage[0..@intCast(cfg.row_block)];
+        for (rows, 0..) |*row, r| row.* = b.blockId(.x).to(.i64).mul(cfg.rows).add(thread.divUnsigned(cfg.lanes).mul(cfg.row_block)).add(@as(i64, @intCast(r)));
         const expert32 = args.ids.at(route);
         const local = expert32.ge(0).bitAnd(expert32.lt(cfg.experts));
 
@@ -769,40 +778,50 @@ const Gemv = struct {
                     }
                 }
                 b.barrier();
-                const sums = accumulate(b, args, cfg, inputs, expert32.to(.i64), row, lane, count);
-                var store = b.openIf(lane.eq(0).bitAnd(in_rows));
-                {
-                    inline for (0..group) |m| {
-                        var write = b.openIf(count.gt(m));
-                        {
-                            args.output.set(.{ members[m], row }, sums[m].to(.bf16));
-                            write.close();
+                const sums = accumulate(b, args, cfg, inputs, expert32.to(.i64), rows, lane, count);
+                for (rows, sums[0..rows.len]) |row, row_sums| {
+                    var store = b.openIf(lane.eq(0).bitAnd(row.cmpUnsigned(.lt, cfg.n)));
+                    {
+                        inline for (0..group) |m| {
+                            var write = b.openIf(count.gt(m));
+                            {
+                                args.output.set(.{ members[m], row }, row_sums[m].to(.bf16));
+                                write.close();
+                            }
                         }
+                        store.close();
                     }
-                    store.close();
                 }
                 leader.close();
             }
             remote.elseBranch();
         }
         {
-            var store = b.openIf(lane.eq(0).bitAnd(in_rows));
-            {
-                args.output.set(.{ route, row }, fzero.to(.bf16));
-                store.close();
+            for (rows) |row| {
+                var store = b.openIf(lane.eq(0).bitAnd(row.cmpUnsigned(.lt, cfg.n)));
+                {
+                    args.output.set(.{ route, row }, fzero.to(.bf16));
+                    store.close();
+                }
             }
             remote.close();
         }
     }
 
-    /// Each lane's partial dot products with its group's input rows, summed over the lanes of its weight row.
-    fn accumulate(b: *Builder, args: Kernel.Args, cfg: Config, inputs: Value, expert: Value, row: Value, lane: Value, count: Value) [group]Value {
+    /// Each lane's partial dot products of its rows with its group's input rows, summed over
+    /// the lanes of its row block.
+    fn accumulate(b: *Builder, args: Kernel.Args, cfg: Config, inputs: Value, expert: Value, rows: []const Value, lane: Value, count: Value) [max_row_block][group]Value {
         const fzero = b.constant(.f32, 0.0);
         const load = b.copyAtom(.{ .universal = 128 }, .i32);
         // Rows past N read row 0 and are never stored.
-        const b_base = expert.mul(cfg.n * cfg.k_words).add(row.cmpUnsigned(.lt, cfg.n).select(row, b.constant(.i64, 0)).mul(cfg.k_words));
-        const scale_row = row.cmpUnsigned(.lt, cfg.n).select(row, b.constant(.i64, 0));
-        var inits: [group]Value = undefined;
+        var kept_rows: [max_row_block]Value = undefined;
+        var b_bases: [max_row_block]Value = undefined;
+        for (kept_rows[0..rows.len], b_bases[0..rows.len], rows) |*kept, *base, row| {
+            kept.* = row.cmpUnsigned(.lt, cfg.n).select(row, b.constant(.i64, 0));
+            base.* = expert.mul(cfg.n * cfg.k_words).add(kept.*.mul(cfg.k_words));
+        }
+        // Rows past the thread's row block carry zeros.
+        var inits: [max_row_block * group]Value = undefined;
         for (&inits) |*acc| acc.* = fzero;
         var batches = b.openFor(b.constant(.i64, 0), cfg.batches, 1, inits);
         {
@@ -810,98 +829,120 @@ const Gemv = struct {
             // reread the last chunk and are zeroed through their scales.
             // FP8 chunks take two loads: `words` and `upper`.
             const chunk_words: i64 = if (cfg.fp8 != 0) 8 else 4;
-            var words: [12]Value = undefined;
-            var upper: [12]Value = undefined;
-            var scales: [12]Value = undefined;
+            var words: [max_row_block][12]Value = undefined;
+            var upper: [max_row_block][12]Value = undefined;
+            var scales: [max_row_block][12]Value = undefined;
             var chunks: [12]Value = undefined;
             for (0..@intCast(cfg.batch)) |j| {
                 chunks[j] = batches.iv.mul(cfg.batch).add(@as(i64, @intCast(j))).mul(cfg.lanes).add(lane);
                 const chunk = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(chunks[j], b.constant(.i64, cfg.chunks - 1));
-                const start = b_base.add(chunk.mul(chunk_words));
-                words[j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(start).view(fly.L(4, 1)));
-                if (cfg.fp8 != 0) upper[j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(start.add(4)).view(fly.L(4, 1)));
-                scales[j] = args.scales.at(.{ expert, scale_row, chunk });
-            }
-            var acc: [group]Value = batches.carried;
-            for (0..@intCast(cfg.batch)) |j| {
-                const chunk = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(chunks[j], b.constant(.i64, cfg.chunks - 1));
-                if (cfg.fp8 != 0) {
-                    const weights = decodeE4m3Chunk(b, words[j], upper[j]);
-                    // E4M3FN bytes read as FNUZ are half their value.
-                    const block_scale = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(decodeE8m0(b, scales[j]).mul(2.0), fzero);
-                    inline for (0..group) |m| {
-                        var member = b.openIfElse(count.gt(m), .{.f32});
-                        {
-                            member.yieldThen(.{dotE4m3(b, load, inputs, @as(i64, m) * cfg.x_words, chunk, weights, block_scale, acc[m])});
-                        }
-                        {
-                            member.yieldElse(.{acc[m]});
-                        }
-                        acc[m] = member.results[0];
-                    }
-                    continue;
+                for (0..rows.len) |r| {
+                    const start = b_bases[r].add(chunk.mul(chunk_words));
+                    words[r][j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(start).view(fly.L(4, 1)));
+                    if (cfg.fp8 != 0) upper[r][j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(start.add(4)).view(fly.L(4, 1)));
+                    scales[r][j] = args.scales.at(.{ expert, kept_rows[r], chunk });
                 }
-                var weights: [4][4]Value = undefined;
-                inline for (0..4) |u| weights[u] = if (cfg.f16 != 0) decodeF16Pairs(b, words[j].extract(u)) else decodeWord(b, words[j].extract(u));
-                var decoded = if (cfg.nvfp4 != 0) decodeE4m3Pair(b, scales[j]) else decodeE8m0(b, scales[j]).splat(2);
-                // F16 weights carry a factor 2^-14, undone in the block scales.
-                if (cfg.f16 != 0) decoded = decoded.mul(0x1p14);
-                const block_scales = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(decoded, fzero.splat(2));
+            }
+            var acc: [max_row_block * group]Value = batches.carried;
+            for (0..@intCast(cfg.batch)) |j| {
+                const valid = chunks[j].cmpUnsigned(.lt, cfg.chunks);
+                const chunk = valid.select(chunks[j], b.constant(.i64, cfg.chunks - 1));
+                var weights: [max_row_block]Weights = undefined;
+                for (weights[0..rows.len], words[0..rows.len], upper[0..rows.len], scales[0..rows.len]) |*w, row_words, row_upper, row_scales| {
+                    w.* = decodeChunk(b, cfg, row_words[j], row_upper[j], row_scales[j], valid);
+                }
+                const result_types: [max_row_block]fly.DType = @splat(.f32);
                 inline for (0..group) |m| {
-                    var member = b.openIfElse(count.gt(m), .{.f32});
+                    var member = b.openIfElse(count.gt(m), result_types);
                     {
-                        member.yieldThen(.{dot(b, cfg, load, inputs, @as(i64, m) * cfg.x_words, chunk, weights, block_scales, acc[m])});
+                        const xs = loadInputs(b, load, inputs, @as(i64, m) * cfg.x_words, chunk);
+                        var results: [max_row_block]Value = undefined;
+                        for (&results, 0..) |*result, r| result.* = if (r < rows.len) dot(b, cfg, xs, weights[r], acc[r * group + m]) else acc[r * group + m];
+                        member.yieldThen(results);
                     }
                     {
-                        member.yieldElse(.{acc[m]});
+                        var kept: [max_row_block]Value = undefined;
+                        for (&kept, 0..) |*k, r| k.* = acc[r * group + m];
+                        member.yieldElse(kept);
                     }
-                    acc[m] = member.results[0];
+                    for (0..max_row_block) |r| acc[r * group + m] = member.results[r];
                 }
             }
             batches.yield(acc);
         }
-        var sums = batches.results;
-        inline for (0..group) |m| {
-            var shift: i32 = 1;
-            while (shift < cfg.lanes) : (shift *= 2) sums[m] = sums[m].add(sums[m].shuffleXor(shift, 64));
+        var sums: [max_row_block][group]Value = undefined;
+        for (sums[0..rows.len], 0..) |*row_sums, r| {
+            inline for (0..group) |m| {
+                var sum = batches.results[r * group + m];
+                var shift: i32 = 1;
+                while (shift < cfg.lanes) : (shift *= 2) sum = sum.add(sum.shuffleXor(shift, 64));
+                row_sums[m] = sum;
+            }
         }
         return sums;
     }
 
-    /// `acc` plus one input row's dot product with a decoded 32-weight chunk.
-    fn dot(b: *Builder, cfg: Config, load: Value, inputs: Value, base: i64, chunk: Value, weights: [4][4]Value, block_scales: Value, acc: Value) Value {
+    /// One row's decoded 32-weight chunk and its block scales, zero past K.
+    const Weights = union(enum) {
+        /// FP4 as F16 or F32 pairs, and the scales of the two 16-weight halves.
+        fp4: struct { pairs: [4][4]Value, scales: Value },
+        /// E4M3 in F32 at half their value, and the doubled E8M0 scale.
+        fp8: struct { values: [32]Value, scale: Value },
+    };
+
+    fn decodeChunk(b: *Builder, cfg: Config, word: Value, upper: Value, scale: Value, valid: Value) Weights {
         const fzero = b.constant(.f32, 0.0);
-        var partial: [2]Value = .{ fzero, fzero };
-        inline for (0..4) |q| {
-            const xs = b.copyAtomLoad(load, inputs.emitIter().addOffset(chunk.mul(16).add(base + q * 4)).view(fly.L(4, 1)));
-            if (cfg.f16 != 0) {
-                inline for (0..4) |p| partial[q / 2] = b.dot2F16(xs.extract(p).splat(1).bitCast(.f16), weights[q][p], partial[q / 2]);
-            } else inline for (0..4) |pair| {
-                const x = xs.extract(pair);
-                const lo = x.shl(16).bitCast(.f32);
-                const hi = x.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
-                // Word q holds weights 8q..8q+7; `pair` selects two of them.
-                const w = weights[q];
-                partial[q / 2] = b.fma(lo, w[(pair / 2) * 2].extract(pair % 2), b.fma(hi, w[(pair / 2) * 2 + 1].extract(pair % 2), partial[q / 2]));
-            }
+        if (cfg.fp8 != 0) {
+            // E4M3FN bytes read as FNUZ are half their value.
+            return .{ .fp8 = .{ .values = decodeE4m3Chunk(b, word, upper), .scale = valid.select(decodeE8m0(b, scale).mul(2.0), fzero) } };
         }
-        return b.fma(partial[0], block_scales.extract(0), b.fma(partial[1], block_scales.extract(1), acc));
+        var pairs: [4][4]Value = undefined;
+        inline for (0..4) |u| pairs[u] = if (cfg.f16 != 0) decodeF16Pairs(b, word.extract(u)) else decodeWord(b, word.extract(u));
+        var decoded = if (cfg.nvfp4 != 0) decodeE4m3Pair(b, scale) else decodeE8m0(b, scale).splat(2);
+        // F16 weights carry a factor 2^-14, undone in the block scales.
+        if (cfg.f16 != 0) decoded = decoded.mul(0x1p14);
+        return .{ .fp4 = .{ .pairs = pairs, .scales = valid.select(decoded, fzero.splat(2)) } };
     }
 
-    /// `acc` plus one BF16 input row's dot product with 32 decoded E4M3 weights.
-    fn dotE4m3(b: *Builder, load: Value, inputs: Value, base: i64, chunk: Value, weights: [32]Value, block_scale: Value, acc: Value) Value {
+    /// One input row's 32-value chunk, from LDS.
+    fn loadInputs(b: *Builder, load: Value, inputs: Value, base: i64, chunk: Value) [4]Value {
+        var xs: [4]Value = undefined;
+        inline for (&xs, 0..) |*x, q| x.* = b.copyAtomLoad(load, inputs.emitIter().addOffset(chunk.mul(16).add(base + q * 4)).view(fly.L(4, 1)));
+        return xs;
+    }
+
+    /// `acc` plus one input chunk's dot product with a decoded weight chunk.
+    fn dot(b: *Builder, cfg: Config, xs: [4]Value, weights: Weights, acc: Value) Value {
         const fzero = b.constant(.f32, 0.0);
         var partial: [2]Value = .{ fzero, fzero };
-        inline for (0..4) |q| {
-            const xs = b.copyAtomLoad(load, inputs.emitIter().addOffset(chunk.mul(16).add(base + q * 4)).view(fly.L(4, 1)));
-            inline for (0..4) |p| {
-                const x = xs.extract(p);
-                const lo = x.shl(16).bitCast(.f32);
-                const hi = x.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
-                partial[q % 2] = b.fma(lo, weights[8 * q + 2 * p], b.fma(hi, weights[8 * q + 2 * p + 1], partial[q % 2]));
-            }
+        switch (weights) {
+            .fp4 => |w| {
+                inline for (xs, 0..) |x4, q| {
+                    if (cfg.f16 != 0) {
+                        inline for (0..4) |p| partial[q / 2] = b.dot2F16(x4.extract(p).splat(1).bitCast(.f16), w.pairs[q][p], partial[q / 2]);
+                    } else inline for (0..4) |pair| {
+                        const x = x4.extract(pair);
+                        const lo = x.shl(16).bitCast(.f32);
+                        const hi = x.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
+                        // Word q holds weights 8q..8q+7; `pair` selects two of them.
+                        const pairs = w.pairs[q];
+                        partial[q / 2] = b.fma(lo, pairs[(pair / 2) * 2].extract(pair % 2), b.fma(hi, pairs[(pair / 2) * 2 + 1].extract(pair % 2), partial[q / 2]));
+                    }
+                }
+                return b.fma(partial[0], w.scales.extract(0), b.fma(partial[1], w.scales.extract(1), acc));
+            },
+            .fp8 => |w| {
+                inline for (xs, 0..) |x4, q| {
+                    inline for (0..4) |p| {
+                        const x = x4.extract(p);
+                        const lo = x.shl(16).bitCast(.f32);
+                        const hi = x.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
+                        partial[q % 2] = b.fma(lo, w.values[8 * q + 2 * p], b.fma(hi, w.values[8 * q + 2 * p + 1], partial[q % 2]));
+                    }
+                }
+                return b.fma(partial[0].add(partial[1]), w.scale, acc);
+            },
         }
-        return b.fma(partial[0].add(partial[1]), block_scale, acc);
     }
 
     /// 32 E4M3FN weights from two words of four, in F32 at half their value (as FNUZ).
