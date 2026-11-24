@@ -1,22 +1,21 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "neuron",
     import_name = "zml-smi/platforms/neuron",
-    main = "metrics.zig",
-    srcs = [
-        "nrt.zig",
-        "process.zig",
-    ],
-    visibility = ["//visibility:public"],
+    main = "Neuron.zig",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [
-        "//bin/zml-smi/collector",
-        "//bin/zml-smi/info",
-        "//bin/zml-smi/utils:double_buffer",
-        "//bin/zml-smi/utils:dynlib",
-        "//bin/zml-smi/utils:sandbox",
-        "//bin/zml-smi/utils:sysfs",
+        "//bin/zml-smi/smi",
         "//platforms/neuron:libnrt_headers",
-        "//stdx",
     ],
+)
+
+zig_test(
+    name = "test",
+    # The test opens the libnrt of the sandbox, which only linux-amd64 ships.
+    data = ["//bin/zml-smi:sandbox"],
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    deps = [":neuron"],
 )
