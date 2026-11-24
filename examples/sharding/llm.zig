@@ -1,0 +1,239 @@
+//! //examples/llm's text generation, runnable as one process of a multi-process
+//! GPU job (see --coordinator). Models and chat come from //examples/llm.
+
+const std = @import("std");
+
+const c = @import("c");
+const llm = @import("llm");
+const zml = @import("zml");
+const stdx = zml.stdx;
+
+const chat = llm.chat;
+const models = llm.models;
+
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
+const log = std.log.scoped(.llm);
+
+const Args = struct {
+    model: []const u8,
+    prompt: ?[]const u8 = null,
+    seqlen: u32 = 2048,
+    topk: u32 = 4,
+    backend: ?enum { stablehlo, cute, nki, metal } = null,
+    profile: bool = false,
+    target: zml.Target = .cuda,
+    coordinator: ?[]const u8 = null,
+    process_index: usize = 0,
+    process_count: usize = 1,
+    local_devices: []const u8 = "0",
+    namespace: []const u8 = "zml-llm",
+
+    pub const help =
+        \\ Use llm --model=<path> [options]
+        \\
+        \\ Run text generation with a model selected from `model_type` in the `config.json`.
+        \\
+        \\ Options:
+        \\   --model=<path>      Path to the model repository (required)
+        \\   --prompt=<string>   Prompt to use for generation (default: none)
+        \\   --seqlen=<number>   Sequence length (default: 2048)
+        \\   --topk=<number>     Top-k sampling cutoff (default: 4)
+        \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
+        \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
+        \\
+        \\ Multi-process (GPU only, requires --prompt): start one process per rank with the same
+        \\ --coordinator (hosted by process 0), --process-count and --namespace.
+        \\   --coordinator=<ip:port>     Address of process 0's coordinator
+        \\   --process-index=<number>    Rank of this process (default: 0)
+        \\   --process-count=<number>    Number of processes (default: 1)
+        \\   --local-devices=<ids>       Comma-separated local GPU ids (default: 0)
+        \\   --namespace=<string>        Job name shared by every process (default: zml-llm)
+        \\   --target=<text>             Platform target (default: cuda)
+        \\
+    ;
+};
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+
+    // `bazel run` executes binaries from Bazel's runfiles tree by default.
+    // If available, switch back to the shell's original working directory.
+    if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
+        var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
+        defer working_dir.close(init.io);
+        try std.process.setCurrentDir(init.io, working_dir);
+    }
+
+    const args = stdx.flags.parse(init.minimal.args, Args);
+
+    //
+    // Virtual File Systems
+    //
+    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
+    defer vfs_file.deinit();
+
+    var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
+    defer http_client.deinit();
+
+    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer hf_vfs.deinit();
+
+    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer s3_vfs.deinit();
+
+    var gcs_vfs: zml.io.VFS.GCS = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer gcs_vfs.deinit();
+
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
+    defer vfs.deinit();
+
+    try vfs.register("file", vfs_file.io());
+    try vfs.register("gs", gcs_vfs.io());
+    try vfs.register("hf", hf_vfs.io());
+    try vfs.register("s3", s3_vfs.io());
+
+    const io = vfs.io();
+
+    //
+    // Platform and Backend Selection
+    //
+    var local_devices: std.ArrayList(i64) = .empty;
+    defer local_devices.deinit(allocator);
+    const platform: *zml.Platform = if (args.coordinator) |coordinator| platform: {
+        // Every process runs the same generation loop; an interactive prompt would diverge.
+        if (args.prompt == null) stdx.flags.fatal("--coordinator requires --prompt", .{});
+        var ids = std.mem.splitScalar(u8, args.local_devices, ',');
+        while (ids.next()) |id| try local_devices.append(allocator, try std.fmt.parseInt(i64, id, 10));
+        // The coordinator client opens TCP connections, which the VFS io doesn't provide.
+        break :platform try .init(allocator, init.io, args.target, .{ .distributed = .{
+            .coordinator_address = try .parseLiteral(coordinator),
+            .process_index = args.process_index,
+            .process_count = args.process_count,
+            .namespace = args.namespace,
+            .local_device_ids = local_devices.items,
+        } });
+    } else try .auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
+
+    log.info("\n{f}", .{platform.fmtVerbose()});
+
+    const backend: zml.attention.Backend = if (args.backend) |selected| switch (selected) {
+        .stablehlo => .{ .stablehlo = {} },
+        .cute => .{ .flash_attention = .cute },
+        .nki => .{ .flash_attention = .nki },
+        .metal => .{ .flash_attention = .metal },
+    } else zml.attention.Backend.auto(platform);
+    log.info("Selected backend: {}", .{backend});
+
+    //
+    // Model initialization
+    //
+    log.info("Resolving model repository..", .{});
+    const repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    defer repo.close(io);
+
+    log.info("Initializing model..", .{});
+    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    defer registry.deinit();
+
+    // Defines how the model's tensors are sharded across the available devices.
+    const meshes: models.Meshes = try .init(platform);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &meshes.all());
+    defer store.deinit();
+
+    const generation: models.GenerationOptions = .{
+        .sampling_strategy = .{
+            .topk = args.topk,
+        },
+    };
+
+    var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
+    defer model.deinit(allocator);
+
+    //
+    // Load the model and compile it
+    //
+    var progress = std.Progress.start(io, .{ .root_name = args.model });
+    errdefer progress.end();
+
+    var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
+    defer tokenizer.deinit();
+
+    var compiled_model = try allocator.create(models.CompiledModel);
+    defer allocator.destroy(compiled_model);
+    compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, meshes, args.seqlen, &progress);
+    defer compiled_model.deinit();
+
+    // Load buffers after the model compilation to be sure to give enough room to the autotune.
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress);
+    defer model.unloadBuffers(&model_buffers, allocator);
+
+    progress.end();
+
+    //
+    // We're ready to go! Let's start a chat...
+    //
+    try printZmlLogo(io, init.environ_map);
+
+    const interactive = args.prompt == null;
+    const prompt = if (args.prompt) |prompt_arg| b: {
+        break :b try allocator.dupe(u8, prompt_arg);
+    } else b: {
+        chat.initHistory();
+        const line = c.linenoise(chat.prompt_prefix) orelse return;
+        defer c.linenoiseFree(line);
+        chat.rememberPrompt(line);
+        break :b try allocator.dupe(u8, std.mem.sliceTo(line, 0));
+    };
+    defer allocator.free(prompt);
+
+    var llm_chat = try chat.Chat.init(
+        allocator,
+        io,
+        platform,
+        tokenizer,
+        compiled_model,
+        &model_buffers,
+    );
+    defer llm_chat.deinit();
+
+    if (interactive) {
+        try llm_chat.runInteractive(prompt);
+    } else {
+        try llm_chat.runOnce(prompt, .{
+            .profile = args.profile,
+        });
+    }
+}
+
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start("Loading tokenizer...", 1);
+    defer node.end();
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Loaded tokenizer [{f}]", .{now.untilNow(io, .awake)});
+    const bytes = b: {
+        const file = try dir.openFile(io, "tokenizer.json", .{});
+        defer file.close(io);
+        var reader = file.reader(io, &.{});
+        break :b try reader.interface.readAlloc(allocator, try file.length(io));
+    };
+    defer allocator.free(bytes);
+
+    return try .fromBytes(allocator, bytes);
+}
+
+pub fn printZmlLogo(io: std.Io, environ_map: *const std.process.Environ.Map) !void {
+    const stdout = std.Io.File.stdout();
+    const logo_options: zml.logo.Options = .{
+        .color_support = zml.logo.detectColorSupport(io, stdout, environ_map),
+    };
+    var writer = stdout.writerStreaming(io, &.{});
+    try writer.interface.writeAll("\n\n");
+    try zml.logo.writeZmlArt(&writer.interface, logo_options);
+    try writer.interface.writeAll("\n\n\n");
+    try writer.interface.flush();
+}

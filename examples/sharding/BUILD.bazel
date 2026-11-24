@@ -6,8 +6,8 @@ zig_binary(
     args = [],
     data = [],
     main = "main.zig",
-    deps = ["//zml"],
     visibility = ["//visibility:public"],
+    deps = ["//zml"],
 )
 
 zig_binary(
@@ -16,10 +16,21 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "llm",
+    main = "llm.zig",
+    deps = [
+        "//examples/llm:lib",
+        "//zml",
+        "@linenoise",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [
         ":bench",
+        ":llm",
         ":sharding",
     ],
 )
