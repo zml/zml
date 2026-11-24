@@ -86,8 +86,8 @@ pub const Backend = enum {
             .metal => b: {
                 const s = scheme orelse break :b .metal;
                 break :b switch (s) {
-                    .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .metal,
-                    .mxfp4 => error.UnsupportedQuantization,
+                    .nvfp4, .mxfp8, .fp8_block128 => .metal,
+                    .mxfp4, .fp8_per_channel, .fp8_per_tensor, .fp8_block32 => error.UnsupportedQuantization,
                 };
             },
             else => error.UnimplementedMoEBackend,
