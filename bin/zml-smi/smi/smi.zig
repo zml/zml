@@ -20,6 +20,11 @@ pub const dynlib = @import("dynlib.zig");
 pub const sandbox = @import("sandbox.zig");
 pub const DoubleBuffer = @import("double_buffer.zig").DoubleBuffer;
 
+pub const csv = @import("csv.zig");
+pub const json = @import("json.zig");
+pub const prometheus = @import("prometheus.zig");
+pub const http = @import("http.zig");
+
 pub const Target = enum { cuda, rocm, oneapi, neuron, tpu };
 
 pub const Device = struct {
@@ -143,10 +148,12 @@ pub const ProcessInfo = struct {
 test {
     _ = collector;
     _ = @import("double_buffer.zig");
+    _ = csv;
     _ = fdinfo;
     _ = hwmon;
     _ = pci;
     _ = procfs;
+    _ = prometheus;
     _ = sysfs;
     _ = Host;
 }
