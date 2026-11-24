@@ -70,6 +70,7 @@ fn cutlassActivation(activation: Activation) i32 {
         .swiglu_step => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
         .geglu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
         .geglu_tanh => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU_TANH,
+        .capped_swiglu => stdx.debug.panic("flashinfer_cutlass backend does not support capped SwiGLU", .{}),
     };
 }
 
@@ -125,7 +126,7 @@ pub fn fc1BlockScaleShape(
 ) zml.Shape {
     const rows = switch (activation) {
         .silu, .gelu, .relu => intermediate_size,
-        .swiglu, .geglu, .geglu_tanh, .swiglu_step => 2 * intermediate_size,
+        .swiglu, .geglu, .geglu_tanh, .swiglu_step, .capped_swiglu => 2 * intermediate_size,
     };
     return .init(
         .{ num_experts, roundUp(rows, 128), roundUp(@divExact(hidden_size, 16), 4) },
@@ -190,7 +191,7 @@ fn validateInputs(
     const fc1_rows = fc1_weights.dim(1);
     const intermediate_size = switch (options.activation) {
         .silu, .gelu, .relu => fc1_rows,
-        .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1_rows, 2),
+        .swiglu, .geglu, .geglu_tanh, .swiglu_step, .capped_swiglu => @divExact(fc1_rows, 2),
     };
     const top_k = topk_ids.dim(.topk);
 

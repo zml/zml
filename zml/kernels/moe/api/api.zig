@@ -29,6 +29,8 @@ pub const ActivationKind = enum {
     geglu,
     /// GeGlu activation function with tanh
     geglu_tanh,
+    /// SwiGLU with soft-capped factors: softcap(gate) * sigmoid(gate) * softcap(up)
+    capped_swiglu,
 };
 
 pub const Activation = union(ActivationKind) {
@@ -45,6 +47,12 @@ pub const Activation = union(ActivationKind) {
     },
     geglu: void,
     geglu_tanh: void,
+    capped_swiglu: struct {
+        /// The gate factor is cap * tanh(gate / cap); the sigmoid reads the uncapped gate.
+        gate_cap: f32,
+        /// The up factor is cap * tanh(up / cap).
+        up_cap: f32,
+    },
 
     pub fn applyActivation(self: Activation, input: Tensor, layout: ProjectionLayout) Tensor {
         const x = input.convert(.f32);
@@ -52,7 +60,7 @@ pub const Activation = union(ActivationKind) {
             .gelu => x.gelu(),
             .relu => x.relu(),
             .silu => x.silu(),
-            .swiglu, .swiglu_step, .geglu, .geglu_tanh => b: {
+            .swiglu, .swiglu_step, .geglu, .geglu_tanh, .capped_swiglu => b: {
                 const mid = @divFloor(x.dim(.out), 2);
                 var gate, var up = switch (layout) {
                     .concatenated => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
@@ -89,6 +97,7 @@ pub const Activation = union(ActivationKind) {
                         up = if (limit) |l| up.clamp(l.negate(), l) else up;
                         break :b gate.mul(up);
                     },
+                    .capped_swiglu => |caps| softcap(gate, caps.gate_cap).mul(gate.sigmoid()).mul(softcap(up, caps.up_cap)),
                     .geglu_tanh => gate.gelu().mul(up),
                     .geglu => {
                         log.warn("The geglu activation function was requested but we only support the tanh approximation", .{});
@@ -100,6 +109,11 @@ pub const Activation = union(ActivationKind) {
         };
     }
 };
+
+/// Smoothly bounds `x` to (-cap, cap).
+pub fn softcap(x: Tensor, cap: f32) Tensor {
+    return x.divByConst(cap).tanh().scale(cap);
+}
 
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
