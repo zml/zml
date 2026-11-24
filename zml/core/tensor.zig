@@ -3819,6 +3819,80 @@ pub const Tensor = struct {
 
     pub const TopKOpts = struct { descending: bool = true };
 
+    fn sortedTopK(self: Tensor, a: u3, k: u32, opts: TopKOpts) SortRes {
+        var sorted = self.sort(a, .{ .descending = opts.descending });
+        sorted.values = sorted.values.slice(a, .{ .end = k });
+        sorted.indices = sorted.indices.slice(a, .{ .end = k });
+        return sorted;
+    }
+
+    /// Top-k along a long axis `a` with two sorts of short rows instead of one sort of the
+    /// whole axis: the best k of each group of about 3k elements, then the best k of these
+    /// candidates. Positions along `a` are sorted with the values, so the candidates keep
+    /// their original indices without a gather.
+    /// Sampling takes the top-k of the logits over the whole vocabulary this way on ROCm.
+    fn chunkedTopk(self: Tensor, a: u3, k: u32, opts: TopKOpts) SortRes {
+        const n = self.dim(a);
+        const groups = @max(@divFloor(n, 3072), 1);
+        const size = @max(std.math.divCeil(i64, n, groups) catch unreachable, k);
+        // Padding sorts after every element, and after equal ones since the sorts are stable.
+        const padding = groups * size - n;
+        const fill = Tensor.constant(if (opts.descending) self.dtype().minValue() else self.dtype().maxValue());
+        const padded = if (padding == 0) self else Tensor.concatenate(&.{ self, fill.broad(self.shape().setDim(a, padding)) }, a);
+
+        const direction: stablehlo.ComparisonDirectionAttr.Direction = if (opts.descending) .GT else .LT;
+        const compare = struct {
+            fn call(values: ops.SortArgs, _: ops.SortArgs, direction_: stablehlo.ComparisonDirectionAttr.Direction) Tensor {
+                return values.left.cmp(direction_, values.right);
+            }
+        }.call;
+
+        // Each group sorted, with the positions of its elements along `a`.
+        const grouped = padded.shape().setDim(a, groups).insert(a + 1, .{size});
+        const positions = Tensor.iota(padded.shape(), a).reshape(grouped.withDtype(.i32));
+        const in_groups = ops.sort(.{ padded.reshape(grouped), positions }, a + 1, compare, .{direction}, true);
+
+        // The best k of each group, sorted together.
+        const candidates = self.shape().setDim(a, groups * k);
+        const best = ops.sort(.{
+            in_groups[0].slice(a + 1, .{ .end = k }).reshape(candidates),
+            in_groups[1].slice(a + 1, .{ .end = k }).reshape(candidates.withDtype(.i32)),
+        }, a, compare, .{direction}, true);
+        return .{ .values = best[0].slice(a, .{ .end = k }), .indices = best[1].slice(a, .{ .end = k }) };
+    }
+
+    test chunkedTopk {
+        const zml = @import("core.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            fn forward(x: Tensor) Tensor {
+                const grouped = x.chunkedTopk(x.axis(.voc), 50, .{}).indices;
+                const sorted = x.sort(.voc, .{ .descending = true }).indices.slice(.voc, .{ .end = 50 });
+                return Tensor.stack(&.{ grouped, sorted }, 0, .method);
+            }
+        };
+
+        // 65 groups of 3078 with 12 padded elements.
+        const x: Tensor = .init(.{ .seq = 3, .voc = 200058 }, .f32);
+        var host = try zml.Slice.alloc(std.testing.allocator, x.shape());
+        defer host.free(std.testing.allocator);
+        // Distinct values in a scrambled order.
+        for (host.items(f32), 0..) |*v, i| v.* = @floatFromInt((i * 7919) % 600174);
+        var input: zml.Buffer = try .fromSlice(std.testing.io, platform, host);
+        defer input.deinit();
+
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.forward, .{x}, platform, .{});
+        defer exe.deinit();
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{input});
+        defer result.deinit();
+        const indices = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+        defer indices.free(std.testing.allocator);
+
+        const both = indices.items(i32);
+        try std.testing.expectEqualSlices(i32, both[both.len / 2 ..], both[0 .. both.len / 2]);
+    }
+
     /// Returns a Tensor representing the result of Top-K over the given axis.
     pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: TopKOpts) SortRes {
         stdx.debug.assert(k > 0, "topK expects a k > 0, got 0", .{});
@@ -3871,12 +3945,10 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => blk: {
-                var sorted = self.sort(a, .{ .descending = opts.descending });
-                sorted.values = sorted.values.slice(a, .{ .end = k });
-                sorted.indices = sorted.indices.slice(a, .{ .end = k });
-                break :blk sorted;
-            },
+            // Top-k sorts the whole axis, which ROCm does slowly: 1.9 ms for 16 rows of 200k
+            // logits, against 0.19 ms in groups.
+            .rocm => if (self.dim(a) >= 16 * 1024 and k <= 1024) self.chunkedTopk(a, k, opts) else self.sortedTopK(a, k, opts),
+            .cpu, .cuda, .tpu, .oneapi, .metal, .furiosa => self.sortedTopK(a, k, opts),
         };
         if (has_name) |new_name| {
             result.values._shape._tags.set(a, new_name.ptr);
