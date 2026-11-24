@@ -4692,14 +4692,14 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing boolean indicating if there is a non-zero value over the given axis.
     pub fn any(self: Tensor, axis_: anytype) Tensor {
-        const pred = self.cmp(.NE, Tensor.constant(self.dims(), self.dtype().zero()));
+        const pred = self.cmp(.NE, Tensor.constant(self.dtype().zero()).broad(self.shape()));
         return ops.reduce(
             .{pred},
             .{Tensor.scalar(false, .bool)},
             &.{self.axis(axis_)},
             struct {
-                pub fn acc(args: ops.ReduceArgs) Tensor {
-                    return args.left.logical(.OR, args.right);
+                pub fn acc(args: ops.ReduceArgs) struct { Tensor } {
+                    return .{args.left.logical(.OR, args.right)};
                 }
             }.acc,
             .{},
@@ -4714,8 +4714,8 @@ pub const Tensor = struct {
             .{Tensor.scalar(true, .bool)},
             &.{self.axis(axis_)},
             struct {
-                pub fn acc(args: ops.ReduceArgs) Tensor {
-                    return args.left.logical(.AND, args.right);
+                pub fn acc(args: ops.ReduceArgs) struct { Tensor } {
+                    return .{args.left.logical(.AND, args.right)};
                 }
             }.acc,
             .{},
