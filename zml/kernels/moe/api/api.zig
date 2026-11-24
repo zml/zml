@@ -10,10 +10,11 @@ const log = std.log.scoped(.@"zml/moe");
 
 pub const Options = struct {
     activation: Activation,
-    /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
-    /// NVFP4 experts always quantize their activations.
+    /// Quantize activations for Triton FP8 GEMMs, and emulate quantized NVFP4 and MXFP8
+    /// activations on Metal; false keeps BF16 activations. Triton and Fly NVFP4 experts
+    /// always quantize their activations.
     quantize_input: bool,
-    /// Where routing weights are applied; FlashInfer, Mosaic, Metal and TCL require after_down.
+    /// Where routing weights are applied; FlashInfer, Mosaic and TCL require after_down.
     routing_weight_placement: RoutingWeightPlacement,
     /// How quantized NVFP4 activations pick the E4M3 scale of each block.
     nvfp4_input_scale: Nvfp4BlockScale = .six,
@@ -159,6 +160,8 @@ pub const ExpertsLayout = struct {
         /// 128x4 atoms in MN-major order `[expert, k/128, rows/128, 512]`,
         /// represented as `[expert, k/128, rows]` i32 words of four scales.
         mxfp4_interleaved8,
+        /// Weights dequantized to BF16 at load, for backends without a kernel for the stored format.
+        dequantized,
     };
 };
 
