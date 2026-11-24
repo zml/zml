@@ -13,6 +13,7 @@ const GlobalOptions = @import("zml/kernels/moe/api").Options;
 const Activation = @import("zml/kernels/moe/api").Activation;
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const softcap = @import("zml/kernels/moe/api").softcap;
 const roundE2m1 = @import("zml/quantization").roundE2m1;
 
 pub fn activate(x: Tensor, activation: Activation) Tensor {
@@ -20,7 +21,7 @@ pub fn activate(x: Tensor, activation: Activation) Tensor {
         .silu => x.silu(),
         .gelu => x.gelu(),
         .relu => x.relu(),
-        .swiglu, .swiglu_step, .geglu, .geglu_tanh => blk: {
+        .swiglu, .swiglu_step, .geglu, .geglu_tanh, .capped_swiglu => blk: {
             const mid = @divExact(x.dim(.out), 2);
             var gate = x.slice(.out, .{ .end = mid });
             var up = x.slice(.out, .{ .start = mid });
@@ -42,6 +43,8 @@ pub fn activate(x: Tensor, activation: Activation) Tensor {
                     if (activation.swiglu.bias) |bias| up = up.addConstant(bias);
                     break :blk gate.div(gate.negate().exp().addConstant(1)).mul(up);
                 },
+                // The sigmoid reads the uncapped gate.
+                .capped_swiglu => |caps| break :blk softcap(gate, caps.gate_cap).div(gate.negate().exp().addConstant(1)).mul(softcap(up, caps.up_cap)),
                 .geglu => break :blk gelu(gate).mul(up),
                 .geglu_tanh => break :blk gate.gelu().mul(up),
                 else => unreachable, // already handled above
@@ -211,4 +214,36 @@ test "MoE compliance: FP4 midpoint rounding" {
     const actual = try output.toSliceAlloc(allocator, io);
     defer actual.free(allocator);
     try std.testing.expectEqualSlices(f32, &expected, actual.constItems(f32));
+}
+
+test "MoE compliance: capped SwiGLU" {
+    const activation: Activation = .{ .capped_swiglu = .{ .gate_cap = 4, .up_cap = 25 } };
+    const Local = struct {
+        // The activation Triton, Fly and Metal apply between their GEMMs, and this reference.
+        fn call(x: Tensor, act: Activation) Tensor {
+            return Tensor.stack(&.{ act.applyActivation(x, .concatenated), activate(x, act) }, 0, .implementation);
+        }
+    };
+    const gates = [_]f32{ -9, -2.5, -0.5, 0, 0.75, 3, 12 };
+    const ups = [_]f32{ 40, -30, 2, 7, -1.5, 0.25, -60 };
+    const values = gates ++ ups;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const x: Tensor = .init(.{ .token = 1, .out = values.len }, .f32);
+    var exe = try platform.compileFn(allocator, io, Local.call, .{ x, activation }, .{});
+    defer exe.deinit();
+    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
+    defer input.deinit();
+    var output = try exe.eval(allocator, io, .{input});
+    defer output.deinit();
+    const actual = try output.toSliceAlloc(allocator, io);
+    defer actual.free(allocator);
+    const results = actual.constItems(f32);
+    for (0..2) |implementation| {
+        for (gates, ups, 0..) |gate, up, i| {
+            const expected = 4 * std.math.tanh(gate / 4) / (1 + @exp(-gate)) * 25 * std.math.tanh(up / 25);
+            try std.testing.expectApproxEqAbs(expected, results[implementation * gates.len + i], 1e-4 * @max(1, @abs(expected)));
+        }
+    }
 }

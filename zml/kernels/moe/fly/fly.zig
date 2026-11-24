@@ -77,7 +77,7 @@ pub fn fusedExperts(
     stdx.debug.assert(hidden.dim(.in) == gate_up_k, "fly backend expected hidden width to match gate/up input width, got {} and {}", .{ hidden.dim(.in), gate_up_k });
     const activation_reduction: i64 = switch (opts.activation) {
         .gelu, .relu, .silu => 1,
-        .swiglu, .swiglu_step, .geglu, .geglu_tanh => 2,
+        .swiglu, .swiglu_step, .geglu, .geglu_tanh, .capped_swiglu => 2,
     };
     stdx.debug.assert(@rem(gate_up.dim(.out), activation_reduction) == 0, "fly backend expected gate/up output width to be divisible by {}, got {}", .{ activation_reduction, gate_up.dim(.out) });
     stdx.debug.assert(down_k == @divFloor(gate_up.dim(.out), activation_reduction), "fly backend expected down input width to match activated width, got {} and {}", .{ down_k, @divFloor(gate_up.dim(.out), activation_reduction) });
