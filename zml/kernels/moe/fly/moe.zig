@@ -1054,11 +1054,12 @@ pub const Route = struct {
         scale: f32,
     };
 
-    /// `logits` is [tokens, experts] F32 and `bias` [experts] F32.
-    pub fn call(logits: Tensor, bias: Tensor, top_k: u32, renormalize: bool, scale: f32) struct { Tensor, Tensor } {
-        std.debug.assert(logits.rank() == 2 and logits.dtype() == .f32 and bias.dtype() == .f32 and
+    /// `logits` is [tokens, experts] F32, `bias` [experts] F32, and inactive tokens,
+    /// zero in `active` [tokens] i32, route to no expert (-1).
+    pub fn call(logits: Tensor, bias: Tensor, active: Tensor, top_k: u32, renormalize: bool, scale: f32) struct { Tensor, Tensor } {
+        std.debug.assert(logits.rank() == 2 and logits.dtype() == .f32 and bias.dtype() == .f32 and active.dtype() == .i32 and
             logits.dim(1) <= 2 * lanes and top_k <= max_top_k);
-        const result = Kernel.call(.{ .logits = logits, .bias = bias }, .{
+        const result = Kernel.call(.{ .logits = logits, .bias = bias, .active = active }, .{
             .ids = zml.Shape.init(.{ logits.dim(0), top_k }, .i32),
             .weights = zml.Shape.init(.{ logits.dim(0), top_k }, .f32),
         }, .{
@@ -1071,7 +1072,7 @@ pub const Route = struct {
 
     const Kernel = zml.kernel.fly.Kernel(Config, .{
         .name = "sigmoid_top_k_route",
-        .inputs = &.{ "logits", "bias" },
+        .inputs = &.{ "logits", "bias", "active" },
         .outputs = &.{ "ids", "weights" },
         .run = run,
     });
@@ -1114,12 +1115,13 @@ pub const Route = struct {
             total = total.add(best_score);
             inline for (0..2) |i| key[i] = index[i].eq(best_index).select(none, key[i]);
         }
+        const routed = args.active.at(token).ne(0);
         var first_lane = b.openIf(lane.eq(0));
         {
             for (0..@intCast(cfg.top_k)) |k| {
                 const slot = b.constant(.i64, @as(i64, @intCast(k)));
                 const weight = if (cfg.renormalize != 0) picked[k].div(total.add(1e-20)) else picked[k];
-                args.ids.set(.{ token, slot }, picks[k]);
+                args.ids.set(.{ token, slot }, routed.select(picks[k], b.constant(.i32, -1)));
                 args.weights.set(.{ token, slot }, weight.mul(cfg.scale));
             }
             first_lane.close();

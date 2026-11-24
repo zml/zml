@@ -793,7 +793,10 @@ test "Fly routing matches the XLA routing" {
     if (!zml.moe.Backend.fly.isAvailable(platform)) return error.SkipZigTest;
     const Local = struct {
         fn forward(x: Tensor, gate: Tensor, bias: Tensor) [4]Tensor {
-            const opts: zml.moe.RouteOptions = .{ .top_k = 8, .scale = 8 };
+            // Every fifth token is inactive.
+            const token = Tensor.arange(.{ .end = x.dim(.t) }, .i32).withTags(.{.t});
+            const active = token.remainder(Tensor.scalar(5, .i32)).cmp(.NE, Tensor.scalar(4, .i32));
+            const opts: zml.moe.RouteOptions = .{ .top_k = 8, .scale = 8, .active = active };
             const fly = zml.moe.route(.fly, x, gate, bias, opts);
             const xla = zml.moe.route(.stablehlo, x, gate, bias, opts);
             return .{ fly.ids, xla.ids, fly.weights, xla.weights };

@@ -163,7 +163,7 @@ pub fn route(backend: Backend, x: zml.Tensor, gate_weight: zml.Tensor, gate_bias
     const ids = keys.topK(.{ .topk = .expert }, opts.top_k, .{ .descending = true }).indices.convert(.i32);
     const selected = scores.gather(.{ .expert = ids }, .{});
     const weights = if (opts.renormalize) selected.div(selected.sum(.topk).addConstant(1e-20)) else selected;
-    return .{ .ids = ids, .weights = weights.scale(opts.scale) };
+    return .{ .ids = if (opts.active) |active| ids.mask(active, -1) else ids, .weights = weights.scale(opts.scale) };
 }
 
 /// Check the shared token-wise contract for activations and routing tensors.

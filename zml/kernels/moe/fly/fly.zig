@@ -143,7 +143,9 @@ pub fn fusedExperts(
 pub fn route(logits: Tensor, gate_bias: ?Tensor, opts: @import("zml/kernels/moe/api").RouteOptions) ?[2]Tensor {
     if (logits.rank() != 2 or logits.dim(.expert) > 128 or opts.top_k > 16) return null;
     const bias = if (gate_bias) |b| b.convert(.f32) else Tensor.zeroes(Shape.init(.{logits.dim(.expert)}, .f32));
-    const ids, const weights = fly.Route.call(logits.convert(.f32).transpose(.{ .t, .expert }), bias, opts.top_k, opts.renormalize, opts.scale);
+    const tokens = Shape.init(.{logits.dim(.t)}, .i32);
+    const active = if (opts.active) |a| a.convert(.i32).reshape(tokens) else Tensor.constant(.{ .i32 = 1 }).broad(tokens);
+    const ids, const weights = fly.Route.call(logits.convert(.f32).transpose(.{ .t, .expert }), bias, active, opts.top_k, opts.renormalize, opts.scale);
     const routed = Shape.init(.{ .t = logits.dim(.t), .topk = opts.top_k }, .i32);
     return .{ ids.reshape(routed), weights.reshape(routed.withDtype(.f32)) };
 }

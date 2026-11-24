@@ -124,6 +124,8 @@ pub const RouteOptions = struct {
     renormalize: bool = true,
     /// Multiplies every routing weight.
     scale: f32 = 1,
+    /// Tokens {.t} that route to experts; the others route to no expert (-1).
+    active: ?Tensor = null,
 };
 
 pub const ProjectionLayout = enum {
