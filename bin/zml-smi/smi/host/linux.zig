@@ -21,6 +21,7 @@ pub const Host = struct {
             data.cpu_name = dupe(arena, dir.field("cpuinfo", "model name", &buffer) catch null);
             data.mem_total_kib = smi.sysfs.firstNumber(dir.field("meminfo", "MemTotal", &buffer) catch "");
         }
+
         return .{ .io = io, .gpa = gpa, .proc = proc };
     }
 
@@ -40,6 +41,7 @@ pub const Host = struct {
             inline for (.{ &data.load_1, &data.load_5, &data.load_15 }, 0..) |load, i| {
                 load.* = @as(f32, @floatFromInt(info.loads[i])) / 65536.0;
             }
+
             data.uptime_seconds = std.math.cast(u64, info.uptime);
         }
 
@@ -65,11 +67,13 @@ pub const Host = struct {
         for (rows, 0..) |*row, i| {
             if (row.remote) continue;
             const entry = first_row.getOrPut(scratch, row.pid) catch continue;
+
             if (entry.found_existing) {
                 const done = rows[entry.value_ptr.*];
                 row.uid, row.username, row.comm, row.cpu_percent, row.rss_kib = .{ done.uid, done.username, done.comm, done.cpu_percent, done.rss_kib };
                 continue;
             }
+
             entry.value_ptr.* = i;
             self.read(proc, strings, row, total);
         }
@@ -113,8 +117,12 @@ fn dupe(arena: std.mem.Allocator, string: ?[]const u8) ?[]const u8 {
 fn totalTicks(stat: []const u8) u64 {
     var words = std.mem.tokenizeAny(u8, std.mem.sliceTo(stat, '\n'), " \t");
     _ = words.next();
+
     var total: u64 = 0;
-    while (words.next()) |word| total +|= std.fmt.parseInt(u64, word, 10) catch 0;
+    while (words.next()) |word| {
+        total +|= std.fmt.parseInt(u64, word, 10) catch 0;
+    }
+
     return total;
 }
 
@@ -122,11 +130,14 @@ fn totalTicks(stat: []const u8) u64 {
 fn parseStat(stat: []const u8) ?struct { ticks: u64, rss_pages: u64 } {
     const end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return null;
     var words = std.mem.tokenizeAny(u8, stat[end + 1 ..], " \t\r\n");
+
     for (0..11) |_| _ = words.next();
     const utime = std.fmt.parseInt(u64, words.next() orelse return null, 10) catch return null;
     const stime = std.fmt.parseInt(u64, words.next() orelse return null, 10) catch return null;
+
     for (0..8) |_| _ = words.next();
     const rss_pages = std.fmt.parseInt(u64, words.next() orelse "", 10) catch 0;
+
     return .{ .ticks = utime +| stime, .rss_pages = rss_pages };
 }
 

@@ -19,6 +19,7 @@ const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .de
 pub fn detect(io: std.Io) bool {
     const drm = smi.sysfs.Dir.open(io, "/sys/class/drm") catch return false;
     defer drm.close();
+
     var it = drm.iterate();
     while (it.next(io) catch null) |entry| {
         const node = renderNode(entry.name) orelse continue;
@@ -26,6 +27,7 @@ pub fn detect(io: std.Io) bool {
         defer dir.close();
         if ((dir.int(u16, "vendor") catch 0) == intel) return true;
     }
+
     return false;
 }
 
@@ -70,6 +72,7 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
         fields.clock_graphics_mhz = gpu.dir.int(u64, "tile0/gt0/freq0/act_freq") catch gpu.dir.int(u64, "tile0/gt0/freq0/cur_freq") catch null;
         fields.clock_graphics_max_mhz = gpu.dir.int(u64, "tile0/gt0/freq0/max_freq") catch null;
         fields.mem_total_bytes = gpu.mem_total_bytes;
+
         if (gpu.render) |render| {
             if (gpu.driver == .xe) fields.mem_used_bytes = if (vram(render, .xe)) |memory| memory.used else null;
         }
@@ -94,6 +97,7 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
                 gpu.last_energy = .{ .microjoules = microjoules, .at = now };
             } else |_| {}
         }
+
         if (hwmon.fan) |fan| fields.fan_speed_percent = fan.percent(hwmon.dir);
     }
 
@@ -102,17 +106,22 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
 
 fn processes(platform: *smi.Platform, _: std.mem.Allocator, _: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
     const self: *OneApi = @alignCast(@fieldParentPtr("platform", platform));
-    for (self.rows orelse return error.Unavailable) |row| try out.append(row);
+
+    for (self.rows orelse return error.Unavailable) |row| {
+        try out.append(row);
+    }
 }
 
 fn deinit(platform: *smi.Platform) void {
     const self: *OneApi = @alignCast(@fieldParentPtr("platform", platform));
+
     for (self.gpus) |gpu| {
         gpu.dir.close();
         gpu.link.close();
         if (gpu.hwmon) |hwmon| hwmon.dir.close();
         if (gpu.render) |render| render.close(self.io);
     }
+
     self.prev_usage.deinit(self.gpa);
     self.curr_usage.deinit(self.gpa);
 }
@@ -145,12 +154,15 @@ const Fan = union(enum) {
     fn find(dir: smi.sysfs.Dir) ?Fan {
         const pwm = comptime smi.hwmon.numbered("pwm{d}");
         if (smi.hwmon.firstReadable(dir, &pwm)) |path| return .{ .pwm = path };
+
         const inputs = comptime smi.hwmon.numbered("fan{d}_input");
         const limits = comptime smi.hwmon.numbered("fan{d}_max");
+
         for (inputs, limits) |input, max| {
             _ = dir.int(u64, input) catch continue;
             if ((dir.int(u64, max) catch 0) != 0) return .{ .speed = .{ .input = input, .max = max } };
         }
+
         return null;
     }
 
@@ -196,6 +208,7 @@ fn openGpu(io: std.Io, dir: smi.sysfs.Dir, node: u32) !Gpu {
     const driver = std.meta.stringToEnum(Driver, driver_name orelse "") orelse .other;
     var path: [32]u8 = undefined;
     const render = std.Io.Dir.cwd().openFile(io, std.fmt.bufPrint(&path, "/dev/dri/renderD{d}", .{node}) catch unreachable, .{ .mode = .read_write }) catch null;
+
     return .{
         .dir = dir,
         .link = upstream,
@@ -383,6 +396,7 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
             timePercent(device.busy, dt)
         else
             0;
+
         fields.encoder_util_percent = if (device.has_encoder) (if (elapsed) |dt| timePercent(device.encoder, dt) else 0) else null;
         fields.decoder_util_percent = if (device.has_decoder) (if (elapsed) |dt| timePercent(device.decoder, dt) else 0) else null;
         // Without the query's count, the clients we can read: those of other users are missing.
@@ -391,6 +405,7 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
         for (rows) |row| {
             if (row.device_idx == index) mem_kib += row.dev_mem_kib orelse 0;
         }
+
         fields.mem_used_bytes = mem_kib * 1024;
     }
 }
@@ -398,6 +413,7 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
 fn durationDelta(curr: ?std.Io.Duration, prev: ?std.Io.Duration) ?std.Io.Duration {
     const c = curr orelse return null;
     const p = prev orelse return null;
+
     return if (c.nanoseconds >= p.nanoseconds) .fromNanoseconds(c.nanoseconds - p.nanoseconds) else null;
 }
 
@@ -425,6 +441,7 @@ fn deviceOf(self: *const OneApi, pdev: []const u8) ?u16 {
 fn memoryBytes(info: *const smi.fdinfo.Fdinfo) ?u64 {
     var device: ?u64 = null;
     var system: ?u64 = null;
+
     for (info.regions()) |region| {
         if (std.mem.startsWith(u8, region.name, "vram") or std.mem.startsWith(u8, region.name, "local")) {
             device = (device orelse 0) + region.bytes;
@@ -432,17 +449,20 @@ fn memoryBytes(info: *const smi.fdinfo.Fdinfo) ?u64 {
             system = (system orelse 0) + region.bytes;
         }
     }
+
     return device orelse system;
 }
 
 fn driverVersion(arena: std.mem.Allocator, io: std.Io) ?[]const u8 {
     const module = smi.sysfs.Dir.open(io, "/sys/module") catch return null;
     defer module.close();
+
     var buffer: [128]u8 = undefined;
     for ([_][]const u8{ "xe/version", "i915/version" }) |file| {
         const version = module.read(file, &buffer) catch continue;
         if (version.len > 0) return arena.dupe(u8, version) catch null;
     }
+
     return null;
 }
 
@@ -466,11 +486,16 @@ fn lspciName(arena: std.mem.Allocator, output: []const u8) !?[]const u8 {
     var vendor: []const u8 = "";
     var device: []const u8 = "";
     var lines = std.mem.tokenizeScalar(u8, output, '\n');
+
     while (lines.next()) |line| {
         if (smi.sysfs.fieldValue(line, "Vendor")) |value| vendor = value;
         if (smi.sysfs.fieldValue(line, "Device")) |value| device = value;
     }
-    if (device.len == 0 or std.mem.startsWith(u8, device, "Device ")) return null;
+
+    if (device.len == 0 or std.mem.startsWith(u8, device, "Device ")) {
+        return null;
+    }
+
     return try std.fmt.allocPrint(arena, "{s} {s}", .{ vendor, device });
 }
 

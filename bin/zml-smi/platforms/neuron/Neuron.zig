@@ -32,10 +32,6 @@ const Private = struct {
     nds_get_nc_counter: *const @TypeOf(c.nds_get_nc_counter),
 };
 
-fn check(status: i64) error{NrtError}!void {
-    if (status != 0) return error.NrtError;
-}
-
 pub fn detect(io: std.Io) bool {
     return smi.sysfs.exists(io, c.NEURON_DEVICE_PREFIX ++ "0");
 }
@@ -90,6 +86,7 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
         if (now.nanoseconds > last.nanoseconds) last.durationTo(now) else null
     else
         null;
+
     self.last_poll = now;
     var rows: std.ArrayList(smi.ProcessInfo) = .empty;
     var read_any = false;
@@ -122,11 +119,13 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
         self.scan(scratch, chip.handle, @intCast(first), elapsed, cores, &rows) catch continue;
         read_any = true;
     }
+
     self.rows = if (read_any) rows.items else null;
 }
 
 fn processes(platform: *smi.Platform, _: std.mem.Allocator, samples: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
     const self: *Neuron = @alignCast(@fieldParentPtr("platform", platform));
+
     for (self.rows orelse return error.Unavailable) |row| {
         var copy = row;
         if (samples[row.device_idx].neuron.util_percent) |util| copy.dev_util_percent = @intCast(util);
@@ -136,9 +135,11 @@ fn processes(platform: *smi.Platform, _: std.mem.Allocator, samples: []const smi
 
 fn deinit(platform: *smi.Platform) void {
     const self: *Neuron = @alignCast(@fieldParentPtr("platform", platform));
+
     for (self.chips) |chip| {
         for (chip.memory) |memory| if (memory) |dir| dir.close();
     }
+
     self.prev_busy.deinit(self.gpa);
     self.curr_busy.deinit(self.gpa);
 }
@@ -155,11 +156,13 @@ const Key = struct { pid: u32, core: u16 };
 fn open(gpa: std.mem.Allocator, io: std.Io) !Api {
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox = smi.sandbox.path(gpa, io, &buffer) orelse return error.LibraryNotFound;
+
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const library = std.c.dlopen(try std.fmt.bufPrintSentinel(&path, "{s}/lib/libnrt.so.1", .{sandbox}, 0), .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
         if (std.c.dlerror()) |err| log.warn("dlopen: {s}", .{err});
         return error.LibraryNotFound;
     };
+
     return smi.dynlib.lookupStruct(library, Api);
 }
 
@@ -171,17 +174,21 @@ fn openChip(arena: std.mem.Allocator, io: std.Io, index: c_int, handle: *c.ndl_d
     var path: [64]u8 = undefined;
     const dir = smi.sysfs.Dir.open(io, try std.fmt.bufPrint(&path, "/sys/devices/virtual/neuron_device/neuron{d}", .{index})) catch return chip;
     defer dir.close();
+
     for (memory, 0..) |*core, core_index| {
         core.* = dir.openDir(try std.fmt.bufPrint(&path, "neuron_core{d}/stats/memory_usage/device_mem", .{core_index})) catch null;
     }
+
     var buffer: [128]u8 = undefined;
     chip.name = try arena.dupe(u8, dir.read("info/architecture/device_name", &buffer) catch return chip);
+
     return chip;
 }
 
 /// Device memory by device type: Inferentia, then Inferentia2 and Trainium, Trainium2, Trainium3.
 fn memoryTotal(device_type: u8) ?u64 {
     const gib: u64 = 1 << 30;
+
     return switch (device_type) {
         1 => 8 * gib,
         2 => 32 * gib,
@@ -193,7 +200,10 @@ fn memoryTotal(device_type: u8) ?u64 {
 
 fn memoryInUse(memory: []const ?smi.sysfs.Dir) ?u64 {
     var total: u64 = 0;
-    for (memory) |dir| total += (dir orelse return null).int(u64, "total") catch return null;
+    for (memory) |dir| {
+        total += (dir orelse return null).int(u64, "total") catch return null;
+    }
+
     return total;
 }
 
@@ -202,6 +212,7 @@ fn scan(self: *Neuron, scratch: std.mem.Allocator, handle: *c.ndl_device_t, firs
     var count: usize = 0;
     try check(self.nrt.ndl_get_all_apps_info(handle, &list, &count, c.APP_INFO_ALL));
     defer std.c.free(list);
+
     const apps: []const c.struct_neuron_app_info = if (list) |items| items[0..count] else &.{};
 
     const busy = try scratch.alloc(std.Io.Duration, cores.len);
@@ -227,6 +238,7 @@ fn scan(self: *Neuron, scratch: std.mem.Allocator, handle: *c.ndl_device_t, firs
             if (micros > 0 and mem_kib > 0) try rows.append(scratch, .{ .pid = key.pid, .device_idx = key.core, .dev_mem_kib = mem_kib });
         }
     }
+
     for (cores, busy) |*sample, sum| {
         sample.neuron.util_percent = if (elapsed) |dt| @intCast(@min(@divTrunc(sum.nanoseconds * 100, dt.nanoseconds), 100)) else 0;
     }
@@ -262,12 +274,14 @@ fn findPrivate(io: std.Io, known: *const anyopaque) !Private {
             }
         }
     }
+
     inline for (info.field_names, found) |field, seen| {
         if (!seen) {
             log.warn("libnrt has no symbol {s}", .{field});
             return error.MissingSymbol;
         }
     }
+
     return private;
 }
 
@@ -279,6 +293,10 @@ const DlInfo = extern struct {
 };
 
 extern fn dladdr(address: *const anyopaque, info: *DlInfo) c_int;
+
+fn check(status: i64) error{NrtError}!void {
+    if (status != 0) return error.NrtError;
+}
 
 test findPrivate {
     const io = std.testing.io;

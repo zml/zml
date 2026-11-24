@@ -10,7 +10,7 @@ pub const std_options: std.Options = .{
         .{ .scope = .vaxis, .level = .warn },
     },
     // A /proc file can vanish between its open and its read, which std reports
-    // as an unexpected errno, with a stack trace in debug builds.
+    // as an unexpected errno. This particularily happen on intel
     .unexpected_error_tracing = false,
 };
 
@@ -77,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
     inline for (platforms) |Platform| {
         if (Platform.detect(io)) {
             const platform = try arena.create(Platform);
+
             if (Platform.init(arena, gpa, io)) |value| {
                 platform.* = value;
                 try collector.add(&platform.platform);
@@ -88,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
         var it = std.mem.splitScalar(u8, hosts, ',');
         while (it.next()) |host| {
             const remote = try arena.create(smi.api.Client);
+
             if (smi.api.Client.open(arena, gpa, io, host)) |value| {
                 remote.* = value;
                 try collector.add(&remote.platform);
@@ -100,6 +102,7 @@ pub fn main(init: std.process.Init) !void {
         try collector.start();
     } else {
         collector.round();
+
         if (collector.two_readings) {
             try io.sleep(interval, .awake);
             collector.round();
@@ -109,17 +112,20 @@ pub fn main(init: std.process.Init) !void {
     if (serving) {
         var servers: std.Io.Group = .init;
         defer servers.cancel(io);
+
         if (args.prometheus_listen) |listen| {
             log.info("serving prometheus metrics on {s}", .{listen});
             const server: smi.api.Server = .{ .gpa = gpa, .io = io, .collector = &collector, .format = .prometheus };
             try servers.concurrent(io, smi.api.Server.serve, .{ server, try .parseLiteral(listen) });
         }
+
         if (args.api) {
             log.info("serving api metrics on port {d}", .{args.api_port});
             const address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = args.api_port } };
             const server: smi.api.Server = .{ .gpa = gpa, .io = io, .collector = &collector, .format = .json };
             try servers.concurrent(io, smi.api.Server.serve, .{ server, address });
         }
+
         try servers.await(io);
         return;
     }

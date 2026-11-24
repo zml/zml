@@ -66,16 +66,20 @@ pub const Clients = struct {
 
     pub fn next(self: *Clients) ?Client {
         const dir: sysfs.Dir = .{ .handle = self.holders.proc orelse return null, .io = self.holders.io };
+
         while (self.holders.next()) |holder| {
             var path: [48]u8 = undefined;
             const sub_path = std.fmt.bufPrint(&path, "{d}/fdinfo/{d}", .{ holder.pid, holder.fd }) catch continue;
             const info = read(dir, sub_path, &self.buffer) catch continue;
+
             if (info.client_id) |id| {
                 const device = std.hash.Wyhash.hash(0, info.pdev orelse "");
                 if ((self.seen.getOrPut(self.scratch, .{ device, id }) catch continue).found_existing) continue;
             }
+
             return .{ .pid = holder.pid, .info = info };
         }
+
         return null;
     }
 };
@@ -111,6 +115,7 @@ pub fn parse(text: []const u8) Fdinfo {
             }
         }
     }
+
     return info;
 }
 
@@ -118,11 +123,14 @@ fn slot(comptime T: type, buffer: []T, count: *u8, comptime key: []const u8, nam
     for (buffer[0..count.*]) |*item| {
         if (std.mem.eql(u8, @field(item, key), name)) return item;
     }
+
     if (count.* == buffer.len) return null;
+
     const item = &buffer[count.*];
     count.* += 1;
     item.* = .{};
     @field(item, key) = name;
+
     return item;
 }
 
@@ -130,6 +138,7 @@ fn bytes(value: []const u8) ?u64 {
     var words = std.mem.tokenizeAny(u8, value, " \t");
     const size = std.fmt.parseInt(u64, words.next() orelse return null, 10) catch return null;
     const unit = words.next() orelse return size;
+
     const shift: u6 = if (std.ascii.eqlIgnoreCase(unit, "KiB") or std.ascii.eqlIgnoreCase(unit, "kB"))
         10
     else if (std.ascii.eqlIgnoreCase(unit, "MiB"))
@@ -138,6 +147,7 @@ fn bytes(value: []const u8) ?u64 {
         30
     else
         0;
+
     return std.math.mul(u64, size, @as(u64, 1) << shift) catch null;
 }
 

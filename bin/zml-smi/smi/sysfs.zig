@@ -41,7 +41,10 @@ pub const Dir = struct {
                 },
                 error.ReadFailed => return reader.err.?,
             } orelse return error.NotFound;
-            if (fieldValue(line, key)) |value| return value;
+
+            if (fieldValue(line, key)) |value| {
+                return value;
+            }
         }
     }
 
@@ -72,6 +75,7 @@ pub fn firstNumber(text: []const u8) ?u64 {
 pub fn fieldValue(line: []const u8, key: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, line, key)) return null;
     const rest = line[key.len..];
+
     if (rest.len > 0 and std.mem.indexOfScalar(u8, ":= \t", rest[0]) == null) return null;
     return std.mem.trim(u8, rest, ":= \t");
 }

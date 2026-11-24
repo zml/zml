@@ -4,12 +4,15 @@ const log = std.log.scoped(.@"zml-smi/dynlib");
 
 pub fn lookupStruct(handle: *anyopaque, comptime Api: type) !Api {
     var api: Api = undefined;
+
     inline for (comptime std.meta.fieldNames(Api)) |name| {
         const symbol = std.c.dlsym(handle, name) orelse {
             log.warn("no symbol {s}", .{name});
             return error.SymbolResolutionFailed;
         };
+
         @field(api, name) = @ptrCast(@alignCast(symbol));
     }
+
     return api;
 }

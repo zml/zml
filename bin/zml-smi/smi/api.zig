@@ -100,17 +100,22 @@ pub const Client = struct {
 
     fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Sample) void {
         const self: *Client = @alignCast(@fieldParentPtr("platform", platform));
+
         self.rows = null;
         const response = fetch(scratch, scratch, self.io, self.url) catch return;
 
         // TODO: read the new devices once the collector supports a device list that changes.
         if (response.devices.len != samples.len) std.debug.panic("{s}: the devices changed since zml-smi started. Please restart.", .{self.url});
-        for (samples, response.devices) |*sample, row| sample.* = row.sample;
+        for (samples, response.devices) |*sample, row| {
+            sample.* = row.sample;
+        }
+
         self.rows = response.processes;
     }
 
     fn processes(platform: *smi.Platform, _: std.mem.Allocator, _: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
         const self: *Client = @alignCast(@fieldParentPtr("platform", platform));
+
         for (self.rows orelse return error.Unavailable) |process| {
             if (process.device_idx >= self.platform.devices.len) continue;
             var row = process;
@@ -129,6 +134,7 @@ pub const Client = struct {
         var body: std.Io.Writer.Allocating = .init(allocator);
         const result = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &body.writer });
         if (result.status != .ok) return error.HttpError;
+
         return std.json.parseFromSliceLeaky(smi.json.Response([]const smi.Row), allocator, body.written(), .{ .ignore_unknown_fields = true });
     }
 };

@@ -42,11 +42,13 @@ pub fn detect(io: std.Io) bool {
 pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSmi {
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox = smi.sandbox.path(gpa, io, &buffer) orelse return error.LibraryNotFound;
+
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const library = std.c.dlopen(try std.fmt.bufPrintSentinel(&path, "{s}/lib/libamd_smi.so.27", .{sandbox}, 0), .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
         if (std.c.dlerror()) |err| log.warn("dlopen: {s}", .{err});
         return error.LibraryNotFound;
     };
+
     const api = try smi.dynlib.lookupStruct(library, Api);
     try check(api.amdsmi_init(c.AMDSMI_INIT_AMD_GPUS));
 
@@ -70,6 +72,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
             var asic: c.amdsmi_asic_info_t = undefined;
             var driver: c.amdsmi_driver_info_t = undefined;
             try gpus.append(arena, .{ .handle = handle, .address = if (ok(api.amdsmi_get_gpu_bdf_id(handle, &bdf))) pciAddress(bdf) else null });
+
             // amdsmi reports the version of an in-tree driver, which has none, as N/A.
             const version = if (ok(api.amdsmi_get_gpu_driver_info(handle, &driver))) std.mem.sliceTo(&driver.driver_version, 0) else "N/A";
             try devices.append(arena, .{
@@ -101,18 +104,22 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
         if (ok(api.amdsmi_get_gpu_metrics_info(handle, &metrics))) {
             if (known(metrics.current_socket_power) orelse known(metrics.average_socket_power)) |watts| fields.power_mw = watts * 1000;
         }
+
         var power: c.amdsmi_power_info_t = undefined;
         if (ok(api.amdsmi_get_power_info(handle, &power))) {
             if (known(power.power_limit)) |microwatts| fields.power_limit_mw = microwatts / 1000;
         }
+
         var celsius: i64 = 0;
         if (ok(api.amdsmi_get_temp_metric(handle, c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT, &celsius))) {
             fields.temperature = std.math.cast(u64, celsius);
         }
+
         var speed: i64 = 0;
         if (ok(api.amdsmi_get_gpu_fan_speed(handle, 0, &speed))) {
             if (std.math.cast(u64, speed)) |pwm| fields.fan_speed_percent = smi.hwmon.pwmPercent(pwm);
         }
+
         var activity: c.amdsmi_engine_usage_t = undefined;
         if (ok(api.amdsmi_get_gpu_activity(handle, &activity))) {
             // Not a percentage when unsupported: 0xFFFF.
@@ -124,9 +131,11 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
             fields.clock_graphics_mhz = known(clock.clk);
             fields.clock_graphics_max_mhz = known(clock.max_clk);
         }
+
         if (ok(api.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_SOC, &clock))) {
             fields.clock_soc_mhz = known(clock.clk);
         }
+
         if (ok(api.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_MEM, &clock))) {
             fields.clock_mem_mhz = known(clock.clk);
             fields.clock_mem_max_mhz = known(clock.max_clk);
@@ -141,7 +150,7 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
             const link: smi.pci.Link = .{ .gen = known(pcie.pcie_static.pcie_interface_version), .width = known(pcie.pcie_metric.pcie_width) };
             fields.pcie_link_gen = link.gen;
             fields.pcie_link_width = link.width;
-            // The rate comes from the generation: the speed amdsmi reports stays at 2.5 GT/s on an R9700 whose link runs at 32.
+            // The rate comes from the generation
             fields.pcie_bandwidth_mbps = link.mbps();
         }
     }
@@ -149,6 +158,7 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
 
 fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
     const self: *AmdSmi = @alignCast(@fieldParentPtr("platform", platform));
+
     self.curr_busy.clearRetainingCapacity();
     defer std.mem.swap(@TypeOf(self.prev_busy), &self.prev_busy, &self.curr_busy);
 
@@ -157,6 +167,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
         if (now.nanoseconds > last.nanoseconds) last.durationTo(now) else null
     else
         null;
+
     self.last_poll = now;
     var read_any = self.gpus.len == 0;
 
@@ -164,6 +175,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
     var vram: std.AutoHashMapUnmanaged(struct { u32, u16 }, u64) = .empty;
     var clients: smi.fdinfo.Clients = .init(self.io, scratch);
     defer clients.deinit();
+
     while (clients.next()) |client| {
         const device = self.deviceOf(client.info.pdev orelse continue) orelse continue;
         const bytes = try vram.getOrPutValue(scratch, .{ client.pid, device }, 0);
@@ -176,10 +188,12 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
         const device: u16 = @intCast(index);
         const list = self.processList(scratch, gpu.handle) catch continue;
         read_any = true;
+
         for (list) |process| {
             const key: BusyKey = .{ .pid = process.pid, .device = device };
             const busy: std.Io.Duration = .fromNanoseconds(process.engine_usage.gfx +| process.engine_usage.enc);
             try self.curr_busy.put(self.gpa, key, busy);
+
             const util: ?u16 = if (self.prev_busy.get(key)) |prev|
                 if (elapsed != null and busy.nanoseconds >= prev.nanoseconds)
                     @intCast(@min(@divTrunc((busy.nanoseconds - prev.nanoseconds) * 100, elapsed.?.nanoseconds), 100))
@@ -187,6 +201,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
                     null
             else
                 null;
+
             try out.append(.{
                 .pid = process.pid,
                 .device_idx = device,
@@ -200,6 +215,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
 
 fn deinit(platform: *smi.Platform) void {
     const self: *AmdSmi = @alignCast(@fieldParentPtr("platform", platform));
+
     self.prev_busy.deinit(self.gpa);
     self.curr_busy.deinit(self.gpa);
 }
@@ -219,6 +235,7 @@ fn processList(self: *AmdSmi, scratch: std.mem.Allocator, handle: c.amdsmi_proce
     const list = try scratch.alloc(c.amdsmi_proc_info_t, count);
     const status = self.listQuietly(handle, &count, list.ptr);
     if (status != c.AMDSMI_STATUS_OUT_OF_RESOURCES) try check(status);
+
     return list[0..@min(count, list.len)];
 }
 
@@ -236,7 +253,28 @@ fn listQuietly(self: *AmdSmi, handle: c.amdsmi_processor_handle, count: *u32, li
         _ = std.c.dup2(saved, std.c.STDERR_FILENO);
         _ = std.c.close(saved);
     };
+
     return self.api.amdsmi_get_gpu_process_list(handle, count, list);
+}
+
+fn deviceOf(self: *const AmdSmi, pdev: []const u8) ?u16 {
+    for (self.gpus, 0..) |gpu, index| {
+        const address = gpu.address orelse continue;
+        if (std.mem.eql(u8, &address, pdev)) return @intCast(index);
+    }
+
+    return null;
+}
+
+/// amdsmi reports a value it cannot read as the largest of its type.
+fn known(value: anytype) ?u64 {
+    return if (value == std.math.maxInt(@TypeOf(value))) null else value;
+}
+
+fn pciAddress(bdf: u64) ?[12]u8 {
+    var address: [12]u8 = undefined;
+    _ = std.fmt.bufPrint(&address, "{x:0>4}:{x:0>2}:{x:0>2}.{x}", .{ bdf >> 32, (bdf >> 8) & 0xff, (bdf >> 3) & 0x1f, bdf & 0x7 }) catch return null;
+    return address;
 }
 
 fn ok(status: c.amdsmi_status_t) bool {
@@ -277,25 +315,6 @@ fn check(status: c.amdsmi_status_t) !void {
         c.AMDSMI_STATUS_UNEXPECTED_DATA => error.UnexpectedData,
         else => error.Unknown,
     };
-}
-
-fn deviceOf(self: *const AmdSmi, pdev: []const u8) ?u16 {
-    for (self.gpus, 0..) |gpu, index| {
-        const address = gpu.address orelse continue;
-        if (std.mem.eql(u8, &address, pdev)) return @intCast(index);
-    }
-    return null;
-}
-
-/// amdsmi reports a value it cannot read as the largest of its type.
-fn known(value: anytype) ?u64 {
-    return if (value == std.math.maxInt(@TypeOf(value))) null else value;
-}
-
-fn pciAddress(bdf: u64) ?[12]u8 {
-    var address: [12]u8 = undefined;
-    _ = std.fmt.bufPrint(&address, "{x:0>4}:{x:0>2}:{x:0>2}.{x}", .{ bdf >> 32, (bdf >> 8) & 0xff, (bdf >> 3) & 0x1f, bdf & 0x7 }) catch return null;
-    return address;
 }
 
 test pciAddress {

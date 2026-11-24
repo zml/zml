@@ -89,13 +89,16 @@ const families: []const Metric = families: {
         const metrics = metricsOf(T);
         next: for (@typeInfo(T).@"struct".field_names) |field| {
             const metric = @field(metrics, field) orelse continue;
+
             for (list) |seen| {
                 if (!std.mem.eql(u8, seen.name, metric.name)) continue;
                 if (!std.mem.eql(u8, seen.help, metric.help) or seen.decimals != metric.decimals or seen.factor != metric.factor) {
                     @compileError(metric.name ++ " has two definitions");
                 }
+
                 continue :next;
             }
+
             list = list ++ .{metric};
         }
     }

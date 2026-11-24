@@ -21,7 +21,11 @@ pub const FdHolders = struct {
     pub fn init(io: std.Io, prefixes: []const []const u8) FdHolders {
         const proc = std.Io.Dir.cwd().openDir(io, "/proc", .{ .iterate = true }) catch null;
         var self: FdHolders = .{ .io = io, .prefixes = prefixes, .proc = proc, .own_pid = @intCast(std.c.getpid()) };
-        if (proc) |dir| self.pids = dir.iterate();
+
+        if (proc) |dir| {
+            self.pids = dir.iterate();
+        }
+
         return self;
     }
 
@@ -33,6 +37,7 @@ pub const FdHolders = struct {
                     const fd = std.fmt.parseInt(u32, entry.name, 10) catch continue;
                     const len = fds.readLink(self.io, entry.name, &self.link) catch continue;
                     const target = self.link[0..len];
+
                     for (self.prefixes) |prefix| {
                         if (std.mem.startsWith(u8, target, prefix)) return .{ .pid = self.pid, .fd = fd, .rest = target[prefix.len..] };
                     }

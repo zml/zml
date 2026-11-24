@@ -49,6 +49,7 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
         if (std.c.dlerror()) |err| log.warn("dlopen: {s}", .{err});
         return error.LibraryNotFound;
     };
+
     const api = try smi.dynlib.lookupStruct(library, Api);
     try check(api.nvmlInit_v2());
 
@@ -57,6 +58,7 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
         try arena.dupe(u8, std.mem.sliceTo(&version, 0))
     else
         null;
+
     var cuda: c_int = 0;
     const details: []const smi.Device.Detail = if (ok(api.nvmlSystemGetCudaDriverVersion_v2(&cuda))) try arena.dupe(smi.Device.Detail, &.{.{
         .key = "cuda_version",
@@ -92,7 +94,8 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
 fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
     const self: *Nvml = @alignCast(@fieldParentPtr("platform", platform));
     const api = &self.api;
-    // PCIe throughput blocks while it measures (#766).
+
+    // PCIe throughput blocks while it measures
     const read_pcie = self.tick % 4 == 0;
     self.tick +%= 1;
 
@@ -167,6 +170,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
             }
         }
     }
+
     if (!read_any) return error.Unavailable;
 }
 

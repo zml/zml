@@ -17,9 +17,11 @@ pub fn detect(io: std.Io) bool {
 pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
     const pci = try smi.sysfs.Dir.open(io, "/sys/bus/pci/devices");
     defer pci.close();
+
     var found: ?Chip = null;
     var count: u32 = 0;
     var it = pci.iterate();
+
     while (try it.next(io)) |entry| {
         const dir = pci.openDir(entry.name) catch continue;
         defer dir.close();
@@ -32,6 +34,7 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
 
     const devices = try arena.alloc(smi.Device, count * chip.devices_per_chip);
     @memset(devices, .{ .target = .tpu, .name = chip.name });
+
     return .{
         .platform = .{ .devices = devices, .vtable = &vtable },
         .io = io,
@@ -43,6 +46,7 @@ fn poll(_: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
     const used = query(c_longlong, "tpu.runtime.hbm.memory.usage.bytes");
     const total = query(c_longlong, "tpu.runtime.hbm.memory.total.bytes");
     const duty = query(f64, "tpu.runtime.tensorcore.dutycycle.percent");
+
     for (samples[0..@min(samples.len, max_devices)], 0..) |*sample, id| {
         sample.tpu = .{ .util_percent = duty[id], .mem_used_bytes = used[id], .mem_total_bytes = total[id] };
     }
@@ -50,9 +54,13 @@ fn poll(_: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) void {
 
 fn processes(platform: *smi.Platform, _: std.mem.Allocator, samples: []const smi.Sample, out: *smi.ProcessList) smi.ProcessList.Error!void {
     const self: *Tpu = @alignCast(@fieldParentPtr("platform", platform));
+
     var holders: smi.proc.FdHolders = .init(self.io, &.{ "/dev/accel", "/dev/vfio/" });
     defer holders.deinit();
-    while (holders.next()) |holder| try addHolder(out, samples, self.devices_per_chip, holder.pid, holder.rest);
+
+    while (holders.next()) |holder| {
+        try addHolder(out, samples, self.devices_per_chip, holder.pid, holder.rest);
+    }
 }
 
 const address = "localhost:8431";
@@ -82,34 +90,41 @@ fn chipOf(device: u16, subsystem: ?u16) ?Chip {
 fn query(comptime T: type, metric: [:0]const u8) [max_devices]?u64 {
     var ids: [max_devices]c_longlong = undefined;
     var values: [max_devices]T = undefined;
+
     const count = switch (T) {
         c_longlong => c.tpu_query_int(address, metric, &ids, &values, max_devices),
         f64 => c.tpu_query_double(address, metric, &ids, &values, max_devices),
         else => @compileError("a metric is an int or a double"),
     };
     const n = std.math.cast(usize, count) orelse 0;
+
     return byId(T, ids[0..n], values[0..n]);
 }
 
 fn byId(comptime T: type, ids: []const c_longlong, values: []const T) [max_devices]?u64 {
     var out: [max_devices]?u64 = @splat(null);
+
     for (ids, values) |id, value| {
         const index = std.math.cast(usize, id) orelse continue;
         if (index >= max_devices) continue;
+
         out[index] = switch (T) {
             c_longlong => std.math.cast(u64, value),
             f64 => if (std.math.isFinite(value)) std.math.lossyCast(u64, @round(value)) else null,
             else => @compileError("a metric is an int or a double"),
         };
     }
+
     return out;
 }
 
 fn addHolder(out: *smi.ProcessList, samples: []const smi.Sample, devices_per_chip: u32, pid: u32, node: []const u8) !void {
     const chip = std.fmt.parseInt(u16, node, 10) catch return;
+
     for (0..devices_per_chip) |core| {
         const device = @as(usize, chip) * devices_per_chip + core;
         if (device >= samples.len) return;
+
         for (out.rows.items) |row| {
             if (row.pid == pid and row.device_idx == device) break;
         } else {

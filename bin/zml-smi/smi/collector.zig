@@ -32,6 +32,7 @@ pub const Collector = struct {
     pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, options: Options) Collector {
         var host: smi.HostData = .{};
         const host_reader: smi.Host = .init(arena, gpa, io, &host);
+
         return .{
             .processes = .{ .values = .{ .init(gpa), .init(gpa) } },
             .host = .{ .values = .{ host, host } },
@@ -47,12 +48,20 @@ pub const Collector = struct {
     pub fn deinit(self: *Collector) void {
         self.stopping.store(true, .release);
         self.tasks.cancel(self.io);
+
         for (self.sources.items) |source| {
             if (source.platform.vtable.deinit) |deinitPlatform| deinitPlatform(source.platform);
-            for (&source.sides.values) |*side| side.processes.deinit();
+
+            for (&source.sides.values) |*side| {
+                side.processes.deinit();
+            }
             source.scratch.deinit();
         }
-        for (&self.processes.values) |*list| list.deinit();
+
+        for (&self.processes.values) |*list| {
+            list.deinit();
+        }
+
         self.host_reader.deinit();
         self.host_scratch.deinit();
     }
@@ -60,6 +69,7 @@ pub const Collector = struct {
     pub fn add(self: *Collector, platform: *smi.Platform) !void {
         const count = platform.devices.len;
         const source = try self.arena.create(Source);
+
         source.* = .{
             .platform = platform,
             .first = std.math.cast(u16, self.devices.items.len) orelse return error.TooManyDevices,
@@ -69,11 +79,14 @@ pub const Collector = struct {
             } },
             .scratch = .init(self.gpa),
         };
+
         for (&source.sides.values) |side| {
             for (side.samples, platform.devices) |*sample_, device| sample_.* = .init(device.target);
         }
+
         try self.devices.appendSlice(self.arena, platform.devices);
         try self.sources.append(self.arena, source);
+
         self.two_readings = self.two_readings or platform.two_readings;
     }
 
@@ -85,7 +98,11 @@ pub const Collector = struct {
     pub fn start(self: *Collector) !void {
         const begin: std.Io.Timestamp = .now(self.io, .awake);
         self.round();
-        for (self.sources.items) |source| try self.tasks.concurrent(self.io, run, .{ self, source, begin });
+
+        for (self.sources.items) |source| {
+            try self.tasks.concurrent(self.io, run, .{ self, source, begin });
+        }
+
         try self.tasks.concurrent(self.io, run, .{ self, null, begin });
     }
 
@@ -93,10 +110,13 @@ pub const Collector = struct {
         const index = @backingInt(device);
         for (self.sources.items) |source| {
             const position = index -% source.first;
+
             if (index < source.first or position >= source.platform.devices.len) continue;
             defer source.sides.unlock(self.io);
+
             return source.sides.lock(self.io).samples[position];
         }
+
         unreachable;
     }
 
@@ -104,9 +124,11 @@ pub const Collector = struct {
         var begin = first_round;
         while (true) {
             const elapsed = begin.untilNow(self.io, .awake);
+
             if (elapsed.nanoseconds < self.interval.nanoseconds) {
                 try self.io.sleep(.fromNanoseconds(self.interval.nanoseconds - elapsed.nanoseconds), .awake);
             }
+
             begin = .now(self.io, .awake);
             if (source) |s| self.poll(s) else self.hostStep();
             if (self.stopping.load(.acquire)) return;
@@ -131,26 +153,31 @@ pub const Collector = struct {
             if (processes(platform, scratch, back.samples, &back.processes)) {
                 const rows = &back.processes.rows;
                 var kept: usize = 0;
+
                 for (rows.items) |row| {
                     if (row.device_idx >= platform.devices.len) continue;
                     rows.items[kept] = row;
                     rows.items[kept].device_idx += source.first;
                     kept += 1;
                 }
+
                 rows.shrinkRetainingCapacity(kept);
             } else |_| {
                 back.processes.clear();
             }
         }
+
         source.sides.swap(self.io);
     }
 
     fn hostStep(self: *Collector) void {
         const merged = self.processes.back();
         merged.clear();
+
         for (self.sources.items) |source| {
             const side = source.sides.lock(self.io);
             defer source.sides.unlock(self.io);
+
             for (side.processes.rows.items) |row| {
                 var copy = row;
                 copy.username = merged.dupe(row.username) catch "";
@@ -158,6 +185,7 @@ pub const Collector = struct {
                 merged.append(copy) catch break;
             }
         }
+
         self.host_reader.enrich(merged.strings.allocator(), self.host_scratch.allocator(), merged.rows.items);
         _ = self.host_scratch.reset(.retain_capacity);
 
