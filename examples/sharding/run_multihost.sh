@@ -19,10 +19,18 @@
 #                       (default: process 0's address as resolved by process 1,
 #                       port 8476)
 #   --port=PORT         coordinator port when it's resolved automatically
+#   --env=KEY=VALUE     environment variable for every process (repeatable),
+#                       e.g. --env=NCCL_DEBUG=INFO
 #   --bazel-flag=FLAG   extra flag for bazel build/run (repeatable)
 #   --no-sync           skip ssync
 #   --no-build          skip the separate build step
 #   --dry-run           print what would run on each host, then exit
+#
+# GB10 (DGX Spark): when every host has an NVIDIA GB10 and process 0 has an
+# IPv4 address on its ConnectX-7 port 0 (enp1s0f0np0), the coordinator
+# defaults to that address and NCCL defaults to the ConnectX-7 links
+# (NCCL_SOCKET_IFNAME=enp1s0, NCCL_IB_HCA=rocep1s0). --coordinator and --env
+# override these defaults.
 #
 # Logs go to $TMPDIR/zml-multihost-<namespace>/<host>.log and to the terminal,
 # prefixed with the host.
@@ -34,17 +42,21 @@ port=8476
 sync=1
 build=1
 dry_run=0
-bazel_flags=(--@zml//platforms:cuda=true)
+# Without a tty, Bazel prints every progress update as a line; keep warnings and errors only.
+bazel_flags=(--@zml//platforms:cuda=true --noshow_progress --ui_event_filters=-info)
+env_vars=()
 hosts=()
 extra_args=()
 
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while (($#)); do
   case $1 in
     --gpus=*)        gpus=${1#--gpus=} ;;
     --coordinator=*) coordinator=${1#--coordinator=} ;;
     --port=*)        port=${1#--port=} ;;
+    --env=*=*)       env_vars+=("${1#--env=}") ;;
+    --env=*)         echo "error: --env expects KEY=VALUE (got ${1#--env=})" >&2; exit 2 ;;
     --bazel-flag=*)  bazel_flags+=("${1#--bazel-flag=}") ;;
     --no-sync)       sync=0 ;;
     --no-build)      build=0 ;;
@@ -123,6 +135,32 @@ fi
 local_devices=0
 for ((i = 1; i < gpus; i++)); do local_devices+=",$i"; done
 
+# Returns success when --env already sets KEY.
+has_env() {
+  local entry
+  for entry in ${env_vars[@]+"${env_vars[@]}"}; do
+    [[ ${entry%%=*} == "$1" ]] && return 0
+  done
+  return 1
+}
+
+all_gb10=1
+for host in "${hosts[@]}"; do
+  name=$(ssh -o BatchMode=yes "$host" 'nvidia-smi --query-gpu=name --format=csv,noheader | head -n1')
+  [[ $name == "NVIDIA GB10" ]] || all_gb10=0
+done
+if ((all_gb10)); then
+  cx7_ip=$(ssh -o BatchMode=yes "${hosts[0]}" "ip -4 -o addr show dev enp1s0f0np0 2>/dev/null | awk '{split(\$4, a, \"/\"); print a[1]; exit}'")
+  if [[ -n $cx7_ip ]]; then
+    log "GB10 hosts: using the ConnectX-7 links (${hosts[0]} enp1s0f0np0 = $cx7_ip)"
+    [[ -z $coordinator ]] && coordinator="$cx7_ip:$port"
+    has_env NCCL_SOCKET_IFNAME || env_vars+=(NCCL_SOCKET_IFNAME=enp1s0)
+    has_env NCCL_IB_HCA || env_vars+=(NCCL_IB_HCA=rocep1s0)
+  else
+    log "GB10 hosts, but ${hosts[0]} has no IPv4 address on enp1s0f0np0; using the default network"
+  fi
+fi
+
 if [[ -z $coordinator ]]; then
   rank0_name=$(ssh -G "${hosts[0]}" | awk '/^hostname /{print $2}')
   if ((process_count > 1)); then
@@ -137,6 +175,7 @@ fi
 
 log "Namespace $namespace"
 log "Coordinator $coordinator on ${hosts[0]}, $process_count processes x $gpus GPUs (local devices $local_devices)"
+((${#env_vars[@]})) && log "Environment ${env_vars[*]}"
 log "Logs in $log_dir"
 
 remote_quote() { printf '%q ' "$@"; }
@@ -176,7 +215,7 @@ for rank in "${!hosts[@]}"; do
     "--namespace=$namespace"
     ${extra_args[@]+"${extra_args[@]}"}
   )
-  run_cmd="cd ~/zml && bazel run $(remote_quote "${bazel_flags[@]}") //examples/sharding -- $(remote_quote "${args[@]}")"
+  run_cmd="cd ~/zml && env ${env_vars[@]+$(remote_quote "${env_vars[@]}")} bazel run $(remote_quote "${bazel_flags[@]}") //examples/sharding -- $(remote_quote "${args[@]}")"
   if ((dry_run)); then
     echo "[$host] $run_cmd"
     continue
