@@ -74,7 +74,9 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
         fields.mem_total_bytes = gpu.mem_total_bytes;
 
         if (gpu.render) |render| {
-            if (gpu.driver == .xe) fields.mem_used_bytes = if (vram(render, .xe)) |memory| memory.used else null;
+            if (gpu.driver == .xe) {
+                if (vram(render, .xe)) |memory| fields.mem_used_bytes = memory.used;
+            }
         }
 
         const link = smi.pci.link(gpu.link, .current);
@@ -83,8 +85,15 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
         fields.pcie_bandwidth_mbps = link.mbps();
 
         const hwmon = gpu.hwmon orelse continue;
-        if (hwmon.temperature) |file| fields.temperature = if (hwmon.dir.int(u64, file)) |millidegrees| millidegrees / 1000 else |_| null;
-        if (hwmon.power_limit) |file| fields.power_limit_mw = if (hwmon.dir.int(u64, file)) |microwatts| microwatts / 1000 else |_| null;
+
+        if (hwmon.temperature) |file| {
+            if (hwmon.dir.int(u64, file) catch null) |millidegrees| fields.temperature = millidegrees / 1000;
+        }
+
+        if (hwmon.power_limit) |file| {
+            if (hwmon.dir.int(u64, file) catch null) |microwatts| fields.power_limit_mw = microwatts / 1000;
+        }
+
         if (hwmon.energy) |file| {
             if (hwmon.dir.int(u64, file)) |microjoules| {
                 const now: std.Io.Timestamp = .now(self.io, .awake);
@@ -209,6 +218,13 @@ fn openGpu(io: std.Io, dir: smi.sysfs.Dir, node: u32) !Gpu {
     var path: [32]u8 = undefined;
     const render = std.Io.Dir.cwd().openFile(io, std.fmt.bufPrint(&path, "/dev/dri/renderD{d}", .{node}) catch unreachable, .{ .mode = .read_write }) catch null;
 
+    const mem_total_bytes: ?u64 = blk: {
+        const file = render orelse break :blk null;
+        const memory = vram(file, driver) orelse break :blk null;
+
+        break :blk memory.total;
+    };
+
     return .{
         .dir = dir,
         .link = upstream,
@@ -216,7 +232,7 @@ fn openGpu(io: std.Io, dir: smi.sysfs.Dir, node: u32) !Gpu {
         .hwmon = openHwmon(dir, driver_name),
         .driver = driver,
         .render = render,
-        .mem_total_bytes = if (render) |file| if (vram(file, driver)) |memory| memory.total else null else null,
+        .mem_total_bytes = mem_total_bytes,
     };
 }
 
@@ -322,10 +338,13 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
     defer std.mem.swap(@TypeOf(self.prev_usage), &self.prev_usage, &self.curr_usage);
 
     const now: std.Io.Timestamp = .now(self.io, .awake);
-    const elapsed: ?std.Io.Duration = if (self.last_scan) |last|
-        if (now.nanoseconds > last.nanoseconds) last.durationTo(now) else null
-    else
-        null;
+    const elapsed: ?std.Io.Duration = blk: {
+        const last = self.last_scan orelse break :blk null;
+        if (now.nanoseconds <= last.nanoseconds) break :blk null;
+
+        break :blk last.durationTo(now);
+    };
+
     self.last_scan = now;
     self.rows = null;
 
@@ -397,8 +416,14 @@ fn scan(self: *OneApi, scratch: std.mem.Allocator, samples: []smi.Sample) void {
         else
             0;
 
-        fields.encoder_util_percent = if (device.has_encoder) (if (elapsed) |dt| timePercent(device.encoder, dt) else 0) else null;
-        fields.decoder_util_percent = if (device.has_decoder) (if (elapsed) |dt| timePercent(device.decoder, dt) else 0) else null;
+        if (device.has_encoder) {
+            fields.encoder_util_percent = if (elapsed) |dt| timePercent(device.encoder, dt) else 0;
+        }
+
+        if (device.has_decoder) {
+            fields.decoder_util_percent = if (elapsed) |dt| timePercent(device.decoder, dt) else 0;
+        }
+
         // Without the query's count, the clients we can read: those of other users are missing.
         if (fields.mem_used_bytes != null) continue;
         var mem_kib: u64 = 0;

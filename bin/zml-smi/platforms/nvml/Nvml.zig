@@ -3,7 +3,6 @@ const c = @import("c");
 const smi = @import("zml-smi");
 
 const Nvml = @This();
-const log = std.log.scoped(.@"zml-smi/nvml");
 
 platform: smi.Platform,
 api: Api,
@@ -44,13 +43,7 @@ pub fn detect(io: std.Io) bool {
 }
 
 pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
-    const library = std.c.dlopen("libnvidia-ml.so.1", .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse
-        std.c.dlopen("libnvidia-ml.so", .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
-        if (std.c.dlerror()) |err| log.warn("dlopen: {s}", .{err});
-        return error.LibraryNotFound;
-    };
-
-    const api = try smi.dynlib.lookupStruct(library, Api);
+    const api = try smi.dynlib.open(Api, &.{ "libnvidia-ml.so.1", "libnvidia-ml.so" });
     try check(api.nvmlInit_v2());
 
     var version: [c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE]u8 = undefined;

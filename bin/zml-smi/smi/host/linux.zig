@@ -56,12 +56,17 @@ pub const Host = struct {
         defer std.mem.swap(@TypeOf(self.prev_ticks), &self.prev_ticks, &self.curr_ticks);
 
         var buffer: [512]u8 = undefined;
-        const total: ?u64 = if (proc.handle.readFile(self.io, "stat", &buffer)) |stat| blk: {
+        const total: ?u64 = blk: {
+            const stat = proc.handle.readFile(self.io, "stat", &buffer) catch break :blk null;
             const current = totalTicks(stat);
             const prev = self.last_total;
             self.last_total = current;
-            break :blk if (prev) |p| if (current >= p) current - p else null else null;
-        } else |_| null;
+
+            const p = prev orelse break :blk null;
+            if (current < p) break :blk null;
+
+            break :blk current - p;
+        };
 
         var first_row: std.AutoHashMapUnmanaged(u32, usize) = .empty;
         for (rows, 0..) |*row, i| {

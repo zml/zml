@@ -82,10 +82,12 @@ fn poll(platform: *smi.Platform, scratch: std.mem.Allocator, samples: []smi.Samp
     defer std.mem.swap(@TypeOf(self.prev_busy), &self.prev_busy, &self.curr_busy);
 
     const now: std.Io.Timestamp = .now(self.io, .awake);
-    const elapsed: ?std.Io.Duration = if (self.last_poll) |last|
-        if (now.nanoseconds > last.nanoseconds) last.durationTo(now) else null
-    else
-        null;
+    const elapsed: ?std.Io.Duration = blk: {
+        const last = self.last_poll orelse break :blk null;
+        if (now.nanoseconds <= last.nanoseconds) break :blk null;
+
+        break :blk last.durationTo(now);
+    };
 
     self.last_poll = now;
     var rows: std.ArrayList(smi.ProcessInfo) = .empty;
@@ -158,12 +160,7 @@ fn open(gpa: std.mem.Allocator, io: std.Io) !Api {
     const sandbox = smi.sandbox.path(gpa, io, &buffer) orelse return error.LibraryNotFound;
 
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const library = std.c.dlopen(try std.fmt.bufPrintSentinel(&path, "{s}/lib/libnrt.so.1", .{sandbox}, 0), .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
-        if (std.c.dlerror()) |err| log.warn("dlopen: {s}", .{err});
-        return error.LibraryNotFound;
-    };
-
-    return smi.dynlib.lookupStruct(library, Api);
+    return smi.dynlib.open(Api, &.{try std.fmt.bufPrintSentinel(&path, "{s}/lib/libnrt.so.1", .{sandbox}, 0)});
 }
 
 fn openChip(arena: std.mem.Allocator, io: std.Io, index: c_int, handle: *c.ndl_device_t, cores: usize) !Chip {

@@ -3,7 +3,6 @@ const c = @import("c");
 const smi = @import("zml-smi");
 
 const AmdSmi = @This();
-const log = std.log.scoped(.@"zml-smi/amdsmi");
 
 platform: smi.Platform,
 io: std.Io,
@@ -44,12 +43,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
     const sandbox = smi.sandbox.path(gpa, io, &buffer) orelse return error.LibraryNotFound;
 
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const library = std.c.dlopen(try std.fmt.bufPrintSentinel(&path, "{s}/lib/libamd_smi.so.27", .{sandbox}, 0), .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
-        if (std.c.dlerror()) |err| log.warn("dlopen: {s}", .{err});
-        return error.LibraryNotFound;
-    };
-
-    const api = try smi.dynlib.lookupStruct(library, Api);
+    const api = try smi.dynlib.open(Api, &.{try std.fmt.bufPrintSentinel(&path, "{s}/lib/libamd_smi.so.27", .{sandbox}, 0)});
     try check(api.amdsmi_init(c.AMDSMI_INIT_AMD_GPUS));
 
     var socket_count: u32 = 0;
@@ -163,10 +157,12 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
     defer std.mem.swap(@TypeOf(self.prev_busy), &self.prev_busy, &self.curr_busy);
 
     const now: std.Io.Timestamp = .now(self.io, .awake);
-    const elapsed: ?std.Io.Duration = if (self.last_poll) |last|
-        if (now.nanoseconds > last.nanoseconds) last.durationTo(now) else null
-    else
-        null;
+    const elapsed: ?std.Io.Duration = blk: {
+        const last = self.last_poll orelse break :blk null;
+        if (now.nanoseconds <= last.nanoseconds) break :blk null;
+
+        break :blk last.durationTo(now);
+    };
 
     self.last_poll = now;
     var read_any = self.gpus.len == 0;
@@ -194,13 +190,13 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
             const busy: std.Io.Duration = .fromNanoseconds(process.engine_usage.gfx +| process.engine_usage.enc);
             try self.curr_busy.put(self.gpa, key, busy);
 
-            const util: ?u16 = if (self.prev_busy.get(key)) |prev|
-                if (elapsed != null and busy.nanoseconds >= prev.nanoseconds)
-                    @intCast(@min(@divTrunc((busy.nanoseconds - prev.nanoseconds) * 100, elapsed.?.nanoseconds), 100))
-                else
-                    null
-            else
-                null;
+            const util: ?u16 = blk: {
+                const dt = elapsed orelse break :blk null;
+                const prev = self.prev_busy.get(key) orelse break :blk null;
+                if (busy.nanoseconds < prev.nanoseconds) break :blk null;
+
+                break :blk @intCast(@min(@divTrunc((busy.nanoseconds - prev.nanoseconds) * 100, dt.nanoseconds), 100));
+            };
 
             try out.append(.{
                 .pid = process.pid,
