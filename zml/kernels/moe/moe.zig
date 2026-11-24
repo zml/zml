@@ -273,7 +273,11 @@ pub fn forwardMoe(
                 .cute => cute.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .flashinfer_cutlass => flashinfer_cutlass.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .triton => triton.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
-                .fly => fly.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
+                // Triton takes the batches Fly does not run, with the same weight layout.
+                .fly => if (fly.runs(args.gate_up, @intCast(args.ids.count())))
+                    fly.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts)
+                else
+                    triton.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .mosaic_tpu => mosaic_tpu.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .metal => metal.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),
                 .tcl => tcl.fusedExperts(args.input, routing, args.gate_up, args.down, args.opts),

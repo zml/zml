@@ -773,6 +773,28 @@ test "Fly NVFP4 compatibility matrix" {
     }, .{});
 }
 
+test "Fly MXFP8 compatibility matrix" {
+    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+
+    // Fly runs MXFP8 decode batches as GEMVs and hands larger ones to Triton.
+    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
+        .formats = &.{.{ .scheme = .mxfp8 }},
+        .activations = &.{
+            .{ .swiglu = .{} },
+            .{ .swiglu = .{ .gate_softcap = 0.5, .up_softcap = 0.25 } },
+        },
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{.before_down},
+        .shapes = &.{
+            .{},
+            .{ .tokens = 17, .topk = 2 },
+            .{ .tokens = 16, .topk = 8, .width = 2304, .intermediate = 1152 },
+            .{ .tokens = 17, .topk = 2, .unrouted = true },
+            .{ .tokens = 40, .topk = 8 },
+        },
+    }, .{});
+}
+
 test "Fly routes without an expert" {
     const pipeline: Pipeline = .{ .platform = zml.testing.env() };
 

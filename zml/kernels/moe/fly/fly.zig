@@ -190,9 +190,13 @@ pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linea
 /// rounded to NVFP4 and widened to a format that holds them exactly. Decode
 /// GEMVs take them over their row scales in F16, others in BF16.
 fn prepareInput(x: Tensor, linear: nn.Linear, opts: Options, routing: Routing) struct { Tensor, ?Tensor } {
-    if (linear.quantizationScheme() != .nvfp4) return .{ x.convert(.bf16), null };
     // Activations are rounded to BF16 before quantization, as for BF16 GEMMs.
-    return fly.RoundNvfp4.call(x.convert(.bf16), opts.nvfp4_input_scale == .four_or_six, if (routing.naive_block_assignment) .f16 else .bf16);
+    const input = x.convert(.bf16);
+    return switch (linear.quantizationScheme() orelse return .{ input, null }) {
+        .nvfp4 => fly.RoundNvfp4.call(input, opts.nvfp4_input_scale == .four_or_six, if (routing.naive_block_assignment) .f16 else .bf16),
+        .mxfp8 => .{ if (opts.quantize_input) fly.RoundMxfp8.call(input) else input, null },
+        .mxfp4, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .{ input, null },
+    };
 }
 
 /// GEMM outputs `{.token, ..., .out}` in FP32, times each route's input row scale
@@ -226,11 +230,14 @@ pub const GemmOptions = struct {
 };
 
 pub fn gemm(opts: GemmOptions) zml.Tensor {
-    stdx.debug.assert((opts.quant_scheme == .mxfp4 or opts.quant_scheme == .nvfp4) and opts.bias == null and opts.routing_weights == null, "Fly MoE requires MXFP4 or NVFP4 weights, BF16 activations and routing weights before the down projection", .{});
-    const weight = if (opts.weight.dtype() == .f4e2m1)
-        opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8)
-    else
-        opts.weight;
+    const scheme_supported = opts.quant_scheme == .mxfp4 or opts.quant_scheme == .nvfp4 or
+        (opts.quant_scheme == .mxfp8 and opts.routing.naive_block_assignment);
+    stdx.debug.assert(scheme_supported and opts.bias == null and opts.routing_weights == null, "Fly MoE requires MXFP4 or NVFP4 weights, or MXFP8 weights for decode, BF16 activations and routing weights before the down projection", .{});
+    const weight = switch (opts.weight.dtype()) {
+        .f4e2m1 => opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8),
+        .f8e4m3fn => opts.weight.bitCast(.u8),
+        else => opts.weight,
+    };
     // The kernels read one scale word per 32 weights: NVFP4 pairs its 16-weight E4M3 scales.
     const bytes = opts.weight_scale.?.bitCast(.u8);
     const scales = if (opts.quant_scheme == .nvfp4)
@@ -249,13 +256,21 @@ pub const Routing = struct {
     naive_block_assignment: bool,
 };
 
+/// Decode batches of at most this many routes use the grouped GEMV; larger ones
+/// share weights across sorted MFMA rows.
+pub const max_gemv_routes = 256;
+
+/// Whether Fly runs these weights for `routes` routes: MXFP8 runs only as a decode GEMV.
+pub fn runs(gate_up: nn.Linear, routes: i64) bool {
+    return gate_up.quantizationScheme() != .mxfp8 or routes <= max_gemv_routes;
+}
+
 pub fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing {
     std.debug.assert(num_experts > 0 and num_experts <= 512);
     std.debug.assert(block_size_m > 0 and block_size_m <= 128 and @mod(block_size_m, 16) == 0);
     const ids = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_assignments = ids.dim(.token) * ids.dim(.topk);
-    // Decode batches use the grouped GEMV; larger ones share weights across sorted MFMA rows.
-    const naive_block_assignment = num_assignments <= 256;
+    const naive_block_assignment = num_assignments <= max_gemv_routes;
     const max_num_tokens_padded = if (naive_block_assignment or num_assignments < num_experts)
         num_assignments * block_size_m
     else
@@ -332,6 +347,42 @@ fn launchConfigForTokens(num_tokens: i64) LaunchConfig {
         }
     }
     return best.config;
+}
+
+test "RoundMxfp8 rounds to E4M3 over power-of-two block scales" {
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+    const Local = struct {
+        fn forward(x: Tensor) [2]Tensor {
+            const blocks = x.convert(.f32).splitAxis(.in, .{ .block = -1, .value = 32 });
+            const scales = quantization.ceilPowerOfTwo(blocks.abs().max(.value).maximum(.scalar(1e-10, .f32)).scale(1.0 / 448.0));
+            const values = blocks.div(scales.broad(blocks.shape())).convert(.f8e4m3fn).convert(.f32);
+            const expected = values.mul(scales.broad(values.shape())).merge(.{ .in = .{ .block, .value } }).convert(.bf16);
+            return .{ expected, fly.RoundMxfp8.call(x) };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // Magnitudes vary by row and within blocks, reaching E4M3 subnormals.
+    const x: Tensor = .init(.{ .t = 13, .in = 2304 }, .bf16);
+    var host = try zml.Slice.alloc(allocator, x.shape());
+    defer host.free(allocator);
+    for (host.items(zml.floats.BFloat16), 0..) |*value, i| {
+        const row: i32 = @intCast(i / 2304);
+        const pattern: f32 = @floatFromInt(@as(i32, @intCast((i * 37 + i / 7) % 97)) - 48);
+        const spread = std.math.pow(f32, 2, @floatFromInt(@mod(@as(i32, @intCast(i)), 13) - 6));
+        value.* = .fromF32(pattern * spread * std.math.pow(f32, 2, @floatFromInt(@mod(row * 5, 11) - 5)));
+    }
+    var input = try zml.Buffer.fromSlice(io, platform, host);
+    defer input.deinit();
+    var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
+    defer exe.deinit();
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    var outputs: [2]zml.Buffer = undefined;
+    runner.run(io, .{input}, .{&outputs}, .{ .wait = true });
+    defer for (&outputs) |*output| output.deinit();
+    try zml.testing.expectClose(io, outputs[0], outputs[1], .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 });
 }
 
 test "RoundNvfp4 matches quantizeNvfp4Rows" {

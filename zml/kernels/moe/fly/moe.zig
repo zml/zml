@@ -243,8 +243,8 @@ pub const Mfma = struct {
     /// `expert_ids` contains local bank indices, including -1 for remote experts.
     /// Sorted routes must contain a real prefix followed by padding per expert.
     /// `block_m` is their alignment; native tiles contain 16 or 32 rows.
-    /// `scales` holds one entry per 32 weights: an E8M0 byte (MXFP4), or an i16
-    /// pairing two E4M3FN bytes that each cover 16 weights (NVFP4).
+    /// `scales` holds one entry per 32 weights: an E8M0 byte (MXFP4, MXFP8), or an
+    /// i16 pairing two E4M3FN bytes that each cover 16 weights (NVFP4).
     pub fn call(
         input: Tensor,
         weight: Tensor,
@@ -265,7 +265,8 @@ pub const Mfma = struct {
         const n = weight.dim(1);
         const k = input.dim(1);
         std.debug.assert(supportsShape(n, k));
-        std.debug.assert(input.dim(0) > 0 and weight.dim(0) > 0 and weight.dim(2) == @divExact(k, 2) and
+        // Decode GEMVs also take a byte per weight (MXFP8).
+        std.debug.assert(input.dim(0) > 0 and weight.dim(0) > 0 and (weight.dim(2) == @divExact(k, 2) or (naive and weight.dim(2) == k)) and
             scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32) and
             output.dim(-1) == n);
         // Keep packed-word counts and route/output indices within signed i32.
@@ -629,32 +630,37 @@ const Gemv = struct {
         rows: i64,
         nvfp4: i64,
         f16: i64,
+        /// E4M3 weights, one byte each, rather than packed E2M1.
+        fp8: i64,
     };
 
     /// `ids` holds one local expert per route, negative or out of bank for remote
     /// experts, whose output rows are zero. Route `r` reads input row `r / topk`.
     /// F16 inputs are NVFP4 values over their row scale, from `RoundNvfp4.Format.f16`.
+    /// Weights are packed E2M1 or, a byte per weight, E4M3FN with E8M0 scales (MXFP8).
     pub fn call(x: Tensor, weight: Tensor, scales: Tensor, ids: Tensor, output: zml.Shape, topk: usize) Tensor {
         const n = weight.dim(1);
         const k = x.dim(1);
         const routes: i64 = @intCast(ids.count());
-        std.debug.assert((x.dtype() == .bf16 or x.dtype() == .f16) and (weight.dtype() == .u8 or weight.dtype() == .i8) and
-            weight.dim(2) * 2 == k and @mod(k, 32) == 0 and routes == x.dim(0) * @as(i64, @intCast(topk)) and routes <= threads);
+        const fp8 = weight.dim(2) == k;
+        std.debug.assert((x.dtype() == .bf16 or (!fp8 and x.dtype() == .f16)) and (weight.dtype() == .u8 or weight.dtype() == .i8) and
+            (fp8 or weight.dim(2) * 2 == k) and @mod(k, 32) == 0 and routes == x.dim(0) * @as(i64, @intCast(topk)) and routes <= threads);
         std.debug.assert(scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32) and
-            (scales.dtype() == .u8 or scales.dtype() == .i16));
+            (scales.dtype() == .u8 or (!fp8 and scales.dtype() == .i16)));
         const chunks = @divExact(k, 32);
-        // Enough lanes per row that each loads at most 12 chunks in one batch.
+        // Enough lanes per row that each has at most 12 loads of 16 bytes in flight in one batch.
+        const most: i64 = if (fp8) 6 else 12;
         var lanes: i64 = 4;
-        while (lanes < 16 and std.math.divCeil(i64, chunks, lanes) catch unreachable > 12) lanes *= 2;
+        while (lanes < 16 and std.math.divCeil(i64, chunks, lanes) catch unreachable > most) lanes *= 2;
         const per_lane = std.math.divCeil(i64, chunks, lanes) catch unreachable;
-        const batches = std.math.divCeil(i64, per_lane, 12) catch unreachable;
+        const batches = std.math.divCeil(i64, per_lane, most) catch unreachable;
         const cfg: Config = .{
             .n = n,
             .experts = weight.dim(0),
             .routes = routes,
             .topk = @intCast(topk),
             .x_words = @divExact(k, 2),
-            .k_words = @divExact(k, 8),
+            .k_words = @divExact(k, @as(i64, if (fp8) 4 else 8)),
             .chunks = chunks,
             .lanes = lanes,
             .batch = std.math.divCeil(i64, per_lane, batches) catch unreachable,
@@ -662,6 +668,7 @@ const Gemv = struct {
             .rows = @divExact(threads, lanes),
             .nvfp4 = @intFromBool(scales.dtype() == .i16),
             .f16 = @intFromBool(x.dtype() == .f16),
+            .fp8 = @intFromBool(fp8),
         };
         const a = x.reshape(.{ x.dim(0), cfg.x_words, 2 }).bitCast(.i32);
         const b = weight.reshape(.{ weight.dim(0), n, cfg.k_words, 4 }).bitCast(.i32);
@@ -801,18 +808,39 @@ const Gemv = struct {
         {
             // Unconditional loads keep a batch in flight together; chunks past K
             // reread the last chunk and are zeroed through their scales.
+            // FP8 chunks take two loads: `words` and `upper`.
+            const chunk_words: i64 = if (cfg.fp8 != 0) 8 else 4;
             var words: [12]Value = undefined;
+            var upper: [12]Value = undefined;
             var scales: [12]Value = undefined;
             var chunks: [12]Value = undefined;
             for (0..@intCast(cfg.batch)) |j| {
                 chunks[j] = batches.iv.mul(cfg.batch).add(@as(i64, @intCast(j))).mul(cfg.lanes).add(lane);
                 const chunk = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(chunks[j], b.constant(.i64, cfg.chunks - 1));
-                words[j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(b_base.add(chunk.mul(4))).view(fly.L(4, 1)));
+                const start = b_base.add(chunk.mul(chunk_words));
+                words[j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(start).view(fly.L(4, 1)));
+                if (cfg.fp8 != 0) upper[j] = b.copyAtomLoad(load, args.b.emitIter().addOffset(start.add(4)).view(fly.L(4, 1)));
                 scales[j] = args.scales.at(.{ expert, scale_row, chunk });
             }
             var acc: [group]Value = batches.carried;
             for (0..@intCast(cfg.batch)) |j| {
                 const chunk = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(chunks[j], b.constant(.i64, cfg.chunks - 1));
+                if (cfg.fp8 != 0) {
+                    const weights = decodeE4m3Chunk(b, words[j], upper[j]);
+                    // E4M3FN bytes read as FNUZ are half their value.
+                    const block_scale = chunks[j].cmpUnsigned(.lt, cfg.chunks).select(decodeE8m0(b, scales[j]).mul(2.0), fzero);
+                    inline for (0..group) |m| {
+                        var member = b.openIfElse(count.gt(m), .{.f32});
+                        {
+                            member.yieldThen(.{dotE4m3(b, load, inputs, @as(i64, m) * cfg.x_words, chunk, weights, block_scale, acc[m])});
+                        }
+                        {
+                            member.yieldElse(.{acc[m]});
+                        }
+                        acc[m] = member.results[0];
+                    }
+                    continue;
+                }
                 var weights: [4][4]Value = undefined;
                 inline for (0..4) |u| weights[u] = if (cfg.f16 != 0) decodeF16Pairs(b, words[j].extract(u)) else decodeWord(b, words[j].extract(u));
                 var decoded = if (cfg.nvfp4 != 0) decodeE4m3Pair(b, scales[j]) else decodeE8m0(b, scales[j]).splat(2);
@@ -858,6 +886,39 @@ const Gemv = struct {
             }
         }
         return b.fma(partial[0], block_scales.extract(0), b.fma(partial[1], block_scales.extract(1), acc));
+    }
+
+    /// `acc` plus one BF16 input row's dot product with 32 decoded E4M3 weights.
+    fn dotE4m3(b: *Builder, load: Value, inputs: Value, base: i64, chunk: Value, weights: [32]Value, block_scale: Value, acc: Value) Value {
+        const fzero = b.constant(.f32, 0.0);
+        var partial: [2]Value = .{ fzero, fzero };
+        inline for (0..4) |q| {
+            const xs = b.copyAtomLoad(load, inputs.emitIter().addOffset(chunk.mul(16).add(base + q * 4)).view(fly.L(4, 1)));
+            inline for (0..4) |p| {
+                const x = xs.extract(p);
+                const lo = x.shl(16).bitCast(.f32);
+                const hi = x.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
+                partial[q % 2] = b.fma(lo, weights[8 * q + 2 * p], b.fma(hi, weights[8 * q + 2 * p + 1], partial[q % 2]));
+            }
+        }
+        return b.fma(partial[0].add(partial[1]), block_scale, acc);
+    }
+
+    /// 32 E4M3FN weights from two words of four, in F32 at half their value (as FNUZ).
+    fn decodeE4m3Chunk(b: *Builder, low: Value, high: Value) [32]Value {
+        var weights: [32]Value = undefined;
+        inline for (0..8) |w| {
+            const word = (if (w < 4) low else high).extract(w % 4);
+            // Negative zero is FNUZ's NaN: clear the sign of bytes whose other bits are zero.
+            const kept = word.bitAnd(0x7f7f7f7f).add(0x7f7f7f7f).bitOr(0x7f7f7f7f);
+            const bits = word.bitAnd(kept);
+            inline for (0..2) |h| {
+                const pair = b.cvtPkF32Fp8(bits, h == 1);
+                weights[4 * w + 2 * h] = pair.extract(0);
+                weights[4 * w + 2 * h + 1] = pair.extract(1);
+            }
+        }
+        return weights;
     }
 
     /// Eight FP4 weights as F16 pairs (0, 1), (2, 3), (4, 5), (6, 7), times 2^-14: an F16
@@ -941,15 +1002,7 @@ pub const RoundNvfp4 = struct {
         const valid = block.cmpUnsigned(.lt, cfg.blocks);
         const offset = b.blockId(.x).to(.i64).mul(cfg.words).add(valid.select(block, b.constant(.i64, 0)).mul(8));
         const access = b.copyAtom(.{ .universal = 128 }, .i32);
-        var values: [16]Value = undefined;
-        inline for (0..2) |h| {
-            const words = b.copyAtomLoad(access, args.x.emitIter().addOffset(offset.add(h * 4)).view(fly.L(4, 1)));
-            inline for (0..4) |w| {
-                const word = words.extract(w);
-                values[h * 8 + w * 2] = word.shl(16).bitCast(.f32);
-                values[h * 8 + w * 2 + 1] = word.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
-            }
-        }
+        const values = loadBf16(b, access, args.x, offset);
         var block_max = fzero;
         inline for (values) |v| block_max = block_max.maximum(abs(v));
         block_max = valid.select(block_max, fzero);
@@ -1037,6 +1090,77 @@ pub const RoundNvfp4 = struct {
 
     fn abs(x: Value) Value {
         return x.bitCast(.i32).bitAnd(0x7fffffff).bitCast(.f32);
+    }
+};
+
+/// MXFP8 rounding of BF16 activation rows as the Triton MoE quantizes them: E4M3
+/// values over the smallest power-of-two scale of each 32-value block that keeps
+/// them within 448, widened back to BF16, which represents them exactly. A block
+/// rounds one row; each thread rounds one 32-value block of it.
+pub const RoundMxfp8 = struct {
+    const threads = 256;
+
+    const Config = struct {
+        words: i64,
+        blocks: i64,
+    };
+
+    pub fn call(x: Tensor) Tensor {
+        std.debug.assert(x.rank() == 2 and x.dtype() == .bf16 and @mod(x.dim(1), 32) == 0 and x.dim(1) <= 32 * threads);
+        const cfg: Config = .{ .words = @divExact(x.dim(1), 2), .blocks = @divExact(x.dim(1), 32) };
+        const words = x.reshape(.{ x.dim(0), cfg.words, 2 }).bitCast(.i32);
+        const result = Kernel.call(.{ .x = words }, .{ .output = words.shape() }, .{
+            .cfg = cfg,
+            .threads = threads,
+            .grid = .{ @intCast(x.dim(0)), 1, 1 },
+        });
+        return result.output.bitCast(.bf16).reshape(x.shape());
+    }
+
+    const Kernel = zml.kernel.fly.Kernel(Config, .{
+        .name = "round_mxfp8",
+        .inputs = &.{"x"},
+        .outputs = &.{"output"},
+        .run = run,
+    });
+
+    fn run(b: *Builder, cfg: Config) fly.FinishError!void {
+        const args = Kernel.args(b);
+        const block = b.threadId(.x).to(.i64);
+        var store = b.openIf(block.cmpUnsigned(.lt, cfg.blocks));
+        {
+            const offset = b.blockId(.x).to(.i64).mul(cfg.words).add(block.mul(16));
+            const access = b.copyAtom(.{ .universal = 128 }, .i32);
+            const values = loadBf16(b, access, args.x, offset) ++ loadBf16(b, access, args.x, offset.add(8));
+            var block_max = b.constant(.f32, 0.0);
+            inline for (values) |v| block_max = block_max.maximum(RoundNvfp4.abs(v));
+            const raw_scale = block_max.maximum(1e-10).mul(1.0 / 448.0).bitCast(.i32);
+            const scale = raw_scale.add(0x7fffff).bitAnd(@as(i32, @bitCast(@as(u32, 0xff800000)))).bitCast(.f32);
+            var rounded: [32]Value = undefined;
+            inline for (&rounded, values) |*r, v| {
+                const sign = v.bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0x80000000))));
+                r.* = roundE4m3(RoundNvfp4.abs(v).div(scale)).mul(scale).bitCast(.i32).bitOr(sign);
+            }
+            // The rounded values are BF16: their high halves hold them exactly.
+            inline for (0..4) |h| {
+                var words = b.constant(.i32, 0).splat(4);
+                inline for (0..4) |w| {
+                    const i = h * 8 + w * 2;
+                    words = words.insert(w, rounded[i].shrU(16).bitOr(rounded[i + 1].bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000))))));
+                }
+                b.copyAtomStore(access, words, args.output.emitIter().addOffset(offset.add(h * 4)).view(fly.L(4, 1)));
+            }
+            store.close();
+        }
+    }
+
+    /// A magnitude of at most 448 rounded to E4M3, to nearest even.
+    fn roundE4m3(magnitude: Value) Value {
+        // Below 2^-6 E4M3 steps by 2^-9, the F32 ulp of 2^14.
+        const subnormal = magnitude.add(0x1p14).sub(0x1p14);
+        const bits = magnitude.bitCast(.i32);
+        const normal = bits.add(0x7ffff).add(bits.shrU(20).bitAnd(1)).bitAnd(@as(i32, @bitCast(@as(u32, 0xfff00000)))).bitCast(.f32);
+        return magnitude.lt(0x1p-6).select(subnormal, normal);
     }
 };
 
@@ -1128,6 +1252,20 @@ pub const Route = struct {
         }
     }
 };
+
+/// 16 BF16 values in F32, from eight I32 words at `offset`.
+fn loadBf16(b: *Builder, access: Value, x: Value, offset: Value) [16]Value {
+    var values: [16]Value = undefined;
+    inline for (0..2) |h| {
+        const words = b.copyAtomLoad(access, x.emitIter().addOffset(offset.add(h * 4)).view(fly.L(4, 1)));
+        inline for (0..4) |w| {
+            const word = words.extract(w);
+            values[h * 8 + w * 2] = word.shl(16).bitCast(.f32);
+            values[h * 8 + w * 2 + 1] = word.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32);
+        }
+    }
+    return values;
+}
 
 fn decodeE8m0(b: *Builder, byte: Value) Value {
     const scale = byte.toUnsigned(.i32);
