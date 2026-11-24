@@ -725,7 +725,8 @@ pub const MoeAlignBlockSize = struct {
                 .mask = mask,
                 .other = b.splat(num_experts, &.{hist_block}),
             });
-            const valid = mask.bitAnd(expert_vals.lt(num_experts));
+            // Negative IDs select no expert.
+            const valid = mask.bitAnd(expert_vals.ge(0)).bitAnd(expert_vals.lt(num_experts));
             const h = b.histogramOpts(expert_vals, padded_num_experts, .{ .mask = valid });
             hist_loop.yield(.{hist_loop.carried[0].add(h)});
         }
@@ -817,7 +818,8 @@ pub const CountAndSortExpertTokens = struct {
                 .mask = mask,
                 .other = b.splat(num_experts, &.{block}),
             });
-            const valid = mask.bitAnd(expert_vals.lt(num_experts));
+            // Negative IDs select no expert.
+            const valid = mask.bitAnd(expert_vals.ge(0)).bitAnd(expert_vals.lt(num_experts));
 
             // rank = atomic_add(cumsum + expert_vals, 1, mask=valid, sem="relaxed")
             const cumsum_ptrs = a.cumsum_ptr.addPtr(expert_vals);

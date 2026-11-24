@@ -177,7 +177,8 @@ pub fn fusedExpertsBase(
         .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
-    const output = down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
+    // Routes without an expert are never written.
+    const output = down_out.convert(.f32).mask(ids.cmp(.GE, .scalar(0, .i32)), 0).sum(.topk).squeeze(.topk).convert(.bf16);
 
     return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }

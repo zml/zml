@@ -187,6 +187,7 @@ pub const Partitioning = struct {
 
 /// Input has shape {.t, .d}; routing IDs and weights have shape {.t, .topk}.
 /// Returns {.t, .d}. Flatten batched input with merge(.{ .t = .{ .b, .s } }).
+/// A negative routing ID selects no expert: the route reads no weights and contributes zero.
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
