@@ -10,6 +10,7 @@ zig_library(
         "//zml/core",
         "//zml/kernels/moe/api",
         "//zml/nn",
+        "//zml/quantization",
     ],
 )
 
