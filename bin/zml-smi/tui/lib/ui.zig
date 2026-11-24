@@ -79,11 +79,13 @@ pub const ImageCellSize = struct {
 /// The terminal stretches the image over exactly these cells, so the width
 /// is rounded to the nearest column: rounding up would widen the image.
 pub fn imageCellSize(img: vaxis.Image, target_rows: u16, cell_size: vxfw.Size) ImageCellSize {
-    const cell_h: u32 = if (cell_size.height > 0) cell_size.height else 20;
-    const cell_w: u32 = if (cell_size.width > 0) cell_size.width else 10;
-    const height_px = @as(u32, target_rows) * cell_h;
-    const scale_f = @as(f64, @floatFromInt(height_px)) / @as(f64, @floatFromInt(img.height));
-    const width_px: u32 = @intFromFloat(@as(f64, @floatFromInt(img.width)) * scale_f);
-    const img_cols: u16 = @intCast(@max(1, (width_px + cell_w / 2) / cell_w));
-    return .{ .cols = img_cols, .rows = target_rows };
+    if (img.width == 0 or img.height == 0 or target_rows == 0) return .{ .cols = 0, .rows = 0 };
+
+    const has_cell = cell_size.width > 0 and cell_size.height > 0;
+    const cell_h: f64 = @floatFromInt(if (has_cell) cell_size.height else 20);
+    const cell_w: f64 = @floatFromInt(if (has_cell) cell_size.width else 10);
+    const height_px = @as(f64, @floatFromInt(target_rows)) * cell_h;
+    const width_px = @as(f64, @floatFromInt(img.width)) * (height_px / @as(f64, @floatFromInt(img.height)));
+    const cols_f = std.math.clamp(@round(width_px / cell_w), 1.0, @as(f64, @floatFromInt(std.math.maxInt(u16))));
+    return .{ .cols = @intFromFloat(cols_f), .rows = target_rows };
 }

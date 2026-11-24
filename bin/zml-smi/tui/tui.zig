@@ -4,4 +4,5 @@ pub const top = @import("top.zig");
 
 test {
     _ = @import("lib/image.zig");
+    _ = @import("widgets/logo.zig");
 }
