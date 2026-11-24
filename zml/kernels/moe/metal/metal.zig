@@ -12,14 +12,16 @@ const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const unpackedWeight = @import("zml/kernels/moe/weights").unpackedWeight;
 const quantization = @import("zml/quantization");
 
+const grouped_gemv = @import("grouped_gemv.zig");
+
 const log = std.log.scoped(.@"zml/moe/metal");
 
-const QuantMode = enum { none, fp8, nvfp4 };
+const QuantMode = enum { none, fp8, mxfp8, nvfp4 };
 
-fn quantMode(dtype: zml.DataType) QuantMode {
+fn quantMode(dtype: zml.DataType, scheme: ?quantization.Quantization.Scheme) QuantMode {
     return switch (dtype) {
         .bf16, .f16, .f32 => .none,
-        .f8e4m3fn => .fp8,
+        .f8e4m3fn => if (scheme == .mxfp8) .mxfp8 else .fp8,
         .u8, .f4e2m1 => .nvfp4,
         else => stdx.debug.panic("unsupported data type: {}", .{dtype}),
     };
@@ -38,6 +40,7 @@ fn moeGemm(
         .none => zml.ops.customCall("__metal$moe_gemm", .{ x_rows, w, expert_ids }, .{out_shape}, .{}, side),
         .fp8 => zml.ops.customCall("__metal$moe_gemm$f8", .{ x_rows, w, scale.?, expert_ids }, .{out_shape}, .{}, side),
         .nvfp4 => zml.ops.customCall("__metal$moe_gemm$f4", .{ x_rows, w, scale.?, expert_ids }, .{out_shape}, .{}, side),
+        .mxfp8 => unreachable, // only the grouped kernel runs MXFP8
     };
 }
 
@@ -79,12 +82,62 @@ fn emulateNvfp4Input(x: Tensor, axis: anytype, opts: GlobalOptions) Tensor {
     return values.reshape(rows.shape()).mul(row_scale).convert(.bf16);
 }
 
+fn emulateInput(x: Tensor, axis: anytype, mode: QuantMode, opts: GlobalOptions) Tensor {
+    return switch (mode) {
+        .nvfp4 => emulateNvfp4Input(x, axis, opts),
+        .mxfp8 => emulateMxfp8Input(x, axis),
+        .none, .fp8 => unreachable,
+    };
+}
+
+/// BF16 rows holding exactly the MXFP8 activations the Triton backend multiplies: blocks of 32
+/// with a power-of-two scale and E4M3 values, whose products are exact in BF16.
+fn emulateMxfp8Input(x: Tensor, axis: anytype) Tensor {
+    const rows = (if (x.dtype() == .bf16) x else x.convert(.bf16).optimizationBarrier()).convert(.f32);
+    const blocks = rows.splitAxis(axis, .{ .sc = -1, .blk = quantization.mx_block_size });
+    const scale = quantization.ceilPowerOfTwo(blocks.abs().max(.blk).maximum(.scalar(1e-10, .f32)).scale(1.0 / 448.0)).broad(blocks.shape());
+    // Dividing by a power of two is exact; the barrier keeps the E4M3 rounding.
+    const values = blocks.div(scale).clamp(.scalar(-448, .f32), .scalar(448, .f32)).convert(.f8e4m3fn).optimizationBarrier().convert(.f32);
+    return values.mul(scale).reshape(rows.shape()).convert(.bf16);
+}
+
 /// Dequantized blocks whose largest magnitude maps to `value_max`, and each block's absolute error.
 fn nvfp4Candidate(blocks: Tensor, value_max: f32) struct { values: Tensor, err: Tensor } {
     const amax = blocks.abs().max(.blk).scale(1.0 / value_max);
     const scale = quantization.roundE4m3Normal(amax.clamp(.scalar(0x1p-6, .f32), .scalar(448, .f32))).broad(blocks.shape());
     const values = quantization.roundE2m1(blocks.div(scale)).mul(scale);
     return .{ .values = values, .err = values.sub(blocks).abs().sum(.blk) };
+}
+
+/// Whether packed NVFP4 experts run the grouped kernel rather than the plugin's. On an M3 Max
+/// the plugin's per-route kernel over sorted routes is faster up to 256 routes and its Steel
+/// GEMM from 2048; in between the grouped kernel wins (1.6x at 512 routes).
+fn groupedNvfp4(routes: i64) bool {
+    return routes >= 512 and routes <= 1024;
+}
+
+/// The projection of routes sorted by expert: each expert's quantized weights are read once
+/// and applied to all its routes.
+fn grouped(x_rows: Tensor, linear: nn.Linear, sorted_ids: Tensor, out_shape: zml.Shape, format: grouped_gemv.Format) Tensor {
+    const cfg: grouped_gemv.GroupedGemv.Cfg = .{ .format = format, .rows = 8, .columns = 4 };
+    const n = linear.weight.dim(1);
+    const routes = sorted_ids.dim(.r);
+    const launch = grouped_gemv.GroupedGemv.launch(cfg, n, routes, 2);
+    return grouped_gemv.GroupedGemv.Kernel.call(.{
+        .x = x_rows,
+        .w = linear.weight.bitCast(.u8),
+        .scales = linear.quantization.?.scales.bitCast(.u8),
+        .ids = sorted_ids,
+    }, .{ .out = out_shape }, .{
+        .cfg = cfg,
+        .grid = launch.grid,
+        .threadgroup = launch.threadgroup,
+        .constants = .{
+            .k = .of(@as(i32, @intCast(x_rows.dim(1)))),
+            .n = .of(@as(i32, @intCast(n))),
+            .routes = .of(@as(i32, @intCast(routes))),
+        },
+    }).out;
 }
 
 /// The rows of `x` along `.r` in `order`.
@@ -111,9 +164,9 @@ pub fn fusedExperts(
     const gate_up = unpackedWeight(gate_up_);
     const down = unpackedWeight(down_);
     stdx.debug.assert(gate_up.dtype() == down.dtype(), "metal backend expected gate_up and down data type to match, got {} and {}", .{ gate_up.dtype(), down.dtype() });
-    const mode = quantMode(gate_up.dtype());
-    // Metal reproduces Triton's NVFP4 activations; other weight formats keep BF16 activations.
-    const quantize_input = opts.quantize_input and mode == .nvfp4;
+    const mode = quantMode(gate_up.dtype(), if (gate_up_.quantization) |q| q.scheme else null);
+    // Metal reproduces Triton's NVFP4 and MXFP8 activations; other weight formats keep BF16 activations.
+    const quantize_input = opts.quantize_input and (mode == .nvfp4 or mode == .mxfp8);
     switch (mode) {
         .none => {
             stdx.debug.assert(gate_up_scales == null and down_scales == null, "metal backend expected gate_up and down scale to be null when the weights are not quantized", .{});
@@ -127,6 +180,11 @@ pub fn fusedExperts(
         .fp8 => {
             stdx.debug.assert(gate_up_scales != null and down_scales != null, "metal backend expected gate_up and down scale to be non null", .{});
             stdx.debug.assert(gate_up_scales.?.dtype() == .bf16 and down_scales.?.dtype() == .bf16, "metal backend expected gate_up and down scale data type to be bf16, got {} and {}", .{ gate_up_scales.?.dtype(), down_scales.?.dtype() });
+            stdx.debug.assert(gate_up_global_scale == null and down_global_scale == null, "metal backend expected gate_up and down global scale to be null", .{});
+            stdx.debug.assert(hidden_states.dtype() == .bf16, "metal backend expected hidden_states data type to be bf16, got {}", .{hidden_states.dtype()});
+        },
+        .mxfp8 => {
+            stdx.debug.assert(gate_up_scales != null and down_scales != null, "metal backend expected gate_up and down scale to be non null", .{});
             stdx.debug.assert(gate_up_global_scale == null and down_global_scale == null, "metal backend expected gate_up and down global scale to be null", .{});
             stdx.debug.assert(hidden_states.dtype() == .bf16, "metal backend expected hidden_states data type to be bf16, got {}", .{hidden_states.dtype()});
         },
@@ -151,7 +209,7 @@ pub fn fusedExperts(
 
     const act_dtype: zml.DataType = switch (mode) {
         .none => hidden_states.dtype(),
-        .fp8, .nvfp4 => .bf16,
+        .fp8, .mxfp8, .nvfp4 => .bf16,
     };
 
     // Routes sorted by expert run each expert's rows back to back, so the per-route kernel
@@ -162,40 +220,46 @@ pub fn fusedExperts(
         .merge(.{ .r = .{ .token, .topk } }).convert(.f32);
     const order = routes.argsort(.r, .{});
     const sorted_ids = permute(routes, order);
-    // Routes without an expert (negative ids) contribute nothing. NVFP4 kernels skip them;
-    // the other kernels need a valid expert, whose result the zero routing weight discards.
+    // Routes without an expert (negative ids) contribute nothing. The NVFP4 and grouped kernels
+    // skip them; the others need a valid expert, whose result the zero routing weight discards.
     const has_expert = sorted_ids.cmp(.GE, .scalar(0, .i32));
-    const expert_ids = if (mode == .nvfp4) sorted_ids else sorted_ids.maximum(.scalar(0, .i32));
+    const expert_ids = if (mode == .nvfp4 or mode == .mxfp8) sorted_ids else sorted_ids.maximum(.scalar(0, .i32));
     const weights = has_expert.select(permute(route_weights, order), .scalar(0, .f32));
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .d = d }).withTags(.{ .token, .d });
     const x_rows = hidden.gather(.{ .token = order.divByConst(topk).withTags(.{.r}) }, .{});
     // Each route quantizes a copy of its token, so the quantizer writes the GEMM input.
-    const gate_up_input = if (quantize_input) emulateNvfp4Input(x_rows, .d, opts) else x_rows.convert(act_dtype);
+    const gate_up_input = if (quantize_input) emulateInput(x_rows, .d, mode, opts) else x_rows.convert(act_dtype);
 
-    const gate_up_out = applyGlobalScale(moeGemm(
-        gate_up_input,
-        gate_up,
-        gate_up_scales,
-        expert_ids,
-        zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
-        mode,
-    ), gate_up_global_scale, expert_ids);
+    // The grouped kernel reads each expert's weights once. It runs MXFP8 experts, which the
+    // plugin has no kernel for, and packed NVFP4 experts where it is faster.
+    const format: ?grouped_gemv.Format = switch (mode) {
+        .mxfp8 => .mxfp8,
+        .nvfp4 => if (gate_up_.weight.dtype() == .u8 and down_.weight.dtype() == .u8 and groupedNvfp4(num_routes)) .nvfp4 else null,
+        .none, .fp8 => null,
+    };
+
+    const gate_up_shape = zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype);
+    const gate_up_out = applyGlobalScale(if (format) |f|
+        grouped(gate_up_input, gate_up_, sorted_ids, gate_up_shape, f)
+    else
+        moeGemm(gate_up_input, gate_up, gate_up_scales, expert_ids, gate_up_shape, mode), gate_up_global_scale, expert_ids);
     var activated = opts.activation.applyActivation(gate_up_out, .concatenated);
     if (opts.routing_weight_placement == .before_down) activated = activated.mul(weights.broad(activated.shape()));
-    const down_input = if (quantize_input) emulateNvfp4Input(activated, .out, opts) else activated.convert(act_dtype);
+    const down_input = if (quantize_input) emulateInput(activated, .out, mode, opts) else activated.convert(act_dtype);
 
-    var down_out = applyGlobalScale(moeGemm(
-        down_input,
-        down,
-        down_scales,
-        expert_ids,
-        zml.Shape.init(.{ .r = num_routes, .d = down.dim(.d) }, act_dtype),
-        mode,
-    ), down_global_scale, expert_ids);
+    const down_shape = zml.Shape.init(.{ .r = num_routes, .d = down.dim(.d) }, act_dtype);
+    var down_out = applyGlobalScale(if (format) |f|
+        grouped(down_input, down_, sorted_ids, down_shape, f)
+    else
+        moeGemm(down_input, down, down_scales, expert_ids, down_shape, mode), down_global_scale, expert_ids);
     if (opts.routing_weight_placement == .after_down) down_out = down_out.mul(weights.broad(down_out.shape()));
     // Back to token-major routes to sum each token's experts.
     const combined = permute(down_out, order.argsort(.r, .{})).splitAxis(.r, .{ .token = num_tokens, .topk = topk })
         .sum(.topk).squeeze(.topk).convert(act_dtype);
 
     return combined.reshape(.{ .t = num_tokens, .d = down.dim(.d) });
+}
+
+test {
+    _ = grouped_gemv;
 }

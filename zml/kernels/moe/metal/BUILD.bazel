@@ -1,7 +1,8 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "metal",
+    srcs = ["grouped_gemv.zig"],
     import_name = "zml/kernels/moe/metal",
     main = "metal.zig",
     visibility = ["//visibility:public"],
@@ -13,4 +14,9 @@ zig_library(
         "//zml/nn",
         "//zml/quantization",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":metal"],
 )

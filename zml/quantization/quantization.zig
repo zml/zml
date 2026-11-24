@@ -183,7 +183,8 @@ pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
     return quantizeBlockFp8(x, axis, mx_block_size, dtype.?, .f8e8m0);
 }
 
-fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
+/// The smallest power of two at least `raw_scale`, for positive normal values.
+pub fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
     const bits = raw_scale.bitCast(.u32);
     return bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
 }

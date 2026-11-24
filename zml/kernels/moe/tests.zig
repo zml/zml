@@ -259,7 +259,7 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
                 projection.weight = projection.weight.transpose(.{ 0, 2, 1 });
             },
             .metal => if (projection.quantization) |*q| {
-                if (q.scheme != .nvfp4) q.scales = q.scales.convert(.bf16);
+                if (q.scheme != .nvfp4 and q.scheme != .mxfp8) q.scales = q.scales.convert(.bf16);
             },
             else => {},
         }
