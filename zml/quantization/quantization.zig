@@ -259,10 +259,10 @@ pub const Nvfp4QuantizationStrategy = enum {
     best_of_four_or_six,
 };
 
-pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype, block_scale: Nvfp4QuantizationStrategy) QuantizedInput {
+pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype, strategy: Nvfp4QuantizationStrategy) QuantizedInput {
     const grouped = nvfp4Blocks(x, input_global_scale, axis);
     const six = nvfp4Candidate(grouped, 6);
-    const values, const scales = switch (block_scale) {
+    const values, const scales = switch (strategy) {
         .largest_maps_to_six => .{ six.values, six.scales },
         .best_of_four_or_six => blk: {
             const four = nvfp4Candidate(grouped, 4);
@@ -282,8 +282,8 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype, bloc
 
 /// NVFP4 quantization of activation rows over their `nvfp4RowScale`, which becomes
 /// the result's global scale, with the reduced axis kept as size 1.
-pub fn quantizeNvfp4Rows(rows: Tensor, axis: anytype, block_scale: Nvfp4QuantizationStrategy) QuantizedInput {
-    return quantizeNvfp4(rows, nvfp4RowScale(rows, axis), axis, block_scale);
+pub fn quantizeNvfp4Rows(rows: Tensor, axis: anytype, strategy: Nvfp4QuantizationStrategy) QuantizedInput {
+    return quantizeNvfp4(rows, nvfp4RowScale(rows, axis), axis, strategy);
 }
 
 /// The FP32 values an NVFP4 input along `axis` represents.

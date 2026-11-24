@@ -146,6 +146,7 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
 
 pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: nn.Linear, down: nn.Linear, opts: GlobalOptions) Tensor {
     stdx.debug.assert(routing.ids.dim(.topk) > 0 and routing.ids.dim(.topk) <= routing.global_num_experts, "MoE top-k must fit the global expert count", .{});
+    stdx.debug.assert(opts.nvfp4_input_scale == .largest_maps_to_six, "stablehlo backend scales NVFP4 activation blocks by amax/6", .{});
     return reference(input, routing.localIds(), routing.weights, gate_up, down, .{
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,

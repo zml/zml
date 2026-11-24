@@ -1,14 +1,13 @@
 //! Blackwell MXFP4 and NVFP4 MoE backend with persistent CuTe GEMMs.
 
-const stdx = @import("stdx");
-
-const nn = @import("zml/nn");
-const Quantization = @import("zml/quantization").Quantization;
-
-const zml = @import("zml/core");
-const Options = @import("zml/kernels/moe/api").Options;
-const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const nn = @import("zml/nn");
+const Options = @import("zml/kernels/moe/api").Options;
+const Quantization = @import("zml/quantization").Quantization;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const stdx = @import("stdx");
+const zml = @import("zml/core");
+
 pub const kernels = @import("sm10x/moe.zig");
 
 // `moe.zig`'s `refAllDecls` reaches this file but not its imports, so the
@@ -34,6 +33,7 @@ pub fn validateOptions(opts: Options) void {
     stdx.debug.assert(opts.activation == .swiglu, "cute backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
+    stdx.debug.assert(opts.nvfp4_input_scale == .largest_maps_to_six, "cute backend scales NVFP4 activation blocks by amax/6", .{});
 }
 
 /// MXFP4 weights are `u8` (or `i8`) packed FP4 with E8M0 block scales. NVFP4
