@@ -893,7 +893,14 @@ fn kernelUnifiedAttention3d(
     } else seq_len;
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
-    const segm_tile_lo = segm_idx.mul(tiles_per_segment);
+    // Sliding window: start each segment at the window's first tile. A segment that ends
+    // before it runs no iteration, and its -inf max (or the sink, in segment 0) gives it
+    // no weight in reduceSegments.
+    var segm_tile_lo = segm_idx.mul(tiles_per_segment);
+    if (SLIDING_WINDOW > 0) {
+        const first_allowed_key = context_len.add(q_local_bq).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
+        segm_tile_lo = segm_tile_lo.maximum(first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))));
+    }
     const segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
 
     const kv_cache_mod: ttir.CacheModifier =
