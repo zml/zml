@@ -498,7 +498,8 @@ pub const PagedAttentionTiled = struct {
 
     pub fn threadgroupMemory(cfg: Cfg) u64 {
         const ld = cfg.head_size + @divExact(16, @as(i32, @intCast(cfg.dtype.size())));
-        return @intCast((cfg.bq + 2 * cfg.tile_kv) * ld * @as(i32, @intCast(cfg.dtype.size())));
+        // Q aliases the K tile and the output goes straight from registers, so only K and V need room.
+        return @intCast(2 * cfg.tile_kv * ld * @as(i32, @intCast(cfg.dtype.size())));
     }
 
     /// Lane `lane_id`'s (column, row) in an 8x8 simdgroup_matrix fragment.
@@ -615,11 +616,10 @@ pub const PagedAttentionTiled = struct {
 
         const SMEM_PAD = @divExact(16, @as(i32, @intCast(T.size())));
         const LD = HEAD_SIZE + SMEM_PAD;
-        const Q_ELEMS = BQ * LD;
         const KV_ELEMS = TILE_KV * LD;
 
         const Q_smem = a.shared_mem.to(T);
-        const K_smem = Q_smem.add(Q_ELEMS);
+        const K_smem = Q_smem;
         const V_smem = K_smem.add(KV_ELEMS);
 
         const log2e: f32 = std.math.log2e;
@@ -653,6 +653,9 @@ pub const PagedAttentionTiled = struct {
             q_reg.store(d, tmp.threadElements());
             load_q_reg.close();
         }
+
+        // The first K tile overwrites Q.
+        b.threadgroupBarrier(.mem_threadgroup);
 
         const fc = fragCoord(b, a.lane.to(.ushort));
         const fm = fc.y();
@@ -725,129 +728,133 @@ pub const PagedAttentionTiled = struct {
 
             b.threadgroupBarrier(.mem_threadgroup);
 
-            const s_reg = b.array(.float2, @intCast(TK));
-            var zero_s = b.openForOpts(0, TK, 1, unroll);
+            var active = b.openIf(a.sg_idx.mul(8).to(.int).lt(valid_q));
             {
-                s_reg.store(zero_s.iv, b.constant(.float2, 0));
-                zero_s.close();
-            }
-
-            var qk_dims = b.openForOpts(0, TD, 1, unroll);
-            {
-                const d = qk_dims.iv;
-                const q_frag = b.matrix(T.scalar, q_reg.load(d));
-                var qk_keys = b.openForOpts(0, TK, 1, unroll);
+                const s_reg = b.array(.float2, @intCast(TK));
+                var zero_s = b.openForOpts(0, TK, 1, unroll);
                 {
-                    const k = qk_keys.iv;
-                    const k_frag = b.simdgroupLoad(K_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{ .transpose = true });
-                    const s_frag = b.matrix(.float, s_reg.load(k));
-                    s_reg.store(k, b.simdgroupMultiplyAccumulate(q_frag, k_frag, s_frag).threadElements());
-                    qk_keys.close();
+                    s_reg.store(zero_s.iv, b.constant(.float2, 0));
+                    zero_s.close();
                 }
-                qk_dims.close();
-            }
 
-            const q_abs_pos = context_len.add(q_pos_start).add(a.sg_idx.mul(8)).add(fm).to(.int);
-            const row_masked = a.sg_idx.mul(8).add(fm).ge(valid_q);
-            const min_q_abs_pos = context_len.add(q_pos_start);
-            var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
-            if (cfg.causal) tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
-
-            var masking = b.openIfElse(tile_no_mask.bitAnd(row_masked.eq(false)), .{});
-            {
-                var scale = b.openForOpts(0, TK, 1, unroll);
+                var qk_dims = b.openForOpts(0, TD, 1, unroll);
                 {
-                    const k = scale.iv;
-                    setLane(s_reg, k, 0, s_reg.load(k).at(0).mul(scale_log2));
-                    setLane(s_reg, k, 1, s_reg.load(k).at(1).mul(scale_log2));
-                    scale.close();
+                    const d = qk_dims.iv;
+                    const q_frag = b.matrix(T.scalar, q_reg.load(d));
+                    var qk_keys = b.openForOpts(0, TK, 1, unroll);
+                    {
+                        const k = qk_keys.iv;
+                        const k_frag = b.simdgroupLoad(K_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{ .transpose = true });
+                        const s_frag = b.matrix(.float, s_reg.load(k));
+                        s_reg.store(k, b.simdgroupMultiplyAccumulate(q_frag, k_frag, s_frag).threadElements());
+                        qk_keys.close();
+                    }
+                    qk_dims.close();
                 }
-                masking.elseBranch();
-            }
-            {
-                var keys = b.openForOpts(0, TK, 1, unroll);
+
+                const q_abs_pos = context_len.add(q_pos_start).add(a.sg_idx.mul(8)).add(fm).to(.int);
+                const row_masked = a.sg_idx.mul(8).add(fm).ge(valid_q);
+                const min_q_abs_pos = context_len.add(q_pos_start);
+                var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
+                if (cfg.causal) tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
+
+                var masking = b.openIfElse(tile_no_mask.bitAnd(row_masked.eq(false)), .{});
                 {
-                    const k = keys.iv;
+                    var scale = b.openForOpts(0, TK, 1, unroll);
+                    {
+                        const k = scale.iv;
+                        setLane(s_reg, k, 0, s_reg.load(k).at(0).mul(scale_log2));
+                        setLane(s_reg, k, 1, s_reg.load(k).at(1).mul(scale_log2));
+                        scale.close();
+                    }
+                    masking.elseBranch();
+                }
+                {
+                    var keys = b.openForOpts(0, TK, 1, unroll);
+                    {
+                        const k = keys.iv;
+                        var pair = b.openForOpts(0, 2, 1, unroll);
+                        {
+                            const jj = pair.iv;
+                            const s = b.local(.float, s_reg.load(k).at(jj).mul(scale_log2));
+                            var capped = b.openIf(a.softcapping.gt(0.0));
+                            {
+                                const s_orig = s.div(log2e);
+                                s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
+                                capped.close();
+                            }
+                            const kv_pos = tile_start.add(k.mul(8)).add(fn_).add(jj);
+                            var masked = row_masked.bitOr(kv_pos.ge(seq_len));
+                            if (cfg.causal) masked = masked.bitOr(kv_pos.gt(q_abs_pos));
+                            const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window)));
+                            masked = masked.bitOr(before_window);
+                            setLane(s_reg, k, jj, b.ternary(masked, masked_score, s));
+                            pair.close();
+                        }
+                        keys.close();
+                    }
+                    masking.close();
+                }
+
+                const local_max = b.local(.float, masked_score);
+                var max_keys = b.openForOpts(0, TK, 1, unroll);
+                {
+                    const k = max_keys.iv;
+                    local_max.assign(b.max(local_max.rvalue(), b.max(s_reg.load(k).at(0), s_reg.load(k).at(1))));
+                    max_keys.close();
+                }
+                const row_max = fragRowReduce(b, .max, local_max);
+
+                const prev_max = max_score.rvalue();
+                const grown_max = b.max(prev_max, row_max);
+                const grew = grown_max.gt(prev_max);
+                const was_empty = prev_max.eq(masked_score);
+                const factor = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
+                const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
+                // A tile masking a whole row leaves the maximum masked: zero would
+                // pin it, and later scores far below zero would underflow.
+                max_score.assign(grown_max);
+
+                const local_sum = b.local(.float, 0.0);
+                var p_keys = b.openForOpts(0, TK, 1, unroll);
+                {
+                    const k = p_keys.iv;
                     var pair = b.openForOpts(0, 2, 1, unroll);
                     {
                         const jj = pair.iv;
-                        const s = b.local(.float, s_reg.load(k).at(jj).mul(scale_log2));
-                        var capped = b.openIf(a.softcapping.gt(0.0));
-                        {
-                            const s_orig = s.div(log2e);
-                            s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
-                            capped.close();
-                        }
-                        const kv_pos = tile_start.add(k.mul(8)).add(fn_).add(jj);
-                        var masked = row_masked.bitOr(kv_pos.ge(seq_len));
-                        if (cfg.causal) masked = masked.bitOr(kv_pos.gt(q_abs_pos));
-                        const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window)));
-                        masked = masked.bitOr(before_window);
-                        setLane(s_reg, k, jj, b.ternary(masked, masked_score, s));
+                        const s = s_reg.load(k).at(jj);
+                        const p = b.ternary(s.eq(masked_score), 0.0, b.fast().exp2(s.sub(new_max)));
+                        setLane(s_reg, k, jj, p);
+                        local_sum.assign(local_sum.add(p));
                         pair.close();
                     }
-                    keys.close();
+                    p_keys.close();
                 }
-                masking.close();
-            }
+                const row_sum = fragRowReduce(b, .sum, local_sum);
 
-            const local_max = b.local(.float, masked_score);
-            var max_keys = b.openForOpts(0, TK, 1, unroll);
-            {
-                const k = max_keys.iv;
-                local_max.assign(b.max(local_max.rvalue(), b.max(s_reg.load(k).at(0), s_reg.load(k).at(1))));
-                max_keys.close();
-            }
-            const row_max = fragRowReduce(b, .max, local_max);
+                sum_score.assign(sum_score.mul(factor).add(row_sum));
 
-            const prev_max = max_score.rvalue();
-            const grown_max = b.max(prev_max, row_max);
-            const grew = grown_max.gt(prev_max);
-            const was_empty = prev_max.eq(masked_score);
-            const factor = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
-            const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
-            // A tile masking a whole row leaves the maximum masked: zero would
-            // pin it, and later scores far below zero would underflow.
-            max_score.assign(grown_max);
-
-            const local_sum = b.local(.float, 0.0);
-            var p_keys = b.openForOpts(0, TK, 1, unroll);
-            {
-                const k = p_keys.iv;
-                var pair = b.openForOpts(0, 2, 1, unroll);
+                var rescale_o = b.openForOpts(0, TD, 1, unroll);
                 {
-                    const jj = pair.iv;
-                    const s = s_reg.load(k).at(jj);
-                    const p = b.ternary(s.eq(masked_score), 0.0, b.fast().exp2(s.sub(new_max)));
-                    setLane(s_reg, k, jj, p);
-                    local_sum.assign(local_sum.add(p));
-                    pair.close();
+                    o_reg.store(rescale_o.iv, o_reg.load(rescale_o.iv).mul(factor));
+                    rescale_o.close();
                 }
-                p_keys.close();
-            }
-            const row_sum = fragRowReduce(b, .sum, local_sum);
 
-            sum_score.assign(sum_score.mul(factor).add(row_sum));
-
-            var rescale_o = b.openForOpts(0, TD, 1, unroll);
-            {
-                o_reg.store(rescale_o.iv, o_reg.load(rescale_o.iv).mul(factor));
-                rescale_o.close();
-            }
-
-            var pv_keys = b.openForOpts(0, TK, 1, unroll);
-            {
-                const k = pv_keys.iv;
-                const p_frag = b.matrix(.float, s_reg.load(k));
-                var pv_dims = b.openForOpts(0, TD, 1, unroll);
+                var pv_keys = b.openForOpts(0, TK, 1, unroll);
                 {
-                    const d = pv_dims.iv;
-                    const v_frag = b.simdgroupLoad(V_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
-                    const o_frag = b.matrix(.float, o_reg.load(d));
-                    o_reg.store(d, b.simdgroupMultiplyAccumulate(p_frag, v_frag, o_frag).threadElements());
-                    pv_dims.close();
+                    const k = pv_keys.iv;
+                    const p_frag = b.matrix(.float, s_reg.load(k));
+                    var pv_dims = b.openForOpts(0, TD, 1, unroll);
+                    {
+                        const d = pv_dims.iv;
+                        const v_frag = b.simdgroupLoad(V_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
+                        const o_frag = b.matrix(.float, o_reg.load(d));
+                        o_reg.store(d, b.simdgroupMultiplyAccumulate(p_frag, v_frag, o_frag).threadElements());
+                        pv_dims.close();
+                    }
+                    pv_keys.close();
                 }
-                pv_keys.close();
+                active.close();
             }
 
             b.threadgroupBarrier(.mem_threadgroup);
@@ -861,27 +868,18 @@ pub const PagedAttentionTiled = struct {
             normalize.close();
         }
 
-        const O_smem = Q_smem.to(.float);
-        var store_o = b.openForOpts(0, TD, 1, unroll);
-        {
-            const d = store_o.iv;
-            const o_frag = b.matrix(.float, o_reg.load(d));
-            b.simdgroupStore(o_frag, O_smem.add(a.sg_idx.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
-            store_o.close();
-        }
-
-        b.threadgroupBarrier(.mem_threadgroup);
-
         const out_base = a.out.add(q_seq_start.add(q_pos_start).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE));
-        const total = valid_q.mul(HEAD_SIZE);
-        var write_out = b.openFor(thread_idx, total, NUM_THREADS);
+        const out_row = a.sg_idx.mul(8).to(.int).add(fm.to(.int));
+        var row_valid = b.openIf(out_row.lt(valid_q));
         {
-            const i = write_out.iv;
-            const r = i.div(HEAD_SIZE);
-            const d = i.rem(HEAD_SIZE);
-            const value = O_smem.load(r.mul(LD).add(d)).to(T);
-            out_base.store(r.mul(a.q_stride).add(d), value);
-            write_out.close();
+            const row_base = out_base.add(out_row.mul(a.q_stride)).add(fn_.to(.int));
+            var store_o = b.openForOpts(0, TD, 1, unroll);
+            {
+                const d = store_o.iv;
+                row_base.add(d.mul(8)).to(T2).store(0, o_reg.load(d).to(T2));
+                store_o.close();
+            }
+            row_valid.close();
         }
     }
 };
