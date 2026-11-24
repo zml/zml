@@ -1,5 +1,6 @@
 const std = @import("std");
 const smi = @import("zml-smi");
+const utils = @import("lib/utils.zig");
 
 pub const History = std.ArrayList(u64);
 
@@ -10,11 +11,22 @@ pub const HistoryBuffers = struct {
     power: []History = &.{},
 
     pub fn init(allocator: std.mem.Allocator, count: usize) !HistoryBuffers {
+        const util = try allocator.alloc(History, count);
+        errdefer allocator.free(util);
+
+        const mem_util = try allocator.alloc(History, count);
+        errdefer allocator.free(mem_util);
+
+        const temp = try allocator.alloc(History, count);
+        errdefer allocator.free(temp);
+
+        const power = try allocator.alloc(History, count);
+
         const h: HistoryBuffers = .{
-            .util = try allocator.alloc(History, count),
-            .mem_util = try allocator.alloc(History, count),
-            .temp = try allocator.alloc(History, count),
-            .power = try allocator.alloc(History, count),
+            .util = util,
+            .mem_util = mem_util,
+            .temp = temp,
+            .power = power,
         };
 
         @memset(h.util, .empty);
@@ -26,6 +38,11 @@ pub const HistoryBuffers = struct {
     }
 
     pub fn deinit(self: *HistoryBuffers, allocator: std.mem.Allocator) void {
+        for (self.util) |*h| h.deinit(allocator);
+        for (self.mem_util) |*h| h.deinit(allocator);
+        for (self.temp) |*h| h.deinit(allocator);
+        for (self.power) |*h| h.deinit(allocator);
+
         allocator.free(self.util);
         allocator.free(self.mem_util);
         allocator.free(self.temp);
@@ -55,7 +72,7 @@ pub const SystemState = struct {
     pub fn init(cfg: Config) !SystemState {
         return .{
             .collector = cfg.collector,
-            .history = try HistoryBuffers.init(cfg.arena, cfg.collector.devices.items.len),
+            .history = try HistoryBuffers.init(cfg.gpa, cfg.collector.devices.items.len),
             .tui_refresh_rate = cfg.tui_refresh_rate,
             .gpa = cfg.gpa,
             .arena = cfg.arena,
@@ -63,8 +80,8 @@ pub const SystemState = struct {
         };
     }
 
-    pub fn deinit(self: *SystemState, allocator: std.mem.Allocator) void {
-        self.history.deinit(allocator);
+    pub fn deinit(self: *SystemState) void {
+        self.history.deinit(self.gpa);
     }
 
     pub fn deviceCount(self: *const SystemState) usize {
@@ -107,14 +124,23 @@ pub const SystemState = struct {
 
     fn recordUsage(self: *SystemState, i: usize, util: ?u64, used: ?u64, total: ?u64) void {
         self.record(&self.history.util[i], util orelse 0);
-        const total_bytes = total orelse 0;
-        self.record(&self.history.mem_util[i], if (total_bytes > 0) (used orelse 0) * 100 / total_bytes else 0);
+        self.record(&self.history.mem_util[i], utils.percent(used, total));
     }
 
     fn record(self: *SystemState, history: *History, value: u64) void {
         if (history.items.len > 0 and history.items.len >= self.history_len) {
             _ = history.orderedRemove(0);
         }
-        history.append(self.arena, value) catch {};
+        history.append(self.gpa, value) catch {};
     }
 };
+
+test "HistoryBuffers deinit frees inner histories" {
+    var history: HistoryBuffers = try .init(std.testing.allocator, 2);
+    defer history.deinit(std.testing.allocator);
+
+    try history.util[0].append(std.testing.allocator, 42);
+    try history.mem_util[1].append(std.testing.allocator, 75);
+    try history.temp[0].append(std.testing.allocator, 65);
+    try history.power[1].append(std.testing.allocator, 150);
+}

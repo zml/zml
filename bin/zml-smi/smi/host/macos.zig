@@ -27,7 +27,12 @@ pub const Host = struct {
         data.uptime_seconds = null;
         var now: c.timeval = undefined;
         if (sysctl(c.timeval, "kern.boottime")) |boot| {
-            if (c.gettimeofday(&now, null) == 0) data.uptime_seconds = @intCast(now.sec - boot.sec);
+            if (c.gettimeofday(&now, null) == 0) {
+                data.uptime_seconds = if (std.math.sub(c.time_t, now.sec, boot.sec)) |diff|
+                    std.math.cast(u64, diff)
+                else |_|
+                    null;
+            }
         }
     }
 
@@ -68,12 +73,15 @@ extern "c" fn host_statistics64(host: c.mach_port_t, flavor: c_int, info: *anyop
 extern "c" fn getloadavg(loadavg: *[3]f64, nelem: c_int) c_int;
 
 fn memAvailable() ?u64 {
+    const host = c.mach_host_self();
+    defer _ = c.mach_port_deallocate(c.mach_task_self(), host);
+
     var stats: vm_statistics64 = undefined;
     var count: c_uint = @sizeOf(vm_statistics64) / @sizeOf(c_int);
-    if (host_statistics64(c.mach_host_self(), HOST_VM_INFO64, &stats, &count) != KERN_SUCCESS) return null;
+    if (host_statistics64(host, HOST_VM_INFO64, &stats, &count) != KERN_SUCCESS) return null;
 
     var page_size: u64 = 0;
-    if (c._host_page_size(c.mach_host_self(), &page_size) != KERN_SUCCESS) return null;
+    if (c._host_page_size(host, &page_size) != KERN_SUCCESS) return null;
 
     const pages = @as(u64, stats.free_count) + stats.inactive_count + stats.purgeable_count;
     return pages * page_size / 1024;

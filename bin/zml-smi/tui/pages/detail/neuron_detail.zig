@@ -29,11 +29,9 @@ pub fn draw(
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{nc.util_percent orelse 0}),
     });
 
-    const mem_used = nc.mem_used_bytes orelse 0;
-    const mem_total = nc.mem_total_bytes orelse 0;
     const mem_chart = try common.historyChart(ctx, state, id, state.history.mem_util, .{
         .title = "Memory",
-        .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{if (mem_total > 0) mem_used * 100 / mem_total else 0}),
+        .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{utils.percent(nc.mem_used_bytes, nc.mem_total_bytes)}),
         .info_line = try std.fmt.allocPrint(ctx.arena, "HBM {d} / {d} MB", .{
             utils.bytesToMb(nc.mem_used_bytes), utils.bytesToMb(nc.mem_total_bytes),
         }),

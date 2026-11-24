@@ -44,6 +44,8 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
 
     const driver_version = driverVersion(arena, io);
     var gpus: std.ArrayList(Gpu) = .empty;
+    errdefer for (gpus.items) |gpu| gpu.close(io);
+
     var devices: std.ArrayList(smi.Device) = .empty;
     for (nodes.items) |node| {
         const dir = openDevice(drm, node) catch continue;
@@ -51,7 +53,10 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
             dir.close();
             continue;
         };
-        try gpus.append(arena, gpu);
+        gpus.append(arena, gpu) catch |err| {
+            gpu.close(io);
+            return err;
+        };
         try devices.append(arena, .{ .target = .oneapi, .name = try name(arena, io, gpu), .driver_version = driver_version });
     }
 
@@ -124,12 +129,7 @@ fn processes(platform: *smi.Platform, _: std.mem.Allocator, _: []const smi.Sampl
 fn deinit(platform: *smi.Platform) void {
     const self: *OneApi = @alignCast(@fieldParentPtr("platform", platform));
 
-    for (self.gpus) |gpu| {
-        gpu.dir.close();
-        gpu.link.close();
-        if (gpu.hwmon) |hwmon| hwmon.dir.close();
-        if (gpu.render) |render| render.close(self.io);
-    }
+    for (self.gpus) |gpu| gpu.close(self.io);
 
     self.prev_usage.deinit(self.gpa);
     self.curr_usage.deinit(self.gpa);
@@ -144,6 +144,13 @@ const Gpu = struct {
     driver: Driver,
     render: ?std.Io.File,
     mem_total_bytes: ?u64,
+
+    fn close(gpu: Gpu, io: std.Io) void {
+        gpu.dir.close();
+        gpu.link.close();
+        if (gpu.hwmon) |hwmon| hwmon.dir.close();
+        if (gpu.render) |render| render.close(io);
+    }
 };
 
 const Driver = enum { xe, i915, other };

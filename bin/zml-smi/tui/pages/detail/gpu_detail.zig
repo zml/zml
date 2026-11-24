@@ -37,7 +37,7 @@ pub fn draw(
     });
     const mem_chart = try common.historyChart(ctx, state, id, state.history.mem_util, .{
         .title = "Memory",
-        .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{if (gpu.mem_total_bytes) |total| if (total > 0) (gpu.mem_used_bytes orelse 0) * 100 / total else 0 else 0}),
+        .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{utils.percent(gpu.mem_used_bytes, gpu.mem_total_bytes)}),
         .info_line = if (gpu.mem_bus_width) |bw|
             try std.fmt.allocPrint(ctx.arena, "VRAM {d} / {d} MB ({d}-bit)", .{
                 utils.bytesToMb(gpu.mem_used_bytes), utils.bytesToMb(gpu.mem_total_bytes), bw,

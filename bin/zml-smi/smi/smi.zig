@@ -42,6 +42,7 @@ test {
     _ = hwmon;
     _ = pci;
     _ = proc;
+    _ = prometheus;
     _ = sysfs;
     _ = Host;
 }

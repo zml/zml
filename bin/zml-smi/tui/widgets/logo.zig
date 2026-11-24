@@ -20,14 +20,26 @@ pub fn draw(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         return img_w.draw(ctx);
     }
 
-    var sb = compose.surfaceBuilder(ctx.arena);
-    for (0..logo_height, 0..) |logo_row, row| {
-        try sb.add(@intCast(row), 0, try self.drawLogoRow(ctx, logo_row));
+    const w = if (ctx.max.width) |mw| @min(logo_width, mw) else logo_width;
+    const h = if (ctx.max.height) |mh| @min(logo_height, mh) else logo_height;
+    if (w == 0 or h == 0) {
+        return .{
+            .size = .{ .width = 0, .height = 0 },
+            .widget = ui.widget(self),
+            .buffer = &.{},
+            .children = &.{},
+        };
     }
-    return sb.finish(.{ .width = logo_width, .height = logo_height }, ui.widget(self));
+
+    var sb = compose.surfaceBuilder(ctx.arena);
+    for (0..h, 0..) |logo_row, row| {
+        try sb.add(@intCast(row), 0, try self.drawLogoRow(ctx, logo_row, w));
+    }
+
+    return sb.finish(.{ .width = w, .height = h }, ui.widget(self));
 }
 
-fn drawLogoRow(self: *const Logo, ctx: vxfw.DrawContext, row_index: usize) std.mem.Allocator.Error!vxfw.Surface {
+fn drawLogoRow(self: *const Logo, ctx: vxfw.DrawContext, row_index: usize, max_w: u16) std.mem.Allocator.Error!vxfw.Surface {
     var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
     for (zml_logo.zml_art_blocks[0..]) |block| {
         const row = block.rows[row_index];
@@ -59,5 +71,29 @@ fn drawLogoRow(self: *const Logo, ctx: vxfw.DrawContext, row_index: usize) std.m
             });
         }
     }
-    return ui.drawRichLine(ctx, segments.items, logo_width);
+    return ui.drawRichLine(ctx, segments.items, max_w);
+}
+
+test "Logo clamps to narrow and zero max widths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    vxfw.DrawContext.init(.unicode);
+
+    const logo: Logo = .{};
+    const narrow = try logo.draw(.{
+        .arena = arena.allocator(),
+        .min = .{},
+        .max = .{ .width = 10, .height = null },
+        .cell_size = .{ .width = 10, .height = 20 },
+    });
+    try std.testing.expectEqual(@as(u16, 10), narrow.size.width);
+
+    const empty = try logo.draw(.{
+        .arena = arena.allocator(),
+        .min = .{},
+        .max = .{ .width = 0, .height = null },
+        .cell_size = .{ .width = 10, .height = 20 },
+    });
+    try std.testing.expectEqual(@as(u16, 0), empty.size.width);
+    try std.testing.expectEqual(@as(u16, 0), empty.size.height);
 }

@@ -26,6 +26,7 @@ const Api = struct {
 const Private = struct {
     ndl_available_devices: *const @TypeOf(c.ndl_available_devices),
     ndl_open_device: *const @TypeOf(c.ndl_open_device),
+    ndl_close_device: *const @TypeOf(c.ndl_close_device),
     ndl_get_all_apps_info: *const @TypeOf(c.ndl_get_all_apps_info),
     nds_open: *const @TypeOf(c.nds_open),
     nds_close: *const @TypeOf(c.nds_close),
@@ -51,6 +52,10 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuro
     var indices: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
     const count: usize = @intCast(std.math.clamp(nrt.ndl_available_devices(&indices, indices.len), 0, indices.len));
     var opened: std.ArrayList(struct { c_int, *c.ndl_device_t }) = try .initCapacity(arena, count);
+    errdefer for (opened.items) |entry| {
+        _ = nrt.ndl_close_device(entry[1]);
+    };
+
     for (indices[0..count]) |index| {
         var params: c.ndl_device_init_param_t = .{ .initialize_device = false, .num_dram_regions = 0, .map_hbm = false, .skip_copy_bufs = true };
         var handle: ?*c.ndl_device_t = null;
@@ -61,9 +66,16 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuro
     const cores_per_chip = core_count / @max(1, opened.items.len);
     const chips = try arena.alloc(Chip, opened.items.len);
     var devices: std.ArrayList(smi.Device) = try .initCapacity(arena, chips.len * cores_per_chip);
+
+    var initialized: usize = 0;
+    errdefer for (chips[0..initialized]) |chip| {
+        for (chip.memory) |memory| if (memory) |dir| dir.close();
+    };
+
     for (chips, opened.items) |*chip, entry| {
         const index, const handle = entry;
         chip.* = try openChip(arena, io, index, handle, cores_per_chip);
+        initialized += 1;
         for (chip.memory) |_| devices.appendAssumeCapacity(.{ .target = .neuron, .name = chip.name, .driver_version = driver_version });
     }
 
@@ -140,6 +152,7 @@ fn deinit(platform: *smi.Platform) void {
 
     for (self.chips) |chip| {
         for (chip.memory) |memory| if (memory) |dir| dir.close();
+        _ = self.nrt.ndl_close_device(chip.handle);
     }
 
     self.prev_busy.deinit(self.gpa);
@@ -166,6 +179,8 @@ fn open(gpa: std.mem.Allocator, io: std.Io) !Api {
 fn openChip(arena: std.mem.Allocator, io: std.Io, index: c_int, handle: *c.ndl_device_t, cores: usize) !Chip {
     const memory = try arena.alloc(?smi.sysfs.Dir, cores);
     @memset(memory, null);
+    errdefer for (memory) |dir| if (dir) |d| d.close();
+
     var chip: Chip = .{ .handle = handle, .mem_total_bytes = memoryTotal(handle.device_type), .memory = memory };
 
     var path: [64]u8 = undefined;

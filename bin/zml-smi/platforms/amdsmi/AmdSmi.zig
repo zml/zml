@@ -17,6 +17,7 @@ const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .de
 
 const Api = struct {
     amdsmi_init: *const @TypeOf(c.amdsmi_init),
+    amdsmi_shut_down: *const @TypeOf(c.amdsmi_shut_down),
     amdsmi_get_socket_handles: *const @TypeOf(c.amdsmi_get_socket_handles),
     amdsmi_get_processor_handles: *const @TypeOf(c.amdsmi_get_processor_handles),
     amdsmi_get_gpu_asic_info: *const @TypeOf(c.amdsmi_get_gpu_asic_info),
@@ -45,6 +46,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const api = try smi.dynlib.open(Api, &.{try std.fmt.bufPrintSentinel(&path, "{s}/lib/libamd_smi.so.27", .{sandbox}, 0)});
     try check(api.amdsmi_init(c.AMDSMI_INIT_AMD_GPUS));
+    errdefer _ = api.amdsmi_shut_down();
 
     var socket_count: u32 = 0;
     try check(api.amdsmi_get_socket_handles(&socket_count, null));
@@ -136,8 +138,8 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
         }
 
         var bytes: u64 = 0;
-        fields.mem_used_bytes = if (ok(api.amdsmi_get_gpu_memory_usage(handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes))) bytes else null;
-        fields.mem_total_bytes = if (ok(api.amdsmi_get_gpu_memory_total(handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes))) bytes else null;
+        fields.mem_used_bytes = if (ok(api.amdsmi_get_gpu_memory_usage(handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes))) known(bytes) else null;
+        fields.mem_total_bytes = if (ok(api.amdsmi_get_gpu_memory_total(handle, c.AMDSMI_MEM_TYPE_VRAM, &bytes))) known(bytes) else null;
 
         var pcie: c.amdsmi_pcie_info_t = undefined;
         if (ok(api.amdsmi_get_pcie_info(handle, &pcie))) {
@@ -212,6 +214,7 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
 fn deinit(platform: *smi.Platform) void {
     const self: *AmdSmi = @alignCast(@fieldParentPtr("platform", platform));
 
+    _ = self.api.amdsmi_shut_down();
     self.prev_busy.deinit(self.gpa);
     self.curr_busy.deinit(self.gpa);
 }
@@ -223,20 +226,11 @@ const Gpu = struct {
     address: ?[12]u8,
 };
 
+/// amdsmi prints while it lists processes, so stderr points at the null device under the stderr lock.
 fn processList(self: *AmdSmi, scratch: std.mem.Allocator, handle: c.amdsmi_processor_handle) ![]const c.amdsmi_proc_info_t {
-    var count: u32 = 0;
-    try check(self.listQuietly(handle, &count, null));
-    if (count == 0) return &.{};
+    _ = std.debug.lockStderr(&.{});
+    defer std.debug.unlockStderr();
 
-    const list = try scratch.alloc(c.amdsmi_proc_info_t, count);
-    const status = self.listQuietly(handle, &count, list.ptr);
-    if (status != c.AMDSMI_STATUS_OUT_OF_RESOURCES) try check(status);
-
-    return list[0..@min(count, list.len)];
-}
-
-/// amdsmi prints while it lists processes, so stderr points at the null device for the length of the call.
-fn listQuietly(self: *AmdSmi, handle: c.amdsmi_processor_handle, count: *u32, list: [*c]c.amdsmi_proc_info_t) c.amdsmi_status_t {
     const saved = std.c.dup(std.c.STDERR_FILENO);
     if (saved >= 0) {
         const null_device = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
@@ -250,7 +244,15 @@ fn listQuietly(self: *AmdSmi, handle: c.amdsmi_processor_handle, count: *u32, li
         _ = std.c.close(saved);
     };
 
-    return self.api.amdsmi_get_gpu_process_list(handle, count, list);
+    var count: u32 = 0;
+    try check(self.api.amdsmi_get_gpu_process_list(handle, &count, null));
+    if (count == 0) return &.{};
+
+    const list = try scratch.alloc(c.amdsmi_proc_info_t, count);
+    const status = self.api.amdsmi_get_gpu_process_list(handle, &count, list.ptr);
+    if (status != c.AMDSMI_STATUS_OUT_OF_RESOURCES) try check(status);
+
+    return list[0..@min(count, list.len)];
 }
 
 fn deviceOf(self: *const AmdSmi, pdev: []const u8) ?u16 {

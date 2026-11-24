@@ -66,13 +66,20 @@ pub const Collector = struct {
         self.host_scratch.deinit();
     }
 
+    const scratch_retain_limit: usize = 1024 * 1024;
+
     pub fn add(self: *Collector, platform: *smi.Platform) !void {
         const count = platform.devices.len;
+        const max_devices = @as(usize, std.math.maxInt(u16)) + 1;
+        if (self.devices.items.len > std.math.maxInt(u16) or count > max_devices - self.devices.items.len) {
+            return error.TooManyDevices;
+        }
+
         const source = try self.arena.create(Source);
 
         source.* = .{
             .platform = platform,
-            .first = std.math.cast(u16, self.devices.items.len) orelse return error.TooManyDevices,
+            .first = @intCast(self.devices.items.len),
             .sides = .{ .values = .{
                 .{ .samples = try self.arena.alloc(smi.Sample, count), .processes = .init(self.gpa) },
                 .{ .samples = try self.arena.alloc(smi.Sample, count), .processes = .init(self.gpa) },
@@ -84,8 +91,9 @@ pub const Collector = struct {
             for (side.samples, platform.devices) |*sample_, device| sample_.* = .init(device.target);
         }
 
+        try self.sources.ensureUnusedCapacity(self.arena, 1);
         try self.devices.appendSlice(self.arena, platform.devices);
-        try self.sources.append(self.arena, source);
+        self.sources.appendAssumeCapacity(source);
 
         self.two_readings = self.two_readings or platform.two_readings;
     }
@@ -122,16 +130,18 @@ pub const Collector = struct {
 
     fn run(self: *Collector, source: ?*Source, first_round: std.Io.Timestamp) std.Io.Cancelable!void {
         var begin = first_round;
-        while (true) {
+        while (!self.stopping.load(.acquire)) {
             const elapsed = begin.untilNow(self.io, .awake);
 
             if (elapsed.nanoseconds < self.interval.nanoseconds) {
                 try self.io.sleep(.fromNanoseconds(self.interval.nanoseconds - elapsed.nanoseconds), .awake);
             }
 
+            try self.io.checkCancel();
+            if (self.stopping.load(.acquire)) return;
+
             begin = .now(self.io, .awake);
             if (source) |s| self.poll(s) else self.hostStep();
-            if (self.stopping.load(.acquire)) return;
         }
     }
 
@@ -139,7 +149,7 @@ pub const Collector = struct {
         const platform = source.platform;
         const back = source.sides.back();
         const scratch = source.scratch.allocator();
-        defer _ = source.scratch.reset(.retain_capacity);
+        defer _ = source.scratch.reset(.{ .retain_with_limit = scratch_retain_limit });
 
         for (back.samples, platform.devices) |*sample_, device| sample_.* = .init(device.target);
         back.processes.clear();
@@ -187,7 +197,7 @@ pub const Collector = struct {
         }
 
         self.host_reader.enrich(merged.strings.allocator(), self.host_scratch.allocator(), merged.rows.items);
-        _ = self.host_scratch.reset(.retain_capacity);
+        _ = self.host_scratch.reset(.{ .retain_with_limit = scratch_retain_limit });
 
         const host = self.host.back();
         host.* = self.host.front().*;
@@ -197,3 +207,27 @@ pub const Collector = struct {
         self.host.swap(self.io);
     }
 };
+
+test "Collector.add enforces u16 device cap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const dummy_vtable: smi.Platform.VTable = .{
+        .poll = struct {
+            fn f(_: *smi.Platform, _: std.mem.Allocator, _: []smi.Sample) void {}
+        }.f,
+    };
+
+    var collector: Collector = .init(arena.allocator(), std.testing.allocator, std.testing.io, .{});
+    defer collector.deinit();
+
+    const one = try arena.allocator().alloc(smi.Device, 1);
+    one[0] = .{ .target = .cuda };
+    var first: smi.Platform = .{ .devices = one, .vtable = &dummy_vtable };
+    try collector.add(&first);
+
+    const overflow = try arena.allocator().alloc(smi.Device, @as(usize, std.math.maxInt(u16)) + 1);
+    @memset(overflow, .{ .target = .cuda });
+    var second: smi.Platform = .{ .devices = overflow, .vtable = &dummy_vtable };
+    try std.testing.expectError(error.TooManyDevices, collector.add(&second));
+}

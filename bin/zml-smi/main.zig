@@ -88,11 +88,10 @@ pub fn main(init: std.process.Init) !void {
     if (args.remotes) |hosts| {
         var it = std.mem.splitScalar(u8, hosts, ',');
         while (it.next()) |host| {
-            const remote = try arena.create(smi.api.Client);
-
             if (smi.api.Client.open(arena, gpa, io, host)) |value| {
+                const remote = try arena.create(smi.api.Client);
                 remote.* = value;
-                try collector.add(&remote.platform);
+                collector.add(&remote.platform) catch |err| log.warn("{s} skipped: {t}", .{ host, err });
             } else |err| log.warn("{s} skipped: {t}", .{ host, err });
         }
     }
@@ -110,20 +109,24 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (serving) {
+        var prom_listener = if (args.prometheus_listen) |listen| try (try std.Io.net.IpAddress.parseLiteral(listen)).listen(io, .{ .reuse_address = true }) else null;
+        defer if (prom_listener) |*l| l.deinit(io);
+        var api_listener = if (args.api) try (std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = args.api_port } }).listen(io, .{ .reuse_address = true }) else null;
+        defer if (api_listener) |*l| l.deinit(io);
+
         var servers: std.Io.Group = .init;
         defer servers.cancel(io);
 
-        if (args.prometheus_listen) |listen| {
-            log.info("serving prometheus metrics on {s}", .{listen});
+        if (prom_listener) |*listener| {
+            log.info("serving prometheus metrics on {s}", .{args.prometheus_listen.?});
             const server: smi.api.Server = .{ .gpa = gpa, .io = io, .collector = &collector, .format = .prometheus };
-            try servers.concurrent(io, smi.api.Server.serve, .{ server, try .parseLiteral(listen) });
+            try servers.concurrent(io, smi.api.Server.serve, .{ server, listener });
         }
 
-        if (args.api) {
+        if (api_listener) |*listener| {
             log.info("serving api metrics on port {d}", .{args.api_port});
-            const address: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = args.api_port } };
             const server: smi.api.Server = .{ .gpa = gpa, .io = io, .collector = &collector, .format = .json };
-            try servers.concurrent(io, smi.api.Server.serve, .{ server, address });
+            try servers.concurrent(io, smi.api.Server.serve, .{ server, listener });
         }
 
         try servers.await(io);
@@ -144,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
         .arena = arena,
         .io = io,
     });
-    defer state.deinit(arena);
+    defer state.deinit();
 
     if (args.top) {
         try tui.top.run(gpa, io, init.environ_map, &state);

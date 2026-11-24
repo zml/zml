@@ -5,6 +5,12 @@ pub fn bytesToMb(val: ?u64) u64 {
     return if (val) |v| v / (1024 * 1024) else 0;
 }
 
+pub fn percent(used: ?u64, total: ?u64) u8 {
+    const t = total orelse return 0;
+    if (t == 0) return 0;
+    return @intCast(@min(@as(u128, used orelse 0) * 100 / t, 100));
+}
+
 pub fn repeatStr(arena: std.mem.Allocator, char: []const u8, count: u16) std.mem.Allocator.Error![]const u8 {
     const buf = try arena.alloc(u8, char.len * count);
     for (0..count) |i| {

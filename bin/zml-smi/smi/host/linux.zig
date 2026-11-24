@@ -92,8 +92,12 @@ pub const Host = struct {
         var buffer: [4096]u8 = undefined;
         if (pid_dir.field("status", "Uid", &buffer)) |uid| {
             row.uid = std.math.cast(u32, smi.sysfs.firstNumber(uid) orelse 0) orelse 0;
-            if (std.c.getpwuid(row.uid)) |user| {
-                if (user.name) |name| row.username = strings.dupe(u8, std.mem.span(name)) catch "";
+            var pwd: std.c.passwd = undefined;
+            var result: ?*std.c.passwd = null;
+            if (std.c.getpwuid_r(row.uid, &pwd, &buffer, buffer.len, &result) == 0) {
+                if (result) |user| {
+                    if (user.name) |name| row.username = strings.dupe(u8, std.mem.span(name)) catch "";
+                }
             }
         } else |_| {}
 

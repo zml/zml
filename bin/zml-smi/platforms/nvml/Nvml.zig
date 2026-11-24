@@ -9,10 +9,11 @@ api: Api,
 gpus: []Gpu,
 tick: u8 = 0,
 
-const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes };
+const vtable: smi.Platform.VTable = .{ .poll = poll, .processes = processes, .deinit = deinit };
 
 const Api = struct {
     nvmlInit_v2: *const @TypeOf(c.nvmlInit_v2),
+    nvmlShutdown: *const @TypeOf(c.nvmlShutdown),
     nvmlSystemGetDriverVersion: *const @TypeOf(c.nvmlSystemGetDriverVersion),
     nvmlSystemGetCudaDriverVersion_v2: *const @TypeOf(c.nvmlSystemGetCudaDriverVersion_v2),
     nvmlDeviceGetCount_v2: *const @TypeOf(c.nvmlDeviceGetCount_v2),
@@ -45,6 +46,7 @@ pub fn detect(io: std.Io) bool {
 pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, _: std.Io) !Nvml {
     const api = try smi.dynlib.open(Api, &.{ "libnvidia-ml.so.1", "libnvidia-ml.so" });
     try check(api.nvmlInit_v2());
+    errdefer _ = api.nvmlShutdown();
 
     var version: [c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE]u8 = undefined;
     const driver_version = if (ok(api.nvmlSystemGetDriverVersion(&version, version.len)))
@@ -148,7 +150,9 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
             if (running(scratch, query, handle)) |list| {
                 read_any = true;
                 for (list) |process| {
-                    try out.append(.{ .pid = process.pid, .device_idx = @intCast(device), .dev_mem_kib = process.usedGpuMemory / 1024 });
+                    const not_available: @TypeOf(process.usedGpuMemory) = @bitCast(@as(c_longlong, c.NVML_VALUE_NOT_AVAILABLE));
+                    const mem_kib: ?u64 = if (process.usedGpuMemory == not_available) null else process.usedGpuMemory / 1024;
+                    try out.append(.{ .pid = process.pid, .device_idx = @intCast(device), .dev_mem_kib = mem_kib });
                 }
             } else |_| {}
         }
@@ -167,6 +171,11 @@ fn processes(platform: *smi.Platform, scratch: std.mem.Allocator, _: []const smi
     if (!read_any) return error.Unavailable;
 }
 
+fn deinit(platform: *smi.Platform) void {
+    const self: *Nvml = @alignCast(@fieldParentPtr("platform", platform));
+    _ = self.api.nvmlShutdown();
+}
+
 const Gpu = struct {
     handle: c.nvmlDevice_t,
     pcie_tx_kbps: ?u64 = null,
@@ -174,15 +183,26 @@ const Gpu = struct {
     last_seen: u64 = 0,
 };
 
+const max_query: c_uint = 4096;
+
 fn running(scratch: std.mem.Allocator, query: anytype, handle: c.nvmlDevice_t) ![]const c.nvmlProcessInfo_t {
     var count: c_uint = 0;
     const status = query(handle, &count, null);
     if (ok(status)) return &.{};
     if (status != c.NVML_ERROR_INSUFFICIENT_SIZE) try check(status);
 
-    const list = try scratch.alloc(c.nvmlProcessInfo_t, count);
-    try check(query(handle, &count, list.ptr));
-    return list[0..count];
+    for (0..3) |_| {
+        if (count == 0 or count > max_query) return &.{};
+        const cap: c_uint = @min(count +| 16, max_query);
+        const list = try scratch.alloc(c.nvmlProcessInfo_t, cap);
+        count = cap;
+
+        const retry = query(handle, &count, list.ptr);
+        if (ok(retry)) return list[0..@min(count, list.len)];
+        if (retry != c.NVML_ERROR_INSUFFICIENT_SIZE) try check(retry);
+    }
+
+    return error.InsufficientSize;
 }
 
 fn processUtilization(self: *Nvml, scratch: std.mem.Allocator, handle: c.nvmlDevice_t, since: u64) ![]const c.nvmlProcessUtilizationSample_t {
@@ -191,9 +211,18 @@ fn processUtilization(self: *Nvml, scratch: std.mem.Allocator, handle: c.nvmlDev
     if (ok(status)) return &.{};
     if (status != c.NVML_ERROR_INSUFFICIENT_SIZE) try check(status);
 
-    const samples = try scratch.alloc(c.nvmlProcessUtilizationSample_t, count);
-    try check(self.api.nvmlDeviceGetProcessUtilization(handle, samples.ptr, &count, since));
-    return samples[0..count];
+    for (0..3) |_| {
+        if (count == 0 or count > max_query) return &.{};
+        const cap: c_uint = @min(count +| 16, max_query);
+        const samples = try scratch.alloc(c.nvmlProcessUtilizationSample_t, cap);
+        count = cap;
+
+        const retry = self.api.nvmlDeviceGetProcessUtilization(handle, samples.ptr, &count, since);
+        if (ok(retry)) return samples[0..@min(count, samples.len)];
+        if (retry != c.NVML_ERROR_INSUFFICIENT_SIZE) try check(retry);
+    }
+
+    return error.InsufficientSize;
 }
 
 fn ok(status: c.nvmlReturn_t) bool {

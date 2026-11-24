@@ -12,18 +12,17 @@ pub const Server = struct {
 
     pub const Format = enum { json, prometheus };
 
-    pub fn serve(self: Server, address: std.Io.net.IpAddress) void {
+    pub fn serve(self: Server, listener: *std.Io.net.Server) void {
         const io = self.io;
-        var server = address.listen(io, .{ .reuse_address = true }) catch |err| {
-            log.err("{t} server cannot listen on {f}: {t}", .{ self.format, address, err });
-            return;
-        };
-        defer server.deinit(io);
-
         var connections: std.Io.Group = .init;
         defer connections.cancel(io);
+
         while (true) {
-            const stream = server.accept(io) catch return;
+            const stream = listener.accept(io) catch |err| switch (err) {
+                error.Canceled, error.SocketNotListening => return,
+                else => continue,
+            };
+
             connections.concurrent(io, answer, .{ self, stream }) catch {
                 stream.close(io);
                 return;
@@ -34,39 +33,40 @@ pub const Server = struct {
     fn answer(self: Server, stream: std.Io.net.Stream) void {
         const io = self.io;
         defer stream.close(io);
+
         var read_buffer: [8192]u8 = undefined;
         var write_buffer: [4096]u8 = undefined;
         var reader = stream.reader(io, &read_buffer);
         var writer = stream.writer(io, &write_buffer);
         var http: std.http.Server = .init(&reader.interface, &writer.interface);
 
+        var request = http.receiveHead() catch return;
+        // Closing the connection skips the body, which std asserts has a length.
+        if (request.head.method != .GET) {
+            request.respond("Method Not Allowed\n", .{ .status = .method_not_allowed, .keep_alive = false }) catch {};
+            return;
+        }
+
         // The body is written to memory first, so a slow client never holds a lock.
         var body: std.Io.Writer.Allocating = .init(self.gpa);
         defer body.deinit();
 
-        while (true) {
-            var request = http.receiveHead() catch return;
-            // Closing the connection skips the body, which std asserts has a length.
-            if (request.head.method != .GET) {
-                request.respond("Method Not Allowed\n", .{ .status = .method_not_allowed, .keep_alive = false }) catch {};
-                return;
-            }
+        const written = switch (self.format) {
+            .json => smi.json.write(&body.writer, self.collector),
+            .prometheus => smi.prometheus.write(&body.writer, self.collector),
+        };
+        written catch return;
 
-            body.clearRetainingCapacity();
-            const written = switch (self.format) {
-                .json => smi.json.write(&body.writer, self.collector),
-                .prometheus => smi.prometheus.write(&body.writer, self.collector),
-            };
-            written catch return;
-
-            request.respond(body.written(), .{ .extra_headers = switch (self.format) {
+        request.respond(body.written(), .{
+            .keep_alive = false,
+            .extra_headers = switch (self.format) {
                 .json => &.{
                     .{ .name = "content-type", .value = "application/json" },
                     .{ .name = "access-control-allow-origin", .value = "*" },
                 },
                 .prometheus => &.{.{ .name = "content-type", .value = "text/plain" }},
-            } }) catch return;
-        }
+            },
+        }) catch {};
     }
 };
 

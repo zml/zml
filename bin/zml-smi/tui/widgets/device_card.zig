@@ -79,7 +79,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const util_percent: u8 = @intCast(@min(usage.util_percent orelse 0, 100));
     const mem_used = usage.mem_used orelse 0;
     const mem_total = usage.mem_total orelse 0;
-    const mem_pct: u8 = if (mem_total > 0) @intCast(@min(mem_used * 100 / mem_total, 100)) else 0;
+    const mem_pct: u8 = utils.percent(usage.mem_used, usage.mem_total);
 
     const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}{s}", .{
         usage.label, i, device.name orelse "Unknown", try utils.versions(ctx.arena, device, .in_title),

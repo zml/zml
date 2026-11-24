@@ -57,11 +57,24 @@ pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16, f
     const count: u32 = @intCast(self.processes.items.len);
     self.scroll_bars.estimated_content_height = count;
     self.scroll_bars.scroll_view.item_count = count;
+
+    if (count == 0) {
+        self.resetScroll();
+    } else {
+        const max_top: u32 = count -| max_visible_rows;
+        if (self.scroll_bars.scroll_view.scroll.top > max_top) {
+            self.scroll_bars.scroll_view.scroll.top = max_top;
+            self.scroll_bars.scroll_view.scroll.vertical_offset = 0;
+            self.scroll_bars.scroll_view.scroll.pending_lines = 0;
+        }
+        self.scroll_bars.scroll_view.cursor = @min(self.scroll_bars.scroll_view.cursor, count - 1);
+    }
 }
 
 pub fn resetScroll(self: *ProcessTable) void {
     self.scroll_bars.scroll_view.scroll = .{};
     self.scroll_bars.scroll_view.cursor = 0;
+    self.scroll_bars.is_dragging_vertical_thumb = false;
 }
 
 pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -85,7 +98,7 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
             .{ .width = w, .height = 2 },
         ));
     } else {
-        const scroll_h: u16 = @min(@as(u16, @intCast(row_count)), max_visible_rows);
+        const scroll_h: u16 = @intCast(@min(row_count, max_visible_rows));
         try children.append(ctx.arena, try compose.sized(ctx.arena, self.scroll_bars.widget(), .{ .width = w, .height = scroll_h }));
     }
 
@@ -176,4 +189,44 @@ fn fmtMem(arena: std.mem.Allocator, kib: u64) std.mem.Allocator.Error![]const u8
     } else {
         return std.fmt.allocPrint(arena, "{d}K", .{kib});
     }
+}
+
+test "ProcessTable.prepare clamps scroll offset when list shrinks" {
+    const smi = @import("zml-smi");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var collector: smi.Collector = .init(arena.allocator(), std.testing.allocator, std.testing.io, .{});
+    defer collector.deinit();
+
+    var state: data.SystemState = try .init(.{
+        .collector = &collector,
+        .tui_refresh_rate = 100,
+        .gpa = std.testing.allocator,
+        .arena = arena.allocator(),
+        .io = std.testing.io,
+    });
+    defer state.deinit();
+
+    var table: ProcessTable = .{};
+    defer table.deinit(std.testing.allocator);
+
+    for (0..25) |i| {
+        try collector.processes.back().append(.{ .pid = @intCast(i + 1) });
+    }
+    collector.processes.swap(std.testing.io);
+    table.prepare(&state, null, arena.allocator());
+    table.scroll_bars.scroll_view.scroll.top = 15;
+    table.scroll_bars.scroll_view.scroll.vertical_offset = 1;
+    table.scroll_bars.scroll_view.scroll.pending_lines = -2;
+    table.scroll_bars.scroll_view.cursor = 24;
+
+    collector.processes.back().clear();
+    try collector.processes.back().append(.{ .pid = 1 });
+    collector.processes.swap(std.testing.io);
+    table.prepare(&state, null, arena.allocator());
+    try std.testing.expectEqual(@as(u32, 0), table.scroll_bars.scroll_view.scroll.top);
+    try std.testing.expectEqual(@as(i17, 0), table.scroll_bars.scroll_view.scroll.vertical_offset);
+    try std.testing.expectEqual(@as(i17, 0), table.scroll_bars.scroll_view.scroll.pending_lines);
+    try std.testing.expectEqual(@as(u32, 0), table.scroll_bars.scroll_view.cursor);
 }

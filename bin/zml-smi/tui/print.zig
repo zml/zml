@@ -7,11 +7,16 @@ const image_cache = @import("image_cache.zig");
 const Overview = @import("pages/overview.zig");
 
 fn silentResize(vx: *vaxis.Vaxis, allocator: std.mem.Allocator, winsize: vaxis.Winsize) !void {
+    var screen = try vaxis.Screen.init(allocator, winsize);
+    errdefer screen.deinit(allocator);
+    screen.width_method = vx.caps.unicode;
+
+    const screen_last = try vaxis.AllocatingScreen.init(allocator, winsize.cols, winsize.rows);
+
     vx.screen.deinit(allocator);
-    vx.screen = try vaxis.Screen.init(allocator, winsize);
-    vx.screen.width_method = vx.caps.unicode;
     vx.screen_last.deinit(allocator);
-    vx.screen_last = try vaxis.AllocatingScreen.init(allocator, winsize.cols, winsize.rows);
+    vx.screen = screen;
+    vx.screen_last = screen_last;
 }
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, state: *data.SystemState) !void {
@@ -55,7 +60,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const content_w: u16 = @min(@as(u16, @intCast(vx.screen.width)), Overview.host_line_width + 2);
+    const max_content_w = Overview.host_line_width + 2;
+    const content_w: u16 = if (vx.screen.width == 0)
+        max_content_w
+    else
+        @min(@as(u16, @intCast(vx.screen.width)), max_content_w);
 
     var viewing_device: ?u16 = null;
     var overview = try Overview.init(allocator, state, null, &viewing_device);
