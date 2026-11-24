@@ -126,7 +126,12 @@ pub const Backend = enum {
                 .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
                 else => error.UnsupportedQuantization,
             } else error.UnsupportedQuantization,
-            .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
+            .mosaic_tpu, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
+            .metal => .{ .gate_up = .concatenated, .packing = if (scheme) |s| switch (s) {
+                // Metal kernels run these formats; the others run in BF16.
+                .nvfp4, .mxfp8, .fp8_block128 => .plain,
+                .mxfp4, .fp8_per_channel, .fp8_per_tensor, .fp8_block32 => .dequantized,
+            } else .plain },
             .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .row_interleaved_1, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }

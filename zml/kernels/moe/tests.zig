@@ -234,6 +234,10 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
                     .reshape(.{ .expert = sf.dim(0), .scale_word = @divExact(sf.dim(2), 4), .row = sf.dim(1), .scale_byte = 4 }).bitCast(.i32)
                     .withTags(sf.shape().transpose(.{ 0, 2, 1 }));
             },
+            .dequantized => {
+                projection.weight = zml.moe.stablehlo.dequantize(projection.*).convert(.bf16);
+                projection.quantization = null;
+            },
             .plain => {},
         }
         switch (backend) {
@@ -255,8 +259,11 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
             .mosaic_tpu => {
                 projection.weight = projection.weight.transpose(.{ 0, 2, 1 });
             },
-            .metal => if (projection.quantization) |*q| {
-                if (q.scheme != .nvfp4) q.scales = q.scales.convert(.bf16);
+            // Checkpoints store NVFP4 weights in bytes, and the FP8 kernel reads BF16 scales.
+            .metal => if (projection.quantization) |*q| switch (q.scheme) {
+                .nvfp4 => projection.weight = packFp4Bytes(projection.weight),
+                .fp8_block128 => q.scales = q.scales.convert(.bf16),
+                else => {},
             },
             else => {},
         }
@@ -309,7 +316,8 @@ fn forward(input: Tensor, c: Case) Outputs {
         .quantize_input = c.quantize_input,
         .routing_weight_placement = c.placement,
         .input_quantization = switch (c.backend) {
-            .metal => .none,
+            // Metal quantizes activations only when asked.
+            .metal => if (c.quantize_input) .automatic else .none,
             .cute => if (c.scheme == .nvfp4) .automatic else .mxfp8_bf16,
             .triton => if (c.scheme == .mxfp4 and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
             else => .automatic,
@@ -825,6 +833,24 @@ test "Metal compatibility matrix" {
             .{ .scheme = .fp8_block32 },
         },
         .activations = &all_activations,
+    }, .{});
+
+    // Emulated NVFP4 and MXFP8 activations, routing before down, routes without an expert,
+    // and the grouped GEMV, which packed NVFP4 experts run from 128 routes.
+    try pipeline.run(std.testing.io, std.testing.allocator, .metal, .{
+        .formats = &.{ .{ .scheme = .nvfp4 }, .{ .scheme = .mxfp8 } },
+        .activations = &.{
+            .{ .swiglu = .{} },
+            .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } },
+        },
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{ .before_down, .after_down },
+        .shapes = &.{
+            .{},
+            .{ .tokens = 17, .topk = 2, .unrouted = true },
+            .{ .tokens = 16, .topk = 8, .width = 256, .intermediate = 256 },
+            .{ .tokens = 16, .topk = 8, .width = 256, .intermediate = 256, .unrouted = true },
+        },
     }, .{});
 }
 
