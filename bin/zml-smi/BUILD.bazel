@@ -61,6 +61,7 @@ copy_to_directory(
         "libnrt.so.1": "lib/libnrt.so.1",
         "libncfw.so.2": "lib/libncfw.so.2",
     },
+    visibility = ["//bin/zml-smi:__subpackages__"],
 )
 
 run_binary(
