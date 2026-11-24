@@ -29,9 +29,15 @@ pub const dynlib = @import("dynlib.zig");
 pub const sandbox = @import("sandbox.zig");
 pub const DoubleBuffer = @import("double_buffer.zig").DoubleBuffer;
 
+pub const csv = @import("csv.zig");
+pub const json = @import("json.zig");
+pub const prometheus = @import("prometheus.zig");
+pub const api = @import("api.zig");
+
 test {
     _ = @import("collector.zig");
     _ = @import("double_buffer.zig");
+    _ = csv;
     _ = fdinfo;
     _ = hwmon;
     _ = pci;
