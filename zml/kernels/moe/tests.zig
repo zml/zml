@@ -322,6 +322,7 @@ const gated_activations = [_]Activation{
     .{ .swiglu = .{ .limit = 0.25 } },
     .{ .swiglu = .{ .bias = 1 } },
     .{ .swiglu = .{ .limit = 0.25, .bias = 1 } },
+    .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } },
     .{ .swiglu_step = .{} },
     .{ .swiglu_step = .{ .limit = 0.25 } },
     .geglu,
