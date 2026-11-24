@@ -12,6 +12,7 @@ zig_library(
         "//stdx",
         "//zml/core",
         "//zml/kernels/moe/api",
+        "//zml/kernels/moe/triton",
         "//zml/nn",
         "//zml/quantization",
     ],
