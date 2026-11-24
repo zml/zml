@@ -746,6 +746,66 @@ test "Fly general projection shapes" {
     }, .{});
 }
 
+test "Fly NVFP4 compatibility matrix" {
+    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+
+    // The default shapes cover GEMV and sorted MFMA. Fly rounds activations to NVFP4 as
+    // Triton does, which the reference only matches closely at these widths.
+    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
+        .formats = &.{
+            .{ .scheme = .nvfp4 },
+            .{ .scheme = .nvfp4, .non_unit_scales = true },
+        },
+        .activations = &.{
+            .{ .swiglu = .{} },
+            .{ .swiglu = .{ .limit = 0.25 } },
+            .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } },
+            .{ .swiglu_step = .{} },
+            .{ .swiglu_step = .{ .limit = 0.25 } },
+            .geglu,
+            .geglu_tanh,
+        },
+        .placements = &.{.before_down},
+    }, .{});
+}
+
+test "Fly MXFP8 compatibility matrix" {
+    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+
+    // Fly runs MXFP8 decode batches as GEMVs and hands larger ones to Triton.
+    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
+        .formats = &.{.{ .scheme = .mxfp8 }},
+        .activations = &.{
+            .{ .swiglu = .{} },
+            .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } },
+        },
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{.before_down},
+        .shapes = &.{
+            .{},
+            .{ .tokens = 17, .topk = 2 },
+            .{ .tokens = 16, .topk = 8, .width = 2304, .intermediate = 1152 },
+            .{ .tokens = 17, .topk = 2, .unrouted = true },
+            .{ .tokens = 40, .topk = 8 },
+        },
+    }, .{});
+}
+
+test "Fly routes without an expert" {
+    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+
+    // Decode GEMVs write zero rows for them; sorted MFMA tiles skip them.
+    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
+        .formats = &.{ .{ .scheme = .mxfp4 }, .{ .scheme = .nvfp4 } },
+        .activations = &.{.{ .swiglu = .{} }},
+        .placements = &.{.before_down},
+        .shapes = &.{
+            .{ .tokens = 17, .topk = 2, .unrouted = true },
+            .{ .tokens = 300, .topk = 1, .unrouted = true },
+        },
+    }, .{});
+}
+
 test "Metal compatibility matrix" {
     const platform = zml.testing.env();
 

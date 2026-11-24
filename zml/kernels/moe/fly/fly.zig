@@ -3,7 +3,8 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const nn = @import("zml/nn");
-const Quantization = @import("zml/quantization").Quantization;
+const quantization = @import("zml/quantization");
+const Quantization = quantization.Quantization;
 
 const zml = @import("zml/core");
 const Tensor = zml.Tensor;
@@ -15,6 +16,8 @@ const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlace
 const Activation = @import("zml/kernels/moe/api").Activation;
 const Options = @import("zml/kernels/moe/api").Options;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const nvfp4OutputScale = @import("zml/kernels/moe/api").nvfp4OutputScale;
+const triton = @import("zml/kernels/moe/triton");
 const fly = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/fused_experts");
@@ -30,27 +33,18 @@ pub fn fusedExperts(
     down_: nn.Linear,
     opts: Options,
 ) Tensor {
-    const expert_map_ = routing_.expertMap();
-    const layout: ProjectionLayout = if (gate_up_.quantizationScheme() == .mxfp4) .row_interleaved_1 else .concatenated;
     const num_tokens = hidden_states.dim(.t);
-    var launch_config = launchConfigForTokens(num_tokens);
-
     const gate_up_scheme = gate_up_.quantizationScheme();
     const down_scheme = down_.quantizationScheme();
-    if (gate_up_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("fly backend doesn't support gate_up nvfp4 quantization scheme", .{}),
-        .fp8_block128 => launch_config.block_size_k = 128,
-        .fp8_block32 => launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
-    };
+    // MXFP8 runs only as decode GEMVs; Triton takes larger batches with the same weight layout.
+    if (gate_up_scheme == .mxfp8 and num_tokens * routing_.ids.dim(.topk) > max_gemv_routes) {
+        return triton.fusedExperts(hidden_states, routing_, gate_up_, down_, opts);
+    }
 
-    var down_launch_config = launchConfigForTokens(num_tokens);
-    if (down_scheme) |scheme| switch (scheme) {
-        .nvfp4 => stdx.debug.panic("fly backend doesn't support down nvfp4 quantization scheme", .{}),
-        .fp8_block128 => down_launch_config.block_size_k = 128,
-        .fp8_block32 => down_launch_config.block_size_k = 32,
-        .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
-    };
+    const expert_map_ = routing_.expertMap();
+    const layout: ProjectionLayout = if (gate_up_scheme == .mxfp4) .row_interleaved_1 else .concatenated;
+    // Fly kernels only read the row block size, which both projections share.
+    const launch_config = launchConfigForTokens(num_tokens);
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = gate_up_.weight.withTags(.{ .expert, .out, .in });
@@ -59,21 +53,21 @@ pub fn fusedExperts(
     const ids = routing_.ids.reshape(.{ .token = num_tokens, .in = routing_.ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "fly backend expected BF16 hidden states, got {}", .{hidden.dtype()});
-    if (gate_up_scheme == .mxfp4) {
-        stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4, got {}", .{gate_up.dtype()});
+    if (gate_up_scheme == .mxfp4 or gate_up_scheme == .nvfp4) {
+        stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4 or nvfp4, got {}", .{gate_up.dtype()});
     } else {
         stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "fly backend expected gate_up data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{gate_up.dtype()});
     }
-    if (down_scheme == .mxfp4) {
-        stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4, got {}", .{down.dtype()});
+    if (down_scheme == .mxfp4 or down_scheme == .nvfp4) {
+        stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "fly backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4 or nvfp4, got {}", .{down.dtype()});
     } else {
         stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "fly backend expected down data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{down.dtype()});
     }
 
     stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "fly backend expected f32 or bf16 routing weights, got {}", .{routing_weights.dtype()});
     stdx.debug.assert(ids.dtype() == .i32, "fly backend expected i32 expert ids, got {}", .{ids.dtype()});
-    const gate_up_k = gate_up.dim(.in) * @as(i64, if (gate_up_scheme == .mxfp4 and gate_up.dtype() != .f4e2m1) 2 else 1);
-    const down_k = down.dim(.mid) * @as(i64, if (down_scheme == .mxfp4 and down.dtype() != .f4e2m1) 2 else 1);
+    const gate_up_k = gate_up.dim(.in) * @as(i64, if (nn.isPackedFp4(gate_up_scheme, gate_up.dtype())) 2 else 1);
+    const down_k = down.dim(.mid) * @as(i64, if (nn.isPackedFp4(down_scheme, down.dtype())) 2 else 1);
     stdx.debug.assert(hidden.dim(.in) == gate_up_k, "fly backend expected hidden width to match gate/up input width, got {} and {}", .{ hidden.dim(.in), gate_up_k });
     const activation_reduction: i64 = switch (opts.activation) {
         .gelu, .relu, .silu => 1,
@@ -95,13 +89,13 @@ pub fn fusedExperts(
     else
         routing.expert_ids;
 
-    const hidden_quant, const input_scale = prepareInput(hidden, gate_up_scheme, gate_up.dtype(), opts.quantize_input);
+    const local_ids = routing_.localIds().reshape(ids.shape());
 
+    const gate_up_operand = prepareOperand(hidden, gate_up_, local_ids, opts, routing);
     const gate_up_out = gemm(.{
-        .input = hidden_quant,
+        .input = gate_up_operand.input,
         .weight = gate_up,
         .bias = gate_up_.bias,
-        .input_scale = input_scale,
         .weight_scale = gate_up_.quantizationScales(),
         .routing = routing,
         .expert_ids = expert_ids,
@@ -111,29 +105,30 @@ pub fn fusedExperts(
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    var activated = opts.activation.applyActivation(gate_up_out, layout);
+    var activated = opts.activation.applyActivation(scaleRoutes(gate_up_out, gate_up_operand.output_scale), layout);
     if (opts.routing_weight_placement == .before_down) {
         const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
         activated = activated.mul(weights.broad(activated.shape()));
     }
-    const activated_quant, const down_input_scale = prepareInput(activated, down_scheme, down.dtype(), opts.quantize_input);
 
+    const down_operand = prepareOperand(activated, down_, local_ids, opts, routing);
     const down_out = gemm(.{
-        .input = activated_quant,
+        .input = down_operand.input,
         .weight = down,
         .bias = down_.bias,
-        .input_scale = down_input_scale,
         .weight_scale = down_.quantizationScales(),
         .routing_weights = if (opts.routing_weight_placement == .after_down) routing_weights else null,
         .routing = routing,
         .expert_ids = expert_ids,
-        .launch_config = down_launch_config,
+        .launch_config = launch_config,
         .quant_scheme = down_scheme,
         .top_k = 1,
         .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
-    const output = down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
+    // Sorted MFMA tiles leave the rows of routes without an expert unwritten.
+    const routed = local_ids.cmp(.GE, Tensor.scalar(0, .i32));
+    const output = scaleRoutes(down_out, down_operand.output_scale).mask(routed, 0).sum(.topk).squeeze(.topk).convert(.bf16);
 
     return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
@@ -173,16 +168,41 @@ pub fn supports(hidden_states: Tensor, routing: LocalRouting, gate_up_: nn.Linea
     return routes > 0 and routes <= @divTrunc(std.math.maxInt(i32), max_width);
 }
 
-pub fn prepareInput(x: Tensor, scheme: ?Quantization.Scheme, _: zml.DataType, _: bool) struct { Tensor, ?Tensor } {
-    std.debug.assert(scheme == .mxfp4);
-    return .{ x.convert(.bf16), null };
+/// What a projection's GEMM reads, and the factor that dequantizes the output of each route.
+const Operand = struct {
+    input: Tensor,
+    output_scale: ?Tensor = null,
+};
+
+/// The operand of `linear` for input `x`, whose routes select the local experts `ids`.
+/// CDNA3 has no FP4 or FP8 MFMA for these formats: quantized activations are rounded
+/// and widened to a format that holds them exactly.
+fn prepareOperand(x: Tensor, linear: nn.Linear, ids: Tensor, opts: Options, routing: Routing) Operand {
+    // Activations are rounded to BF16 like the inputs of BF16 GEMMs.
+    const input = x.convert(.bf16);
+    const scheme = linear.quantizationScheme() orelse return .{ .input = input };
+    switch (scheme) {
+        .nvfp4 => {
+            // Decode GEMVs take the rounded values over their row scale in F16, the others in BF16.
+            const rounded, const row_scale = fly.RoundNvfp4.call(input, opts.nvfp4_input_scale, if (routing.naive_block_assignment) .f16 else .bf16);
+            return .{ .input = rounded, .output_scale = nvfp4OutputScale(row_scale, linear.quantization.?, ids) };
+        },
+        .mxfp8 => return .{ .input = if (opts.quantize_input) fly.RoundMxfp8.call(input) else input },
+        .mxfp4, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => return .{ .input = input },
+    }
+}
+
+/// GEMM outputs {.token, ..., .out} in F32, times the factor of each route.
+fn scaleRoutes(x: Tensor, scale: ?Tensor) Tensor {
+    const result = x.convert(.f32);
+    const factor = scale orelse return result;
+    return result.mul(factor.reshape(result.shape().setDim(-1, 1).withDtype(.f32)).broad(result.shape()));
 }
 
 pub const GemmOptions = struct {
     input: Tensor,
     weight: Tensor,
     bias: ?Tensor = null,
-    input_scale: ?Tensor = null,
     weight_scale: ?Tensor = null,
     routing_weights: ?Tensor = null,
     routing: Routing,
@@ -194,12 +214,21 @@ pub const GemmOptions = struct {
 };
 
 pub fn gemm(opts: GemmOptions) zml.Tensor {
-    stdx.debug.assert(opts.quant_scheme == .mxfp4 and opts.bias == null and opts.routing_weights == null and opts.input_scale == null, "Fly MoE requires MXFP4 weights, BF16 activations and routing weights before the down projection", .{});
-    const weight = if (opts.weight.dtype() == .f4e2m1)
-        opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8)
+    const scheme_supported = opts.quant_scheme == .mxfp4 or opts.quant_scheme == .nvfp4 or
+        (opts.quant_scheme == .mxfp8 and opts.routing.naive_block_assignment);
+    stdx.debug.assert(scheme_supported and opts.bias == null and opts.routing_weights == null, "Fly MoE requires MXFP4 or NVFP4 weights, or MXFP8 weights for decode, BF16 activations and routing weights before the down projection", .{});
+    const weight = switch (opts.weight.dtype()) {
+        .f4e2m1 => opts.weight.reshape(opts.weight.shape().setDim(2, @divExact(opts.weight.dim(2), 2)).append(.{ .nibble = 2 })).bitCast(.u8),
+        .f8e4m3fn => opts.weight.bitCast(.u8),
+        else => opts.weight,
+    };
+    // The kernels read one scale word per 32 weights: NVFP4 pairs its 16-weight E4M3 scales.
+    const bytes = opts.weight_scale.?.bitCast(.u8);
+    const scales = if (opts.quant_scheme == .nvfp4)
+        bytes.reshape(bytes.shape().setDim(2, @divExact(bytes.dim(2), 2)).append(.{ .pair = 2 })).bitCast(.i16)
     else
-        opts.weight;
-    return fly.Mfma.call(opts.input, weight, opts.weight_scale.?.bitCast(.u8), opts.routing.sorted_token_ids, opts.expert_ids, opts.routing.num_tokens_post_padded, opts.output_shape, opts.top_k, opts.routing.naive_block_assignment, opts.launch_config.block_size_m);
+        bytes;
+    return fly.Mfma.call(opts.input, weight, scales, opts.routing.sorted_token_ids, opts.expert_ids, opts.routing.num_tokens_post_padded, opts.output_shape, opts.top_k, opts.routing.naive_block_assignment, opts.launch_config.block_size_m);
 }
 
 pub const Routing = struct {
@@ -211,13 +240,16 @@ pub const Routing = struct {
     naive_block_assignment: bool,
 };
 
+/// Decode batches of at most this many routes use the grouped GEMV; larger ones
+/// share weights across sorted MFMA rows.
+const max_gemv_routes = 256;
+
 pub fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing {
     std.debug.assert(num_experts > 0 and num_experts <= 512);
     std.debug.assert(block_size_m > 0 and block_size_m <= 128 and @mod(block_size_m, 16) == 0);
     const ids = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_assignments = ids.dim(.token) * ids.dim(.topk);
-    // GEMV handles up to six routes; MFMA shares weights across sorted rows.
-    const naive_block_assignment = num_assignments <= 6;
+    const naive_block_assignment = num_assignments <= max_gemv_routes;
     const max_num_tokens_padded = if (naive_block_assignment or num_assignments < num_experts)
         num_assignments * block_size_m
     else
@@ -294,4 +326,82 @@ fn launchConfigForTokens(num_tokens: i64) LaunchConfig {
         }
     }
     return best.config;
+}
+
+test "RoundMxfp8 rounds to E4M3 over power-of-two block scales" {
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+    const Local = struct {
+        fn forward(x: Tensor) [2]Tensor {
+            const blocks = x.convert(.f32).splitAxis(.in, .{ .block = -1, .value = 32 });
+            const scales = quantization.ceilPowerOfTwo(blocks.abs().max(.value).maximum(.scalar(1e-10, .f32)).scale(1.0 / 448.0));
+            const values = blocks.div(scales.broad(blocks.shape())).convert(.f8e4m3fn).convert(.f32);
+            const expected = values.mul(scales.broad(values.shape())).merge(.{ .in = .{ .block, .value } }).convert(.bf16);
+            return .{ expected, fly.RoundMxfp8.call(x) };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // Magnitudes vary by row and within blocks, reaching E4M3 subnormals.
+    const x: Tensor = .init(.{ .t = 13, .in = 2304 }, .bf16);
+    var host = try zml.Slice.alloc(allocator, x.shape());
+    defer host.free(allocator);
+    for (host.items(zml.floats.BFloat16), 0..) |*value, i| {
+        const row: i32 = @intCast(i / 2304);
+        const pattern: f32 = @floatFromInt(@as(i32, @intCast((i * 37 + i / 7) % 97)) - 48);
+        const spread = std.math.pow(f32, 2, @floatFromInt(@mod(@as(i32, @intCast(i)), 13) - 6));
+        value.* = .fromF32(pattern * spread * std.math.pow(f32, 2, @floatFromInt(@mod(row * 5, 11) - 5)));
+    }
+    var input = try zml.Buffer.fromSlice(io, platform, host);
+    defer input.deinit();
+    var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
+    defer exe.deinit();
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    var outputs: [2]zml.Buffer = undefined;
+    runner.run(io, .{input}, .{&outputs}, .{ .wait = true });
+    defer for (&outputs) |*output| output.deinit();
+    try zml.testing.expectClose(io, outputs[0], outputs[1], .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 });
+}
+
+test "RoundNvfp4 matches quantizeNvfp4Rows" {
+    const platform = zml.testing.env();
+    if (platform.target != .rocm) return error.SkipZigTest;
+    const Outputs = struct { bf16: Tensor, f16: Tensor, reference: Tensor };
+    const Local = struct {
+        fn forward(x: Tensor, block_scale: quantization.Nvfp4BlockScale) Outputs {
+            const quantized = quantization.quantizeNvfp4Rows(x.convert(.f32), .in, block_scale);
+            const normalized, const row_scales = fly.RoundNvfp4.call(x, block_scale, .f16);
+            return .{
+                .bf16 = fly.RoundNvfp4.call(x, block_scale, .bf16)[0],
+                .f16 = normalized.convert(.f32).mul(row_scales.?.withTags(.{.t}).broad(normalized.shape().withDtype(.f32))).convert(.bf16),
+                .reference = quantization.dequantizeNvfp4(quantized, .in).convert(.bf16),
+            };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // Rows of 144 blocks leave part of each 256-thread block idle; magnitudes vary by row.
+    const x: Tensor = .init(.{ .t = 13, .in = 2304 }, .bf16);
+    var host = try zml.Slice.alloc(allocator, x.shape());
+    defer host.free(allocator);
+    for (host.items(zml.floats.BFloat16), 0..) |*value, i| {
+        const row: i32 = @intCast(i / 2304);
+        const pattern: f32 = @floatFromInt(@as(i32, @intCast((i * 37 + i / 7) % 97)) - 48);
+        value.* = .fromF32(pattern / 16 * std.math.pow(f32, 2, @floatFromInt(@mod(row * 5, 11) - 5)));
+    }
+    var input = try zml.Buffer.fromSlice(io, platform, host);
+    defer input.deinit();
+    for ([_]quantization.Nvfp4BlockScale{ .six, .four_or_six }) |block_scale| {
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, block_scale }, .{});
+        defer exe.deinit();
+        var runner = try exe.runner(allocator);
+        defer runner.deinit(allocator);
+        var outputs: zml.Bufferized(Outputs) = undefined;
+        runner.run(io, .{input}, .{&outputs}, .{ .wait = true });
+        defer zml.Buffer.deinitAll(Outputs, &outputs);
+        const exact: zml.testing.CompareOpts = .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 };
+        try zml.testing.expectClose(io, outputs.reference, outputs.bf16, exact);
+        try zml.testing.expectClose(io, outputs.reference, outputs.f16, exact);
+    }
 }
