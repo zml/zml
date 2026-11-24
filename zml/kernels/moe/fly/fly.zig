@@ -131,7 +131,9 @@ pub fn fusedExperts(
         .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
-    const output = scaleRoutes(down_out, down_, local_ids, down_row_scales).sum(.topk).squeeze(.topk).convert(.bf16);
+    // Sorted MFMA tiles leave the rows of routes without an expert unwritten.
+    const routed = local_ids.cmp(.GE, Tensor.scalar(0, .i32));
+    const output = scaleRoutes(down_out, down_, local_ids, down_row_scales).mask(routed, 0).sum(.topk).squeeze(.topk).convert(.bf16);
 
     return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
