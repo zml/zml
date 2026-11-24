@@ -1257,7 +1257,8 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
 
     // NOTE(Corentin): This is a hack. We take the first non device memory, hoping that it's host visible,
     // and copy the buffer there to read it on the CPU and print it.
-    const device = pjrt_client.devices(pjrt_api)[device_ordinal];
+    // The FFI device ordinal is process-local, so index the addressable devices.
+    const device = pjrt_client.addressableDevices(pjrt_api)[device_ordinal];
     const addressable_memories = device.addressableMemories(pjrt_api);
     const first_non_device_memory = for (addressable_memories) |memory| {
         if (!std.mem.eql(u8, memory.kind_(pjrt_api), "device")) break memory;
