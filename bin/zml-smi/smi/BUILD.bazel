@@ -1,0 +1,27 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "smi",
+    srcs = [
+        "collector.zig",
+        "double_buffer.zig",
+        "dynlib.zig",
+        "fdinfo.zig",
+        "host/linux.zig",
+        "host/macos.zig",
+        "hwmon.zig",
+        "pci.zig",
+        "procfs.zig",
+        "sandbox.zig",
+        "sysfs.zig",
+    ],
+    import_name = "zml-smi",
+    main = "smi.zig",
+    visibility = ["//bin/zml-smi:__subpackages__"],
+    deps = ["@rules_zig//zig/runfiles"],
+)
+
+zig_test(
+    name = "test",
+    deps = [":smi"],
+)
