@@ -7,11 +7,12 @@ const std = @import("std");
 const metal = @import("zml/core").kernel.metal;
 
 const Builder = metal.Builder;
+const Type = metal.Type;
 const Value = metal.Value;
 
 const simd_width = 32;
-/// Weight values one lane decodes per step.
-const values_per_unit = 8;
+/// Weight values in one 32-bit word of FP4 codes, or in two of FP8 codes.
+const values_per_word = 8;
 
 pub const Format = enum {
     /// E2M1 values, two per byte, low nibble first, and an E4M3 scale per 16.
@@ -19,17 +20,19 @@ pub const Format = enum {
     /// E4M3 values and an E8M0 scale per 32.
     mxfp8,
 
-    fn bytesPerUnit(self: Format) i32 {
+    /// Values sharing one scale.
+    fn group(self: Format) i32 {
         return switch (self) {
-            .nvfp4 => 4,
-            .mxfp8 => 8,
+            .nvfp4 => 16,
+            .mxfp8 => 32,
         };
     }
 
-    fn unitsPerScale(self: Format) i32 {
+    /// The load of `words` words of 8 values.
+    fn unitType(self: Format, words: u32) Type {
         return switch (self) {
-            .nvfp4 => 2,
-            .mxfp8 => 4,
+            .nvfp4 => if (words == 1) .uint else .uint2,
+            .mxfp8 => if (words == 1) .uint2 else .uint4,
         };
     }
 };
@@ -44,6 +47,8 @@ pub const GroupedGemv = struct {
         rows: u32,
         /// Output columns per simdgroup.
         columns: u32,
+        /// Words of 8 values a lane loads per column and step: 1 or 2.
+        words: u32 = 1,
     };
 
     pub const Kernel = metal.Kernel(Cfg, .{
@@ -106,15 +111,18 @@ pub const GroupedGemv = struct {
             scan.close();
         }
 
-        // Weight rows of this simdgroup's columns, as units of 8 values, and their scales.
+        // Weight rows of this simdgroup's columns, as units of 8 or 16 values, and their scales.
         const format = cfg.format;
-        const units = a.k.div(values_per_unit);
+        const W = cfg.words;
+        const unit_values: i32 = @intCast(values_per_word * W);
+        const units = a.k.div(unit_values);
+        const row_bytes = if (format == .nvfp4) a.k.div(2) else a.k;
         var weights: [16]Value = undefined;
         var scales: [16]Value = undefined;
         for (0..C) |c| {
             const row = expert.to(.long).mul(a.n).add(column).add(@as(i32, @intCast(c)));
-            weights[c] = a.w.add(row.mul(units.mul(format.bytesPerUnit()))).to(if (format == .nvfp4) .uint else .uint2);
-            scales[c] = a.scales.add(row.mul(units.div(format.unitsPerScale())));
+            weights[c] = a.w.add(row.mul(row_bytes)).to(format.unitType(W));
+            scales[c] = a.scales.add(row.mul(a.k.div(format.group())));
         }
 
         var pass = b.openFor(start, end.rvalue(), @as(i32, @intCast(R)));
@@ -127,32 +135,37 @@ pub const GroupedGemv = struct {
             var steps = b.openFor(lane, units, simd_width);
             {
                 const unit = steps.iv;
-                var low: [16]Value = undefined;
-                var high: [16]Value = undefined;
+                // Each column's values as float4s, scaled by their decoding factor.
+                var values: [16][4]Value = undefined;
                 var scale: [16]Value = undefined;
                 for (0..C) |c| {
-                    const code = scales[c].load(unit.div(format.unitsPerScale()));
-                    switch (format) {
-                        .nvfp4 => {
-                            low[c], high[c] = decodeE2m1(b, weights[c].load(unit));
-                            scale[c] = decodeE4m3Scale(b, code);
-                        },
-                        .mxfp8 => {
-                            const pair = weights[c].load(unit);
-                            low[c] = decodeE4m3(b, pair.x());
-                            high[c] = decodeE4m3(b, pair.y());
-                            scale[c] = decodeE8m0Scale(b, code);
-                        },
+                    const code = scales[c].load(unit.mul(unit_values).div(format.group()));
+                    const loaded = weights[c].load(unit);
+                    for (0..W) |w| {
+                        switch (format) {
+                            .nvfp4 => {
+                                values[c][2 * w], values[c][2 * w + 1] = decodeE2m1(b, if (W == 1) loaded else loaded.at(@as(i32, @intCast(w))));
+                            },
+                            .mxfp8 => {
+                                values[c][2 * w] = decodeE4m3(b, loaded.at(@as(i32, @intCast(2 * w))));
+                                values[c][2 * w + 1] = decodeE4m3(b, loaded.at(@as(i32, @intCast(2 * w + 1))));
+                            },
+                        }
                     }
+                    scale[c] = switch (format) {
+                        .nvfp4 => decodeE4m3Scale(b, code),
+                        .mxfp8 => decodeE8m0Scale(b, code),
+                    };
                 }
                 for (0..R) |r| {
                     var live_row = b.openIf(b.constant(.int, @as(i32, @intCast(r))).lt(live));
                     {
-                        const xs = a.x.add(first.add(@as(i32, @intCast(r))).to(.long).mul(a.k).add(unit.mul(values_per_unit))).to(.bfloat4);
-                        const x0 = xs.load(0).to(.float4);
-                        const x1 = xs.load(1).to(.float4);
+                        const xs = a.x.add(first.add(@as(i32, @intCast(r))).to(.long).mul(a.k).add(unit.mul(unit_values))).to(.bfloat4);
+                        var x: [4]Value = undefined;
+                        for (0..2 * W) |i| x[i] = xs.load(@as(i32, @intCast(i))).to(.float4);
                         for (0..C) |c| {
-                            const dot = b.dot(low[c], x0).add(b.dot(high[c], x1));
+                            var dot = b.dot(values[c][0], x[0]);
+                            for (1..2 * W) |i| dot = dot.add(b.dot(values[c][i], x[i]));
                             const slot = acc[r * C + c];
                             slot.assign(b.fma(dot, scale[c], slot.rvalue()));
                         }
@@ -237,6 +250,8 @@ pub const GroupedGemv = struct {
 test "moe_grouped_gemv emits verified modules" {
     const allocator = std.testing.allocator;
     inline for (.{ Format.nvfp4, Format.mxfp8 }) |format| {
-        inline for (.{ 1, 8 }) |rows| allocator.free(try GroupedGemv.Kernel.emit(allocator, .{ .format = format, .rows = rows, .columns = 4 }));
+        inline for (.{ 1, 8 }) |rows| inline for (.{ 1, 2 }) |words| {
+            allocator.free(try GroupedGemv.Kernel.emit(allocator, .{ .format = format, .rows = rows, .columns = 4, .words = words }));
+        };
     }
 }

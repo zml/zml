@@ -110,16 +110,18 @@ fn nvfp4Candidate(blocks: Tensor, value_max: f32) struct { values: Tensor, err: 
 }
 
 /// Whether packed NVFP4 experts run the grouped kernel rather than the plugin's. On an M3 Max
-/// the plugin's per-route kernel over sorted routes is faster up to 256 routes and its Steel
-/// GEMM from 2048; in between the grouped kernel wins (1.6x at 512 routes).
+/// the plugin's per-route kernel over sorted routes is as fast up to 64 routes and its Steel
+/// GEMM is faster from 2048; in between the grouped kernel wins (16 tokens over 48 experts:
+/// 0.73 vs 0.86 ms per layer, 64 tokens over 128 experts: 2.4 vs 4.3 ms).
 fn groupedNvfp4(routes: i64) bool {
-    return routes >= 512 and routes <= 1024;
+    return routes >= 128 and routes <= 1024;
 }
 
 /// The projection of routes sorted by expert: each expert's quantized weights are read once
 /// and applied to all its routes.
 fn grouped(x_rows: Tensor, linear: nn.Linear, sorted_ids: Tensor, out_shape: zml.Shape, format: grouped_gemv.Format) Tensor {
-    const cfg: grouped_gemv.GroupedGemv.Cfg = .{ .format = format, .rows = 8, .columns = 4 };
+    // Four routes per pass keep the accumulators in registers; wider loads help from 16 tokens.
+    const cfg: grouped_gemv.GroupedGemv.Cfg = .{ .format = format, .rows = 4, .columns = 4, .words = 2 };
     const n = linear.weight.dim(1);
     const routes = sorted_ids.dim(.r);
     const launch = grouped_gemv.GroupedGemv.launch(cfg, n, routes, 2);
