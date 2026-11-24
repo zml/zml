@@ -388,7 +388,7 @@ pub const Exe = struct {
         }
     }
 
-    pub fn memoryStats(self: *const Exe) pjrt.ApiError!pjrt.CompiledMemoryStats {
+    pub fn memoryStats(self: *const Exe) pjrt.ApiError!pjrt.Executable.CompiledMemoryStats {
         const exe = try self.exe.executable(self.platform.pjrt_api);
         return try exe.getCompiledMemoryStats(self.platform.pjrt_api);
     }
