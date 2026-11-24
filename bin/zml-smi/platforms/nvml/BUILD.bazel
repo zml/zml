@@ -1,22 +1,18 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "nvml",
-    srcs = [
-        "nvml.zig",
-        "process.zig",
-    ],
     import_name = "zml-smi/platforms/nvml",
-    main = "metrics.zig",
+    main = "Nvml.zig",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//bin/zml-smi/collector",
-        "//bin/zml-smi/info",
-        "//bin/zml-smi/utils:double_buffer",
-        "//bin/zml-smi/utils:dynlib",
-    ] + select({
+    visibility = ["//bin/zml-smi:__subpackages__"],
+    deps = ["//bin/zml-smi/smi"] + select({
         "@llvm//platforms/config:linux_x86_64": ["@cuda_nvml_dev_linux_x86_64//:nvml"],
         "@llvm//platforms/config:linux_aarch64": ["@cuda_nvml_dev_linux_sbsa//:nvml"],
     }),
+)
+
+zig_test(
+    name = "test",
+    deps = [":nvml"],
 )
