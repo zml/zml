@@ -67,11 +67,19 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor
     const vc = v_cache.transpose(.{ .page, .k_chunk, .hkv, .hd });
 
     const sliding_window: i32 = if (opts.mask.slidingWindow()) |window| @intCast(window) else -1;
+    const tokens = qh.dim(.b);
+    const heads = qh.dim(.h);
 
     const out = dispatch(qh, kc, vc, parameters.block_table, parameters.seq_lens, parameters.query_start_len, .{
         .is_causal = opts.mask.isCausal(),
         .sliding_window = sliding_window,
         .scale = opts.scale orelse 1.0 / @sqrt(@as(f32, @floatFromInt(q.dim(.hd)))),
+        // Per-head sinks apply to every token.
+        .sinks = if (opts.sink) |sink| (if (sink.rank() == 1)
+            sink.convert(.f32).withTags(.{.h}).broad(.init(.{ .b = tokens, .h = heads }, .f32))
+        else
+            sink.convert(.f32).transpose(.{ .b, .h })) else null,
+        .rel_bias = if (opts.rel_bias) |bias| bias.convert(.bf16).transpose(.{ .b, .h, ._2 }) else null,
     });
 
     // [total_q_tokens, num_heads, head_dim] -> {.b, .hkv, .hg, .hd} (q's order)
@@ -83,6 +91,10 @@ const DispatchOptions = struct {
     /// Below 0 for global attention.
     sliding_window: i32,
     scale: f32,
+    /// `[tokens, heads]` FP32 sink logits.
+    sinks: ?zml.Tensor = null,
+    /// `[tokens, heads, extent]` BF16 logit biases by distance from the query.
+    rel_bias: ?zml.Tensor = null,
 };
 
 /// Launches fa_vec_paged for causal bf16 decode and paged_attention_tiled
@@ -103,6 +115,11 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
     const num_kv_heads: i32 = @intCast(k_cache.dim(2));
     const num_seqs: i32 = @intCast(block_table.dim(0));
     const max_blocks: i32 = @intCast(block_table.dim(1));
+
+    // Kernels read sinks and biases only when their configuration asks for them.
+    const sinks = opts.sinks orelse zml.Tensor.zeroes(.init(.{1}, .f32));
+    const rel_bias = opts.rel_bias orelse zml.Tensor.zeroes(.init(.{1}, .bf16));
+    const bias_extent: i32 = if (opts.rel_bias) |bias| @intCast(bias.dim(2)) else 0;
 
     const vec_decode = opts.is_causal and total_q_tokens == num_seqs and
         (head_dim == 32 or head_dim == 64 or head_dim == 128 or head_dim == 256 or head_dim == 512) and
@@ -125,6 +142,8 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
             .block_tables = block_table,
             .seq_lens = seq_lens,
             .cu_seqlens_q = query_start_len,
+            .sinks = sinks,
+            .rel_bias = rel_bias,
         };
 
         const kv_capacity = max_blocks * block_size;
@@ -144,6 +163,8 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
             .position_stride = num_kv_heads * head_dim,
             .heads = launch.heads,
             .splits = launch.splits,
+            .sinks = opts.sinks != null,
+            .bias_extent = bias_extent,
         };
         const dst = if (launch.splits == 1) q.shape() else zml.Shape.init(.{nrows * (head_dim * launch.splits + 2 * launch.splits)}, .f32);
         const out = paged_attn.FaVecPaged.Kernel.call(inputs, .{ .dst = dst }, .{
@@ -154,8 +175,8 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         }).dst;
         if (launch.splits == 1) return out;
 
-        return paged_attn.FaVecPagedReduce.Kernel.call(.{ .htmp = out, .seq_lens = seq_lens, .cu_seqlens_q = query_start_len }, .{ .dst = q.shape() }, .{
-            .cfg = .{ .splits = launch.splits, .head_dim = head_dim },
+        return paged_attn.FaVecPagedReduce.Kernel.call(.{ .htmp = out, .seq_lens = seq_lens, .cu_seqlens_q = query_start_len, .sinks = sinks }, .{ .dst = q.shape() }, .{
+            .cfg = .{ .splits = launch.splits, .head_dim = head_dim, .sinks = opts.sinks != null },
             .grid = .{ @intCast(nrows), @intCast(@divExact(head_dim, 4 * paged_attn.FaVecPagedReduce.simdgroups)), 1 },
             .threadgroup = .{ 32, paged_attn.FaVecPagedReduce.simdgroups, 1 },
             .constants = .{ .args = .of(args) },
@@ -172,6 +193,8 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         .tile_kv = tile[1],
         .num_threads = tile[2],
         .causal = opts.is_causal,
+        .sinks = opts.sinks != null,
+        .bias_extent = bias_extent,
     };
 
     const total_q_blocks = @divTrunc(total_q_tokens, tile[0]) + num_seqs;
@@ -183,6 +206,8 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         .block_tables = block_table,
         .context_lens = seq_lens,
         .cu_seqlens_q = query_start_len,
+        .sinks = sinks,
+        .rel_bias = rel_bias,
     }, .{ .out = q.shape() }, .{
         .cfg = cfg,
         .grid = .{ @intCast(num_heads), @intCast(total_q_blocks), 1 },
