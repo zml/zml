@@ -1,23 +1,18 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "amdsmi",
-    srcs = [
-        "amdsmi.zig",
-        "process.zig",
-    ],
     import_name = "zml-smi/platforms/amdsmi",
-    main = "metrics.zig",
+    main = "AmdSmi.zig",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["//visibility:public"],
+    visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [
-        "//bin/zml-smi/collector",
-        "//bin/zml-smi/info",
-        "//bin/zml-smi/utils:double_buffer",
-        "//bin/zml-smi/utils:dynlib",
-        "//bin/zml-smi/utils:sandbox",
-        "//bin/zml-smi/utils:sysfs",
-        "//stdx",
+        "//bin/zml-smi/smi",
         "@amdrocm-amdsmi//:amdsmi",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":amdsmi"],
 )
