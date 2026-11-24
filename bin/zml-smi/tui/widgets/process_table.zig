@@ -7,8 +7,7 @@ const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const TitledBorder = @import("titled_border.zig");
 const ColumnLayout = @import("column_layout.zig");
-const pi = @import("zml-smi/info").process_info;
-const ProcessInfo = pi.ProcessInfo;
+const ProcessInfo = @import("zml-smi").ProcessInfo;
 
 const RichText = vxfw.RichText;
 const Segment = vaxis.Cell.Segment;
@@ -24,41 +23,38 @@ scroll_bars: vxfw.ScrollBars = .{
     },
     .draw_horizontal_scrollbar = false,
 },
-merged: std.ArrayList(ProcessInfo) = .empty,
+processes: std.ArrayList(ProcessInfo) = .empty,
 
 pub fn deinit(self: *ProcessTable, allocator: std.mem.Allocator) void {
-    self.merged.deinit(allocator);
+    self.processes.deinit(allocator);
 }
 
-pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16) void {
+pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16, frame: std.mem.Allocator) void {
     self.scroll_bars.scroll_view.children.builder.userdata = self;
-    self.merged.clearRetainingCapacity();
+    self.processes.clearRetainingCapacity();
 
-    for (state.process_lists) |pl| {
-        const pl_items = pl.front().items;
+    const merged = state.collector.processes.lock(state.io);
+    defer state.collector.processes.unlock(state.io);
+    for (merged.rows.items) |entry| {
         if (device_id) |did| {
-            for (pl_items) |entry| {
-                if (entry.device_idx != did) {
-                    continue;
-                }
-                self.merged.append(state.gpa, entry) catch break;
+            if (entry.device_idx != did) {
+                continue;
             }
-        } else {
-            self.merged.appendSlice(state.gpa, pl_items) catch break;
         }
+        var row = entry;
+        row.username = frame.dupe(u8, entry.username) catch "";
+        row.comm = frame.dupe(u8, entry.comm) catch "";
+        self.processes.append(state.gpa, row) catch break;
     }
 
-    // Enrich with host data (uid, username, cpu%, rss, cmdline)
-    state.enricher.enrich(state.io, self.merged.items);
-
     // Sort by dev_mem descending
-    std.sort.insertion(ProcessInfo, self.merged.items, {}, struct {
+    std.sort.insertion(ProcessInfo, self.processes.items, {}, struct {
         fn cmp(_: void, a: ProcessInfo, b: ProcessInfo) bool {
             return (a.dev_mem_kib orelse 0) > (b.dev_mem_kib orelse 0);
         }
     }.cmp);
 
-    const count: u32 = @intCast(self.merged.items.len);
+    const count: u32 = @intCast(self.processes.items.len);
     self.scroll_bars.estimated_content_height = count;
     self.scroll_bars.scroll_view.item_count = count;
 }
@@ -70,7 +66,7 @@ pub fn resetScroll(self: *ProcessTable) void {
 
 pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const w = ctx.max.width orelse 80;
-    const row_count = self.merged.items.len;
+    const row_count = self.processes.items.len;
 
     var header_rt: RichText = .{ .text = &header_segs, .softwrap = false, .overflow = .clip };
     const empty_rt: RichText = .{
@@ -104,10 +100,10 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
 /// Builds only data rows (no header) for the scroll view.
 fn buildRow(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
     const self: *ProcessTable = @ptrCast(@alignCast(@constCast(ptr)));
-    if (idx >= self.merged.items.len) {
+    if (idx >= self.processes.items.len) {
         return null;
     }
-    return .{ .userdata = @ptrCast(&self.merged.items[idx]), .drawFn = drawProcessRow };
+    return .{ .userdata = @ptrCast(&self.processes.items[idx]), .drawFn = drawProcessRow };
 }
 
 // Column format strings — shared between header (comptime) and row (runtime).
