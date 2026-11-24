@@ -361,6 +361,9 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                 try bufferizeInner(allocator, model.?, &bufferized_.*.?);
             }
         },
+        .array => for (model, bufferized_) |src, *dst| {
+            try bufferizeInner(allocator, src, dst);
+        },
         .pointer => |p| {
             switch (p.size) {
                 .slice => {
@@ -383,4 +386,28 @@ pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, 
     var bufferized: Bufferized(ModelType) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
+}
+
+test "bufferize handles arrays" {
+    const Model = struct { layers: [2]Tensor };
+    const model: Model = .{ .layers = .{
+        .init(.{4}, .f32),
+        .init(.{8}, .f32),
+    } };
+    const b = try bufferize(std.testing.allocator, Model, &model);
+    try std.testing.expectEqual(model.layers[0].shape(), b.layers[0].shape());
+    try std.testing.expectEqual(model.layers[1].shape(), b.layers[1].shape());
+}
+
+test "bufferize handles slices" {
+    var layers = [_]Tensor{
+        .init(.{4}, .f32),
+        .init(.{8}, .f32),
+    };
+    const Model = struct { layers: []Tensor };
+    const model: Model = .{ .layers = &layers };
+    const b = try bufferize(std.testing.allocator, Model, &model);
+    defer std.testing.allocator.free(b.layers);
+    try std.testing.expectEqual(2, b.layers.len);
+    try std.testing.expectEqual(model.layers[1].shape(), b.layers[1].shape());
 }
