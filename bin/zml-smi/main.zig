@@ -2,32 +2,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const stdx = @import("stdx");
+const smi = @import("zml-smi");
+const tui = @import("zml-smi/tui");
 
 pub const std_options: std.Options = .{
     .log_scope_levels = &.{
         .{ .scope = .vaxis, .level = .warn },
     },
+    // A /proc file can vanish between its open and its read, which std reports
+    // as an unexpected errno. This particularily happen on intel
+    .unexpected_error_tracing = false,
 };
 
-const Collector = @import("zml-smi/collector").Collector;
-const smi_info = @import("zml-smi/info");
-const HostInfo = smi_info.host_info.HostInfo;
-const platform = if (builtin.os.tag == .macos)
-    @import("zml-smi/platforms/macos")
-else
-    @import("zml-smi/platforms/linux");
-const ProcessEnricher = platform.process.ProcessEnricher;
-const host = platform.metrics;
-const c = @import("c");
-const csv = @import("zml-smi/csv");
-const json = @import("zml-smi/json");
-const api = @import("zml-smi/api");
-const prometheus = @import("zml-smi/prometheus");
-const sysfs = @import("zml-smi/sysfs");
-const smi_tui = @import("zml-smi/tui");
-const tui = smi_tui.top;
-const static_print = smi_tui.print;
-const data = smi_tui.data;
+const log = std.log;
 
 const CliArgs = struct {
     top: bool = false,
@@ -59,18 +46,18 @@ const CliArgs = struct {
     //  \\ --remotes           Add devices from remote hosts (comma-separated URLs)
 };
 
-const device_backends = switch (builtin.os.tag) {
+const platforms = switch (builtin.os.tag) {
     .macos => .{},
     .linux => switch (builtin.cpu.arch) {
         .x86_64 => .{
-            .{ .cuda, @import("zml-smi/platforms/nvml") },
-            .{ .rocm, @import("zml-smi/platforms/amdsmi") },
-            .{ .oneapi, @import("zml-smi/platforms/oneapi") },
-            .{ .neuron, @import("zml-smi/platforms/neuron") },
-            .{ .tpu, @import("zml-smi/platforms/tpu") },
+            @import("zml-smi/platforms/nvml"),
+            @import("zml-smi/platforms/amdsmi"),
+            @import("zml-smi/platforms/oneapi"),
+            @import("zml-smi/platforms/neuron"),
+            @import("zml-smi/platforms/tpu"),
         },
         .aarch64 => .{
-            .{ .cuda, @import("zml-smi/platforms/nvml") },
+            @import("zml-smi/platforms/nvml"),
         },
         else => unreachable,
     },
@@ -82,160 +69,89 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
+    const interval: std.Io.Duration = .fromMilliseconds(args.poll_interval);
 
-    const targets = detect(gpa, io);
-
-    var collector: Collector = .init(arena, gpa, io, .{
-        .poll_interval_ms = args.poll_interval,
-        .poll_only = !args.top and args.prometheus_listen == null and !args.api,
-    });
+    var collector: smi.Collector = .init(arena, gpa, io, .{ .interval = interval });
     defer collector.deinit();
 
-    var host_info: HostInfo = .{ .values = .{ .{}, .{} } };
-    try host.init(&collector, &host_info);
+    inline for (platforms) |Platform| {
+        if (Platform.detect(io)) {
+            const platform = try arena.create(Platform);
 
-    var enricher: ProcessEnricher = try .init(gpa, io);
-    defer enricher.deinit();
-
-    if (args.api) {
-        std.log.info("serving api metrics on port {d}", .{args.api_port});
-    }
-
-    if (args.prometheus_listen) |listen| {
-        std.log.info("serving prometheus metrics on {s}", .{listen});
-    }
-
-    inline for (device_backends) |entry| {
-        const target, const backend = entry;
-        if (targets.contains(target)) {
-            backend.start(&collector) catch |err| {
-                std.log.err("{s} skipped: {s}", .{ @tagName(target), @errorName(err) });
-            };
+            if (Platform.init(arena, gpa, io)) |value| {
+                platform.* = value;
+                try collector.add(&platform.platform);
+            } else |err| log.warn("{s} skipped: {t}", .{ @typeName(Platform), err });
         }
     }
 
-    var api_group: std.Io.Group = .init;
-
     if (args.remotes) |hosts| {
-        try api.addRemotes(&collector, hosts);
+        var it = std.mem.splitScalar(u8, hosts, ',');
+        while (it.next()) |host| {
+            if (smi.http.Client.open(arena, gpa, io, host)) |value| {
+                const remote = try arena.create(smi.http.Client);
+                remote.* = value;
+                collector.add(&remote.platform) catch |err| log.warn("{s} skipped: {t}", .{ host, err });
+            } else |err| log.warn("{s} skipped: {t}", .{ host, err });
+        }
     }
 
-    var state = try data.SystemState.init(.{
-        .devices = collector.device_infos.items,
-        .host = &host_info,
-        .targets = targets,
+    const serving = args.prometheus_listen != null or args.api;
+    if (serving or args.top) {
+        try collector.start();
+    } else {
+        collector.round();
+
+        if (collector.two_readings) {
+            try io.sleep(interval, .awake);
+            collector.round();
+        }
+    }
+
+    if (serving) {
+        var prom_listener = if (args.prometheus_listen) |listen| try (try std.Io.net.IpAddress.parseLiteral(listen)).listen(io, .{ .reuse_address = true }) else null;
+        defer if (prom_listener) |*l| l.deinit(io);
+        var api_listener = if (args.api) try (std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = args.api_port } }).listen(io, .{ .reuse_address = true }) else null;
+        defer if (api_listener) |*l| l.deinit(io);
+
+        var servers: std.Io.Group = .init;
+        defer servers.cancel(io);
+
+        if (prom_listener) |*listener| {
+            log.info("serving prometheus metrics on {s}", .{args.prometheus_listen.?});
+            const server: smi.http.Server = .{ .gpa = gpa, .io = io, .collector = &collector, .format = .prometheus };
+            try servers.concurrent(io, smi.http.Server.serve, .{ server, listener });
+        }
+
+        if (api_listener) |*listener| {
+            log.info("serving api metrics on port {d}", .{args.api_port});
+            const server: smi.http.Server = .{ .gpa = gpa, .io = io, .collector = &collector, .format = .json };
+            try servers.concurrent(io, smi.http.Server.serve, .{ server, listener });
+        }
+
+        try servers.await(io);
+        return;
+    }
+
+    if (args.csv or args.json) {
+        var buffer: [4096]u8 = undefined;
+        var stdout = std.Io.File.stdout().writer(io, &buffer);
+        try if (args.csv) smi.csv.write(&stdout.interface, &collector) else smi.json.write(&stdout.interface, &collector);
+        return stdout.interface.flush();
+    }
+
+    var state: tui.data.SystemState = try .init(.{
+        .collector = &collector,
         .tui_refresh_rate = args.tui_refresh_rate,
-        .process_lists = collector.process_lists.items,
-        .enricher = &enricher,
         .gpa = gpa,
         .arena = arena,
         .io = io,
     });
-    defer state.deinit(arena);
+    defer state.deinit();
 
-    if (args.prometheus_listen) |listen| {
-        try api_group.concurrent(io, prometheus.Server.run, .{ io, listen, collector.device_infos.items, &host_info });
-    }
-
-    if (args.api) {
-        try api_group.concurrent(io, api.Server.run, .{ gpa, io, args.api_port, collector.device_infos.items, collector.process_lists.items, &enricher });
-    }
-
-    if (args.prometheus_listen != null or args.api) {
-        try api_group.await(io);
-    } else if (args.csv) {
-        var csv_buf: [4096]u8 = undefined;
-        var csv_writer = std.Io.File.stdout().writer(io, &csv_buf);
-
-        try csv.write(&csv_writer.interface, collector.device_infos.items);
-        try csv_writer.flush();
-    } else if (args.json) {
-        var procs: std.ArrayList(smi_info.process_info.ProcessInfo) = .empty;
-        defer procs.deinit(gpa);
-        for (collector.process_lists.items) |pl| {
-            try procs.appendSlice(gpa, pl.front().items);
-        }
-        enricher.enrich(io, procs.items);
-
-        var json_buf: [4096]u8 = undefined;
-        var json_writer = std.Io.File.stdout().writer(io, &json_buf);
-
-        try json.write(&json_writer.interface, collector.device_infos.items, procs.items);
-        try json_writer.flush();
-    } else if (args.top) {
-        try tui.run(gpa, io, init.environ_map, &state);
+    if (args.top) {
+        try tui.top.run(gpa, io, init.environ_map, &state);
     } else {
-        try static_print.run(arena, io, init.environ_map, &state);
+        try tui.print.run(arena, io, init.environ_map, &state);
     }
-}
-
-fn detect(allocator: std.mem.Allocator, io: std.Io) smi_info.Targets {
-    if (comptime builtin.os.tag == .macos) {
-        return .{};
-    }
-
-    var targets: smi_info.Targets = .{};
-
-    switch (builtin.os.tag) {
-        .macos => {},
-        .linux => {
-            switch (builtin.cpu.arch) {
-                .x86_64 => {
-                    if (hasDevice(io, "/dev/nvidiactl")) {
-                        targets.insert(.cuda);
-                    }
-
-                    if (hasDevice(io, "/dev/kfd")) {
-                        targets.insert(.rocm);
-                    }
-
-                    if (hasDrmRenderDevice(allocator, io, "0x8086")) {
-                        targets.insert(.oneapi);
-                    }
-
-                    if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) {
-                        targets.insert(.neuron);
-                    }
-
-                    if (hasDevice(io, "/dev/accel0") or hasDevice(io, "/dev/vfio/0")) {
-                        targets.insert(.tpu);
-                    }
-                },
-                .aarch64 => {
-                    if (hasDevice(io, "/dev/nvidiactl")) {
-                        targets.insert(.cuda);
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
-
-    return targets;
-}
-
-fn hasDevice(io: std.Io, path: []const u8) bool {
-    std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
-    return true;
-}
-
-fn hasDrmRenderDevice(allocator: std.mem.Allocator, io: std.Io, comptime pci_vendor_id: []const u8) bool {
-    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return false;
-    defer dir.close(io);
-
-    var it = dir.iterate();
-    while (it.next(io) catch null) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "renderD")) continue;
-
-        var vendor_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const vendor_path = std.fmt.bufPrint(&vendor_path_buf, "/sys/class/drm/{s}/device/vendor", .{entry.name}) catch continue;
-        const vendor = sysfs.readString(allocator, io, vendor_path) catch continue;
-        defer allocator.free(vendor);
-        if (std.mem.eql(u8, std.mem.trim(u8, vendor, &std.ascii.whitespace), pci_vendor_id)) {
-            return true;
-        }
-    }
-
-    return false;
 }

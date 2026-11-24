@@ -4,13 +4,9 @@ load("@bazel_lib//tools/release:hashes.bzl", "hashes")
 load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
-
-# zig libraries
-
-# smi
 
 run_binary(
     name = "libnrt.stripped",
@@ -47,17 +43,13 @@ copy_to_directory(
         "@llvm//platforms/config:linux_x86_64": [
             ":libncfw.stripped",
             ":libnrt.stripped",
-            "//platforms/rocm:zmlxrocm",
             "@amdrocm-amdsmi//:libamd_smi",
             "@amdrocm-sysdeps//:system_libs",
-            "@libzml_rocm//:amdgpu_ids",
         ],
         "@llvm//platforms/config:linux_aarch64": [],
     }),
     include_external_repositories = ["**"],
     replace_prefixes = {
-        "amdgpu.ids": "share/libdrm/amdgpu.ids",
-        "platforms/rocm": "lib",
         "libnrt.so.1": "lib/libnrt.so.1",
         "libncfw.so.2": "lib/libncfw.so.2",
     },
@@ -83,28 +75,16 @@ zig_binary(
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "//bin/zml-smi/api",
-        "//bin/zml-smi/collector",
-        "//bin/zml-smi/csv",
-        "//bin/zml-smi/info",
-        "//bin/zml-smi/json",
-        "//bin/zml-smi/prometheus",
+        "//bin/zml-smi/smi",
         "//bin/zml-smi/tui",
-        "//bin/zml-smi/utils:sysfs",
         "//stdx",
-        "@libvaxis//:vaxis",
-        "@rules_zig//zig/runfiles",
     ] + select({
-        "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],
-        "@platforms//os:linux": ["//bin/zml-smi/platforms/linux"],
-    }) + select({
         "@llvm//platforms/config:linux_x86_64": [
             "//bin/zml-smi/platforms/amdsmi",
             "//bin/zml-smi/platforms/neuron",
             "//bin/zml-smi/platforms/nvml",
             "//bin/zml-smi/platforms/oneapi",
             "//bin/zml-smi/platforms/tpu",
-            "//platforms/neuron:libnrt_headers",
         ],
         "@llvm//platforms/config:linux_aarch64": [
             "//bin/zml-smi/platforms/nvml",
