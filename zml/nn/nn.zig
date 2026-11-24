@@ -10,6 +10,8 @@ const stdx = @import("stdx");
 const zml = @import("zml/core");
 const quantization = @import("zml/quantization");
 
+const metal_matmul = @import("metal_matmul.zig");
+
 const DataType = zml.DataType;
 const mlirx = zml.mlir;
 const ops = zml.ops;
@@ -74,6 +76,14 @@ pub const Linear = struct {
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 };
+
+/// `lhs . rhs` over `axis`, accumulated and returned in FP32, for a 2D weight `rhs`.
+/// On Metal, a few BF16 rows read a BF16 weight once instead of converting it to FP32 first.
+pub fn matmulF32(lhs: Tensor, rhs: Tensor, axis: anytype) Tensor {
+    const tag = Shape.toTag(axis);
+    if (metal_matmul.supports(lhs, rhs, tag)) return metal_matmul.matmul(lhs, rhs, tag);
+    return lhs.convert(.f32).dot(rhs.convert(.f32), tag);
+}
 
 pub fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
     return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
@@ -2405,4 +2415,8 @@ test "softplus" {
             .{},
         );
     }
+}
+
+test {
+    _ = metal_matmul;
 }
