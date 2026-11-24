@@ -32,6 +32,10 @@ pub fn main(init: std.process.Init) !void {
     const forecaster: model.Model = .{
         .representation = .init(store.view().withPrefix("representation")),
         .patcher = .{ .options = shallowPick(&config.value, model.PatchBuilder.Options) },
+        .attn_masking = .{
+            .options = shallowPick(&config.value, model.AttentionMasking.Options),
+            .horizon = 64,
+        },
     };
 
     // Dummy input
