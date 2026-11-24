@@ -10,7 +10,16 @@ zig_binary(
     visibility = ["//visibility:public"],
 )
 
+zig_binary(
+    name = "bench",
+    main = "bench.zig",
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
-    targets = [":sharding"],
+    targets = [
+        ":bench",
+        ":sharding",
+    ],
 )

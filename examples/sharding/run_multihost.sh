@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Runs examples/sharding as one process per host across several CUDA machines.
+# Runs an examples/sharding binary as one process per host across several CUDA machines.
 #
-#   examples/sharding/run_multihost.sh [options] HOST... [-- EXTRA_SHARDING_ARGS...]
+#   examples/sharding/run_multihost.sh [options] HOST... [-- EXTRA_PROGRAM_ARGS...]
 #
 #   examples/sharding/run_multihost.sh 4090 5090
 #   examples/sharding/run_multihost.sh --gpus=1 --coordinator=10.0.0.12:8476 4090 5090 -- --partitioner=gspmd
+#   examples/sharding/run_multihost.sh --bin=bench gb10-1 gb10-2 -- --sizes-mib=64,512
 #
 # HOSTs are ssh aliases. The first one is process 0 and hosts the coordinator.
 # Steps: sync the local tree to every host with `ssync --once`, build in
@@ -19,6 +20,7 @@
 #                       (default: process 0's address as resolved by process 1,
 #                       port 8476)
 #   --port=PORT         coordinator port when it's resolved automatically
+#   --bin=NAME          examples/sharding binary to run: sharding (default) or bench
 #   --env=KEY=VALUE     environment variable for every process (repeatable),
 #                       e.g. --env=NCCL_DEBUG=INFO
 #   --bazel-flag=FLAG   extra flag for bazel build/run (repeatable)
@@ -29,8 +31,11 @@
 # GB10 (DGX Spark): when every host has an NVIDIA GB10 and process 0 has an
 # IPv4 address on its ConnectX-7 port 0 (enp1s0f0np0), the coordinator
 # defaults to that address and NCCL defaults to the ConnectX-7 links
-# (NCCL_SOCKET_IFNAME=enp1s0, NCCL_IB_HCA=rocep1s0). --coordinator and --env
-# override these defaults.
+# (NCCL_SOCKET_IFNAME=enp1s0). Each port is reached through two PCIe Gen5 x4
+# links of ~110 Gb/s each, so when the second link's interface (enP2p1s0f0np0)
+# also has an IPv4 address, NCCL uses the RDMA devices of both links
+# (NCCL_IB_HCA=rocep1s0,roceP2p1s0); otherwise only the first one (rocep1s0).
+# --coordinator and --env override these defaults.
 #
 # Logs go to $TMPDIR/zml-multihost-<namespace>/<host>.log and to the terminal,
 # prefixed with the host.
@@ -48,13 +53,16 @@ env_vars=()
 hosts=()
 extra_args=()
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; }
+bin=sharding
+
+usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while (($#)); do
   case $1 in
     --gpus=*)        gpus=${1#--gpus=} ;;
     --coordinator=*) coordinator=${1#--coordinator=} ;;
     --port=*)        port=${1#--port=} ;;
+    --bin=*)         bin=${1#--bin=} ;;
     --env=*=*)       env_vars+=("${1#--env=}") ;;
     --env=*)         echo "error: --env expects KEY=VALUE (got ${1#--env=})" >&2; exit 2 ;;
     --bazel-flag=*)  bazel_flags+=("${1#--bazel-flag=}") ;;
@@ -155,7 +163,17 @@ if ((all_gb10)); then
     log "GB10 hosts: using the ConnectX-7 links (${hosts[0]} enp1s0f0np0 = $cx7_ip)"
     [[ -z $coordinator ]] && coordinator="$cx7_ip:$port"
     has_env NCCL_SOCKET_IFNAME || env_vars+=(NCCL_SOCKET_IFNAME=enp1s0)
-    has_env NCCL_IB_HCA || env_vars+=(NCCL_IB_HCA=rocep1s0)
+    # Use the second PCIe link only if every host has addressed it.
+    second_link=1
+    for host in "${hosts[@]}"; do
+      ssh -o BatchMode=yes "$host" 'ip -4 -o addr show dev enP2p1s0f0np0 2>/dev/null | grep -q inet' || second_link=0
+    done
+    if ((second_link)); then
+      has_env NCCL_IB_HCA || env_vars+=(NCCL_IB_HCA=rocep1s0,roceP2p1s0)
+    else
+      log "enP2p1s0f0np0 has no IPv4 address on every host; NCCL uses one PCIe link (~110 Gb/s)"
+      has_env NCCL_IB_HCA || env_vars+=(NCCL_IB_HCA=rocep1s0)
+    fi
   else
     log "GB10 hosts, but ${hosts[0]} has no IPv4 address on enp1s0f0np0; using the default network"
   fi
@@ -181,7 +199,7 @@ log "Logs in $log_dir"
 remote_quote() { printf '%q ' "$@"; }
 
 if ((build)); then
-  build_cmd="cd ~/zml && bazel build $(remote_quote "${bazel_flags[@]}") //examples/sharding"
+  build_cmd="cd ~/zml && bazel build $(remote_quote "${bazel_flags[@]}") //examples/sharding:$bin"
   if ((dry_run)); then
     for host in "${hosts[@]}"; do echo "[$host] $build_cmd"; done
   else
@@ -215,7 +233,7 @@ for rank in "${!hosts[@]}"; do
     "--namespace=$namespace"
     ${extra_args[@]+"${extra_args[@]}"}
   )
-  run_cmd="cd ~/zml && env ${env_vars[@]+$(remote_quote "${env_vars[@]}")} bazel run $(remote_quote "${bazel_flags[@]}") //examples/sharding -- $(remote_quote "${args[@]}")"
+  run_cmd="cd ~/zml && env ${env_vars[@]+$(remote_quote "${env_vars[@]}")} bazel run $(remote_quote "${bazel_flags[@]}") //examples/sharding:$bin -- $(remote_quote "${args[@]}")"
   if ((dry_run)); then
     echo "[$host] $run_cmd"
     continue
