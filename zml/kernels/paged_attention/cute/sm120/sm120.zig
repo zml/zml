@@ -14,7 +14,8 @@ test {
 pub fn isAvailable(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
     const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major == 12;
+    // Only sm80-level features (cp.async, ldmatrix, mma.sync), so Hopper runs it too.
+    return cc.major == 9 or cc.major == 12;
 }
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: cute.AttentionOptions) zml.Tensor {
