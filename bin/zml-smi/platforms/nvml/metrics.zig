@@ -6,6 +6,7 @@ const poll_metrics = @import("zml-smi/info").poll_metrics;
 const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 const Collector = @import("zml-smi/collector").Collector;
 const process = @import("process.zig");
+const sysfs = @import("zml-smi/sysfs");
 
 const pcie_every: u8 = 4;
 
@@ -20,6 +21,8 @@ const Ctx = struct {
     slots: []Slot,
     processes: *process.ProcessDoubleBuffer,
     last_seen_ts: []u64,
+    /// Backs the /proc/meminfo reads of unified-memory GPUs; null when there are none.
+    poll_arena: ?*std.heap.ArenaAllocator,
     dev_offset: u16,
     device_count: u32,
     tick: u8 = 0,
@@ -32,9 +35,16 @@ pub fn start(collector: *Collector) !void {
     const count = try nvml.deviceCount();
     const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
+    var poll_arena: ?*std.heap.ArenaAllocator = null;
     var slots: std.ArrayList(Slot) = try .initCapacity(collector.arena, count);
     for (0..count) |i| {
-        const dev = Device.open(nvml, @intCast(i)) catch continue;
+        var dev = Device.open(nvml, @intCast(i)) catch continue;
+        // Unified-memory GPUs (e.g. GB10 / DGX Spark) have no dedicated memory and NVML
+        // reports memory info as not supported: report the system memory they share.
+        if (nvml.memTotal(dev.handle)) |_| {} else |err| if (err == error.error_not_supported) {
+            if (poll_arena == null) poll_arena = try collector.createPollArena();
+            dev.system_memory = .{ .io = collector.io, .arena = poll_arena.? };
+        }
         const initial: GpuInfo = .{
             .name = dev.name(collector.arena) catch null,
             .driver_version = dev.driverVersion(collector.arena) catch null,
@@ -54,6 +64,7 @@ pub fn start(collector: *Collector) !void {
         .slots = slots.items,
         .processes = try collector.createProcessList(),
         .last_seen_ts = last_seen_ts,
+        .poll_arena = poll_arena,
         .dev_offset = dev_offset,
         .device_count = count,
     };
@@ -63,6 +74,7 @@ pub fn start(collector: *Collector) !void {
 fn pollOnce(ctx: *Ctx) void {
     const pcie = ctx.tick % pcie_every == 0;
     ctx.tick +%= 1;
+    if (ctx.poll_arena) |a| _ = a.reset(.retain_capacity);
 
     for (ctx.slots) |slot| {
         pollDevice(slot.info, slot.dev, pcie);
@@ -81,6 +93,8 @@ fn pollDevice(db: *DoubleBuffer(GpuInfo), dev: Device, pcie: bool) void {
 const Device = struct {
     nvml: *const Nvml,
     handle: Nvml.Handle,
+    /// set when the GPU uses system memory (NVML memory info not supported)
+    system_memory: ?SystemMemory = null,
 
     pub fn open(nvml: *const Nvml, index: u32) !Device {
         return .{ .nvml = nvml, .handle = try nvml.handleByIndex(index) };
@@ -162,10 +176,15 @@ const Device = struct {
 
     // Memory
     pub fn memUsed(self: Device) !u64 {
+        if (self.system_memory) |sm| {
+            const total = try sm.memTotal();
+            return total - @min(total, try sm.memAvailable());
+        }
         return self.nvml.memUsed(self.handle);
     }
 
     pub fn memTotal(self: Device) !u64 {
+        if (self.system_memory) |sm| return sm.memTotal();
         return self.nvml.memTotal(self.handle);
     }
 
@@ -192,6 +211,21 @@ const Device = struct {
 
     pub fn pcieLinkWidth(self: Device) !u64 {
         return @intCast(try self.nvml.pcieLinkWidth(self.handle));
+    }
+};
+
+/// System memory as seen by a unified-memory GPU, from /proc/meminfo
+/// (used = MemTotal - MemAvailable, as NVIDIA recommends for DGX Spark).
+const SystemMemory = struct {
+    io: std.Io,
+    arena: *std.heap.ArenaAllocator,
+
+    fn memTotal(self: SystemMemory) !u64 {
+        return 1024 * try sysfs.readFieldInt(self.arena.allocator(), self.io, "/proc/meminfo", "MemTotal");
+    }
+
+    fn memAvailable(self: SystemMemory) !u64 {
+        return 1024 * try sysfs.readFieldInt(self.arena.allocator(), self.io, "/proc/meminfo", "MemAvailable");
     }
 };
 
