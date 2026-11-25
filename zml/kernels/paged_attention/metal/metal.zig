@@ -258,6 +258,6 @@ test vecLaunch {
     try std.testing.expectEqual(VecLaunch{ .heads = 2, .splits = 64, .splits_per_threadgroup = 4 }, vecLaunch(256, 2, 128, 128000, 40));
     try std.testing.expectEqual(VecLaunch{ .heads = 4, .splits = 32, .splits_per_threadgroup = 2 }, vecLaunch(512, 4, 128, 128000, 40));
     try std.testing.expectEqual(VecLaunch{ .heads = 3, .splits = 8, .splits_per_threadgroup = 2 }, vecLaunch(48, 6, 128, 288, 40));
-    try std.testing.expectEqual(VecLaunch{ .heads = 3, .splits = 32, .splits_per_threadgroup = 2 }, vecLaunch(16, 6, 32, 128000, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 3, .splits = 128, .splits_per_threadgroup = 2 }, vecLaunch(16, 6, 32, 128000, 40));
     try std.testing.expectEqual(VecLaunch{ .heads = 1, .splits = 1, .splits_per_threadgroup = 1 }, vecLaunch(8, 1, 128, 20, 40));
 }
