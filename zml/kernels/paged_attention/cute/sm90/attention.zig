@@ -13,7 +13,12 @@ const V = cute.Value;
 
 pub const block_rows: i64 = 128;
 pub const block_keys: i64 = 128;
-pub const thread_count: i64 = 256;
+pub const thread_count: i64 = 384;
+const producer_threads: i64 = 128;
+const consumer_threads: u32 = 256;
+const stages: i64 = 3;
+const producer_registers: u32 = 56;
+const consumer_registers: u32 = 216;
 
 pub const Config = struct {
     head_dim: i64,
@@ -41,10 +46,13 @@ pub const Config = struct {
         return block_rows * c.head_dim * 2;
     }
     fn valueBase(c: Config) i64 {
-        return c.keyBase() + 2 * c.tileBytes();
+        return c.keyBase() + stages * c.tileBytes();
+    }
+    fn barrierBase(c: Config) i64 {
+        return c.valueBase() + stages * c.tileBytes();
     }
     fn sharedBytes(c: Config) i64 {
-        return c.valueBase() + 2 * c.tileBytes();
+        return c.barrierBase() + 8 * (1 + 2 * stages);
     }
 };
 
@@ -95,12 +103,43 @@ const TileContext = struct {
     qlen: V,
     klen: V,
 
+    // Pages hold 16 rows, so the page table is read once per page and shared by K and V instead of once per 16-byte copy.
+    fn loadKeyValue(t: TileContext, comptime head_dim: i64, key_base: V, stage: V) void {
+        const b = t.b;
+        const c = t.c;
+        const chunks = @divExact(head_dim, 8);
+        const rows_per_pass = @divExact(producer_threads, chunks);
+        const passes = @divExact(block_keys, rows_per_pass);
+        const tile_pages = @divExact(block_keys, 16);
+        const chunk = t.tid.rem(chunks);
+        const first_row = t.tid.div(chunks);
+        var pages: [tile_pages]V = undefined;
+        for (&pages, 0..) |*page, index| {
+            const first_key = key_base.add(index * 16);
+            const logical_page = b.select(first_key.lt(t.klen), first_key.div(16), b.constant(.i32, 0));
+            page.* = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
+        }
+        const head_offset = t.head.to(.i64).mul(c.head_dim).add(chunk.mul(8).to(.i64));
+        const slab_offset = chunk.div(8).mul(block_keys * 128);
+        const swizzled = chunk.rem(8).bitXor(first_row.rem(8)).mul(16);
+        const key_destination = t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())).add(slab_offset).add(swizzled);
+        const value_destination = t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())).add(slab_offset).add(swizzled);
+        inline for (0..@as(usize, @intCast(passes))) |pass| {
+            const row = first_row.add(pass * rows_per_pass);
+            const valid = key_base.add(row).lt(t.klen);
+            const page = pages[(pass * @as(usize, @intCast(rows_per_pass))) / 16];
+            const element = page.to(.i64).mul(16 * c.kv_heads * c.head_dim).add(row.rem(16).to(.i64).mul(c.kv_heads * c.head_dim)).add(head_offset);
+            b.cpAsync16(key_destination.add(row.mul(128)), t.k.add(element.mul(2)), valid);
+            b.cpAsync16(value_destination.add(row.mul(128)), t.v.add(element.mul(2)), valid);
+        }
+    }
+
     fn loadRows(t: TileContext, source: V, key_base: V, destination: V, comptime is_query: bool) void {
         const b = t.b;
         const c = t.c;
         const chunks = @divExact(c.head_dim, 8);
         const row_count = if (is_query) block_rows else block_keys;
-        var copy = b.openFor(t.tid, row_count * chunks, thread_count, .{});
+        var copy = b.openFor(t.tid, row_count * chunks, producer_threads, .{});
         {
             const row = copy.iv.div(chunks);
             const chunk = copy.iv.rem(chunks);
@@ -125,6 +164,14 @@ const TileContext = struct {
     }
 };
 
+fn fullBarrier(t: TileContext, stage: V) V {
+    return t.shared.add(t.c.barrierBase() + 8).add(stage.mul(8));
+}
+
+fn emptyBarrier(t: TileContext, stage: V) V {
+    return t.shared.add(t.c.barrierBase() + 8 + 8 * stages).add(stage.mul(8));
+}
+
 fn rowOf(index: usize) usize {
     return (index % 4) / 2;
 }
@@ -137,6 +184,184 @@ fn quadMax(b: *B, value: V) V {
 fn quadSum(b: *B, value: V) V {
     const far = value.add(b.shuffleXor(value, 2));
     return far.add(b.shuffleXor(far, 1));
+}
+
+fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
+    return struct {
+        const Self = @This();
+        const accumulator_count = d / 2;
+        const score_count = block_keys / 2;
+
+        b: *B,
+        c: Config,
+        t: TileContext,
+        query_descriptor: ptx.MatrixDescriptor,
+        first_row: V,
+        row_in_tile: V,
+        column0: V,
+        lo: V,
+        scale_log2: V,
+        zero: V,
+        neg_inf: V,
+        release_leader: V,
+        turn_barrier: V,
+        next_turn_barrier: V,
+
+        const SoftmaxState = struct { maximum: [2]V, sum: [2]V, scale: [2]V };
+
+        fn stageOf(self: Self, block: V) V {
+            return block.sub(self.lo).rem(stages);
+        }
+
+        fn waitFull(self: Self, block: V) void {
+            const step = block.sub(self.lo);
+            self.b.mbarrierWait(fullBarrier(self.t, self.stageOf(block)), step.div(stages).bitAnd(1), .{});
+            ptx.asyncProxyFence(self.b);
+        }
+
+        // Warpgroups issue their wgmma batches in turn so one's softmax runs while the other's GEMMs use the tensor cores.
+        fn waitTurn(self: Self) void {
+            ptx.namedBarrierSync(self.b, self.turn_barrier, consumer_threads);
+        }
+
+        fn passTurn(self: Self) void {
+            ptx.namedBarrierArrive(self.b, self.next_turn_barrier, consumer_threads);
+        }
+
+        fn release(self: Self, block: V) void {
+            var leader = self.b.openIf(self.release_leader);
+            {
+                builder.mbarrierArrive(self.b, emptyBarrier(self.t, self.stageOf(block)));
+                leader.close();
+            }
+        }
+
+        // S = Q K^T of one block, issued without waiting.
+        fn issueScores(self: Self, scores: *[score_count]V, block: V) void {
+            const b = self.b;
+            const key_descriptor = ptx.matrixDescriptor(b, self.t.shared.add(self.c.keyBase()).add(self.stageOf(block).mul(self.c.tileBytes())), 16, 1024);
+            ptx.fenceOperands(b, .f32, scores);
+            ptx.wgmmaFence(b);
+            inline for (0..d / 16) |k_step| {
+                const slab: i32 = @intCast(k_step / 4);
+                const within_slab: i32 = @intCast((k_step % 4) * 32);
+                const query_offset: i32 = (slab * @as(i32, block_rows) * 128 + within_slab) >> 4;
+                const key_offset: i32 = (slab * @as(i32, block_keys) * 128 + within_slab) >> 4;
+                ptx.wgmmaSharedShared(b, dt, block_keys, scores, self.query_descriptor.advance(query_offset), key_descriptor.advance(key_offset), k_step > 0);
+            }
+            ptx.wgmmaCommit(b);
+        }
+
+        // O += P V of one block with P in registers, issued without waiting.
+        fn issueValues(self: Self, output: *[accumulator_count]V, words: *[score_count / 2]V, block: V) void {
+            const b = self.b;
+            const value_descriptor = ptx.matrixDescriptor(b, self.t.shared.add(self.c.valueBase()).add(self.stageOf(block).mul(self.c.tileBytes())), block_keys * 128, 1024);
+            ptx.fenceOperands(b, .f32, output);
+            ptx.fenceOperands(b, .i32, words);
+            ptx.wgmmaFence(b);
+            inline for (0..block_keys / 16) |k_step| {
+                const value_offset: i32 = @intCast((k_step * 16 * 128) >> 4);
+                ptx.wgmmaRegistersShared(b, dt, d, output, words[4 * k_step ..][0..4].*, value_descriptor.advance(value_offset));
+            }
+            ptx.wgmmaCommit(b);
+        }
+
+        fn rescale(self: Self, output: *[accumulator_count]V, scale: [2]V) void {
+            _ = self;
+            for (output, 0..) |*value, index| {
+                value.* = value.*.mul(scale[rowOf(index)]);
+            }
+        }
+
+        fn packProbabilities(self: Self, scores: *const [score_count]V) [score_count / 2]V {
+            var words: [score_count / 2]V = undefined;
+            for (&words, 0..) |*word, index| {
+                word.* = ptx.packHalves(self.b, dt, scores[2 * index], scores[2 * index + 1]);
+            }
+            return words;
+        }
+
+        // Masks the scores of `block`, folds them into the running maximum and sum, and replaces them by probabilities.
+        fn softmax(self: Self, block: V, scores: *[score_count]V, previous_maximum: [2]V, previous_sum: [2]V) SoftmaxState {
+            const b = self.b;
+            const unmasked = ptx.packVector(b, scores);
+            var masked = b.openIfElse(self.blockNeedsMask(block), .{unmasked.type_()});
+            {
+                self.maskScores(block, scores);
+                masked.yieldThen(.{ptx.packVector(b, scores)});
+            }
+            {
+                masked.yieldElse(.{unmasked});
+            }
+            scores.* = ptx.unpackVector(b, score_count, masked.results[0], .f32);
+            var thread_max: [2]V = .{ self.neg_inf, self.neg_inf };
+            for (scores, 0..) |score, index| {
+                thread_max[rowOf(index)] = b.fmax(thread_max[rowOf(index)], score, .{ .ftz = true });
+            }
+            var state: SoftmaxState = undefined;
+            var offset: [2]V = undefined;
+            for (0..2) |h| {
+                const maximum = b.fmax(quadMax(b, thread_max[h]), previous_maximum[h], .{ .ftz = true });
+                const finite = b.select(maximum.eq(self.neg_inf), self.zero, maximum);
+                state.scale[h] = b.exp2Approx(previous_maximum[h].sub(finite).mul(self.scale_log2));
+                offset[h] = finite.mul(self.scale_log2).neg();
+                state.maximum[h] = maximum;
+                state.sum[h] = previous_sum[h].mul(state.scale[h]);
+            }
+            for (scores, 0..) |*score, index| {
+                score.* = b.exp2Approx(b.fma(score.*, self.scale_log2, offset[rowOf(index)]));
+                state.sum[rowOf(index)] = state.sum[rowOf(index)].add(score.*);
+            }
+            return state;
+        }
+
+        // True when some score of the CTA's rows and this block falls outside the visible keys, so interior blocks skip the masking.
+        fn blockNeedsMask(self: Self, block: V) V {
+            const c = self.c;
+            const t = self.t;
+            const first_position = t.klen.sub(t.qlen).add(self.first_row.div(c.group));
+            const last_position = t.klen.sub(t.qlen).add(self.first_row.add(block_rows - 1).div(c.group));
+            var last_visible = t.klen.sub(1);
+            if (c.causal) {
+                last_visible = last_visible.minimum(first_position);
+            }
+            const block_start = block.mul(block_keys);
+            var needs_mask = self.first_row.add(block_rows).gt(t.qlen.mul(c.group)).bitOr(block_start.add(block_keys - 1).gt(last_visible));
+            if (c.window > 0) {
+                needs_mask = needs_mask.bitOr(block_start.lt(last_position.sub(c.window - 1)));
+            }
+            return needs_mask;
+        }
+
+        // A column offset (relative to this thread's first key) is visible when lower <= offset <= upper, one compare per bound.
+        fn maskScores(self: Self, block: V, scores: *[score_count]V) void {
+            const b = self.b;
+            const c = self.c;
+            const t = self.t;
+            var upper: [2]V = undefined;
+            var lower: [2]V = undefined;
+            const thread_key = block.mul(block_keys).add(self.column0);
+            for (0..2) |h| {
+                const row = self.first_row.add(self.row_in_tile).add(h * 8);
+                const position = t.klen.sub(t.qlen).add(row.div(c.group));
+                var last_key = t.klen.sub(1);
+                if (c.causal) {
+                    last_key = last_key.minimum(position);
+                }
+                upper[h] = b.select(row.lt(t.qlen.mul(c.group)), last_key.sub(thread_key), b.constant(.i32, -1));
+                lower[h] = position.sub(c.window - 1).sub(thread_key);
+            }
+            for (scores, 0..) |*score, index| {
+                const h = rowOf(index);
+                const column_offset: i32 = @intCast((index / 4) * 8 + index % 2);
+                var valid = upper[h].ge(column_offset);
+                if (c.window > 0) {
+                    valid = valid.bitAnd(lower[h].le(column_offset));
+                }
+                score.* = b.select(valid, score.*, self.neg_inf);
+            }
+        }
+    };
 }
 
 fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.FinishError!void {
@@ -191,7 +416,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
         const lo = first_tile.add(tiles.mul(split).div(c.splits));
         const hi = first_tile.add(tiles.mul(split.add(1)).div(c.splits));
 
-        const warpgroup = tid.div(128);
+        const warpgroup = tid.div(128).sub(1);
         const lane = tid.rem(32);
         const row_in_tile = warpgroup.mul(64).add(tid.rem(128).div(32).mul(16)).add(lane.div(4));
         const column0 = lane.rem(4).mul(2);
@@ -199,114 +424,143 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
         const neg_inf = b.constant(.f32, -std.math.inf(f32));
         const scale_log2 = b.constant(.f32, c.scale * std.math.log2e);
 
-        t.loadRows(t.q, b.constant(.i32, 0), t.shared, true);
-        t.loadRows(t.k, lo.mul(block_keys), t.shared.add(c.keyBase()), false);
-        t.loadRows(t.v, lo.mul(block_keys), t.shared.add(c.valueBase()), false);
-
-        const query_descriptor = ptx.matrixDescriptor(b, t.shared.add(warpgroup.mul(64 * 128)), 16, 1024);
-
-        var initial: [5]V = undefined;
-        const zero_output: [accumulator_count]V = @splat(zero);
-        initial[0] = ptx.packVector(b, &zero_output);
-        initial[1] = neg_inf;
-        initial[2] = neg_inf;
-        initial[3] = zero;
-        initial[4] = zero;
-        var loop = b.openFor(lo, hi, 1, initial);
+        const query_barrier = t.shared.add(c.barrierBase());
+        var initializer = b.openIf(tid.eq(0));
         {
-            b.cpAsyncWaitAll();
-            ptx.asyncProxyFence(b);
-            b.syncThreads();
-            const stage = loop.iv.sub(lo).bitAnd(1);
-            const next_stage = stage.bitXor(1);
-            var has_next = b.openIf(loop.iv.add(1).lt(hi));
+            b.mbarrierInit(query_barrier, producer_threads);
+            inline for (0..stages) |stage_index| {
+                b.mbarrierInit(fullBarrier(t, b.constant(.i32, stage_index)), producer_threads);
+                b.mbarrierInit(emptyBarrier(t, b.constant(.i32, stage_index)), 2);
+            }
+            b.fenceMbarrierInit();
+            initializer.close();
+        }
+        b.syncThreads();
+
+        var producer = b.openIf(tid.lt(producer_threads));
+        {
+            b.setMaxRegisterDecrease(producer_registers);
+            t.loadRows(t.q, b.constant(.i32, 0), t.shared, true);
+            b.cpAsyncMbarrierArrive(query_barrier, true);
+            var loads = b.openFor(lo, hi, 1, .{});
             {
-                const next_keys = loop.iv.add(1).mul(block_keys);
-                t.loadRows(t.k, next_keys, t.shared.add(c.keyBase()).add(next_stage.mul(c.tileBytes())), false);
-                t.loadRows(t.v, next_keys, t.shared.add(c.valueBase()).add(next_stage.mul(c.tileBytes())), false);
-                has_next.close();
+                const step = loads.iv.sub(lo);
+                const stage = step.rem(stages);
+                b.mbarrierWait(emptyBarrier(t, stage), step.div(stages).bitAnd(1).bitXor(1), .{});
+                if (c.page_size == 16) {
+                    t.loadKeyValue(d, loads.iv.mul(block_keys), stage);
+                } else {
+                    t.loadRows(t.k, loads.iv.mul(block_keys), t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())), false);
+                    t.loadRows(t.v, loads.iv.mul(block_keys), t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())), false);
+                }
+                b.cpAsyncMbarrierArrive(fullBarrier(t, stage), true);
+                loads.close();
             }
-
-            var output = ptx.unpackVector(b, accumulator_count, loop.carried[0], .f32);
-            var scores: [score_count]V = @splat(zero);
-            const key_descriptor = ptx.matrixDescriptor(b, t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())), 16, 1024);
-            ptx.fenceOperands(b, .f32, &scores);
-            ptx.wgmmaFence(b);
-            inline for (0..d / 16) |k_step| {
-                const slab: i32 = @intCast(k_step / 4);
-                const within_slab: i32 = @intCast((k_step % 4) * 32);
-                const query_offset: i32 = (slab * @as(i32, block_rows) * 128 + within_slab) >> 4;
-                const key_offset: i32 = (slab * @as(i32, block_keys) * 128 + within_slab) >> 4;
-                ptx.wgmmaSharedShared(b, dt, block_keys, &scores, query_descriptor.advance(query_offset), key_descriptor.advance(key_offset), k_step > 0);
-            }
-            ptx.wgmmaCommit(b);
-            ptx.wgmmaWait(b, 0);
-            ptx.fenceOperands(b, .f32, &scores);
-
-            const key_base = loop.iv.mul(block_keys);
-            var row_valid: [2]V = undefined;
-            var row_position: [2]V = undefined;
-            for (0..2) |h| {
-                const row = first_row.add(row_in_tile).add(h * 8);
-                row_valid[h] = row.lt(qlen.mul(c.group));
-                row_position[h] = t.klen.sub(qlen).add(row.div(c.group));
-            }
-            var thread_max: [2]V = .{ neg_inf, neg_inf };
-            for (&scores, 0..) |*score, index| {
-                const h = rowOf(index);
-                const key = key_base.add((index / 4) * 8).add(column0).add(index % 2);
-                var valid = row_valid[h].bitAnd(key.lt(t.klen));
-                if (c.causal) valid = valid.bitAnd(key.le(row_position[h]));
-                if (c.window > 0) valid = valid.bitAnd(key.gt(row_position[h].sub(c.window)));
-                score.* = b.select(valid, score.*, neg_inf);
-                thread_max[h] = b.fmax(thread_max[h], score.*, .{ .ftz = true });
-            }
-            var next: [5]V = undefined;
-            var scale: [2]V = undefined;
-            var offset: [2]V = undefined;
-            for (0..2) |h| {
-                const previous = loop.carried[1 + h];
-                const maximum = b.fmax(quadMax(b, thread_max[h]), previous, .{ .ftz = true });
-                const finite = b.select(maximum.eq(neg_inf), zero, maximum);
-                scale[h] = b.exp2Approx(previous.sub(finite).mul(scale_log2));
-                offset[h] = finite.mul(scale_log2).neg();
-                next[1 + h] = maximum;
-                next[3 + h] = loop.carried[3 + h].mul(scale[h]);
-            }
-            for (&output, 0..) |*value, index| {
-                value.* = value.*.mul(scale[rowOf(index)]);
-            }
-            var words: [score_count / 2]V = undefined;
-            for (&scores, 0..) |*score, index| {
-                score.* = b.exp2Approx(b.fma(score.*, scale_log2, offset[rowOf(index)]));
-                next[3 + rowOf(index)] = next[3 + rowOf(index)].add(score.*);
-            }
-            for (&words, 0..) |*word, index| {
-                word.* = ptx.packHalves(b, dt, scores[2 * index], scores[2 * index + 1]);
-            }
-
-            const value_descriptor = ptx.matrixDescriptor(b, t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())), block_keys * 128, 1024);
-            ptx.fenceOperands(b, .f32, &output);
-            ptx.fenceOperands(b, .i32, &words);
-            ptx.wgmmaFence(b);
-            inline for (0..block_keys / 16) |k_step| {
-                const value_offset: i32 = @intCast((k_step * 16 * 128) >> 4);
-                ptx.wgmmaRegistersShared(b, dt, d, &output, words[4 * k_step ..][0..4].*, value_descriptor.advance(value_offset));
-            }
-            ptx.wgmmaCommit(b);
-            ptx.wgmmaWait(b, 0);
-            ptx.fenceOperands(b, .f32, &output);
-            next[0] = ptx.packVector(b, &output);
-            loop.yield(next);
+            producer.close();
         }
 
-        const final_output = ptx.unpackVector(b, accumulator_count, loop.results[0], .f32);
+        var consumer = b.openIf(tid.ge(producer_threads));
+        {
+        b.setMaxRegisterIncrease(consumer_registers);
+        const query_descriptor = ptx.matrixDescriptor(b, t.shared.add(warpgroup.mul(64 * 128)), 16, 1024);
+        b.mbarrierWait(query_barrier, b.constant(.i32, 0), .{});
+        ptx.asyncProxyFence(b);
+
+        const mainloop: Mainloop(d, dt) = .{
+            .b = b,
+            .c = c,
+            .t = t,
+            .query_descriptor = query_descriptor,
+            .first_row = first_row,
+            .row_in_tile = row_in_tile,
+            .column0 = column0,
+            .lo = lo,
+            .scale_log2 = scale_log2,
+            .zero = zero,
+            .neg_inf = neg_inf,
+            .release_leader = tid.rem(128).eq(0),
+            .turn_barrier = warpgroup.add(1),
+            .next_turn_barrier = b.constant(.i32, 2).sub(warpgroup),
+        };
+        const zero_output: [accumulator_count]V = @splat(zero);
+        const zero_packed = ptx.packVector(b, &zero_output);
+        const has_rows = first_row.add(warpgroup.mul(64)).lt(qlen.mul(c.group));
+        var nonempty = b.openIfElse(hi.gt(lo).bitAnd(has_rows), .{ zero_packed.type_(), zero.type_(), zero.type_(), zero.type_(), zero.type_() });
+        {
+            var scores: [score_count]V = @splat(zero);
+            var bootstrap = b.openIf(warpgroup.eq(1));
+            {
+                ptx.namedBarrierArrive(b, b.constant(.i32, 1), consumer_threads);
+                bootstrap.close();
+            }
+            mainloop.waitFull(lo);
+            mainloop.waitTurn();
+            mainloop.issueScores(&scores, lo);
+            mainloop.passTurn();
+            ptx.wgmmaWait(b, 0);
+            ptx.fenceOperands(b, .f32, &scores);
+            const first = mainloop.softmax(lo, &scores, .{ neg_inf, neg_inf }, .{ zero, zero });
+            var first_words = mainloop.packProbabilities(&scores);
+            const carried: [8]V = .{ zero_packed, ptx.packVector(b, &first_words), first.maximum[0], first.maximum[1], first.sum[0], first.sum[1], first.scale[0], first.scale[1] };
+            var loop = b.openFor(lo.add(1), hi, 1, carried);
+            {
+                const block = loop.iv;
+                var output = ptx.unpackVector(b, accumulator_count, loop.carried[0], .f32);
+                var previous_words = ptx.unpackVector(b, score_count / 2, loop.carried[1], .i32);
+                var block_scores: [score_count]V = @splat(zero);
+                mainloop.waitFull(block);
+                mainloop.waitTurn();
+                mainloop.issueScores(&block_scores, block);
+                mainloop.rescale(&output, loop.carried[6..8].*);
+                mainloop.issueValues(&output, &previous_words, block.sub(1));
+                mainloop.passTurn();
+                ptx.wgmmaWait(b, 1);
+                ptx.fenceOperands(b, .f32, &block_scores);
+                const state = mainloop.softmax(block, &block_scores, loop.carried[2..4].*, loop.carried[4..6].*);
+                ptx.wgmmaWait(b, 0);
+                ptx.fenceOperands(b, .f32, &output);
+                mainloop.release(block.sub(1));
+                var words = mainloop.packProbabilities(&block_scores);
+                loop.yield(.{ ptx.packVector(b, &output), ptx.packVector(b, &words), state.maximum[0], state.maximum[1], state.sum[0], state.sum[1], state.scale[0], state.scale[1] });
+            }
+            var output = ptx.unpackVector(b, accumulator_count, loop.results[0], .f32);
+            var last_words = ptx.unpackVector(b, score_count / 2, loop.results[1], .i32);
+            mainloop.rescale(&output, loop.results[6..8].*);
+            mainloop.issueValues(&output, &last_words, hi.sub(1));
+            ptx.wgmmaWait(b, 0);
+            ptx.fenceOperands(b, .f32, &output);
+            mainloop.release(hi.sub(1));
+            nonempty.yieldThen(.{ ptx.packVector(b, &output), loop.results[2], loop.results[3], loop.results[4], loop.results[5] });
+        }
+        {
+            // A warpgroup without valid rows still plays its part in the stage and turn handshakes so the other warpgroup's protocol stays whole.
+            var drain_needed = b.openIf(hi.gt(lo));
+            {
+                var bootstrap = b.openIf(warpgroup.eq(1));
+                {
+                    ptx.namedBarrierArrive(b, b.constant(.i32, 1), consumer_threads);
+                    bootstrap.close();
+                }
+                var drain = b.openFor(lo, hi, 1, .{});
+                {
+                    mainloop.waitFull(drain.iv);
+                    mainloop.waitTurn();
+                    mainloop.passTurn();
+                    mainloop.release(drain.iv);
+                    drain.close();
+                }
+                drain_needed.close();
+            }
+            nonempty.yieldElse(.{ zero_packed, neg_inf, neg_inf, zero, zero });
+        }
+
+        const final_output = ptx.unpackVector(b, accumulator_count, nonempty.results[0], .f32);
         for (0..2) |h| {
             const row = first_row.add(row_in_tile).add(h * 8);
             var valid = b.openIf(row.lt(qlen.mul(c.group)));
             {
-                const m = loop.results[1 + h].mul(scale_log2);
-                const l = quadSum(b, loop.results[3 + h]);
+                const m = nonempty.results[1 + h].mul(scale_log2);
+                const l = quadSum(b, nonempty.results[3 + h]);
                 var norm = b.select(l.gt(0), b.rcpApprox(l), zero);
                 if (c.splits == 1 and c.sink) {
                     const sink = loadI32(b, sink_pointer, t.head.mul(c.group).add(row.rem(c.group))).bitCast(.f32).mul(std.math.log2e);
@@ -341,6 +595,8 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
                 }
                 valid.close();
             }
+        }
+        consumer.close();
         }
         active.close();
     }
