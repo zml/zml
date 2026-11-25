@@ -26,6 +26,15 @@ pub fn supports(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, opts: cute
     return parameters.options_.is_prefill and opts.mask != .indices and (head_dim == 64 or head_dim == 128) and key_range >= minimum_key_range;
 }
 
+// A grid that already fits in one wave gains nothing from splitting: it only adds a second wave, fp32 partials and the merge kernel.
+fn splitCount(multiprocessors: i64, work: i64, grid_ctas: i64, bound: i64) i64 {
+    if (grid_ctas <= multiprocessors) {
+        return 1;
+    }
+
+    return @max(1, @min(32, @min(@divTrunc(multiprocessors * 2 + work - 1, work), @divTrunc(bound + kernel.block_keys - 1, kernel.block_keys))));
+}
+
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: cute.AttentionOptions) zml.Tensor {
     const q_ = q.transpose(.{ .b, .hkv, .hg, .hd });
     const k_ = k.transpose(.{ .page, .k_chunk, .hkv, .hd });
@@ -50,7 +59,8 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     const query_tiles = c.batch + @divTrunc(c.tokens * c.group + kernel.block_rows - 1, kernel.block_rows);
     const work = query_tiles * c.kv_heads;
     const bound = if (c.window > 0) @min(c.window, c.pages_per_seq * c.page_size) else c.pages_per_seq * c.page_size;
-    c.splits = @max(1, @min(32, @min(@divTrunc(@as(i64, @intCast(cute.multiprocessorCount(zml.Compiler.current().platform))) * 2 + work - 1, work), @divTrunc(bound + kernel.block_keys - 1, kernel.block_keys))));
+    const multiprocessors: i64 = @intCast(cute.multiprocessorCount(zml.Compiler.current().platform));
+    c.splits = splitCount(multiprocessors, work, c.batch * c.queryTiles() * c.kv_heads, bound);
     const sink = if (opts.sink) |s| s.convert(.f32).reshape(.{c.kv_heads * c.group}) else zml.Tensor.zeroes(.init(.{c.kv_heads * c.group}, .f32));
     const out = kernel.Kernel.call(.{
         .q = q_,
