@@ -56,6 +56,7 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
         .window = opts.mask.slidingWindow() orelse 0,
         .scale = opts.scale orelse 1 / @sqrt(@as(f32, @floatFromInt(q_.dim(.hd)))),
         .sink = opts.sink != null,
+        .separate_v = q_.dim(.hd) <= 256,
     };
     // Mixed batches also contain single-token rows. Partition their KV
     // range so one long decode cannot hold up all the prefill CTAs.
