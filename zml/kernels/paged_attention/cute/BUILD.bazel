@@ -5,12 +5,10 @@ package(default_visibility = ["//zml:__pkg__"])
 zig_library(
     name = "cute",
     srcs = [
+        "Merge.zig",
         "attention.zig",
         "common.zig",
-        "//zml/kernels/paged_attention/cute/sm10x",
-        "//zml/kernels/paged_attention/cute/sm120",
-        "//zml/kernels/paged_attention/cute/sm90",
-    ],
+    ] + glob(["sm*/*.zig"]),
     import_name = "zml/kernels/paged_attention/cute",
     main = "cute.zig",
     tags = ["manual"],

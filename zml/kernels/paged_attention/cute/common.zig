@@ -1,7 +1,9 @@
 //! Pieces of the CuTe paged attention kernels that every architecture computes the same way.
 const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("zml/core");
+const host = @import("cute.zig");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const V = cute.Value;
@@ -128,4 +130,53 @@ pub fn rowNormalizer(b: *B, c: anytype, sink_pointer: V, head: V, row: V, maximu
     }
 
     return norm;
+}
+
+pub fn multiprocessorCount() i64 {
+    return @intCast(host.multiprocessorCount(zml.Compiler.current().platform));
+}
+
+pub fn pagedOperands(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+    const q_ = q.transpose(.{ .b, .hkv, .hg, .hd });
+    const k_ = k.transpose(.{ .page, .k_chunk, .hkv, .hd });
+    const v_ = v.transpose(.{ .page, .k_chunk, .hkv, .hd });
+    stdx.debug.assert(q_.dim(.hkv) == k_.dim(.hkv) and k_.shape().eql(v_.shape()) and k_.dim(.hd) == q_.dim(.hd) and q_.dim(.hg) > 0, "CuTe paged attention requires aligned local Q/KV heads and matching caches", .{});
+    return .{ q_, k_, v_ };
+}
+
+// Kernels that take no sink still receive a buffer, so it is zeros.
+pub fn sinkOperand(opts: host.AttentionOptions, entries: i64) zml.Tensor {
+    if (opts.sink) |sink| {
+        return sink.convert(.f32).reshape(.{entries});
+    }
+
+    return zml.Tensor.zeroes(.init(.{entries}, .f32));
+}
+
+// Keys a query can reach at most, which bounds how many splits are worth launching.
+pub fn keyBound(c: anytype) i64 {
+    const cached_keys = c.pages_per_seq * c.page_size;
+    if (c.window > 0) {
+        return @min(c.window, cached_keys);
+    }
+
+    return cached_keys;
+}
+
+pub fn prefillQueryTiles(c: anytype, rows: i64) i64 {
+    return c.batch + @divTrunc(c.tokens * c.group + rows - 1, rows);
+}
+
+// Enough splits to fill twice the multiprocessors, but none smaller than `keys_per_split` keys.
+pub fn splitCount(c: anytype, multiprocessors: i64, query_tiles: i64, bound: i64, keys_per_split: i64) i64 {
+    const work = query_tiles * c.kv_heads;
+    return @max(1, @min(32, @min(@divTrunc(multiprocessors * 2 + work - 1, work), @divTrunc(bound + keys_per_split - 1, keys_per_split))));
+}
+
+pub fn splitOutputShape(c: anytype, final_shape: zml.Shape) zml.Shape {
+    if (c.splits > 1) {
+        return zml.Shape.init(.{ c.splits, c.tokens, c.kv_heads * c.group, c.head_dim + 2 }, .f32);
+    }
+
+    return final_shape;
 }
