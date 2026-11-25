@@ -318,20 +318,28 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
             ptx.fenceOperands(b, .f32, &scores);
 
             const key_base = loop.iv.mul(block_keys);
-            var row_valid: [2]V = undefined;
-            var row_position: [2]V = undefined;
+            // A column offset (relative to this thread's first key) is visible when lower <= offset <= upper, one compare per bound.
+            var upper: [2]V = undefined;
+            var lower: [2]V = undefined;
+            const thread_key = key_base.add(column0);
             for (0..2) |h| {
                 const row = first_row.add(row_in_tile).add(h * 8);
-                row_valid[h] = row.lt(qlen.mul(c.group));
-                row_position[h] = t.klen.sub(qlen).add(row.div(c.group));
+                const position = t.klen.sub(qlen).add(row.div(c.group));
+                var last_key = t.klen.sub(1);
+                if (c.causal) {
+                    last_key = last_key.minimum(position);
+                }
+                upper[h] = b.select(row.lt(qlen.mul(c.group)), last_key.sub(thread_key), b.constant(.i32, -1));
+                lower[h] = position.sub(c.window - 1).sub(thread_key);
             }
             var thread_max: [2]V = .{ neg_inf, neg_inf };
             for (&scores, 0..) |*score, index| {
                 const h = rowOf(index);
-                const key = key_base.add((index / 4) * 8).add(column0).add(index % 2);
-                var valid = row_valid[h].bitAnd(key.lt(t.klen));
-                if (c.causal) valid = valid.bitAnd(key.le(row_position[h]));
-                if (c.window > 0) valid = valid.bitAnd(key.gt(row_position[h].sub(c.window)));
+                const column_offset: i32 = @intCast((index / 4) * 8 + index % 2);
+                var valid = upper[h].ge(column_offset);
+                if (c.window > 0) {
+                    valid = valid.bitAnd(lower[h].le(column_offset));
+                }
                 score.* = b.select(valid, score.*, neg_inf);
                 thread_max[h] = b.fmax(thread_max[h], score.*, .{ .ftz = true });
             }
