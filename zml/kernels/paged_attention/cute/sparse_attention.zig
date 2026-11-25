@@ -818,7 +818,7 @@ fn mergeVectorized(b: *B, c: Config, comptime features: usize, comptime parts: u
         }
         var maximum = reducedMaxima[0].maximum(sink);
         var step: usize = featureLanes;
-        while (step < 32) : (step *= 2) maximum = maximum.maximum(b.shuffleXor(maximum, @intCast(step)));
+        while (step < 32) : (step *= 2) maximum = maximum.maximum(b.shuffleXor(maximum, @as(i32, @intCast(step))));
         maximum = maximum.maximum(-std.math.floatMax(f32));
         var weights: [slots]V = @splat(zero);
         var denominator = zero;
@@ -828,7 +828,7 @@ fn mergeVectorized(b: *B, c: Config, comptime features: usize, comptime parts: u
         }
         if (c.sink) denominator = denominator.add(b.select(partLane.eq(0), b.exp2Approx(sink.sub(maximum)), zero));
         step = featureLanes;
-        while (step < 32) : (step *= 2) denominator = denominator.add(b.shuffleXor(denominator, @intCast(step)));
+        while (step < 32) : (step *= 2) denominator = denominator.add(b.shuffleXor(denominator, @as(i32, @intCast(step))));
         const norm = b.select(denominator.gt(0), b.rcpApprox(denominator), zero);
         var values: [slots][features]V = @splat(@splat(zero));
         for (0..count) |i| for (0..features / 4) |chunk| {
@@ -844,7 +844,7 @@ fn mergeVectorized(b: *B, c: Config, comptime features: usize, comptime parts: u
             }
             value.* = values[0][j];
             step = featureLanes;
-            while (step < 32) : (step *= 2) value.* = value.*.add(b.shuffleXor(value.*, @intCast(step)));
+            while (step < 32) : (step *= 2) value.* = value.*.add(b.shuffleXor(value.*, @as(i32, @intCast(step))));
             value.* = value.*.mul(norm);
         }
         var writer = b.openIf(partLane.eq(0));
@@ -894,7 +894,7 @@ fn mergeScalar(b: *B, c: Config) cute.FinishError!void {
         }
         var m = maxima[0].maximum(sink);
         var step = cols;
-        while (step < 32) : (step *= 2) m = m.maximum(b.shuffleXor(m, @intCast(step)));
+        while (step < 32) : (step *= 2) m = m.maximum(b.shuffleXor(m, @as(i32, @intCast(step))));
         m = m.maximum(-std.math.floatMax(f32));
         const chunk = @min(@as(i64, 32), @divTrunc(c.splits + c.merge_parts - 1, c.merge_parts));
         const sink_weight = if (c.sink) b.select(part_lane.eq(0), b.exp2Approx(sink.sub(m)), zero) else zero;
@@ -923,8 +923,8 @@ fn mergeScalar(b: *B, c: Config) cute.FinishError!void {
         var denominator = sum.results[1];
         step = cols;
         while (step < 32) : (step *= 2) {
-            numerator = numerator.add(b.shuffleXor(numerator, @intCast(step)));
-            denominator = denominator.add(b.shuffleXor(denominator, @intCast(step)));
+            numerator = numerator.add(b.shuffleXor(numerator, @as(i32, @intCast(step))));
+            denominator = denominator.add(b.shuffleXor(denominator, @as(i32, @intCast(step))));
         }
         var leader = b.openIf(part_lane.eq(0));
         a.out.set(.{ token, head, dim }, numerator.mul(b.select(denominator.gt(0), b.rcpApprox(denominator), zero)).to(c.dtype));
