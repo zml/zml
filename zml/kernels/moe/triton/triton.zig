@@ -17,6 +17,7 @@ const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlace
 const Activation = @import("zml/kernels/moe/api").Activation;
 const Options = @import("zml/kernels/moe/api").Options;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const nvfp4OutputScale = @import("zml/kernels/moe/api").nvfp4OutputScale;
 pub const kernels = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/triton");
@@ -488,15 +489,7 @@ fn nvfp4Operand(x: Tensor, linear: nn.Linear, ids: Tensor, block_scale: quantiza
     // The barrier keeps XLA from skipping the BF16 rounding.
     const rows = x.withTags(.{ .token, .in }).convert(.bf16).optimizationBarrier().convert(.f32);
     const quantized = quantization.quantizeNvfp4Rows(rows, .in, block_scale);
-
-    // Gate/up rows are tokens and down rows are routes: expand both to routes.
-    var output_scale = quantized.global_scale.?.reshape(.{ .token = ids.dim(.token), .topk = .auto }).broad(ids.shape().withDtype(.f32));
-    if (linear.quantization.?.global_scale) |scale| {
-        const global = scale.asMultiplier();
-        // The kernel skips routes without a local expert; any expert works for them.
-        output_scale = output_scale.mul(if (global.rank() == 0) global else global.withTags(.{.expert}).gather(.{ .expert = ids.maximum(.scalar(0, .i32)) }, .{}));
-    }
-    return .{ .input = quantized.values, .input_scale = quantized.scales, .output_scale = output_scale };
+    return .{ .input = quantized.values, .input_scale = quantized.scales, .output_scale = nvfp4OutputScale(quantized.global_scale, linear.quantization.?, ids) };
 }
 
 /// The product of the factors that are present.
