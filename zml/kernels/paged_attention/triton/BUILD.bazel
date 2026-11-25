@@ -3,6 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 zig_library(
     name = "triton",
     srcs = [
+        "kernel_helpers.zig",
         "sparse_unified_attention.zig",
         "unified_attention.zig",
         "unified_attention_oneapi.zig",

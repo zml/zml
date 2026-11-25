@@ -4,9 +4,9 @@ const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
-
-/// `log_2(e)` — pre-multiply with this to turn `exp(x)` into `exp2(x * RCP_LN2)`.
-const RCP_LN2: f32 = 1.4426950408889634;
+const helpers = @import("kernel_helpers.zig");
+const RCP_LN2 = helpers.RCP_LN2;
+const findSeqIdx = helpers.findSeqIdx;
 
 /// Partition selection slots, not logical KV positions. Scratch capacity may be
 /// larger than the number of segments that have any selection slots to visit.
@@ -47,45 +47,6 @@ pub const SparseAttentionConfig = struct {
     value_strides: [4]i64,
     indices_strides: [2]i64,
 };
-
-fn findSeqIdx(
-    k: *Builder,
-    query_start_len_ptr: Value,
-    target_idx: Value,
-    num_seqs: Value,
-    block_q: i64,
-    use_q_block_mode: bool,
-) Value {
-    const left_init = k.constant(.i32, 0);
-
-    var w = k.openWhile(.{ left_init, num_seqs }, .{ .i32, .i32 });
-    {
-        const left = w.before_carried[0];
-        const right = w.before_carried[1];
-        w.yieldBefore(left.lt(right), .{ left, right });
-    }
-    {
-        const left = w.after_carried[0];
-        const right = w.after_carried[1];
-        const mid = left.add(right).div(2);
-        const val = k.load(query_start_len_ptr.addPtr(mid));
-        const mid_val = if (use_q_block_mode)
-            val.div(@as(i32, @intCast(block_q))).add(mid)
-        else
-            val;
-
-        var i = k.openIfElse(mid_val.le(target_idx), .{ .i32, .i32 });
-        {
-            i.yieldThen(.{ mid.add(1), right });
-        }
-        {
-            i.yieldElse(.{ left, mid });
-        }
-        w.yieldAfter(.{ i.results[0], i.results[1] });
-    }
-
-    return w.results[0].sub(1);
-}
 
 /// One program processes all selected keys for one query/KV-head group and write the normalized output.
 pub const KernelSparseAttention2dPtr = KernelSparseAttentionPtr(false);
