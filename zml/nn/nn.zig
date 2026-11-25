@@ -4,16 +4,14 @@ const std = @import("std");
 const constants = @import("zml/constants");
 const meta = @import("zml/meta");
 const mlir = @import("mlir");
+const quantization = @import("zml/quantization");
+pub const Quantization = quantization.Quantization;
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
-
 const zml = @import("zml/core");
-const quantization = @import("zml/quantization");
-
 const DataType = zml.DataType;
 const mlirx = zml.mlir;
 const ops = zml.ops;
-pub const Quantization = quantization.Quantization;
 const Shape = zml.Shape;
 const Slice = zml.Slice;
 const Tensor = zml.Tensor;
@@ -1976,7 +1974,9 @@ test "gated delta net" {
 
 /// Options controlling generation. The default values correspond to greedy decoding.
 pub const SamplingStrategy = struct {
-    topk: u32 = 1,
+    top_k: u32 = 1,
+    top_p: f32 = 1.0,
+    min_p: f32 = 0.0,
     temperature: f32 = 1.0,
 };
 
@@ -1984,53 +1984,55 @@ pub const SamplingStrategy = struct {
 /// Compute indices for the next tokens, following the given sampling strategy.
 /// Returns an integer tensor with a shape similar to the input, but without the .voc axis.
 pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
-    if (opts.topk <= 1) {
+    stdx.debug.assert(activations.shape().hasTag(.voc) != null, "Expected activations to have .voc tag, but got: {f}", .{activations.shape()});
+
+    if (opts.top_k <= 1 or opts.temperature == 0.0) {
         const next_tokens = activations.argMax(.voc).indices.squeeze(.voc);
         return .{ next_tokens, rng };
     }
 
-    const topk = activations.topK(.{ .topk = .voc }, opts.topk, .{});
-    // After the topk, we don't have .voc values, anymore, only .topk.
-    var x = topk.values;
-    if (opts.temperature != 1.0) {
-        x = x.scale(1 / opts.temperature);
-    }
-
-    // Gumbel reparametrization trick:
-    // Adding gumbel noise and taking the argmax is equivalent
-    // to sampling from the categorical distribution produced by the softmax.
-    // https://en.wikipedia.org/wiki/Gumbel_distribution#Gumbel_reparametrization_tricks
-    const next_rng, const gumbel_noise = rng.gumbel(x.shape());
-    x = x.add(gumbel_noise);
-    const topk_idx = x.argMax(.topk).indices;
-
-    // topk_idx is indices into topk.values ! so in the range [0, topk]
-    // Convert for the original indices from the full [0, voc] range.
-    const next_tokens = topk.indices.gather(.{ .topk = topk_idx.squeeze(.topk) }, .{});
-    // log.debug("sampleTokens({}) -> {} -> {} -> {}", .{ activations, topk.indices, topk_idx, next_tokens });
-    return .{ next_tokens, next_rng };
+    return sampleTokensDynamic(activations, .{
+        .max_top_k = opts.top_k,
+        .top_k = .scalar(opts.top_k, .i32),
+        .temperature = .scalar(opts.temperature, activations.dtype()),
+        .top_p = .scalar(opts.top_p, activations.dtype()),
+        .min_p = .scalar(opts.min_p, activations.dtype()),
+    }, rng);
 }
 
 test sampleTokens {
     const platform = zml.testing.env();
 
     const rng: zml.Tensor.Rng = .init();
-    const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
-
-    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, .{});
-    defer exe.deinit();
+    const activations: zml.Tensor = .init(.{ .voc = 5 }, .f32);
 
     var rng_buffer = try rng.initBuffer(std.testing.io, platform, 0xdeadbeef);
     defer rng_buffer._state.deinit();
 
     const inf = std.math.inf(f32);
 
-    inline for (.{
-        .{ [_]f32{ inf, 3.0, 2.0, 1.0 }, 0 },
-        .{ [_]f32{ -inf, 3.0, -inf, -inf }, 1 },
-        .{ [_]f32{ 3.0, 2, inf, inf }, 2 },
-    }) |logits_expected| {
-        const logits, const expected: i32 = logits_expected;
+    const Case = struct {
+        logits: [5]f32,
+        expected: i32,
+        opts: SamplingStrategy,
+    };
+    inline for ([_]Case{
+        .{ .logits = .{ inf, 3.0, 2.0, 1.0, inf }, .expected = 0, .opts = .{ .top_k = 4, .temperature = 2.0 } },
+        .{ .logits = .{ -inf, 3.0, -inf, -inf, -inf }, .expected = 1, .opts = .{ .top_k = 4, .temperature = 2.0 } },
+        .{ .logits = .{ 3.0, 2, inf, inf, inf }, .expected = 2, .opts = .{ .top_k = 4, .temperature = 2.0 } },
+        .{ .logits = .{ inf, 2.0, 1.0, 4.0, 3.0 }, .expected = 0, .opts = .{} },
+        .{ .logits = .{ 2.0, inf, 1.0, 4.0, 3.0 }, .expected = 1, .opts = .{ .top_k = 4, .temperature = 0.0 } },
+        // `@log` give exact softmax probabilities; for example, log(2), log(1), log(4), log(3) produces 0.2, 0.1, 0.4, 0.3
+        .{ .logits = .{ @log(2.0), @log(1.0), inf, @log(4.0), @log(3.0) }, .expected = 2, .opts = .{ .top_k = 4, .top_p = 0.5 } },
+        .{ .logits = .{ @log(2.0), @log(1.0), @log(4.0), inf, @log(3.0) }, .expected = 3, .opts = .{ .top_k = 4, .min_p = 0.9 } },
+        .{ .logits = .{ @log(2.0), @log(1.0), @log(4.0), @log(3.0), -inf }, .expected = 2, .opts = .{ .top_k = 4, .top_p = 0.5 } },
+        .{ .logits = .{ @log(2.0), @log(1.0), @log(4.0), @log(3.0), -inf }, .expected = 2, .opts = .{ .top_k = 4, .min_p = 0.9 } },
+        .{ .logits = .{ @log(2.0), @log(1.0), @log(4.0), @log(3.0), -inf }, .expected = 2, .opts = .{ .top_k = 4, .top_p = 0.75, .min_p = 0.9 } },
+    }) |case| {
+        const logits = case.logits;
+        const expected = case.expected;
+        var exe = try platform.compileFn(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, case.opts, rng }, .{});
+        defer exe.deinit();
 
         var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), std.mem.sliceAsBytes(&logits));
         defer activations_buffer.deinit();
@@ -2106,7 +2108,6 @@ pub const DynamicSamplingStrategy = struct {
 pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
     var x, const topk_indices = fixupLogits(logits, opts);
 
-    // the rest is similar to sampleTokens
     const next_rng, const gumbel_noise = rng.gumbel(x.shape());
     x = x.add(gumbel_noise);
 
