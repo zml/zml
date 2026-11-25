@@ -324,14 +324,29 @@ pub const paged = struct {
         }
     };
 
-    pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        if (opts.mask == .indices or isOneapiTarget()) stdx.debug.assert(
-            opts.rel_bias == null and (opts.sink == null or opts.sink.?.rank() == 1),
-            "Triton sparse and oneAPI paged attention take neither per-token sinks nor relative biases",
-            .{},
-        );
-        if (opts.mask == .indices) {
-            return pagedSparseAttention(parameters, q, k_cache, v_cache, opts);
+    pub fn pagedAttention(parameters: Parameters, input_q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, input_opts: AttentionOptions) zml.Tensor {
+        if (input_opts.mask == .indices) {
+            stdx.debug.assert(
+                input_opts.rel_bias == null and (input_opts.sink == null or input_opts.sink.?.rank() == 1),
+                "Triton sparse paged attention takes neither per-token sinks nor relative biases",
+                .{},
+            );
+            return pagedSparseAttention(parameters, input_q, k_cache, v_cache, input_opts);
+        }
+
+        // Keep complete GQA groups inside the power-of-two Intel query tile.
+        // Without padding, a leftover lane can write the next tile's first query.
+        const groups = input_q.dim(.hg);
+        const padded_groups = if (isOneapiTarget()) std.math.ceilPowerOfTwoAssert(usize, @intCast(groups)) else @as(usize, @intCast(groups));
+        const padding = @as(i64, @intCast(padded_groups)) - groups;
+        const head_padding = .{ .hg = zml.Tensor.Pad{ .high = padding } };
+        const q = if (padding != 0) input_q.pad(0, head_padding) else input_q;
+        var opts = input_opts;
+        if (padding != 0) {
+            const heads = .{ .hkv = input_q.dim(.hkv), .hg = groups };
+            const merge_heads = .{ .h = .{ .hkv, .hg } };
+            if (opts.sink) |sink| opts.sink = sink.splitAxis(.h, heads).pad(0, head_padding).merge(merge_heads);
+            if (opts.rel_bias) |bias| opts.rel_bias = bias.splitAxis(.h, heads).pad(0, head_padding).merge(merge_heads);
         }
 
         const num_heads: usize = @intCast(q.dim(.hkv) * q.dim(.hg));
@@ -391,7 +406,7 @@ pub const paged = struct {
         else
             pagedAttention3d(parameters, q, k_cache, v_cache, opts, paged_attention_opts);
 
-        return output;
+        return if (padding != 0) output.slice(.hg, .{ .end = groups }) else output;
     }
 
     pub fn pagedSparseAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
@@ -835,6 +850,9 @@ pub const paged = struct {
             .use_qq_bias = false,
             .use_softcap = false,
             .use_sinks = (opts.sink != null),
+            .per_token_sinks = if (opts.sink) |sink| sink.rank() == 2 else false,
+            .rel_bias_extent = if (opts.rel_bias) |bias| bias.dim(.distance) else 0,
+            .rel_bias_dtype = if (opts.rel_bias) |bias| triton.from(bias.dtype()) else .f32,
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .is_causal = opts.mask.isCausal(),
             .block_q = @intCast(config.attention.block_q),
@@ -876,7 +894,8 @@ pub const paged = struct {
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
 
-        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+        const sink = if (opts.sink) |sink| (if (sink.rank() == 2) sink.transpose(.{ .b, .h }) else sink).convert(.f32) else dummy;
+        const rel_bias = if (opts.rel_bias) |bias| bias.transpose(.{ .b, .h, .distance }) else dummy;
 
         const attn_output = kernels_oneapi.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
@@ -888,6 +907,7 @@ pub const paged = struct {
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
                 .qq_bias_ptr = dummy,
+                .rel_bias_ptr = rel_bias,
                 .scale_ptr = .scalar(scale, .f32),
                 .k_scale_ptr = dummy,
                 .v_scale_ptr = dummy,
