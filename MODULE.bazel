@@ -299,15 +299,23 @@ http_archive(
 
 http_aea_archive = use_repo_rule("//bazel:http_aea_archive.bzl", "http_aea_archive")
 
+# See platforms/metal/README.md for how to update this toolchain.
 http_aea_archive(
     name = "metal_toolchain",
-    archive_decryption_key = "v7VbaT39JmQPp5p4N3HoVPAKcZ5vyhY+nnjMRD79z5E=",
+    archive_decryption_key = "zIZ89LUdcdQ66mceeKpURt8POdwcLIu57HoZzQrxsPI=",
     build_file = "//platforms/metal:metal_toolchain.BUILD.bazel",
-    canonical_id = "com.apple.MobileAsset.MetalToolchain-17B54",
-    includes = ["Metal.xctoolchain/*"],
-    sha256 = "84f1cec3984878294777349e794f7bff0407e501a728bd600dc8605fa36abf6f",
+    canonical_id = "com.apple.MobileAsset.MetalToolchain-27B47",
+    includes = [
+        "Metal.xctoolchain/usr/metal/32023/bin/air-as",
+        "Metal.xctoolchain/usr/metal/32023/bin/air-lld",
+        "Metal.xctoolchain/usr/metal/32023/bin/air-opt",
+        "Metal.xctoolchain/usr/metal/32023/bin/metal",
+        "Metal.xctoolchain/usr/metal/32023/bin/metallib",
+        "Metal.xctoolchain/usr/metal/32023/lib/clang/32023/*",
+    ],
+    sha256 = "fcea0f3c0b038950bfe1c838ec05af56589b62591c9f9892457bfc1e2b6513d9",
     urls = [
-        "https://updates.cdn-apple.com/2025/mobileassets/022-20354/192ADD28-31EE-43C8-972D-E5BED5FB1845/com_apple_MobileAsset_MetalToolchain/637B0E26-E00A-488B-BA3B-CB50A8ECFD74.aar",
+        "https://updates.cdn-apple.com/MobileAssets2026/mobileassets/022-22478/8A094E5D-0597-4526-BA3F-A3C56614D1E5/com_apple_MobileAsset_MetalToolchain/0FA81854-B432-47C5-9913-0A496FDCAC4B.aar",
     ],
 )
 
