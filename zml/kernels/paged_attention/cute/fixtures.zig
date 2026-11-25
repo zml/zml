@@ -161,14 +161,27 @@ pub fn forwardBackend(i: Inputs, c: cases.Case, backend: Backend) zml.Tensor {
     };
 }
 
-pub fn upload(_: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {
+pub fn upload(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {
     var result: zml.Bufferized(Inputs) = undefined;
     var initialized: usize = 0;
     errdefer inline for (@typeInfo(Inputs).@"struct".field_names, 0..) |name, index| {
         if (index < initialized) @field(result, name).deinit();
     };
     inline for (@typeInfo(Inputs).@"struct".field_names) |name| {
-        @field(result, name) = try .fromBytes(io, platform, @field(inputs, name).shape(), std.mem.sliceAsBytes(@field(f, name)));
+        const shape = @field(inputs, name).shape();
+        const values = @field(f, name);
+        if (comptime @TypeOf(values) == []zml.floats.BFloat16) {
+            if (shape.dtype() == .f16) {
+                const converted = try a.alloc(f16, values.len);
+                defer a.free(converted);
+                for (converted, values) |*dst, src| dst.* = @floatCast(src.toF32());
+                @field(result, name) = try .fromBytes(io, platform, shape, std.mem.sliceAsBytes(converted));
+            } else {
+                @field(result, name) = try .fromBytes(io, platform, shape, std.mem.sliceAsBytes(values));
+            }
+        } else {
+            @field(result, name) = try .fromBytes(io, platform, shape, std.mem.sliceAsBytes(values));
+        }
         initialized += 1;
     }
     return result;
