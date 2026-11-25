@@ -527,12 +527,16 @@ pub const PagedAttentionTiled = struct {
     /// Four simdgroups of 16 rows each.
     fn tensorOpsTileConfig(head_size: i64) ?[3]i32 {
         return switch (head_size) {
-            32, 64, 96, 128 => .{ 64, 32, 128 },
+            32, 64, 96, 128 => .{ 16, 32, 32 },
             else => null,
         };
     }
 
     pub fn threadgroupMemory(cfg: Cfg) u64 {
+        if (cfg.tensor_ops) {
+            return 0;
+        }
+
         const ld = cfg.head_size + @divExact(16, @as(i32, @intCast(cfg.dtype.size())));
         // Q aliases the K tile and the output goes straight from registers, so only K and V need room.
         return @intCast(2 * cfg.tile_kv * ld * @as(i32, @intCast(cfg.dtype.size())));
