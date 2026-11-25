@@ -713,7 +713,6 @@ pub const PagedAttentionTiled = struct {
         std.debug.assert(TILE_KV == 32);
         const TD: usize = @intCast(@divExact(HEAD_SIZE, 16));
         const DP = TD / 2;
-        const LD = smemStride(cfg);
         const arena = b.arena.allocator();
 
         const prologue = sequencePrologue(b, a, cfg.bq);
@@ -723,9 +722,6 @@ pub const PagedAttentionTiled = struct {
         const context_len = prologue.context_len;
         const valid_q = prologue.valid_q;
 
-        const K_smem = a.shared_mem.to(T);
-        const V_smem = K_smem.add(TILE_KV * LD);
-
         const qk: Builder.Matmul2d = .{ .m = 16, .n = 32, .k = 16, .transpose_left = false, .transpose_right = true, .left = T.scalar, .right = T.scalar, .destination = .float };
         const pv: Builder.Matmul2d = .{ .m = 16, .n = 32, .k = 16, .transpose_left = false, .transpose_right = false, .left = .float, .right = T.scalar, .destination = .float };
 
@@ -734,6 +730,8 @@ pub const PagedAttentionTiled = struct {
         const fm = quad.bitAnd(4).bitOr(lane.div(2).bitAnd(3));
         const fn_ = quad.bitAnd(2).bitOr(lane.bitAnd(1)).mul(4);
         const sg_row = a.sg_idx.mul(16).to(.int);
+        b.returnIf(sg_row.ge(valid_q));
+        const sg_valid_end = b.min(sg_row.add(16), valid_q);
 
         const log2e: f32 = std.math.log2e;
         const scale_log2 = a.scale.mul(log2e);
@@ -782,16 +780,20 @@ pub const PagedAttentionTiled = struct {
             const tile_start = tiles.iv.mul(TILE_KV);
 
             if (cfg.causal) {
-                var past = b.openIf(tile_start.gt(context_len.add(q_pos_start).add(valid_q).sub(1)));
+                var past = b.openIf(tile_start.gt(context_len.add(q_pos_start).add(sg_valid_end).sub(1)));
                 {
                     tiles.breakLoop();
                     past.close();
                 }
             }
 
-            loadKvTile(b, cfg, a, prologue, block_table, tile_start, K_smem, V_smem);
-
-            b.threadgroupBarrier(.mem_threadgroup);
+            // Rows past the sequence read the last row: their scores are masked and their P is 0.
+            var key_offsets: [4]Value = undefined;
+            inline for (0..4) |slot| {
+                const kv_pos = b.min(tile_start.add(fm).add(i32Of((slot / 2) * 16 + (slot % 2) * 8)), seq_len.sub(1));
+                const page = block_table.load(kv_pos.div(cfg.block_size)).to(.long);
+                key_offsets[slot] = page.mul(a.kv_block_stride).add(kv_pos.rem(cfg.block_size).mul(prologue.kv_token_stride)).add(prologue.kv_head_idx.mul(a.kv_head_stride)).add(fn_);
+            }
 
             var active = b.openIf(sg_row.lt(valid_q));
             {
@@ -802,8 +804,7 @@ pub const PagedAttentionTiled = struct {
                 for (q_tensors, 0..) |q_tensor, d| {
                     inline for (0..2) |blk| {
                         inline for (0..2) |rh| {
-                            const key_row = fm.add(i32Of(blk * 16 + rh * 8));
-                            const k_vec = K_smem.add(key_row.mul(LD).add(i32Of(d * 16)).add(fn_)).to(T4).load(0);
+                            const k_vec = a.k_cache.add(key_offsets[blk * 2 + rh]).add(i32Of(d * 16)).to(T4).load(0);
                             inline for (0..4) |j| {
                                 k_right.element(blk * 8 + rh * 4 + j).store(0, k_vec.at(i32Of(j)));
                             }
@@ -897,8 +898,7 @@ pub const PagedAttentionTiled = struct {
                     for (o_tensors, 0..) |o_tensor, dp| {
                         inline for (0..2) |dblk| {
                             inline for (0..2) |rh| {
-                                const key_row = fm.add(i32Of(blk * 16 + rh * 8));
-                                const v_vec = V_smem.add(key_row.mul(LD).add(i32Of((2 * dp + dblk) * 16)).add(fn_)).to(T4).load(0);
+                                const v_vec = a.v_cache.add(key_offsets[blk * 2 + rh]).add(i32Of((2 * dp + dblk) * 16)).to(T4).load(0);
                                 inline for (0..4) |j| {
                                     v_right.element(dblk * 8 + rh * 4 + j).store(0, v_vec.at(i32Of(j)));
                                 }
@@ -910,7 +910,6 @@ pub const PagedAttentionTiled = struct {
                 active.close();
             }
 
-            b.threadgroupBarrier(.mem_threadgroup);
             tiles.close();
         }
 
