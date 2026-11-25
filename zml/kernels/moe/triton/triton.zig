@@ -185,9 +185,12 @@ pub const GemmOptions = struct {
 
 pub fn gemm(opts: GemmOptions) Tensor {
     const nvfp4 = opts.quant_scheme == .nvfp4;
-    const weight = bytePackedFp4(opts.weight);
+    const mxfp8 = opts.quant_scheme == .mxfp8;
+    const oneapi = zml.Compiler.current().platform.target == .oneapi;
+    const dequantize_to_bf16 = oneapi and (nvfp4 or mxfp8);
+    const weight = if (oneapi and mxfp8) opts.weight.bitCast(.u8) else bytePackedFp4(opts.weight);
     // NVFP4 activations are FP4 like the weights.
-    const input = bytePackedFp4(opts.input);
+    const input = if (oneapi and mxfp8 and opts.input.dtype() == .f8e4m3fn) opts.input.bitCast(.u8) else bytePackedFp4(opts.input);
     const weight_k = weight.dim(2) * @as(i64, if (opts.quant_scheme == .mxfp4 or nvfp4) 2 else 1);
     const input_k = input.dim(1) * @as(i64, if (nvfp4) 2 else 1);
     stdx.debug.assert(input_k == weight_k, "input width {} must match logical weight K {}", .{ input_k, weight_k });
@@ -231,12 +234,14 @@ pub fn gemm(opts: GemmOptions) Tensor {
             .fp8_per_tensor => if (scale.count() == 1) scale else scale.reshape(.{ weight.dim(0), 1, 1 }),
             // Tiled FP8 uses ordinary dot products with FP32 scale arithmetic.
             .fp8_block32 => scale.convert(.f32),
-            .fp8_block128, .nvfp4 => scale,
+            .fp8_block128 => scale,
+            .nvfp4 => if (oneapi) scale.bitCast(.u8) else scale,
         };
     } else null;
+    const input_scale: ?Tensor = if (opts.input_scale) |scale| (if (oneapi and nvfp4) scale.bitCast(.u8) else scale) else null;
 
-    const stride_asm: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) scale.dim(1) else 0) else 0;
-    const stride_ask: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) 1 else 0) else 0;
+    const stride_asm: i64 = if (input_scale) |scale| (if (scale.rank() == 2) scale.dim(1) else 0) else 0;
+    const stride_ask: i64 = if (input_scale) |scale| (if (scale.rank() == 2) 1 else 0) else 0;
     const has_weight_scale_expert_stride = if (weight_scale) |scale|
         !(opts.quant_scheme == .fp8_per_tensor and scale.count() == 1)
     else
@@ -267,7 +272,7 @@ pub fn gemm(opts: GemmOptions) Tensor {
             .a_ptr = input,
             .b_ptr = weight,
             .b_bias_ptr = opts.bias orelse Tensor.scalar(0, .f32),
-            .a_scale_ptr = opts.input_scale orelse Tensor.scalar(1.0, .f32),
+            .a_scale_ptr = input_scale orelse Tensor.scalar(1.0, .f32),
             .b_scale_ptr = weight_scale orelse Tensor.scalar(1.0, .f32),
             .routing_weights_ptr = opts.routing_weights orelse Tensor.scalar(1.0, .f32),
             .sorted_token_ids_ptr = opts.routing.sorted_token_ids,
@@ -295,7 +300,7 @@ pub fn gemm(opts: GemmOptions) Tensor {
                 .a_dtype = toDType(input.dtype()),
                 .b_dtype = toDType(weight.dtype()),
                 .c_dtype = toDType(opts.output_shape.dtype()),
-                .a_scale_dtype = if (opts.input_scale) |scale| toDType(scale.dtype()) else null,
+                .a_scale_dtype = if (input_scale) |scale| toDType(scale.dtype()) else null,
                 .b_scale_dtype = if (weight_scale) |scale| toDType(scale.dtype()) else null,
                 .b_bias_dtype = if (opts.bias) |bias| toDType(bias.dtype()) else null,
                 .routing_weights_dtype = if (opts.routing_weights) |weights| toDType(weights.dtype()) else null,
@@ -307,6 +312,7 @@ pub fn gemm(opts: GemmOptions) Tensor {
                 .naive_block_assignment = opts.routing.naive_block_assignment,
                 .compute_type = .bf16,
                 .quant_scheme = opts.quant_scheme,
+                .dequantize_to_bf16 = dequantize_to_bf16,
                 .dims = dims,
             },
             .grid = .{ @intCast(grid_x), 1, 1 },
@@ -375,7 +381,9 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     const max_num_m_blocks = @divExact(max_num_tokens_padded, block_size_m);
     const warp_size: i64 = 32;
     const padded_num_experts: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(num_experts, warp_size))));
-    const sort_block_size: i64 = 256;
+    const oneapi = zml.Compiler.current().platform.target == .oneapi;
+    // Keep oneAPI's vectorized token loads within SPIR-V's 16-element limit.
+    const sort_block_size: i64 = if (oneapi) 16 else 256;
     const sort_grid_x: i64 = @min(std.math.divCeil(i64, num_assignments, sort_block_size) catch unreachable, 65535);
 
     const flat_experts = topk_ids_.reshape(.{ .g = num_assignments });
@@ -445,7 +453,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                 },
                 .grid = .{ @intCast(sort_grid_x), 1, 1 },
                 .num_stages = 1,
-                .num_warps = 4,
+                .num_warps = if (oneapi) 1 else 4,
                 .output_operand_aliases = .{
                     .sorted_token_ids = .sorted_token_ids_ptr,
                     .cumsum = .cumsum_ptr,
@@ -564,7 +572,8 @@ fn quantizeFp8Input(x: Tensor, scheme: Quantization.Scheme, output_dtype: DataTy
     stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "activation width must be divisible by group size {d}, got {d}", .{ group_size, x.dim(1) });
 
     const groups_per_row = @divExact(x.dim(1), group_size);
-    const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, output_dtype));
+    const store_bytes = scheme == .mxfp8 and zml.Compiler.current().platform.target == .oneapi;
+    const quantized = Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, if (store_bytes) .u8 else output_dtype);
     const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, scale_dtype));
 
     const outs = kernels.PerTokenGroupQuantFp8.Kernel.call(
@@ -575,11 +584,11 @@ fn quantizeFp8Input(x: Tensor, scheme: Quantization.Scheme, output_dtype: DataTy
             .y_row_stride_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             .eps_ptr = Tensor.scalar(absmax_epsilon, .f32),
         },
-        .{ .y_q = quantized.shape(), .y_s = scales.shape() },
+        .{ .y_q = quantized, .y_s = scales.shape() },
         .{
             .cfg = .{
                 .input_dtype = toDType(x.dtype()),
-                .output_dtype = toDType(output_dtype),
+                .output_dtype = toDType(quantized.dtype()),
                 .scale_dtype = toDType(scale_dtype),
                 .block = std.math.ceilPowerOfTwoAssert(usize, @intCast(group_size)),
                 .quant_scheme = scheme,
@@ -1029,6 +1038,9 @@ const launch_configs = [_]struct { tokens: i64, config: LaunchConfig }{
 
 /// The launch configuration of a projection's GEMM.
 fn launchConfig(scheme: ?Quantization.Scheme, num_tokens: i64) LaunchConfig {
+    if (zml.Compiler.current().platform.target == .oneapi and (scheme == .nvfp4 or scheme == .mxfp8)) {
+        return .{ .block_size_m = 16, .block_size_n = 32, .block_size_k = 64, .group_size_m = 1, .num_warps = 4, .num_stages = 1 };
+    }
     var config = launchConfigForTokens(num_tokens);
     switch (scheme orelse return config) {
         // Each K tile spans one scale block.

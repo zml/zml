@@ -42,6 +42,53 @@ fn encodeE4m3(b: *Builder, x: Value) Value {
     return b.select(magnitude.lt(0x1p-6), subnormal, normal).bitOr(sign).to(.i8);
 }
 
+fn decodeE4m3(b: *Builder, bytes: Value) Value {
+    const code = bytes.to(.i32);
+    const magnitude = code.bitAnd(0x7f);
+    const exponent = magnitude.div(8);
+    const mantissa = magnitude.bitAnd(7);
+    const normal = exponent.add(127 - 7).mul(0x800000).bitOr(mantissa.mul(0x100000));
+    const subnormal = mantissa.to(.f32).mul(0x1p-9).bitCast(.i32);
+    const decoded = b.select(exponent.eq(0), subnormal, normal);
+    const nan = b.full(code.shape().constSlice(), 0x7fc00000, .i32);
+    const sign = code.bitAnd(0x80).mul(0x1000000);
+    return b.select(magnitude.eq(0x7f), nan, decoded).bitOr(sign).bitCast(.f32);
+}
+
+fn decodeE8m0(b: *Builder, bytes: Value) Value {
+    const exponent = bytes.to(.i32).bitAnd(0xff);
+    const shape = exponent.shape().constSlice();
+    const bits = b.select(exponent.eq(0), b.full(shape, 0x400000, .i32), exponent.mul(0x800000));
+    return b.select(exponent.eq(255), b.full(shape, 0x7fc00000, .i32), bits).bitCast(.f32);
+}
+
+fn decodeE2m1(b: *Builder, codes: Value) Value {
+    const magnitude = codes.bitAnd(7);
+    const normal = magnitude.div(2).add(126).mul(0x800000).bitOr(magnitude.bitAnd(1).mul(0x400000));
+    const subnormal = magnitude.mul(0x3f000000);
+    const sign = codes.bitAnd(8).mul(0x10000000);
+    return b.select(magnitude.lt(2), subnormal, normal).bitOr(sign).bitCast(.f32);
+}
+
+/// The oneAPI dot uses BF16 operands. Block scales fit exactly with these
+/// low-precision values; NVFP4's separate row/expert factors stay in the epilogue.
+/// Both inputs use [row, K] order, with K halved for packed FP4 bytes.
+fn dequantizeDotTile(b: *Builder, encoded: Value, scales: Value, nvfp4: bool) Value {
+    const scale_shape = scales.shape();
+    const rows = scale_shape.get(0);
+    const groups = scale_shape.get(1);
+    const group_size: i64 = if (nvfp4) 16 else 32;
+    const shape = [_]i64{ rows, groups, group_size };
+    const values = if (nvfp4) blk: {
+        const bytes = encoded.to(.i32).bitAnd(0xff);
+        // Checkpoint bytes store the lower K index in the low nibble.
+        break :blk decodeE2m1(b, b.join(bytes.bitAnd(15), bytes.div(16)));
+    } else decodeE4m3(b, encoded);
+    const scale = if (nvfp4) decodeE4m3(b, scales) else decodeE8m0(b, scales);
+    const scaled = b.reshape(values, &shape).mul(b.broadcastTo(scale.expandDims(2), &shape));
+    return b.reshape(scaled.to(.bf16), &.{ rows, groups * group_size });
+}
+
 // =============================================================================
 // per_token_group_quant_fp8
 // =============================================================================
@@ -78,6 +125,7 @@ pub const PerTokenGroupQuantFp8 = struct {
         const fp8_max: f32 = switch (out_dt) {
             .f8e4m3fn => 448.0,
             .f8e4m3fnuz => 224.0,
+            .i8 => if (cfg.quant_scheme == .mxfp8) 448.0 else return error.InvalidMlir,
             else => return error.InvalidMlir,
         };
         const scale_dt = cfg.scale_dtype;
@@ -127,6 +175,12 @@ pub const PerTokenGroupQuantFp8 = struct {
         const scale_raw = absmax.mul(1.0 / fp8_max);
         const y_s: Value, const stored_scale: Value = switch (cfg.quant_scheme) {
             .mxfp8 => blk: {
+                if (out_dt == .i8) {
+                    // Round the scale upward directly in FP32 exponent bits.
+                    const bits = scale_raw.bitCast(.i32);
+                    const exponent = bits.div(0x800000).add(bits.bitAnd(0x7fffff).ne(0).to(.i32));
+                    break :blk .{ exponent.mul(0x800000).bitCast(.f32), exponent.to(.i8) };
+                }
                 const exponent = b.ceil(b.log2(scale_raw));
                 // E8M0 stores the biased exponent as a byte.
                 break :blk .{ b.exp2(exponent), exponent.add(127).to(.i32).to(.i8) };
@@ -153,7 +207,7 @@ pub const PerTokenGroupQuantFp8 = struct {
             b.splat(-fp8_max, &.{block}),
             b.splat(fp8_max, &.{block}),
         );
-        const y_q = clamped.to(out_dt);
+        const y_q = if (out_dt == .i8) encodeE4m3(b, clamped) else clamped.to(out_dt);
 
         const y_q_ptrs = y_q_ptr_shifted.addPtr(cols_i64);
         b.storeOpts(y_q_ptrs, y_q, .{ .mask = mask });
@@ -227,6 +281,8 @@ pub const FusedMoe = struct {
         naive_block_assignment: bool,
         compute_type: DType,
         quant_scheme: ?Quantization.Scheme,
+        /// Intel Triton cannot use the native block-scaled dot for these operands.
+        dequantize_to_bf16: bool = false,
         /// The values behind the dimension and stride pointers, when the graph knows them:
         /// the kernel then folds them instead of loading them in every program.
         dims: ?Dims = null,
@@ -283,9 +339,12 @@ pub const FusedMoe = struct {
             return error.InvalidMlir;
         }
 
+        // The packaged Intel compiler otherwise combines aligned MXFP8 weight
+        // loads into 32-element SPIR-V vectors it cannot translate.
+        const weight_divisibility: u32 = if (cfg.dequantize_to_bf16 and cfg.quant_scheme == .mxfp8) 1 else 16;
         const a = try b.declareArgs(.{
             .a_ptr = .{ .ptr = cfg.a_dtype },
-            .b_ptr = .{ .ptr = cfg.b_dtype },
+            .b_ptr = .{ .ptr_opts = .{ .dtype = cfg.b_dtype, .divisibility = weight_divisibility } },
             // The fixed signature requires concrete pointer types even for absent,
             // unused inputs. FP32 matches the caller's placeholder tensors.
             .b_bias_ptr = .{ .ptr = cfg.b_bias_dtype orelse .f32 },
@@ -519,6 +578,11 @@ pub const FusedMoe = struct {
                             .other = if (nvfp4) b.zeros(&.{ block_size_m, scale_k }, cfg.a_scale_dtype.?) else b.full(&.{ block_size_m, scale_k }, 127, .i8),
                         });
                     } else null;
+                    if (cfg.dequantize_to_bf16) {
+                        const dot_a = if (a_scales) |a_scale| dequantizeDotTile(b, a_val, a_scale, nvfp4) else a_val;
+                        const dot_b = dequantizeDotTile(b, b.trans(b_val, &.{ 1, 0 }), scales, nvfp4);
+                        break :scaled b.dot(dot_a, b.trans(dot_b, &.{ 1, 0 }), acc);
+                    }
                     break :scaled b.dotScaledOpts(
                         a_val,
                         b_val,
