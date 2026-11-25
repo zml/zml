@@ -582,6 +582,64 @@ pub const PagedAttentionTiled = struct {
         p.store(i, p.load(i).insert(lane, x));
     }
 
+    /// Whether the tile at `tile_start` needs no softcap, window or sequence-end masking for any of the block's rows.
+    fn tileNeedsNoMask(cfg: Cfg, a: anytype, prologue: Prologue, tile_start: Value) Value {
+        const min_q_abs_pos = prologue.context_len.add(prologue.q_pos_start);
+        var tile_no_mask = tile_start.add(cfg.tile_kv).le(prologue.seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
+        if (cfg.causal) {
+            tile_no_mask = tile_no_mask.bitAnd(tile_start.add(cfg.tile_kv).sub(1).lt(min_q_abs_pos));
+        }
+        return tile_no_mask;
+    }
+
+    /// A raw score times `scale_log2`, soft-capped when the kernel asks for it.
+    fn scaledScore(b: *Builder, a: anytype, raw_score: Value, scale_log2: Value) Value {
+        const log2e: f32 = std.math.log2e;
+        const s = b.local(.float, raw_score.mul(scale_log2));
+        var capped = b.openIf(a.softcapping.gt(0.0));
+        {
+            const s_orig = s.div(log2e);
+            s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
+            capped.close();
+        }
+        return s;
+    }
+
+    /// Whether key `kv_pos` is past the sequence, in the future of the query at `q_abs_pos` or before its window.
+    fn isMaskedKey(cfg: Cfg, a: anytype, prologue: Prologue, kv_pos: Value, q_abs_pos: Value, row_masked: Value) Value {
+        var masked = row_masked.bitOr(kv_pos.ge(prologue.seq_len));
+        if (cfg.causal) {
+            masked = masked.bitOr(kv_pos.gt(q_abs_pos));
+        }
+        const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window)));
+        return masked.bitOr(before_window);
+    }
+
+    const MaxUpdate = struct {
+        /// The maximum to keep for the next tile.
+        grown_max: Value,
+        /// What the running sum and O are multiplied by.
+        factor: Value,
+        /// The maximum to subtract from this tile's scores.
+        new_max: Value,
+    };
+
+    /// Folds a tile's row maximum into the running one.
+    fn growMax(b: *Builder, prev_max: Value, row_max: Value) MaxUpdate {
+        const grown_max = b.max(prev_max, row_max);
+        const grew = grown_max.gt(prev_max);
+        const was_empty = prev_max.eq(masked_score);
+        return .{
+            .grown_max = grown_max,
+            .factor = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0),
+            .new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max),
+        };
+    }
+
+    fn probability(b: *Builder, score: Value, new_max: Value) Value {
+        return b.ternary(score.eq(masked_score), 0.0, b.fast().exp2(score.sub(new_max)));
+    }
+
 
     const Prologue = struct {
         thread_idx: Value,
@@ -835,11 +893,7 @@ pub const PagedAttentionTiled = struct {
 
                 const row_masked = [2]Value{ sg_row.add(fm).ge(valid_q), sg_row.add(fm).add(8).ge(valid_q) };
                 const q_abs_pos = [2]Value{ context_len.add(q_pos_start).add(sg_row).add(fm), context_len.add(q_pos_start).add(sg_row).add(fm).add(8) };
-                const min_q_abs_pos = context_len.add(q_pos_start);
-                var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
-                if (cfg.causal) {
-                    tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
-                }
+                const tile_no_mask = tileNeedsNoMask(cfg, a, prologue, tile_start);
 
                 var masking = b.openIfElse(tile_no_mask.bitAnd(row_masked[0].bitOr(row_masked[1]).eq(false)), .{});
                 {
@@ -853,20 +907,9 @@ pub const PagedAttentionTiled = struct {
                     inline for (0..16) |e| {
                         const rh = (e % 8) / 4;
                         const s_element = s_tensor.element(e);
-                        const s = b.local(.float, s_element.load(0).mul(scale_log2));
-                        var capped = b.openIf(a.softcapping.gt(0.0));
-                        {
-                            const s_orig = s.div(log2e);
-                            s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
-                            capped.close();
-                        }
+                        const s = scaledScore(b, a, s_element.load(0), scale_log2);
                         const kv_pos = tile_start.add(fn_).add(i32Of((e / 8) * 16 + e % 4));
-                        var masked = row_masked[rh].bitOr(kv_pos.ge(seq_len));
-                        if (cfg.causal) {
-                            masked = masked.bitOr(kv_pos.gt(q_abs_pos[rh]));
-                        }
-                        const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos[rh].add(1).sub(a.sliding_window)));
-                        masked = masked.bitOr(before_window);
+                        const masked = isMaskedKey(cfg, a, prologue, kv_pos, q_abs_pos[rh], row_masked[rh]);
                         s_element.store(0, b.ternary(masked, masked_score, s));
                     }
                     masking.close();
@@ -882,20 +925,15 @@ pub const PagedAttentionTiled = struct {
                     }
                     const row_max = fragRowReduce(b, .max, local_max);
 
-                    const prev_max = max_state.load(i32Of(rh));
-                    const grown_max = b.max(prev_max, row_max);
-                    const grew = grown_max.gt(prev_max);
-                    const was_empty = prev_max.eq(masked_score);
-                    factors[rh] = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
-                    const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
-                    max_state.store(i32Of(rh), grown_max);
+                    const update = growMax(b, max_state.load(i32Of(rh)), row_max);
+                    factors[rh] = update.factor;
+                    max_state.store(i32Of(rh), update.grown_max);
 
                     const local_sum = b.local(.float, 0.0);
                     inline for (0..2) |blk| {
                         inline for (0..4) |j| {
                             const s_element = s_tensor.element(blk * 8 + rh * 4 + j);
-                            const s = s_element.load(0);
-                            const prob = b.ternary(s.eq(masked_score), 0.0, b.fast().exp2(s.sub(new_max)));
+                            const prob = probability(b, s_element.load(0), update.new_max);
                             s_element.store(0, prob);
                             local_sum.assign(local_sum.add(prob));
                         }
@@ -1122,9 +1160,7 @@ pub const PagedAttentionTiled = struct {
 
                 const q_abs_pos = context_len.add(q_pos_start).add(sg_row).add(fm).to(.int);
                 const row_masked = sg_row.add(fm).ge(valid_q);
-                const min_q_abs_pos = context_len.add(q_pos_start);
-                var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
-                if (cfg.causal) tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
+                const tile_no_mask = tileNeedsNoMask(cfg, a, prologue, tile_start);
 
                 var masking = b.openIfElse(tile_no_mask.bitAnd(row_masked.eq(false)), .{});
                 {
@@ -1144,18 +1180,9 @@ pub const PagedAttentionTiled = struct {
                         var pair = b.openForOpts(0, 2, 1, unroll);
                         {
                             const jj = pair.iv;
-                            const s = b.local(.float, s_reg.load(k).at(jj).mul(scale_log2));
-                            var capped = b.openIf(a.softcapping.gt(0.0));
-                            {
-                                const s_orig = s.div(log2e);
-                                s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
-                                capped.close();
-                            }
+                            const s = scaledScore(b, a, s_reg.load(k).at(jj), scale_log2);
                             const kv_pos = tile_start.add(k.mul(8)).add(fn_).add(jj);
-                            var masked = row_masked.bitOr(kv_pos.ge(seq_len));
-                            if (cfg.causal) masked = masked.bitOr(kv_pos.gt(q_abs_pos));
-                            const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window)));
-                            masked = masked.bitOr(before_window);
+                            const masked = isMaskedKey(cfg, a, prologue, kv_pos, q_abs_pos, row_masked);
                             setLane(s_reg, k, jj, b.ternary(masked, masked_score, s));
                             pair.close();
                         }
@@ -1173,15 +1200,10 @@ pub const PagedAttentionTiled = struct {
                 }
                 const row_max = fragRowReduce(b, .max, local_max);
 
-                const prev_max = max_score.rvalue();
-                const grown_max = b.max(prev_max, row_max);
-                const grew = grown_max.gt(prev_max);
-                const was_empty = prev_max.eq(masked_score);
-                const factor = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
-                const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
+                const update = growMax(b, max_score.rvalue(), row_max);
                 // A tile masking a whole row leaves the maximum masked: zero would
                 // pin it, and later scores far below zero would underflow.
-                max_score.assign(grown_max);
+                max_score.assign(update.grown_max);
 
                 const local_sum = b.local(.float, 0.0);
                 var p_keys = b.openForOpts(0, TK, 1, unroll);
@@ -1190,8 +1212,7 @@ pub const PagedAttentionTiled = struct {
                     var pair = b.openForOpts(0, 2, 1, unroll);
                     {
                         const jj = pair.iv;
-                        const s = s_reg.load(k).at(jj);
-                        const p = b.ternary(s.eq(masked_score), 0.0, b.fast().exp2(s.sub(new_max)));
+                        const p = probability(b, s_reg.load(k).at(jj), update.new_max);
                         setLane(s_reg, k, jj, p);
                         local_sum.assign(local_sum.add(p));
                         pair.close();
@@ -1200,11 +1221,11 @@ pub const PagedAttentionTiled = struct {
                 }
                 const row_sum = fragRowReduce(b, .sum, local_sum);
 
-                sum_score.assign(sum_score.mul(factor).add(row_sum));
+                sum_score.assign(sum_score.mul(update.factor).add(row_sum));
 
                 var rescale_o = b.openForOpts(0, TD, 1, unroll);
                 {
-                    o_reg.store(rescale_o.iv, o_reg.load(rescale_o.iv).mul(factor));
+                    o_reg.store(rescale_o.iv, o_reg.load(rescale_o.iv).mul(update.factor));
                     rescale_o.close();
                 }
 
