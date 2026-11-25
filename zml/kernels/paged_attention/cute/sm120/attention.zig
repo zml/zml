@@ -24,6 +24,7 @@ pub const Config = struct {
     window: i64,
     scale: f32,
     sink: bool,
+    separate_v: bool,
     splits: i64 = 1,
 
     pub fn rows(c: Config) i64 {
@@ -35,8 +36,23 @@ pub const Config = struct {
     fn kvBase(c: Config) i64 {
         return c.rows() * c.head_dim * 2;
     }
+    fn kvBufferBytes(c: Config) i64 {
+        return c.kv_tile * c.head_dim * 2;
+    }
+    fn bufferCount(c: Config) i64 {
+        if (c.separate_v) {
+            return 2;
+        }
+        return 1;
+    }
+    fn vBase(c: Config) i64 {
+        if (c.separate_v) {
+            return c.kvBase() + c.kvBufferBytes();
+        }
+        return c.kvBase();
+    }
     fn pBase(c: Config) i64 {
-        return c.kvBase() + c.kv_tile * c.head_dim * 2;
+        return c.kvBase() + c.bufferCount() * c.kvBufferBytes();
     }
     fn redBase(c: Config) i64 {
         return c.pBase() + c.rows() * c.kv_tile * 2;
@@ -78,6 +94,14 @@ fn unpackStruct(b: *B, comptime n: usize, value: V, dtype: cute.DType) [n]V {
     return result;
 }
 
+fn commitGroup(b: *B) void {
+    _ = llvm.inline_asm(b.ctx, "cp.async.commit_group;", &.{}, .{ .has_side_effects = true }, b.loc()).appendTo(b.currentBlock());
+}
+
+fn waitGroup(b: *B, comptime pending: u8) void {
+    _ = llvm.inline_asm(b.ctx, std.fmt.comptimePrint("cp.async.wait_group {d};", .{pending}), &.{}, .{ .has_side_effects = true }, b.loc()).appendTo(b.currentBlock());
+}
+
 fn matrixLoad(b: *B, comptime n: usize, comptime transpose: bool, address: V) [n]V {
     const assembly = std.fmt.comptimePrint("ldmatrix.sync.aligned.m8n8.x{d}{s}.shared.b16 {{", .{ n, if (transpose) ".trans" else "" }) ++
         (if (n == 4) "$0, $1, $2, $3}, [$4];" else "$0, $1}, [$2];");
@@ -95,7 +119,7 @@ fn mma(b: *B, comptime dtype: cute.DType, a: [4]V, k: [2]V, acc: [4]V) [4]V {
 fn run(b: *B, c: Config) cute.FinishError!void {
     switch (c.head_dim) {
         inline 32, 64, 128, 256, 512 => |d| switch (c.warps_per_query) {
-            inline 2, 4 => |w| switch (c.kv_tile) {
+            inline 1, 2, 4 => |w| switch (c.kv_tile) {
                 inline 32, 64 => |n| switch (c.dtype) {
                     inline .bf16, .f16 => |dt| try runTile(b, c, d, w, n, dt),
                     else => unreachable,
@@ -131,7 +155,7 @@ const TileContext = struct {
 
     // Every load resolves its logical page on device. Tail copies are zeroed
     // before either MMA, including V tails whose backing allocation holds NaN.
-    fn loadKV(t: TileContext, source: V, key_base: V) void {
+    fn loadKV(t: TileContext, source: V, key_base: V, destination: i64) void {
         const b = t.b;
         const c = t.c;
         if (c.page_size == 16 and c.head_dim >= 64) {
@@ -150,7 +174,7 @@ const TileContext = struct {
                     const row = vector_index.div(@divExact(c.head_dim, 8));
                     const col = vector_index.rem(@divExact(c.head_dim, 8)).mul(8);
                     const offset = base.add(row.to(.i64).mul(c.kv_heads * c.head_dim)).add(col.to(.i64));
-                    b.cpAsync16(t.shared.add(c.kvBase()).add(swizzle(pages.iv.add(row), col, c.head_dim)), source.add(offset.mul(2)), first_key.add(row).lt(t.klen));
+                    b.cpAsync16(t.shared.add(destination).add(swizzle(pages.iv.add(row), col, c.head_dim)), source.add(offset.mul(2)), first_key.add(row).lt(t.klen));
                 }
                 pages.close();
             }
@@ -165,7 +189,7 @@ const TileContext = struct {
             const safe_key = b.select(valid, key, b.constant(.i32, 0));
             const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(safe_key.div(c.page_size)));
             const offset = page.to(.i64).mul(c.page_size).add(safe_key.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64));
-            b.cpAsync16(t.shared.add(c.kvBase()).add(swizzle(row, col, c.head_dim)), source.add(offset.mul(2)), valid);
+            b.cpAsync16(t.shared.add(destination).add(swizzle(row, col, c.head_dim)), source.add(offset.mul(2)), valid);
             copy.close();
         }
     }
@@ -283,12 +307,17 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
         initial[0] = neg_inf;
         initial[1] = neg_inf;
         for (initial[4..]) |*v| v.* = packAcc(b, .{ zero, zero, zero, zero });
+        if (c.separate_v) {
+            t.loadKV(t.k, lo.mul(n), c.kvBase());
+        }
         b.cpAsyncWaitAll();
         b.syncThreads();
         var loop = b.openFor(lo, hi, 1, initial);
         {
             const key_base = loop.iv.mul(n);
-            t.loadKV(t.k, key_base);
+            if (!c.separate_v) {
+                t.loadKV(t.k, key_base, c.kvBase());
+            }
             b.cpAsyncWaitAll();
             b.syncThreads();
             var scores: [nf][4]V = @splat(@splat(zero));
@@ -321,7 +350,15 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             b.syncThreads();
             // All K reads have completed. Reuse its allocation for V, and
             // overlap these global loads with softmax and probability stores.
-            t.loadKV(t.v, key_base);
+            t.loadKV(t.v, key_base, c.vBase());
+            if (c.separate_v) {
+                commitGroup(b);
+                var has_next = b.openIf(loop.iv.add(1).lt(hi));
+                {
+                    t.loadKV(t.k, key_base.add(n), c.kvBase());
+                    has_next.close();
+                }
+            }
             var m: [2]V = undefined;
             var alpha: [2]V = undefined;
             var local_sum: [2]V = @splat(zero);
@@ -342,7 +379,12 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
                 }
             }
             for (0..2) |h| t.publishReduction(row0.add(h * 8), local_sum[h], false);
-            b.cpAsyncWaitAll();
+            if (c.separate_v) {
+                commitGroup(b);
+                waitGroup(b, 1);
+            } else {
+                b.cpAsyncWaitAll();
+            }
             b.syncThreads();
             var next: [count]V = undefined;
             for (0..2) |h| {
@@ -359,7 +401,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             {
                 const pa = matrixLoad(b, 4, false, t.shared.add(c.pBase()).add(swizzle(row_base.add(t.lane.rem(16)), pv.iv.add(t.lane.div(16).mul(8)), n)));
                 for (0..of) |i| {
-                    const vb = matrixLoad(b, 2, true, t.shared.add(c.kvBase()).add(swizzle(pv.iv.add(t.lane.rem(16)), dim_part.add(i * 8), d)));
+                    const vb = matrixLoad(b, 2, true, t.shared.add(c.vBase()).add(swizzle(pv.iv.add(t.lane.rem(16)), dim_part.add(i * 8), d)));
                     var prev: [4]V = undefined;
                     for (0..4) |j| prev[j] = b.vectorExtract(pv.carried[i], @intCast(j), .f32);
                     acc[i] = mma(b, dt, pa, vb, prev);

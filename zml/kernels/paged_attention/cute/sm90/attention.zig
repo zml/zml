@@ -1,0 +1,347 @@
+//! Paged attention for Hopper with warpgroup MMA. Two math warpgroups each own 64 of the 128 packed query rows of a CTA;
+//! K and V tiles of 128 keys are double-buffered in 128-byte-swizzled shared memory with cp.async, S = Q K^T and O += P V run on
+//! wgmma with P kept in registers, and the online softmax runs on the accumulator fragments.
+const std = @import("std");
+
+const builder = @import("dsl/cute/builder");
+const zml = @import("zml/core");
+const cute = zml.kernel.cute;
+const ptx = @import("ptx.zig");
+
+const B = cute.Builder;
+const V = cute.Value;
+
+pub const block_rows: i64 = 128;
+pub const block_keys: i64 = 128;
+pub const thread_count: i64 = 256;
+
+pub const Config = struct {
+    head_dim: i64,
+    tokens: i64,
+    batch: i64,
+    kv_heads: i64,
+    group: i64,
+    pages_per_seq: i64,
+    page_size: i64,
+    max_query: i64,
+    dtype: cute.DType,
+    causal: bool,
+    window: i64,
+    scale: f32,
+    sink: bool,
+    splits: i64,
+
+    pub fn queryTiles(c: Config) i64 {
+        return @divTrunc(c.max_query * c.group + block_rows - 1, block_rows);
+    }
+    fn tileBytes(c: Config) i64 {
+        return block_keys * c.head_dim * 2;
+    }
+    fn keyBase(c: Config) i64 {
+        return block_rows * c.head_dim * 2;
+    }
+    fn valueBase(c: Config) i64 {
+        return c.keyBase() + 2 * c.tileBytes();
+    }
+    fn sharedBytes(c: Config) i64 {
+        return c.valueBase() + 2 * c.tileBytes();
+    }
+};
+
+pub const Kernel = cute.Kernel(Config, .{
+    .name = "paged_attention_cute_sm90",
+    .inputs = &.{ "q", "k", "v", "table", "lengths", "starts", "sink" },
+    .outputs = &.{"out"},
+    .run = run,
+});
+
+fn run(b: *B, c: Config) cute.FinishError!void {
+    switch (c.head_dim) {
+        inline 64, 128 => |d| switch (c.dtype) {
+            inline .bf16, .f16 => |dt| try runTile(b, c, d, dt),
+            else => unreachable,
+        },
+        else => unreachable,
+    }
+}
+
+fn loadI32(b: *B, ptr: V, index: V) V {
+    return b.loadWords(1, ptr.add(index.to(.i64).mul(4)), .global, .{})[0];
+}
+
+// Offset in a tile stored as 64-column slabs of 128-byte rows, whose 16-byte chunks are XORed by the row mod 8 (the 128-byte
+// swizzle wgmma expects). `rows` is the slab height.
+fn tileOffset(row: V, chunk: V, rows: i64) V {
+    const slab = chunk.div(8);
+    const within = chunk.rem(8).bitXor(row.rem(8));
+    return slab.mul(rows * 128).add(row.mul(128)).add(within.mul(16));
+}
+
+const Rows = [2]V;
+
+const TileContext = struct {
+    b: *B,
+    c: Config,
+    q: V,
+    k: V,
+    v: V,
+    table: V,
+    shared: V,
+    tid: V,
+    seq: V,
+    head: V,
+    first_row: V,
+    start: V,
+    qlen: V,
+    klen: V,
+
+    fn loadRows(t: TileContext, source: V, key_base: V, destination: V, comptime is_query: bool) void {
+        const b = t.b;
+        const c = t.c;
+        const chunks = @divExact(c.head_dim, 8);
+        const row_count = if (is_query) block_rows else block_keys;
+        var copy = b.openFor(t.tid, row_count * chunks, thread_count, .{});
+        {
+            const row = copy.iv.div(chunks);
+            const chunk = copy.iv.rem(chunks);
+            const column = chunk.mul(8);
+            const target = destination.add(tileOffset(row, chunk, row_count));
+            if (is_query) {
+                const packed_row = t.first_row.add(row);
+                const valid = packed_row.lt(t.qlen.mul(c.group));
+                const token = t.start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
+                const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(c.head_dim).add(column.to(.i64));
+                b.cpAsync16(target, source.add(offset.mul(2)), valid);
+            } else {
+                const key = key_base.add(row);
+                const valid = key.lt(t.klen);
+                const safe_key = b.select(valid, key, b.constant(.i32, 0));
+                const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(safe_key.div(c.page_size)));
+                const offset = page.to(.i64).mul(c.page_size).add(safe_key.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(column.to(.i64));
+                b.cpAsync16(target, source.add(offset.mul(2)), valid);
+            }
+            copy.close();
+        }
+    }
+};
+
+fn rowOf(index: usize) usize {
+    return (index % 4) / 2;
+}
+
+fn quadMax(b: *B, value: V) V {
+    const pair = b.fmax(value, b.shuffleXor(value, 1), .{ .ftz = true });
+    return b.fmax(pair, b.shuffleXor(pair, 2), .{ .ftz = true });
+}
+
+fn quadSum(b: *B, value: V) V {
+    const far = value.add(b.shuffleXor(value, 2));
+    return far.add(b.shuffleXor(far, 1));
+}
+
+fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.FinishError!void {
+    std.debug.assert(c.sharedBytes() <= 227 * 1024);
+    const accumulator_count = d / 2;
+    const score_count = block_keys / 2;
+    const a = try b.declareArgs(.{
+        .q = .{ .ptr = dt },
+        .k = .{ .ptr = dt },
+        .v = .{ .ptr = dt },
+        .table = .{ .ptr = cute.DType.i32 },
+        .lengths = .{ .ptr = cute.DType.i32 },
+        .starts = .{ .ptr = cute.DType.i32 },
+        .sink = .{ .ptr = cute.DType.f32 },
+        .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else dt },
+    });
+    b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
+    const seq = b.blockIdx().x.div(c.queryTiles());
+    const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(block_rows);
+    const starts = b.ptrToInt(a.starts, .i64);
+    const start = loadI32(b, starts, seq);
+    const qlen = loadI32(b, starts, seq.add(1)).sub(start);
+    var active = b.openIf(first_row.lt(qlen.mul(c.group)));
+    {
+        const tid = b.threadIdx().x;
+        const t: TileContext = .{
+            .b = b,
+            .c = c,
+            .q = b.ptrToInt(a.q, .i64),
+            .k = b.ptrToInt(a.k, .i64),
+            .v = b.ptrToInt(a.v, .i64),
+            .table = b.ptrToInt(a.table, .i64),
+            .shared = b.ptrToInt(b.allocSmem(.i8, c.sharedBytes(), 1024), .i32),
+            .tid = tid,
+            .seq = seq,
+            .head = b.blockIdx().y,
+            .first_row = first_row,
+            .start = start,
+            .qlen = qlen,
+            .klen = loadI32(b, b.ptrToInt(a.lengths, .i64), seq),
+        };
+        const split = b.blockIdx().z;
+        const sink_pointer = b.ptrToInt(a.sink, .i64);
+        const out_pointer = b.ptrToInt(a.out, .i64);
+
+        const first_pos = t.klen.sub(qlen).add(first_row.div(c.group));
+        const last_pos = t.klen.sub(qlen).add(first_row.add(block_rows - 1).div(c.group).minimum(qlen.sub(1)));
+        const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
+        const end = if (c.causal) last_pos.add(1).minimum(t.klen) else t.klen;
+        const first_tile = begin.div(block_keys);
+        const tiles = end.add(block_keys - 1).div(block_keys).sub(first_tile).maximum(0);
+        const lo = first_tile.add(tiles.mul(split).div(c.splits));
+        const hi = first_tile.add(tiles.mul(split.add(1)).div(c.splits));
+
+        const warpgroup = tid.div(128);
+        const lane = tid.rem(32);
+        const row_in_tile = warpgroup.mul(64).add(tid.rem(128).div(32).mul(16)).add(lane.div(4));
+        const column0 = lane.rem(4).mul(2);
+        const zero = b.constant(.f32, 0);
+        const neg_inf = b.constant(.f32, -std.math.inf(f32));
+        const scale_log2 = b.constant(.f32, c.scale * std.math.log2e);
+
+        t.loadRows(t.q, b.constant(.i32, 0), t.shared, true);
+        t.loadRows(t.k, lo.mul(block_keys), t.shared.add(c.keyBase()), false);
+        t.loadRows(t.v, lo.mul(block_keys), t.shared.add(c.valueBase()), false);
+
+        const query_descriptor = ptx.matrixDescriptor(b, t.shared.add(warpgroup.mul(64 * 128)), 16, 1024);
+
+        var initial: [5]V = undefined;
+        const zero_output: [accumulator_count]V = @splat(zero);
+        initial[0] = ptx.packVector(b, &zero_output);
+        initial[1] = neg_inf;
+        initial[2] = neg_inf;
+        initial[3] = zero;
+        initial[4] = zero;
+        var loop = b.openFor(lo, hi, 1, initial);
+        {
+            b.cpAsyncWaitAll();
+            ptx.asyncProxyFence(b);
+            b.syncThreads();
+            const stage = loop.iv.sub(lo).bitAnd(1);
+            const next_stage = stage.bitXor(1);
+            var has_next = b.openIf(loop.iv.add(1).lt(hi));
+            {
+                const next_keys = loop.iv.add(1).mul(block_keys);
+                t.loadRows(t.k, next_keys, t.shared.add(c.keyBase()).add(next_stage.mul(c.tileBytes())), false);
+                t.loadRows(t.v, next_keys, t.shared.add(c.valueBase()).add(next_stage.mul(c.tileBytes())), false);
+                has_next.close();
+            }
+
+            var output = ptx.unpackVector(b, accumulator_count, loop.carried[0], .f32);
+            var scores: [score_count]V = @splat(zero);
+            const key_descriptor = ptx.matrixDescriptor(b, t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())), 16, 1024);
+            ptx.fenceOperands(b, .f32, &scores);
+            ptx.wgmmaFence(b);
+            inline for (0..d / 16) |k_step| {
+                const slab: i32 = @intCast(k_step / 4);
+                const within_slab: i32 = @intCast((k_step % 4) * 32);
+                const query_offset: i32 = (slab * @as(i32, block_rows) * 128 + within_slab) >> 4;
+                const key_offset: i32 = (slab * @as(i32, block_keys) * 128 + within_slab) >> 4;
+                ptx.wgmmaSharedShared(b, dt, block_keys, &scores, query_descriptor.advance(query_offset), key_descriptor.advance(key_offset), k_step > 0);
+            }
+            ptx.wgmmaCommit(b);
+            ptx.wgmmaWait(b, 0);
+            ptx.fenceOperands(b, .f32, &scores);
+
+            const key_base = loop.iv.mul(block_keys);
+            var row_valid: [2]V = undefined;
+            var row_position: [2]V = undefined;
+            for (0..2) |h| {
+                const row = first_row.add(row_in_tile).add(h * 8);
+                row_valid[h] = row.lt(qlen.mul(c.group));
+                row_position[h] = t.klen.sub(qlen).add(row.div(c.group));
+            }
+            var thread_max: [2]V = .{ neg_inf, neg_inf };
+            for (&scores, 0..) |*score, index| {
+                const h = rowOf(index);
+                const key = key_base.add((index / 4) * 8).add(column0).add(index % 2);
+                var valid = row_valid[h].bitAnd(key.lt(t.klen));
+                if (c.causal) valid = valid.bitAnd(key.le(row_position[h]));
+                if (c.window > 0) valid = valid.bitAnd(key.gt(row_position[h].sub(c.window)));
+                score.* = b.select(valid, score.*, neg_inf);
+                thread_max[h] = b.fmax(thread_max[h], score.*, .{ .ftz = true });
+            }
+            var next: [5]V = undefined;
+            var scale: [2]V = undefined;
+            var offset: [2]V = undefined;
+            for (0..2) |h| {
+                const previous = loop.carried[1 + h];
+                const maximum = b.fmax(quadMax(b, thread_max[h]), previous, .{ .ftz = true });
+                const finite = b.select(maximum.eq(neg_inf), zero, maximum);
+                scale[h] = b.exp2Approx(previous.sub(finite).mul(scale_log2));
+                offset[h] = finite.mul(scale_log2).neg();
+                next[1 + h] = maximum;
+                next[3 + h] = loop.carried[3 + h].mul(scale[h]);
+            }
+            for (&output, 0..) |*value, index| {
+                value.* = value.*.mul(scale[rowOf(index)]);
+            }
+            var words: [score_count / 2]V = undefined;
+            for (&scores, 0..) |*score, index| {
+                score.* = b.exp2Approx(b.fma(score.*, scale_log2, offset[rowOf(index)]));
+                next[3 + rowOf(index)] = next[3 + rowOf(index)].add(score.*);
+            }
+            for (&words, 0..) |*word, index| {
+                word.* = ptx.packHalves(b, dt, scores[2 * index], scores[2 * index + 1]);
+            }
+
+            const value_descriptor = ptx.matrixDescriptor(b, t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())), block_keys * 128, 1024);
+            ptx.fenceOperands(b, .f32, &output);
+            ptx.fenceOperands(b, .i32, &words);
+            ptx.wgmmaFence(b);
+            inline for (0..block_keys / 16) |k_step| {
+                const value_offset: i32 = @intCast((k_step * 16 * 128) >> 4);
+                ptx.wgmmaRegistersShared(b, dt, d, &output, words[4 * k_step ..][0..4].*, value_descriptor.advance(value_offset));
+            }
+            ptx.wgmmaCommit(b);
+            ptx.wgmmaWait(b, 0);
+            ptx.fenceOperands(b, .f32, &output);
+            next[0] = ptx.packVector(b, &output);
+            loop.yield(next);
+        }
+
+        const final_output = ptx.unpackVector(b, accumulator_count, loop.results[0], .f32);
+        for (0..2) |h| {
+            const row = first_row.add(row_in_tile).add(h * 8);
+            var valid = b.openIf(row.lt(qlen.mul(c.group)));
+            {
+                const m = loop.results[1 + h].mul(scale_log2);
+                const l = quadSum(b, loop.results[3 + h]);
+                var norm = b.select(l.gt(0), b.rcpApprox(l), zero);
+                if (c.splits == 1 and c.sink) {
+                    const sink = loadI32(b, sink_pointer, t.head.mul(c.group).add(row.rem(c.group))).bitCast(.f32).mul(std.math.log2e);
+                    const maximum = m.maximum(sink);
+                    const weight = b.exp2Approx(m.sub(maximum));
+                    norm = weight.div(l.mul(weight).add(b.exp2Approx(sink.sub(maximum))));
+                }
+                const token = start.add(row.div(c.group));
+                var base = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(row.rem(c.group).to(.i64));
+                if (c.splits > 1) {
+                    base = split.to(.i64).mul(c.tokens * c.kv_heads * c.group).add(base).mul(c.head_dim + 2);
+                } else {
+                    base = base.mul(c.head_dim);
+                }
+                for (0..d / 8) |group_index| {
+                    const column = column0.add(group_index * 8);
+                    const first = final_output[group_index * 4 + h * 2];
+                    const second = final_output[group_index * 4 + h * 2 + 1];
+                    if (c.splits > 1) {
+                        b.storeWords(2, out_pointer.add(base.add(column.to(.i64)).mul(4)), .global, .{ first.bitCast(.i32), second.bitCast(.i32) });
+                    } else {
+                        b.storeWords(1, out_pointer.add(base.add(column.to(.i64)).mul(2)), .global, .{b.packHalf2(first.mul(norm), second.mul(norm), dt)});
+                    }
+                }
+                if (c.splits > 1) {
+                    var leader = b.openIf(lane.rem(4).eq(0));
+                    {
+                        b.storeWords(1, out_pointer.add(base.add(c.head_dim).mul(4)), .global, .{m.bitCast(.i32)});
+                        b.storeWords(1, out_pointer.add(base.add(c.head_dim + 1).mul(4)), .global, .{l.bitCast(.i32)});
+                        leader.close();
+                    }
+                }
+                valid.close();
+            }
+        }
+        active.close();
+    }
+}
