@@ -772,6 +772,12 @@ pub const CreateOptions = struct {
             async: Options,
             /// use virtual memory allocator
             vmm: VmmOptions,
+            /// use BFC for default memory and VMM for collective memory and
+            /// command buffer remapping
+            composite_bfc_vmm: CompositeOptions,
+            /// use CUDA async for default memory and VMM for collective memory
+            /// and command buffer remapping
+            composite_cuda_async_vmm: CompositeOptions,
             /// use raw cuMalloc
             platform,
 
@@ -782,6 +788,10 @@ pub const CreateOptions = struct {
             };
 
             pub const VmmOptions = struct {
+                memory_fraction: f32 = 0.90,
+            };
+
+            pub const CompositeOptions = struct {
                 memory_fraction: f32 = 0.90,
             };
         };
@@ -795,7 +805,7 @@ pub const CreateOptions = struct {
                     values.appendAssumeCapacity(.init(.string, "allocator", switch (self.allocator) {
                         .bfc => "bfc",
                         .async => "cuda_async",
-                        .platform, .vmm => unreachable,
+                        .platform, .vmm, .composite_bfc_vmm, .composite_cuda_async_vmm => unreachable,
                     }));
                     values.appendAssumeCapacity(.init(.bool, "preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
@@ -807,6 +817,17 @@ pub const CreateOptions = struct {
                 },
                 .vmm => |opt| {
                     values.appendAssumeCapacity(.init(.string, "allocator", "vmm"));
+                    if (opt.memory_fraction > 0) {
+                        values.appendAssumeCapacity(.init(.float, "memory_fraction", opt.memory_fraction));
+                    }
+                },
+                .composite_bfc_vmm, .composite_cuda_async_vmm => |opt| {
+                    values.appendAssumeCapacity(.init(.string, "allocator", switch (self.allocator) {
+                        .composite_bfc_vmm => "composite_bfc_vmm",
+                        .composite_cuda_async_vmm => "composite_cuda_async_vmm",
+                        .bfc, .async, .platform, .vmm => unreachable,
+                    }));
+                    values.appendAssumeCapacity(.init(.bool, "preallocate", false));
                     if (opt.memory_fraction > 0) {
                         values.appendAssumeCapacity(.init(.float, "memory_fraction", opt.memory_fraction));
                     }
