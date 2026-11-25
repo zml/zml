@@ -1,5 +1,6 @@
 #!/bin/bash
-if git diff --quiet; then
+# Trees synced without .git (e.g. to remote build hosts) report "dev" quietly.
+if git diff --quiet 2>/dev/null; then
     echo BUILD_SCM_REVISION "$(git rev-parse --short HEAD)"
 else
     echo BUILD_SCM_REVISION "dev"
