@@ -9,6 +9,7 @@ const stdx = @import("stdx");
 
 const zml = @import("zml/core");
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const Nvfp4BlockScale = @import("zml/quantization").Nvfp4BlockScale;
 const triton_kernels = @import("zml/kernels/moe/triton").kernels;
 pub const mxfp4 = @import("mxfp4.zig");
 pub const mxfp4_persistent = @import("persistent_mxfp4.zig");
@@ -258,6 +259,18 @@ pub const Nvfp4Options = struct {
     routing_weight_placement: RoutingWeightPlacement = .after_down,
     /// GEMM tile N; null selects it from the batch size.
     tile_n: ?i64 = null,
+    /// Soft caps of the gate and up values, in place of the SwiGLU's clamp.
+    capped: ?nvfp4.CappedSwiglu = null,
+    /// Quantize activations row by row instead of with the calibrated `act1` and `act2`.
+    row_scaled: ?Nvfp4RowScaled = null,
+};
+
+/// NVFP4 activations without calibrated scales: each row takes a dynamic power-of-two
+/// scale, computed from its largest value, and each of its blocks the E4M3 scale
+/// `block_scale` picks. See `nvfp4.quantizeRows`.
+pub const Nvfp4RowScaled = struct {
+    block_scale: Nvfp4BlockScale,
+    activation: nvfp4.CappedSwiglu,
 };
 
 pub fn validateNvfp4Shapes(hidden: i64, intermediate: i64) void {
@@ -276,6 +289,7 @@ fn nvfp4TileN(tokens: i64, experts: i64, topk: i64) i64 {
 
 /// `[tokens, hidden]` BF16 output of the NVFP4 MoE layer.
 pub fn forwardNvfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, a: Nvfp4Inputs, opts: Nvfp4Options) zml.Tensor {
+    if (opts.row_scaled) |row_scaled| return forwardNvfp4RowScaled(tokens, hidden, intermediate, experts, topk, a, opts, row_scaled);
     validateNvfp4Shapes(hidden, intermediate);
     const n = opts.tile_n orelse nvfp4TileN(tokens, experts, topk);
     const direct = isDirect(tokens);
@@ -296,6 +310,7 @@ pub fn forwardNvfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, t
         .routes = routes,
         .direct = direct,
         .swiglu_limit = opts.swiglu_limit,
+        .capped = opts.capped,
         .routing_weights = opts.routing_weight_placement == .before_down,
     };
     var down_cfg = up_cfg;
@@ -329,6 +344,86 @@ pub fn forwardNvfp4(tokens: i64, hidden: i64, intermediate: i64, experts: i64, t
         .input_scale = q2.s,
         .alpha = a.alpha2,
     }, routing.route_inverse, weights);
+    return reduce.topk(down, route_map, .{
+        .tokens = tokens,
+        .hidden = hidden,
+        .topk = topk,
+        .columns_per_cta = reduce.columnsPerCta(tokens, hidden),
+    });
+}
+
+/// `forwardNvfp4` with activations quantized row by row. The gate/up GEMM stores BF16
+/// rows in route order; one kernel activates, weights and quantizes them for the down
+/// GEMM, whose output takes the row scales through its routing-weight operand.
+/// `a.w2` and `a.s2` hold the down projection padded along K to whole K tiles.
+fn forwardNvfp4RowScaled(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, a: Nvfp4Inputs, opts: Nvfp4Options, row_scaled: Nvfp4RowScaled) zml.Tensor {
+    const padded_intermediate = a.w2.dim(2) * 2;
+    validateNvfp4Shapes(hidden, padded_intermediate);
+    stdx.debug.assert(padded_intermediate >= intermediate and @rem(intermediate, 16) == 0, "cute NVFP4 backend expects the down projection padded from {} values, got {}", .{ intermediate, padded_intermediate });
+    const n = opts.tile_n orelse nvfp4TileN(tokens, experts, topk);
+    const direct = isDirect(tokens);
+    const routes = tokens * topk;
+    const flat_ids = a.ids.convert(.i32).reshape(.{routes});
+    const routing = route(tokens, experts, topk, n, direct, a.ids);
+    const route_map = routing.route_map orelse flat_ids;
+    const weights = a.routing_weights.convert(.f32).reshape(.{routes});
+    const before_down = opts.routing_weight_placement == .before_down;
+
+    const up_cfg: nvfp4_persistent.Config = .{
+        .experts = experts,
+        .m = 2 * intermediate,
+        .n = n,
+        .k = hidden,
+        .groups = routing.groups,
+        .persistent_ctas = @intCast(persistentCtas()),
+        .epilogue = .route_rows,
+        .routes = routes,
+        .direct = direct,
+    };
+    var down_cfg = up_cfg;
+    down_cfg.m = hidden;
+    down_cfg.k = padded_intermediate;
+    down_cfg.routing_weights = true;
+
+    const q1 = nvfp4.quantizeRows(a.x, route_map, flat_ids, null, null, .{
+        .rows = tokens,
+        .width = hidden,
+        .topk = topk,
+        .group_size = up_cfg.groupRows(),
+        .capacity = routing.groups,
+        .direct = direct,
+        .block_scale = row_scaled.block_scale,
+    });
+    const up = nvfp4_persistent.downRows(up_cfg, .{
+        .weight = a.w1,
+        .schedule = routing.schedule,
+        .input_quant = q1.q,
+        .weight_scale = a.s1.bitCast(.u8),
+        .input_scale = q1.s,
+        .alpha = a.alpha1,
+    }, routing.route_inverse, weights);
+    // Each route's row takes the scale of its token's input row before the activation.
+    const q2 = nvfp4.quantizeRows(up, route_map, flat_ids, q1.row_scale, if (before_down) weights else null, .{
+        .rows = routes,
+        .width = padded_intermediate,
+        .input_width = intermediate,
+        .topk = 1,
+        .group_size = down_cfg.groupRows(),
+        .capacity = routing.groups,
+        .direct = direct,
+        .block_scale = row_scaled.block_scale,
+        .activation = row_scaled.activation,
+        .pre_scale_rows = topk,
+        .weights = before_down,
+    });
+    const down = nvfp4_persistent.downRows(down_cfg, .{
+        .weight = a.w2,
+        .schedule = routing.schedule,
+        .input_quant = q2.q,
+        .weight_scale = a.s2.bitCast(.u8),
+        .input_scale = q2.s,
+        .alpha = a.alpha2,
+    }, routing.route_inverse, if (before_down) q2.row_scale else q2.row_scale.mul(weights));
     return reduce.topk(down, route_map, .{
         .tokens = tokens,
         .hidden = hidden,
