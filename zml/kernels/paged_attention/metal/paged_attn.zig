@@ -614,6 +614,13 @@ pub const PagedAttentionTiled = struct {
         const context_len = seq_len.sub(cur_batch_query_len);
         const valid_q = b.min(BQ, cur_batch_query_len.sub(q_pos_start));
 
+        // A block of at most one stripe of rows leaves the other simdgroups idle: they take the next query heads
+        // of the KV group instead, so one K/V stream serves them all.
+        const shares_heads = valid_q.le(8).bitAnd(num_queries_per_kv.rem(NUM_SG).eq(0));
+        b.returnIf(shares_heads.bitAnd(head_idx.rem(NUM_SG).gt(0)));
+        const sg_head_offset = b.ternary(shares_heads, a.sg_idx.to(.int), 0);
+        const sg_row = b.ternary(shares_heads, 0, a.sg_idx.mul(8).to(.int));
+
         const SMEM_PAD = @divExact(16, @as(i32, @intCast(T.size())));
         const LD = HEAD_SIZE + SMEM_PAD;
         const KV_ELEMS = TILE_KV * LD;
@@ -629,16 +636,18 @@ pub const PagedAttentionTiled = struct {
         var load_q = b.openFor(thread_idx, BQ * HEAD_SIZE, NUM_THREADS);
         {
             const i = load_q.iv;
-            const r = i.div(HEAD_SIZE);
+            const smem_row = i.div(HEAD_SIZE);
+            const r = b.ternary(shares_heads, smem_row.rem(8), smem_row);
+            const head_offset = b.ternary(shares_heads, smem_row.div(8), 0);
             const d = i.rem(HEAD_SIZE);
             var value = b.openIfElse(r.lt(valid_q), .{T});
             {
-                value.yieldThen(.{q_base.load(r.mul(a.q_stride).add(d))});
+                value.yieldThen(.{q_base.load(r.mul(a.q_stride).add(head_offset.mul(HEAD_SIZE)).add(d))});
             }
             {
                 value.yieldElse(.{b.constant(T, 0)});
             }
-            Q_smem.store(r.mul(LD).add(d), value.results[0]);
+            Q_smem.store(smem_row.mul(LD).add(d), value.results[0]);
             load_q.close();
         }
 
@@ -728,7 +737,7 @@ pub const PagedAttentionTiled = struct {
 
             b.threadgroupBarrier(.mem_threadgroup);
 
-            var active = b.openIf(a.sg_idx.mul(8).to(.int).lt(valid_q));
+            var active = b.openIf(sg_row.lt(valid_q));
             {
                 const s_reg = b.array(.float2, @intCast(TK));
                 var zero_s = b.openForOpts(0, TK, 1, unroll);
@@ -752,8 +761,8 @@ pub const PagedAttentionTiled = struct {
                     qk_dims.close();
                 }
 
-                const q_abs_pos = context_len.add(q_pos_start).add(a.sg_idx.mul(8)).add(fm).to(.int);
-                const row_masked = a.sg_idx.mul(8).add(fm).ge(valid_q);
+                const q_abs_pos = context_len.add(q_pos_start).add(sg_row).add(fm).to(.int);
+                const row_masked = sg_row.add(fm).ge(valid_q);
                 const min_q_abs_pos = context_len.add(q_pos_start);
                 var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
                 if (cfg.causal) tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
@@ -868,8 +877,8 @@ pub const PagedAttentionTiled = struct {
             normalize.close();
         }
 
-        const out_base = a.out.add(q_seq_start.add(q_pos_start).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE));
-        const out_row = a.sg_idx.mul(8).to(.int).add(fm.to(.int));
+        const out_base = a.out.add(q_seq_start.add(q_pos_start).mul(a.q_stride)).add(head_idx.add(sg_head_offset).mul(HEAD_SIZE));
+        const out_row = sg_row.add(fm.to(.int));
         var row_valid = b.openIf(out_row.lt(valid_q));
         {
             const row_base = out_base.add(out_row.mul(a.q_stride)).add(fn_.to(.int));

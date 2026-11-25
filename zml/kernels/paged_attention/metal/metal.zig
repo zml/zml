@@ -136,7 +136,7 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
             break :blk platform.coreCountPerDevice() orelse std.debug.panic("Metal device has no core_count attribute", .{});
         };
 
-        const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), span, @intCast(core_count));
+        const launch = vecLaunch(nrows, @divExact(num_heads, num_kv_heads), head_dim, span, @intCast(core_count));
 
         const cfg: paged_attn.FaVecPaged.Cfg = .{
             .head_dim = head_dim,
@@ -212,6 +212,13 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
     }).out;
 }
 
+fn chooseWant(few_rows: bool, heads: i32) i32 {
+    if (few_rows) {
+        return 128;
+    }
+    return @divExact(128, heads);
+}
+
 const VecLaunch = struct {
     heads: i32,
     splits: i32,
@@ -220,10 +227,11 @@ const VecLaunch = struct {
 
 /// At most 256 threads, which every Apple GPU pipeline accepts. Splits past a
 /// row's length exit early, so `splits` follows the core and row counts.
-fn vecLaunch(rows: i32, group: i32, span: i32, cores: i32) VecLaunch {
-    var heads: i32 = @min(group, 4);
+fn vecLaunch(rows: i32, group: i32, head_dim: i32, span: i32, cores: i32) VecLaunch {
+    // Wide heads keep fewer heads per group: a threadgroup holds about 128 head-and-split simdgroups per KV head.
+    var heads: i32 = @min(group, std.math.clamp(@divFloor(512, head_dim), 2, 4));
     while (@rem(group, heads) != 0) heads -= 1;
-    const want: i32 = if (rows <= 2 * cores) 128 else 64;
+    const want: i32 = chooseWant(rows <= 2 * cores, heads);
     const chunks = @divFloor(span + 31, 32);
     var splits: i32 = 1;
     while (splits * 2 <= @min(want, chunks)) splits *= 2;
@@ -231,9 +239,9 @@ fn vecLaunch(rows: i32, group: i32, span: i32, cores: i32) VecLaunch {
 }
 
 test vecLaunch {
-    try std.testing.expectEqual(VecLaunch{ .heads = 4, .splits = 128, .splits_per_threadgroup = 2 }, vecLaunch(16, 4, 128000, 40));
-    try std.testing.expectEqual(VecLaunch{ .heads = 2, .splits = 64, .splits_per_threadgroup = 4 }, vecLaunch(256, 2, 128000, 40));
-    try std.testing.expectEqual(VecLaunch{ .heads = 4, .splits = 64, .splits_per_threadgroup = 2 }, vecLaunch(512, 4, 128000, 40));
-    try std.testing.expectEqual(VecLaunch{ .heads = 3, .splits = 8, .splits_per_threadgroup = 2 }, vecLaunch(48, 6, 288, 40));
-    try std.testing.expectEqual(VecLaunch{ .heads = 1, .splits = 1, .splits_per_threadgroup = 1 }, vecLaunch(8, 1, 20, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 4, .splits = 128, .splits_per_threadgroup = 2 }, vecLaunch(16, 4, 128, 128000, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 2, .splits = 64, .splits_per_threadgroup = 4 }, vecLaunch(256, 2, 128, 128000, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 4, .splits = 32, .splits_per_threadgroup = 2 }, vecLaunch(512, 4, 128, 128000, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 3, .splits = 8, .splits_per_threadgroup = 2 }, vecLaunch(48, 6, 128, 288, 40));
+    try std.testing.expectEqual(VecLaunch{ .heads = 1, .splits = 1, .splits_per_threadgroup = 1 }, vecLaunch(8, 1, 128, 20, 40));
 }
