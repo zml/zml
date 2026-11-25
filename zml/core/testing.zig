@@ -298,7 +298,7 @@ pub const CompareOpts = struct {
 
             for (left, right) |l, r| {
                 switch (@typeInfo(T)) {
-                    .int, .float => self.count_close += if (l == r) 1 else 0,
+                    .bool, .int, .float => self.count_close += if (l == r) 1 else 0,
                     .vector => |vec| self.count_close += @popCount(@as(@Int(.unsigned, vec.len), @bitCast(l == r))),
                     else => @panic("cmpIntSlices expect int or vector of int"),
                 }
