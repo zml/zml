@@ -7,6 +7,7 @@ const zml = @import("zml/core");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const V = cute.Value;
+const common = @import("../common.zig");
 
 pub const Config = struct {
     head_dim: i64,
@@ -77,10 +78,6 @@ fn flatten(comptime n: usize, values: [n][4]V) [n * 4]V {
 
 fn packAcc(b: *B, values: [4]V) V {
     return b.emit(vector.from_elements(b.ctx, &.{ values[0].inner, values[1].inner, values[2].inner, values[3].inner }, .vector(&.{4}, .float(b.ctx, .f32)), b.loc()));
-}
-
-fn loadI32(b: *B, ptr: V, index: V) V {
-    return b.loadWords(1, ptr.add(index.to(.i64).mul(4)), .global, .{})[0];
 }
 
 // XOR whole 16-byte vectors so cp.async and ldmatrix agree on bank layout.
@@ -167,7 +164,7 @@ const TileContext = struct {
                 const first_key = key_base.add(pages.iv);
                 const page_valid = first_key.lt(t.klen);
                 const logical_page = b.select(page_valid, first_key.div(16), b.constant(.i32, 0));
-                const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
+                const page = common.loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
                 const base = page.to(.i64).mul(16 * c.kv_heads * c.head_dim).add(t.head.to(.i64).mul(c.head_dim));
                 for (0..@as(usize, @intCast(@divExact(c.head_dim, 64)))) |i| {
                     const vector_index = t.tid.add(i * 128);
@@ -186,9 +183,7 @@ const TileContext = struct {
             const col = copy.iv.rem(@divExact(c.head_dim, 8)).mul(8);
             const key = key_base.add(row);
             const valid = key.lt(t.klen);
-            const safe_key = b.select(valid, key, b.constant(.i32, 0));
-            const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(safe_key.div(c.page_size)));
-            const offset = page.to(.i64).mul(c.page_size).add(safe_key.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64));
+            const offset = common.pagedElement(b, c, t.table, t.seq, t.head, key, valid, col);
             b.cpAsync16(t.shared.add(destination).add(swizzle(row, col, c.head_dim)), source.add(offset.mul(2)), valid);
             copy.close();
         }
@@ -219,37 +214,19 @@ const TileContext = struct {
     }
 
     fn store(t: TileContext, row: V, dim: V, value: V) void {
-        const c = t.c;
-        const token = t.start.add(row.div(c.group));
-        var offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(row.rem(c.group).to(.i64));
-        if (c.splits > 1) {
-            offset = t.split.to(.i64).mul(c.tokens * c.kv_heads * c.group).add(offset).mul(c.head_dim + 2).add(dim.to(.i64));
-            t.b.storeWords(1, t.out.add(offset.mul(4)), .global, .{value.bitCast(.i32)});
-        } else {
-            offset = offset.mul(c.head_dim).add(dim.to(.i64));
-            t.b.storeHalf(t.out.add(offset.mul(2)), .global, value.to(c.dtype).bitCast(.i16).to(.i32));
-        }
+        common.storeOutput(t.b, t.c, t.out, t.split, t.start, t.head, row, dim, value);
     }
 };
 
 fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: usize, comptime dt: cute.DType) cute.FinishError!void {
     std.debug.assert(c.sharedBytes() <= 99 * 1024);
-    const a = try b.declareArgs(.{
-        .q = .{ .ptr = dt },
-        .k = .{ .ptr = dt },
-        .v = .{ .ptr = dt },
-        .table = .{ .ptr = cute.DType.i32 },
-        .lengths = .{ .ptr = cute.DType.i32 },
-        .starts = .{ .ptr = cute.DType.i32 },
-        .sink = .{ .ptr = cute.DType.f32 },
-        .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else dt },
-    });
-    b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
+    const a = try b.declareArgs(common.KernelArguments.init(dt, c.splits));
+    common.allowMaximumSharedMemory(b);
     const seq = b.blockIdx().x.div(c.queryTiles());
     const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(c.rows());
     const starts = b.ptrToInt(a.starts, .i64);
-    const start = loadI32(b, starts, seq);
-    const qlen = loadI32(b, starts, seq.add(1)).sub(start);
+    const start = common.loadI32(b, starts, seq);
+    const qlen = common.loadI32(b, starts, seq.add(1)).sub(start);
     var active = b.openIf(first_row.lt(qlen.mul(c.group)));
     {
         const tid = b.threadIdx().x;
@@ -271,7 +248,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             .first_row = first_row,
             .start = start,
             .qlen = qlen,
-            .klen = loadI32(b, b.ptrToInt(a.lengths, .i64), seq),
+            .klen = common.loadI32(b, b.ptrToInt(a.lengths, .i64), seq),
             .split = b.blockIdx().z,
         };
         var copy_q = b.openFor(tid, c.rows() * (d / 8), 128, .{});
@@ -281,18 +258,13 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             const packed_row = first_row.add(row);
             const valid = packed_row.lt(qlen.mul(c.group));
             const token = start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
-            const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(d).add(col.to(.i64));
+            const offset = common.queryRowIndex(c, token, t.head, packed_row).mul(d).add(col.to(.i64));
             b.cpAsync16(t.shared.add(swizzle(row, col, d)), t.q.add(offset.mul(2)), valid);
             copy_q.close();
         }
-        const first_pos = t.klen.sub(qlen).add(first_row.div(c.group));
-        const last_pos = t.klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
-        const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
-        const end = if (c.causal) last_pos.add(1).minimum(t.klen) else t.klen;
-        const first_tile = begin.div(n);
-        const tiles = end.add(n - 1).div(n).sub(first_tile).maximum(0);
-        const lo = first_tile.add(tiles.mul(t.split).div(c.splits));
-        const hi = first_tile.add(tiles.mul(t.split.add(1)).div(c.splits));
+        const span = common.splitSpan(common.keyTiles(b, c, first_row, c.rows(), qlen, t.klen, n), t.split, c.splits);
+        const lo = span.lo;
+        const hi = span.hi;
         const row_base = t.warp.div(w).mul(16);
         const key_part = t.warp.rem(w).mul(n / w);
         const dim_part = t.warp.rem(w).mul(d / w);
@@ -419,13 +391,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             {
                 const m = loop.results[h];
                 const l = loop.results[h + 2];
-                var norm = b.select(l.gt(0), b.rcpApprox(l), zero);
-                if (c.splits == 1 and c.sink) {
-                    const sink = loadI32(b, t.sink, t.head.mul(c.group).add(row.rem(c.group))).bitCast(.f32).mul(std.math.log2e);
-                    const maximum = m.maximum(sink);
-                    const weight = b.exp2Approx(m.sub(maximum));
-                    norm = weight.div(l.mul(weight).add(b.exp2Approx(sink.sub(maximum))));
-                }
+                const norm = common.rowNormalizer(b, c, t.sink, t.head, row, m, l, zero);
                 for (0..of) |i| for (0..2) |j| {
                     const value = b.vectorExtract(loop.results[4 + i], @intCast(h * 2 + j), .f32);
                     t.store(row, dim_part.add(i * 8).add(col0).add(j), if (c.splits > 1) value else value.mul(norm));

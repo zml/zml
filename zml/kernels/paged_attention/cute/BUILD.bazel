@@ -6,6 +6,7 @@ zig_library(
     name = "cute",
     srcs = [
         "attention.zig",
+        "common.zig",
         "//zml/kernels/paged_attention/cute/sm10x",
         "//zml/kernels/paged_attention/cute/sm120",
         "//zml/kernels/paged_attention/cute/sm90",

@@ -6,6 +6,7 @@ const std = @import("std");
 const builder = @import("dsl/cute/builder");
 const zml = @import("zml/core");
 const cute = zml.kernel.cute;
+const common = @import("../common.zig");
 const ptx = @import("ptx.zig");
 
 const B = cute.Builder;
@@ -73,10 +74,6 @@ fn run(b: *B, c: Config) cute.FinishError!void {
     }
 }
 
-fn loadI32(b: *B, ptr: V, index: V) V {
-    return b.loadWords(1, ptr.add(index.to(.i64).mul(4)), .global, .{})[0];
-}
-
 // Offset in a tile stored as 64-column slabs of 128-byte rows, whose 16-byte chunks are XORed by the row mod 8 (the 128-byte
 // swizzle wgmma expects). `rows` is the slab height.
 fn tileOffset(row: V, chunk: V, rows: i64) V {
@@ -117,7 +114,7 @@ const TileContext = struct {
         for (&pages, 0..) |*page, index| {
             const first_key = key_base.add(index * 16);
             const logical_page = b.select(first_key.lt(t.klen), first_key.div(16), b.constant(.i32, 0));
-            page.* = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
+            page.* = common.loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
         }
         const head_offset = t.head.to(.i64).mul(c.head_dim).add(chunk.mul(8).to(.i64));
         const slab_offset = chunk.div(8).mul(block_keys * 128);
@@ -149,14 +146,12 @@ const TileContext = struct {
                 const packed_row = t.first_row.add(row);
                 const valid = packed_row.lt(t.qlen.mul(c.group));
                 const token = t.start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
-                const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(c.head_dim).add(column.to(.i64));
+                const offset = common.queryRowIndex(c, token, t.head, packed_row).mul(c.head_dim).add(column.to(.i64));
                 b.cpAsync16(target, source.add(offset.mul(2)), valid);
             } else {
                 const key = key_base.add(row);
                 const valid = key.lt(t.klen);
-                const safe_key = b.select(valid, key, b.constant(.i32, 0));
-                const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(safe_key.div(c.page_size)));
-                const offset = page.to(.i64).mul(c.page_size).add(safe_key.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(column.to(.i64));
+                const offset = common.pagedElement(b, c, t.table, t.seq, t.head, key, valid, column);
                 b.cpAsync16(target, source.add(offset.mul(2)), valid);
             }
             copy.close();
@@ -368,22 +363,13 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
     std.debug.assert(c.sharedBytes() <= 227 * 1024);
     const accumulator_count = d / 2;
     const score_count = block_keys / 2;
-    const a = try b.declareArgs(.{
-        .q = .{ .ptr = dt },
-        .k = .{ .ptr = dt },
-        .v = .{ .ptr = dt },
-        .table = .{ .ptr = cute.DType.i32 },
-        .lengths = .{ .ptr = cute.DType.i32 },
-        .starts = .{ .ptr = cute.DType.i32 },
-        .sink = .{ .ptr = cute.DType.f32 },
-        .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else dt },
-    });
-    b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
+    const a = try b.declareArgs(common.KernelArguments.init(dt, c.splits));
+    common.allowMaximumSharedMemory(b);
     const seq = b.blockIdx().x.div(c.queryTiles());
     const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(block_rows);
     const starts = b.ptrToInt(a.starts, .i64);
-    const start = loadI32(b, starts, seq);
-    const qlen = loadI32(b, starts, seq.add(1)).sub(start);
+    const start = common.loadI32(b, starts, seq);
+    const qlen = common.loadI32(b, starts, seq.add(1)).sub(start);
     var active = b.openIf(first_row.lt(qlen.mul(c.group)));
     {
         const tid = b.threadIdx().x;
@@ -401,20 +387,15 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
             .first_row = first_row,
             .start = start,
             .qlen = qlen,
-            .klen = loadI32(b, b.ptrToInt(a.lengths, .i64), seq),
+            .klen = common.loadI32(b, b.ptrToInt(a.lengths, .i64), seq),
         };
         const split = b.blockIdx().z;
         const sink_pointer = b.ptrToInt(a.sink, .i64);
         const out_pointer = b.ptrToInt(a.out, .i64);
 
-        const first_pos = t.klen.sub(qlen).add(first_row.div(c.group));
-        const last_pos = t.klen.sub(qlen).add(first_row.add(block_rows - 1).div(c.group).minimum(qlen.sub(1)));
-        const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
-        const end = if (c.causal) last_pos.add(1).minimum(t.klen) else t.klen;
-        const first_tile = begin.div(block_keys);
-        const tiles = end.add(block_keys - 1).div(block_keys).sub(first_tile).maximum(0);
-        const lo = first_tile.add(tiles.mul(split).div(c.splits));
-        const hi = first_tile.add(tiles.mul(split.add(1)).div(c.splits));
+        const span = common.splitSpan(common.keyTiles(b, c, first_row, block_rows, qlen, t.klen, block_keys), split, c.splits);
+        const lo = span.lo;
+        const hi = span.hi;
 
         const warpgroup = tid.div(128).sub(1);
         const lane = tid.rem(32);
@@ -561,20 +542,9 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
             {
                 const m = nonempty.results[1 + h].mul(scale_log2);
                 const l = quadSum(b, nonempty.results[3 + h]);
-                var norm = b.select(l.gt(0), b.rcpApprox(l), zero);
-                if (c.splits == 1 and c.sink) {
-                    const sink = loadI32(b, sink_pointer, t.head.mul(c.group).add(row.rem(c.group))).bitCast(.f32).mul(std.math.log2e);
-                    const maximum = m.maximum(sink);
-                    const weight = b.exp2Approx(m.sub(maximum));
-                    norm = weight.div(l.mul(weight).add(b.exp2Approx(sink.sub(maximum))));
-                }
+                const norm = common.rowNormalizer(b, c, sink_pointer, t.head, row, m, l, zero);
                 const token = start.add(row.div(c.group));
-                var base = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(row.rem(c.group).to(.i64));
-                if (c.splits > 1) {
-                    base = split.to(.i64).mul(c.tokens * c.kv_heads * c.group).add(base).mul(c.head_dim + 2);
-                } else {
-                    base = base.mul(c.head_dim);
-                }
+                const base = common.outputRowStart(c, split, common.queryRowIndex(c, token, t.head, row));
                 for (0..d / 8) |group_index| {
                     const column = column0.add(group_index * 8);
                     const first = final_output[group_index * 4 + h * 2];

@@ -4,6 +4,7 @@ const zml = @import("zml/core");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const V = cute.Value;
+const common = @import("../common.zig");
 const sm103 = @import("sm103.zig");
 
 pub const Architecture = enum { sm100, sm103 };
@@ -84,10 +85,6 @@ pub const Attention = cute.Kernel(Config, .{
     .run = attention,
 });
 
-fn loadInt(b: *B, pointer: V, index: V) V {
-    return b.loadWords(1, pointer.add(index.to(.i64).mul(4)), .global, .{})[0];
-}
-
 // Each 64-feature plane uses a 128-byte XOR swizzle. The descriptor and
 // vector copies use this same layout for Q, K, V and probabilities.
 fn swizzle(row: V, col: V, rows: i64) V {
@@ -113,12 +110,8 @@ const Range = struct { first: V, count: V };
 // Used by both attention and merge: every output row must merge exactly the
 // partitions produced for its query tile, including causal/window boundaries.
 fn keyRange(b: *B, c: Config, first_row: V, qlen: V, klen: V) Range {
-    const first_pos = klen.sub(qlen).add(first_row.div(c.group));
-    const last_pos = klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
-    const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
-    const end = if (c.causal) last_pos.add(1).minimum(klen) else klen;
-    const first = begin.div(c.keys());
-    return .{ .first = first, .count = end.add(c.keys() - 1).div(c.keys()).sub(first).maximum(0) };
+    const tiles = common.keyTiles(b, c, first_row, c.rows(), qlen, klen, c.keys());
+    return .{ .first = tiles.first, .count = tiles.count };
 }
 
 fn liveSplits(c: Config, tiles: V) V {
@@ -169,21 +162,13 @@ const Tile = struct {
         t.b.storeHalf(t.shared.add(t.c.pBase()).add(swizzle(row, key, t.c.rows())), .shared, value.to(t.c.dtype).bitCast(.i16).to(.i32));
     }
     fn put(t: Tile, row: V, dim: V, value: V) void {
-        const token = t.start.add(row.div(t.c.group));
-        var index = token.to(.i64).mul(t.c.kv_heads).add(t.head.to(.i64)).mul(t.c.group).add(row.rem(t.c.group).to(.i64));
-        if (t.c.splits > 1) {
-            index = t.split.to(.i64).mul(t.c.tokens * t.c.kv_heads * t.c.group).add(index).mul(t.c.head_dim + 2).add(dim.to(.i64));
-            t.b.storeWords(1, t.out.add(index.mul(4)), .global, .{value.bitCast(.i32)});
-        } else {
-            index = index.mul(t.c.head_dim).add(dim.to(.i64));
-            t.b.storeHalf(t.out.add(index.mul(2)), .global, value.to(t.c.dtype).bitCast(.i16).to(.i32));
-        }
+        common.storeOutput(t.b, t.c, t.out, t.split, t.start, t.head, row, dim, value);
     }
     fn norm(t: Tile, row: V, maximum: V, denominator: V) V {
         const b = t.b;
         if (t.c.splits > 1) return b.constant(.f32, 1);
         if (!t.c.sink) return b.select(denominator.gt(0), b.rcpApprox(denominator), b.constant(.f32, 0));
-        const sink = loadInt(b, t.sink, t.head.mul(t.c.group).add(row.rem(t.c.group))).bitCast(.f32).mul(std.math.log2e);
+        const sink = common.loadI32(b, t.sink, t.head.mul(t.c.group).add(row.rem(t.c.group))).bitCast(.f32).mul(std.math.log2e);
         const reference = maximum.maximum(sink).maximum(-std.math.floatMax(f32));
         const weight = b.exp2Approx(maximum.sub(reference));
         return weight.div(denominator.mul(weight).add(b.exp2Approx(sink.sub(reference))));
@@ -191,24 +176,15 @@ const Tile = struct {
 };
 
 fn attention(b: *B, c: Config) cute.FinishError!void {
-    const a = try b.declareArgs(.{
-        .q = .{ .ptr = c.dtype },
-        .k = .{ .ptr = c.dtype },
-        .v = .{ .ptr = c.dtype },
-        .table = .{ .ptr = cute.DType.i32 },
-        .lengths = .{ .ptr = cute.DType.i32 },
-        .starts = .{ .ptr = cute.DType.i32 },
-        .sink = .{ .ptr = cute.DType.f32 },
-        .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else c.dtype },
-    });
+    const a = try b.declareArgs(common.KernelArguments.init(c.dtype, c.splits));
     std.debug.assert(c.sharedBytes() <= 227 * 1024);
-    b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
+    common.allowMaximumSharedMemory(b);
     const seq = b.blockIdx().x.div(c.queryTiles());
     const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(c.rows());
     const starts = b.ptrToInt(a.starts, .i64);
-    const start = loadInt(b, starts, seq);
-    const qlen = loadInt(b, starts, seq.add(1)).sub(start);
-    const klen = loadInt(b, b.ptrToInt(a.lengths, .i64), seq);
+    const start = common.loadI32(b, starts, seq);
+    const qlen = common.loadI32(b, starts, seq.add(1)).sub(start);
+    const klen = common.loadI32(b, b.ptrToInt(a.lengths, .i64), seq);
     const range = keyRange(b, c, first_row, qlen, klen);
     const splits = liveSplits(c, range.count);
     const split = b.blockIdx().z;
@@ -265,7 +241,7 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             const packed_row = first_row.add(row);
             const valid = packed_row.lt(qlen.mul(c.group)).bitAnd(col.lt(c.head_dim));
             const token = start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
-            const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(c.head_dim).add(col.to(.i64));
+            const offset = common.queryRowIndex(c, token, t.head, packed_row).mul(c.head_dim).add(col.to(.i64));
             b.cpAsync16(shared.add(c.qBase()).add(swizzle(row, col, c.rows())), t.q.add(offset.mul(2)), valid);
             queries.close();
         }
@@ -309,9 +285,7 @@ fn produce(t: Tile) void {
         for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
             const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(row0).add(i * 8);
             valid[i] = key.lt(t.klen).bitAnd(col.lt(c.head_dim));
-            const safe = b.select(key.lt(t.klen), key, b.constant(.i32, 0));
-            const page = loadInt(b, t.table, t.seq.mul(c.pages_per_seq).add(safe.div(c.page_size)));
-            offsets[i] = page.to(.i64).mul(c.page_size).add(safe.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64)).mul(2);
+            offsets[i] = common.pagedElement(b, c, t.table, t.seq, t.head, key, key.lt(t.klen), col).mul(2);
         }
         for (0..@as(usize, @intCast(c.features() * 2))) |stage| {
             const id = tiles.iv.mul(c.features() * 2).add(stage);
