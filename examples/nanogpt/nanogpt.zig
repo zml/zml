@@ -5,76 +5,6 @@ const zml = @import("zml");
 
 const chars = "\n !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const io = init.io;
-
-    const args = try init.minimal.args.toSlice(allocator);
-    defer allocator.free(args);
-    if (args.len != 3) {
-        log.err("Usage: {s} weights.safetensors activations.safetensors", .{args[0]});
-        return error.InvalidArguments;
-    }
-    const model_path, const activations_path = args[1..3].*;
-
-    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(
-        allocator,
-        io,
-        activations_path,
-    );
-    defer activations_registry.deinit();
-
-    var model_registry = try zml.safetensors.TensorRegistry.fromPath(
-        allocator,
-        io,
-        model_path,
-    );
-    defer model_registry.deinit();
-
-    var model_store: zml.io.TensorStore = .fromRegistry(
-        allocator,
-        &model_registry,
-        &.{},
-    );
-    defer model_store.deinit();
-
-    var platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator, io);
-
-    var activations_store: zml.io.TensorStore = .fromRegistry(
-        allocator,
-        &activations_registry,
-        &.{},
-    );
-    defer activations_store.deinit();
-
-    // GPT hypers
-    const config: Config = .{
-        .block_size = 256,
-        .vocab_size = 65,
-        .n_layer = 6,
-        .n_head = 6,
-        .n_embd = 384,
-        .bias = false,
-    };
-
-    // ======== GPT ========
-    std.log.info("———— GPT ————", .{});
-    const arena = init.arena.allocator();
-    const gpt = try Gpt.init(arena, model_store.view(), config);
-    var gpt_weights = try loadWeights(
-        Gpt,
-        &gpt,
-        arena,
-        io,
-        platform,
-        &model_store,
-    );
-    try Gpt.generate(arena, io, gpt, platform, "CORIOLANUS:\nThat haz a straight stoop to his good behold! this come;\n", gpt_weights);
-    defer zml.Buffer.freeDeviceMemoryButKeepHostMetadataMemory(Gpt, &gpt_weights);
-}
-
-/// === TYPES ===
 const Mlp = struct {
     c_fc: zml.nn.Linear,
     c_proj: zml.nn.Linear,
@@ -106,8 +36,8 @@ const Mlp = struct {
 const Attn = struct {
     c_attn: zml.nn.Linear,
     c_proj: zml.nn.Linear,
-    n_head: i64,
-    n_embd: i64,
+    n_head: u64,
+    n_embd: u64,
 
     pub fn init(view: zml.io.TensorStore.View, config: Config) Attn {
         return .{
@@ -137,7 +67,7 @@ const Attn = struct {
         att = att.add(mask.broad(att.shape()));
         att = att.softmax(.k);
         var y = att.dot(v, .k);
-        // y = y.merge(.{ .dout = .{ .h, .hd } });,02
+        // y = y.merge(.{ .dout = .{ .h, .hd } });
         y = y.mergeTranspose(.{ .h, .hd }, .dout); // DAMNIT
 
         return self.c_proj.forward(y, y.dtype()).rename(.{ .q = .t });
@@ -217,35 +147,28 @@ const Gpt = struct {
         return logits;
     }
 
-    pub fn forwardAll(self: Gpt, idx: zml.Tensor) zml.Tensor {
+    pub fn forwardAll(self: Gpt, idx: zml.Tensor, config: Config, active_length: zml.Tensor, rng: zml.Tensor.Rng) Output {
         const idx_tagged = idx.withTags(.{ .b, .t });
         const pos = zml.Tensor.arange(.{ .end = idx_tagged.dim(.t) }, .i64).withTags(.{.t});
         const tok_emb = self.transformer.wte.forward(idx_tagged);
         const pos_emb = self.transformer.wpe.forward(pos);
+
         var x = tok_emb.add(pos_emb.broad(tok_emb.shape()));
         for (self.transformer.h) |block| {
             x = block.forward(x);
         }
 
         x = self.transformer.ln_f.forward(x);
+
+        const last_index = active_length.convert(.i32).addConstant(-1);
+        x = x.slice(.t, .dyn(last_index, 1)); // {b, t, d} -> {b, 1, d}
         const logits = x.dot(self.transformer.wte.weight.withTags(.{ .voc, .d }), .d);
-        return logits;
-    }
-
-    pub fn nextToken(self: Gpt, idx: zml.Tensor) zml.Tensor {
-        const idx_tagged = idx.withTags(.{ .b, .t });
-        const pos = zml.Tensor.arange(.{ .end = idx_tagged.dim(.t) }, .i64).withTags(.{.t});
-        const tok_emb = self.transformer.wte.forward(idx_tagged);
-        const pos_emb = self.transformer.wpe.forward(pos);
-        var x = tok_emb.add(pos_emb.broad(tok_emb.shape()));
-        for (self.transformer.h) |block| {
-            x = block.forward(x);
-        }
-
-        x = self.transformer.ln_f.forward(x);
-        const logits = x.dot(self.transformer.wte.weight.withTags(.{ .voc, .d }), .d);
-
-        return logits;
+        const next_tokens, const new_rng = zml.nn.sampleTokens(
+            logits,
+            .{ .topk = @intCast(config.vocab_size), .temperature = 0.8 },
+            rng,
+        );
+        return .{ .tokens = next_tokens.convert(.u32), .rng = new_rng };
     }
 
     pub fn generate(
@@ -255,12 +178,19 @@ const Gpt = struct {
         platform: *const zml.Platform,
         prompt: []const u8,
         layer_weights: zml.Bufferized(Gpt),
+        config: Config,
     ) !void {
-        const ctx = 256;
+        const ctx = config.block_size;
         const max_new_tokens = 512;
+        const rng = zml.Tensor.Rng.init();
+        var rng_buf = try rng.initBuffer(io, platform, 1337);
+        defer zml.Tensor.Rng.deinitBuffer(&rng_buf);
 
         // Prompt + generated tokens
-        var history: [1024]i64 = undefined;
+        //var history: [1024]i64 = undefined;
+        const history = try allocator.alloc(i64, prompt.len + max_new_tokens);
+        defer allocator.free(history);
+
         for (prompt, 0..) |c, i| {
             history[i] = @intCast(std.mem.indexOfScalar(u8, chars, c) orelse 0);
         }
@@ -269,7 +199,14 @@ const Gpt = struct {
 
         // Returns logits for every position
         const in_tensor = zml.Tensor.init(.{ 1, ctx }, .i64);
-        const exe = try platform.compileFn(allocator, io, Gpt.forwardAll, .{ layer, in_tensor }, .{ .meshes = &.{} });
+        const active_length = zml.Tensor.init(.{}, .u32);
+        const exe = try platform.compileFn(
+            allocator,
+            io,
+            Gpt.forwardAll,
+            .{ layer, in_tensor, config, active_length, rng },
+            .{ .meshes = &.{} },
+        );
         defer exe.deinit();
 
         var args = try exe.args(allocator);
@@ -277,77 +214,63 @@ const Gpt = struct {
 
         var res = try exe.results(allocator);
         defer res.deinit(allocator);
+        const window = try allocator.alloc(i64, ctx);
+        defer allocator.free(window);
 
-        var prng = std.Random.DefaultPrng.init(1337);
-        const rng = prng.random();
         // Autoregressive inference
         while (len < prompt.len + max_new_tokens) : (len += 1) {
             // Sliding window + padding
             const start = len -| ctx;
-            var window: [ctx]i64 = @splat(0);
+            @memset(window, 0);
             @memcpy(window[0 .. len - start], history[start..len]);
 
-            var in_buffer = try zml.Buffer.fromBytes(io, platform, in_tensor.shape(), std.mem.sliceAsBytes(&window));
+            var in_buffer = try zml.Buffer.fromBytes(io, platform, in_tensor.shape(), std.mem.sliceAsBytes(window));
             defer in_buffer.deinit();
-            args.set(.{ layer_weights, in_buffer });
+            var active_length_buf = try zml.Buffer.scalar(io, platform, len - start, .u32);
+            defer active_length_buf.deinit();
+            args.set(.{ layer_weights, in_buffer, active_length_buf, rng_buf });
 
             exe.call(io, args, &res, .{});
-            var out = res.get(zml.Buffer);
-            defer out.deinit();
+            var out = res.get(zml.Bufferized(Output));
+            defer out.tokens.deinit();
 
-            const host = try out.toSliceAlloc(allocator, io);
-            defer host.free(allocator);
+            const token = try out.tokens.getValue(u32, io);
 
-            // Take the last token row
-            const pos = len - start - 1;
-            const scores = host.constItems(f32)[pos * chars.len ..][0..chars.len];
+            zml.Tensor.Rng.deinitBuffer(&rng_buf);
+            rng_buf = out.rng;
 
-            // var best: usize = 0;
-            // for (scores, 0..) |score, i| {
-            //     if (score > scores[best]) best = i;
-            // }
-
-            // Best + temperature
-            const temperature: f32 = 0.8;
-
-            // max
-            var max: f32 = scores[0];
-            for (scores) |s| max = @max(max, s);
-
-            // softmax
-            var probs: [chars.len]f32 = undefined;
-            var sum: f32 = 0;
-            for (scores, 0..) |s, i| {
-                probs[i] = @exp((s - max) / temperature);
-                sum += probs[i];
-            }
-
-            // sampling
-            var r = rng.float(f32) * sum;
-            var best: usize = chars.len - 1;
-            for (probs, 0..) |p, i| {
-                r -= p;
-                if (r <= 0) {
-                    best = i;
-                    break;
-                }
-            }
-
-            history[len] = @intCast(best);
-            std.debug.print("{c}", .{chars[best]});
+            history[len] = token;
+            std.debug.print("{c}", .{chars[token]});
         }
         std.debug.print("\n", .{});
     }
 };
 
+pub const Output = struct {
+    tokens: zml.Tensor,
+    rng: zml.Tensor.Rng,
+};
+
 const Config = struct {
-    block_size: i64,
-    vocab_size: i64,
-    n_layer: i64,
-    n_head: i64,
-    n_embd: i64,
+    block_size: u64,
+    vocab_size: u64,
+    n_layer: u64,
+    n_head: u64,
+    n_embd: u64,
     bias: bool,
 };
+
+pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(T) {
+    const file = try dir.openFile(io, "config.json", .{});
+    defer file.close(io);
+
+    var buffer: [256]u8 = undefined;
+    var file_reader = file.reader(io, &buffer);
+    var reader: std.json.Reader = .init(allocator, &file_reader.interface);
+    defer reader.deinit();
+
+    return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
+}
 
 pub fn loadWeights(
     comptime T: type,
@@ -368,6 +291,66 @@ pub fn loadWeights(
     try loader.await(io);
 
     return buffers;
+}
+
+/// Cross-entropy loss = (softmax(logits) - onehot(targets)) / N.
+pub fn crossEntropyBackward(logits: zml.Tensor, targets: zml.Tensor) zml.Tensor {
+    const l = logits.withTags(.{ .b, .t, .voc });
+    const y = targets.withTags(.{ .b, .t }).convert(.i32);
+
+    // onehot[b, t, v] = 1 if v == y[b, t], else 0
+    const voc_idx = zml.Tensor.iota(l.shape(), .voc); // {b, t, voc}, value = v
+    const y_full = y.broad(voc_idx.shape()); // {b, t, voc}, value = y[b, t]
+    const onehot = voc_idx.cmp(.EQ, y_full).convert(l.dtype());
+
+    const n: f32 = @floatFromInt(y.count());
+    return l.softmax(.voc).sub(onehot).scale(1.0 / n);
+}
+
+fn testLoss(
+    // logits <- lm_head.out.0
+    // compilefn crossEntropyBackward(logits, targets)
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    activation_store: zml.io.TensorStore.View,
+    opts: zml.testing.CompareOpts,
+) !void {
+    var logits = try loadBufferFromStore(allocator, io, platform, activation_store, "lm_head.out.0");
+    defer logits.deinit();
+    const logits_shape = activation_store.getShape("lm_head.out.0") orelse return;
+    const logits_tensor = zml.Tensor.fromShape(logits_shape);
+    const logits_buffer = try loadBufferFromStore(allocator, io, platform, activation_store, "lm_head.out.0");
+
+    var targets = try loadBufferFromStore(allocator, io, platform, activation_store, "y");
+    defer targets.deinit();
+    const targets_shape = activation_store.getShape("y") orelse return;
+    const targets_tensor = zml.Tensor.fromShape(targets_shape);
+    const targets_buffer = try loadBufferFromStore(allocator, io, platform, activation_store, "y");
+
+    const expected = try loadBufferFromStore(allocator, io, platform, activation_store, "lm_head.grad_out.0");
+
+    const exe = try platform.compileFn(
+        allocator,
+        io,
+        crossEntropyBackward(logits, targets),
+        .{ logits_tensor, targets_tensor },
+        .{ .meshes = &.{} },
+    );
+    defer exe.deinit();
+
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+    args.set(.{ logits_buffer, targets_buffer });
+
+    var res = try exe.results(allocator);
+    defer res.deinit(allocator);
+
+    exe.call(io, args, &res, .{});
+    var out_result = res.get(zml.Buffer);
+
+    defer out_result.deinit();
+    try zml.testing.expectClose(io, out_result, expected, opts);
 }
 
 fn testLayer(
@@ -435,4 +418,82 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
     _ = try reader.interface.readSliceAll(host_bytes);
 
     return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
+}
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
+    if (args.len != 3) {
+        log.err("Usage: {s} weights.safetensors activations.safetensors", .{args[0]});
+        return error.InvalidArguments;
+    }
+    const model_path, const activations_path = args[1..3].*;
+    const repo = try std.Io.Dir.cwd().openDir(
+        io,
+        "examples/nanogpt/weights/",
+        .{},
+    );
+    defer repo.close(io);
+    const parsed_config = try parseConfig(Config, allocator, io, repo);
+    defer parsed_config.deinit();
+    const config = parsed_config.value;
+
+    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(
+        allocator,
+        io,
+        activations_path,
+    );
+    defer activations_registry.deinit();
+
+    var model_registry = try zml.safetensors.TensorRegistry.fromPath(
+        allocator,
+        io,
+        model_path,
+    );
+    defer model_registry.deinit();
+
+    var model_store: zml.io.TensorStore = .fromRegistry(
+        allocator,
+        &model_registry,
+        &.{},
+    );
+    defer model_store.deinit();
+
+    var platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
+
+    var activations_store: zml.io.TensorStore = .fromRegistry(
+        allocator,
+        &activations_registry,
+        &.{},
+    );
+    defer activations_store.deinit();
+
+    // ======== GPT ========
+    std.log.info("———— GPT ————", .{});
+    const arena = init.arena.allocator(); // USE GPA
+    const gpt = try Gpt.init(arena, model_store.view(), config);
+    var gpt_weights = try loadWeights(
+        Gpt,
+        &gpt,
+        arena,
+        io,
+        platform,
+        &model_store,
+    );
+    defer zml.Buffer.freeDeviceMemoryButKeepHostMetadataMemory(Gpt, &gpt_weights); // MUST DIE
+
+    // try testLoss(init.arena.allocator(), io, platform, activations_store.view(), .{ .absolute_tolerance = 1e-2 });
+    try Gpt.generate(
+        arena,
+        io,
+        gpt,
+        platform,
+        "CORIOLANUS:\nThat haz a straight stoop to his good behold! this come;\n",
+        gpt_weights,
+        config,
+    );
 }
