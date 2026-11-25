@@ -15,6 +15,21 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "test-activations",
+    srcs = [
+        "debug.zig",
+        "layer.zig",
+        "main.zig",
+        "masking.zig",
+        "meta.zig",
+        "model.zig",
+        "scaling.zig",
+    ],
+    main = "test.zig",
+    deps = ["//zml"],
+)
+
 zig_test(
     name = "test",
     srcs = [

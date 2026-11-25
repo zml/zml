@@ -137,7 +137,7 @@ pub const PreProcessor = struct {
     }
 };
 
-pub const PatchScaler = struct {
+pub const PatchBuilder = struct {
     pub const Options = struct {
         minimum_scale: f32,
         patch_size: u32,
@@ -161,7 +161,7 @@ pub const PatchScaler = struct {
     /// Scale input time series patch-wise.
     ///
     /// Input and output rows are in shape `{.row, .time}`.
-    pub fn forward(self: PatchScaler, rows: PreProcessor.Rows) Output {
+    pub fn forward(self: PatchBuilder, rows: PreProcessor.Rows) Output {
         assertTags(rows.values, .{ .row, .time });
         assertTags(rows.mask, .{ .row, .time });
         // Scaling locations and scale for all timesteps
@@ -183,11 +183,16 @@ pub const PatchScaler = struct {
 
         return .{
             .rows = .{
-                .values = assertedTags(scaled, .{ .row, .time }),
-                .mask = assertedTags(rows.mask, .{ .row, .time }),
+                .values = assertedTags(self.toPatches(scaled), .{ .row, .token, .h }),
+                .mask = assertedTags(self.toPatches(rows.mask), .{ .row, .token, .h }),
             },
             .stats = stats,
         };
+    }
+
+    /// Split the `.time` axis into a `.token` sequence axis and a `.h` patch dimension.
+    pub fn toPatches(self: PatchBuilder, x: Tensor) Tensor {
+        return x.splitAxis(.time, .{ .token = .auto, .h = self.options.patch_size });
     }
 };
 
@@ -205,19 +210,12 @@ const PatchRepresentation = struct {
         };
     }
 
-    /// Split the `.time` axis into a `.token` sequence axis and a `.h` patch dimension.
-    pub fn toPatches(self: *const PatchRepresentation, x: Tensor) Tensor {
-        return x.splitAxis(.time, .{ .token = .auto, .h = self.patch_size });
-    }
-
     /// Embed `{.row, .time}` rows into `{.row, .token, .h}` patch tokens.
-    pub fn forward(self: *const PatchRepresentation, rows: PatchScaler.PatchRows) Tensor {
-        assertTags(rows.values, .{ .row, .time });
-        assertTags(rows.mask, .{ .row, .time });
-        const values = self.toPatches(rows.values);
-        const mask = self.toPatches(rows.mask);
-        const dtype = values.dtype();
-        const x: Tensor = .concatenate(&[_]Tensor{ values, mask.not().convert(dtype) }, .h);
+    pub fn forward(self: *const PatchRepresentation, rows: PatchBuilder.PatchRows) Tensor {
+        assertTags(rows.values, .{ .row, .token, .h });
+        assertTags(rows.mask, .{ .row, .token, .h });
+        const dtype = rows.values.dtype();
+        const x: Tensor = .concatenate(&[_]Tensor{ rows.values, rows.mask.not().convert(dtype) }, .h);
         const out = self.patch_proj.forward(x.renameTag(.h, .d)).renameTag(.out, .h);
         return assertedTags(out, .{ .row, .token, .h });
     }
@@ -229,27 +227,33 @@ const PatchRepresentation = struct {
     }
 };
 
-pub const AttentionMasking = struct {
+pub const AttentionLocator = struct {
     pub const Options = struct {
         attend_missing_patches: bool,
     };
 
     options: Options,
-    horizon: u32,
+    horizon_patches: u32,
 
-    const Masks = struct {
-        time: Tensor,
-        variate: Tensor,
+    const Location = struct {
+        time_mask: Tensor,
+        variate_mask: Tensor,
+        positions: Tensor,
     };
 
-    pub fn forward(self: *const AttentionMasking, observed: Tensor, group: Tensor) Masks {
+    pub fn forward(self: *const AttentionLocator, observed: Tensor, group: Tensor) Location {
         assertTags(observed, .{ .row, .token, .h });
-        const context_masks = masking.Context.forward(observed, self.options.attend_missing_patches);
-        const time_mask = masking.Window.forward(context_masks.attended, self.horizon);
-        const variate_mask = masking.Variate.forward(context_masks.attended, group, self.horizon);
+        const observed_patches = observed.any(.h).squeeze(.h);
+
+        const context_masks = masking.Context.forward(observed_patches, self.options.attend_missing_patches);
+        const time_mask = masking.Window.forward(context_masks.attended, self.horizon_patches);
+        const variate_mask = masking.Variate.forward(context_masks.attended, group, self.horizon_patches);
+        const positions = masking.Position.forward(observed_patches, group, self.horizon_patches);
+
         return .{
-            .time = assertedTags(time_mask, .{ .row, .token_q, .token_k }),
-            .variate = assertedTags(variate_mask, .{ .token, .row_q, .row_k }),
+            .time_mask = assertedTags(time_mask, .{ .row, .token_q, .token_k }),
+            .variate_mask = assertedTags(variate_mask, .{ .token, .row_q, .row_k }),
+            .positions = assertedTags(positions, .{ .row, .token }),
         };
     }
 };
@@ -292,7 +296,7 @@ pub const Transformer = struct {
     pub fn forward(
         self: Transformer,
         patches: Tensor,
-        mask: AttentionMasking.Mask,
+        mask: AttentionLocator.Mask,
         positions: Tensor,
     ) Tensor {
         assertTags(patches, .{ .row, .token, .h });
@@ -305,18 +309,18 @@ pub const Transformer = struct {
 };
 
 pub const Model = struct {
-    patch_scaler: PatchScaler,
+    patch_builder: PatchBuilder,
     representation: PatchRepresentation,
-    attn_masking: AttentionMasking,
+    attn_masking: AttentionLocator,
     transformer: Transformer,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) Model {
         return .{
             .representation = .init(store.withPrefix("representation"), config.patch_size),
-            .patch_scaler = .{ .options = config.pick(PatchScaler.Options) },
+            .patch_builder = .{ .options = config.pick(PatchBuilder.Options) },
             .attn_masking = .{
-                .options = config.pick(AttentionMasking.Options),
-                .horizon = 64, // TODO hardcoded
+                .options = config.pick(AttentionLocator.Options),
+                .horizon_patches = config.block_size,
             },
             .transformer = .init(
                 store.withPrefix("transformer"),
@@ -328,11 +332,14 @@ pub const Model = struct {
     pub fn forward(self: Model, targets: Tensor) Tensor {
         assertTags(targets, .{ .batch, .variate, .time });
         const preprocessed = PreProcessor.forward(targets);
-        const patches = self.patch_scaler.forward(preprocessed);
+        const patches = self.patch_builder.forward(preprocessed);
         const reprs = self.representation.forward(patches.rows);
 
-        const attn_masks = self.attn_masking.forward(self.representation.toPatches(patches.rows.mask), preprocessed.group);
-        _ = attn_masks;
+        const attn_loc = self.attn_masking.forward(
+            patches.rows.mask,
+            preprocessed.group,
+        );
+        _ = attn_loc;
         return reprs;
     }
 };

@@ -12,19 +12,18 @@ pub const Context = struct {
         attended: Tensor, // PY: key_valid
     };
 
-    pub fn forward(observed: Tensor, attend_missing_patches: bool) Masks {
-        assertTags(observed, .{ .row, .token, .h });
-        const observed_patch = observed.any(.h).squeeze(.h);
+    pub fn forward(observed_patches: Tensor, attend_missing_patches: bool) Masks {
+        assertTags(observed_patches, .{ .row, .token });
 
         // Leading all-unobserved patches are left-padded and are never valid keys.
         const key_valid: Tensor = if (attend_missing_patches)
             // A patch is a valid key if the row's series has started at or before it.
-            .logical(observed_patch, .OR, observed_patch.cumulativeMax(.token))
+            .logical(observed_patches, .OR, observed_patches.cumulativeMax(.token))
         else
             // A patch is a valid key if it is observed
-            observed_patch;
+            observed_patches;
         return .{
-            .observed = assertedTags(observed_patch, .{ .row, .token }),
+            .observed = assertedTags(observed_patches, .{ .row, .token }),
             .attended = assertedTags(key_valid, .{ .row, .token }),
         };
     }
@@ -35,11 +34,11 @@ pub const Window = struct {
     ///
     /// The encoder is causal; every decoder token reads the whole valid context and its
     /// own causal decoder chain; the context never reads the horizon.
-    pub fn forward(attended: Tensor, horizon: u32) Tensor {
+    pub fn forward(attended: Tensor, horizon_patches: u32) Tensor {
         assertTags(attended, .{ .row, .token });
         const rows = attended.dim(.row);
         const n_past = attended.dim(.token);
-        const n_fut = horizon;
+        const n_fut = horizon_patches;
 
         const key_valid_mask = keyValidityAsMask(attended);
         const enc_enc = assertedTags(encoderCausalMask(key_valid_mask), .{ .row, .token_q, .token_k });
@@ -174,21 +173,22 @@ pub const Variate = struct {
 };
 
 pub const Position = struct {
-    pub fn forward(observed: Tensor, group: Tensor, horizon: u32) Tensor {
+    pub fn forward(observed: Tensor, group: Tensor, horizon_patches: u32) Tensor {
         assertTags(observed, .{ .row, .token });
-        const l = observed.dim(.token);
+        const n_past = observed.dim(.token);
+        const n_fut = horizon_patches;
 
         const first_obs = rowFirstObservedPatch(observed, group);
-        const position = buildTimePosition(@intCast(l + horizon), first_obs);
+        const position = buildTimePosition(@intCast(n_past + n_fut), first_obs);
         return assertedTags(position, .{ .row, .token });
     }
 
-    fn buildTimePosition(window: u63, offsets: Tensor) Tensor {
+    fn buildTimePosition(window_size: u63, offsets: Tensor) Tensor {
         assertTags(offsets, .{.row});
         const dtype = offsets.dtype();
-        const shape = offsets.shape().append(.{ .token = window });
+        const shape = offsets.shape().append(.{ .token = window_size });
 
-        const pos: Tensor = .arange(.{ .end = window }, dtype).withTags(.{.token});
+        const pos = Tensor.arange(.{ .end = window_size }, dtype).withTags(.{.token});
         const out: Tensor = .sub(pos.broad(shape), offsets.broad(shape));
         return assertedTags(out, .{ .row, .token });
     }
