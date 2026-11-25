@@ -188,6 +188,8 @@ pub const Config = struct {
     routes: i64,
     /// Clamp of both halves of the fused SwiGLU, if any.
     swiglu_limit: ?f32 = null,
+    /// Soft caps of the gate and up halves, which replace the SwiGLU's clamp.
+    capped: ?nvfp4.CappedSwiglu = null,
     /// Multiply rows by their routing weight in this projection's epilogue.
     routing_weights: bool = false,
     /// Ungrouped routing: group `g` is route `g` and holds one live row.
@@ -1120,6 +1122,7 @@ const EpilogueOperands = struct {
     direct: bool,
     group_rows: i64 = 0,
     swiglu_limit: ?f32 = null,
+    capped: ?nvfp4.CappedSwiglu = null,
 };
 
 /// Warps 0-3 drain each TMEM accumulator stage into registers, release it to
@@ -1276,6 +1279,12 @@ fn storeTileSwiglu(b: *B, comptime tile: Tile, operands: EpilogueOperands, route
         swigluRows(b, tile, operands, routed, tile_m, group, act_scale, columns, comptime @intCast(tile.chunkRows()), true, chunk);
 }
 
+/// `cap * tanh(x / cap)`: tanh(y) = 1 - 2 / (2^(2 y log2 e) + 1).
+fn softcap(b: *B, x: V, cap: f32) V {
+    const exp = b.unaryF32("ex2.approx.ftz.f32", x.mul(2.0 * std.math.log2e / cap));
+    return b.unaryF32("rcp.approx.ftz.f32", exp.add(1.0)).mul(-2.0 * cap).add(cap);
+}
+
 fn swigluRows(b: *B, comptime tile: Tile, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, group: V, act_scale: V, columns: []const V, comptime live: usize, comptime skip_padding: bool, comptime chunk: usize) void {
     const n = comptime tile.chunkRows();
     const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(tile.chunkRows())));
@@ -1308,7 +1317,10 @@ fn swigluRows(b: *B, comptime tile: Tile, operands: EpilogueOperands, routed: Ro
             }
             // up * SiLU(gate), exp(-g) = 2^(-g * log2 e).
             const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
-            var result = up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
+            var result = if (operands.capped) |caps|
+                softcap(b, gate, caps.gate_cap).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0))).mul(softcap(b, up_value, caps.up_cap))
+            else
+                up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
             if (routed.weight) |weight| result = result.mul(b.shuffleIdx(weight, c));
             // The NVFP4 quantizer reads BF16 activations.
             result = result.to(.bf16).to(.f32);
@@ -1547,6 +1559,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .direct = cfg.direct,
         .group_rows = cfg.groupRows(),
         .swiglu_limit = cfg.swiglu_limit,
+        .capped = cfg.capped,
     };
     var operands = shared_operands;
     switch (epilogue) {
