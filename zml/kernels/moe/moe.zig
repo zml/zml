@@ -63,8 +63,8 @@ pub const Backend = enum {
             .rocm => b: {
                 const s = scheme orelse break :b .triton;
                 break :b switch (s) {
-                    .mxfp4 => if (zml.platform.rocm.computeCapability(platform) == .gfx942) .fly else .triton,
-                    .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
+                    .mxfp4, .mxfp8 => if (zml.platform.rocm.computeCapability(platform) == .gfx942) .fly else .triton,
+                    .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
                     .nvfp4 => if (zml.platform.rocm.computeCapability(platform) == .gfx942) .fly else error.UnsupportedQuantization,
                 };
             },
