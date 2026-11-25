@@ -893,15 +893,20 @@ fn kernelUnifiedAttention3d(
     } else seq_len;
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
-    // Sliding window: start each segment at the window's first tile. A segment that ends
-    // before it runs no iteration, and its -inf max (or the sink, in segment 0) gives it
-    // no weight in reduceSegments.
     var segm_tile_lo = segm_idx.mul(tiles_per_segment);
+    var segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
     if (SLIDING_WINDOW > 0) {
+        // Sliding window: only the window's tiles hold visible keys, so they are the ones
+        // split, over the segments reduceSegments reads for this sequence length. A segment
+        // left without tiles runs no iteration, and its -inf max (or the sink, in segment 0)
+        // gives it no weight there.
         const first_allowed_key = context_len.add(q_local_bq).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
-        segm_tile_lo = segm_tile_lo.maximum(first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))));
+        const first_tile = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(0);
+        const read_segments = cdivFn(seq_len, tiles_per_segment.mul(@as(i32, @intCast(TILE_SIZE))));
+        const window_tiles_per_segment = cdivFn(num_tiles.sub(first_tile), read_segments);
+        segm_tile_lo = first_tile.add(segm_idx.mul(window_tiles_per_segment));
+        segm_tile_hi = first_tile.add(segm_idx.add(1).mul(window_tiles_per_segment)).minimum(num_tiles);
     }
-    const segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
 
     const kv_cache_mod: ttir.CacheModifier =
         if (config.all_decode) .cg else .none;
