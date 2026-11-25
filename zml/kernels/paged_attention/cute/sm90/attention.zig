@@ -100,6 +100,27 @@ const TileContext = struct {
     qlen: V,
     klen: V,
 
+    fn keyStage(t: TileContext, stage: V) V {
+        return t.shared.add(t.c.keyBase()).add(stage.mul(t.c.tileBytes()));
+    }
+
+    fn valueStage(t: TileContext, stage: V) V {
+        return t.shared.add(t.c.valueBase()).add(stage.mul(t.c.tileBytes()));
+    }
+
+    fn position(t: TileContext, row: V) V {
+        return t.klen.sub(t.qlen).add(row.div(t.c.group));
+    }
+
+    fn lastVisibleKey(t: TileContext, query_position: V) V {
+        const last_key = t.klen.sub(1);
+        if (t.c.causal) {
+            return last_key.minimum(query_position);
+        }
+
+        return last_key;
+    }
+
     // Pages hold 16 rows, so the page table is read once per page and shared by K and V instead of once per 16-byte copy.
     fn loadKeyValue(t: TileContext, comptime head_dim: i64, key_base: V, stage: V) void {
         const b = t.b;
@@ -119,8 +140,8 @@ const TileContext = struct {
         const head_offset = t.head.to(.i64).mul(c.head_dim).add(chunk.mul(8).to(.i64));
         const slab_offset = chunk.div(8).mul(block_keys * 128);
         const swizzled = chunk.rem(8).bitXor(first_row.rem(8)).mul(16);
-        const key_destination = t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())).add(slab_offset).add(swizzled);
-        const value_destination = t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())).add(slab_offset).add(swizzled);
+        const key_destination = t.keyStage(stage).add(slab_offset).add(swizzled);
+        const value_destination = t.valueStage(stage).add(slab_offset).add(swizzled);
         inline for (0..@as(usize, @intCast(passes))) |pass| {
             const row = first_row.add(pass * rows_per_pass);
             const valid = key_base.add(row).lt(t.klen);
@@ -179,6 +200,15 @@ fn quadMax(b: *B, value: V) V {
 fn quadSum(b: *B, value: V) V {
     const far = value.add(b.shuffleXor(value, 2));
     return far.add(b.shuffleXor(far, 1));
+}
+
+// The second warpgroup arrives on the first one's turn barrier up front, so the first warpgroup takes the first turn.
+fn startTurns(b: *B, warpgroup: V) void {
+    var bootstrap = b.openIf(warpgroup.eq(1));
+    {
+        ptx.namedBarrierArrive(b, b.constant(.i32, 1), consumer_threads);
+        bootstrap.close();
+    }
 }
 
 fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
@@ -314,12 +344,9 @@ fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
         fn blockNeedsMask(self: Self, block: V) V {
             const c = self.c;
             const t = self.t;
-            const first_position = t.klen.sub(t.qlen).add(self.first_row.div(c.group));
+            const first_position = t.position(self.first_row);
             const last_position = t.klen.sub(t.qlen).add(self.first_row.add(block_rows - 1).div(c.group));
-            var last_visible = t.klen.sub(1);
-            if (c.causal) {
-                last_visible = last_visible.minimum(first_position);
-            }
+            const last_visible = t.lastVisibleKey(first_position);
             const block_start = block.mul(block_keys);
             var needs_mask = self.first_row.add(block_rows).gt(t.qlen.mul(c.group)).bitOr(block_start.add(block_keys - 1).gt(last_visible));
             if (c.window > 0) {
@@ -338,11 +365,8 @@ fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
             const thread_key = block.mul(block_keys).add(self.column0);
             for (0..2) |h| {
                 const row = self.first_row.add(self.row_in_tile).add(h * 8);
-                const position = t.klen.sub(t.qlen).add(row.div(c.group));
-                var last_key = t.klen.sub(1);
-                if (c.causal) {
-                    last_key = last_key.minimum(position);
-                }
+                const position = t.position(row);
+                const last_key = t.lastVisibleKey(position);
                 upper[h] = b.select(row.lt(t.qlen.mul(c.group)), last_key.sub(thread_key), b.constant(.i32, -1));
                 lower[h] = position.sub(c.window - 1).sub(thread_key);
             }
@@ -431,8 +455,8 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
                 if (c.page_size == 16) {
                     t.loadKeyValue(d, loads.iv.mul(block_keys), stage);
                 } else {
-                    t.loadRows(t.k, loads.iv.mul(block_keys), t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())), false);
-                    t.loadRows(t.v, loads.iv.mul(block_keys), t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())), false);
+                    t.loadRows(t.k, loads.iv.mul(block_keys), t.keyStage(stage), false);
+                    t.loadRows(t.v, loads.iv.mul(block_keys), t.valueStage(stage), false);
                 }
                 b.cpAsyncMbarrierArrive(fullBarrier(t, stage), true);
                 loads.close();
@@ -469,11 +493,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
         var nonempty = b.openIfElse(hi.gt(lo).bitAnd(has_rows), .{ zero_packed.type_(), zero.type_(), zero.type_(), zero.type_(), zero.type_() });
         {
             var scores: [score_count]V = @splat(zero);
-            var bootstrap = b.openIf(warpgroup.eq(1));
-            {
-                ptx.namedBarrierArrive(b, b.constant(.i32, 1), consumer_threads);
-                bootstrap.close();
-            }
+            startTurns(b, warpgroup);
             mainloop.waitFull(lo);
             mainloop.waitTurn();
             mainloop.issueScores(&scores, lo);
@@ -517,11 +537,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
             // A warpgroup without valid rows still plays its part in the stage and turn handshakes so the other warpgroup's protocol stays whole.
             var drain_needed = b.openIf(hi.gt(lo));
             {
-                var bootstrap = b.openIf(warpgroup.eq(1));
-                {
-                    ptx.namedBarrierArrive(b, b.constant(.i32, 1), consumer_threads);
-                    bootstrap.close();
-                }
+                startTurns(b, warpgroup);
                 var drain = b.openFor(lo, hi, 1, .{});
                 {
                     mainloop.waitFull(drain.iv);
