@@ -8,9 +8,7 @@ const metal = zml.kernel.metal;
 const Builder = metal.Builder;
 const paged_attn = @import("paged_attn.zig");
 
-fn i32Of(x: usize) i32 {
-    return @intCast(x);
-}
+const i32Of = paged_attn.i32Of;
 
 const Probe = struct {
     const Cfg = struct {};
@@ -31,9 +29,9 @@ const Probe = struct {
             .lane = .{ .thread_index_in_simdgroup = .uint },
         });
         const lane = a.lane.to(.int);
-        const quad = lane.div(4);
-        const fm = quad.bitAnd(4).bitOr(lane.div(2).bitAnd(3));
-        const fn_ = quad.bitAnd(2).bitOr(lane.bitAnd(1)).mul(4);
+        const fragment = paged_attn.tensorFragmentCoord(lane);
+        const fm = fragment.row;
+        const fn_ = fragment.column;
 
         const op: Builder.Matmul2d = .{ .m = 16, .n = 32, .k = 16, .transpose_left = false, .transpose_right = true, .left = .half, .right = .half, .destination = .float };
         const left = b.cooperativeTensor(op, .left);
