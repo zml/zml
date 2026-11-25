@@ -105,6 +105,9 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
     const num_seqs: i32 = @intCast(block_table.dim(0));
     const max_blocks: i32 = @intCast(block_table.dim(1));
 
+    const token_stride = num_kv_heads * head_dim;
+    const row_stride = num_heads * head_dim;
+
     const vec_decode = opts.is_causal and total_q_tokens == num_seqs and
         (head_dim == 32 or head_dim == 64 or head_dim == 128 or head_dim == 256 or head_dim == 512) and
         dtype == .bf16;
@@ -142,7 +145,7 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         const cfg: paged_attn.FaVecPaged.Cfg = .{
             .head_dim = head_dim,
             .block_size = block_size,
-            .position_stride = num_kv_heads * head_dim,
+            .position_stride = token_stride,
             .heads = launch.heads,
             .splits = launch.splits,
         };
@@ -196,8 +199,8 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
             .scale = .of(opts.scale),
             .softcapping = .of(@as(f32, 0)),
             .max_num_blocks_per_seq = .of(max_blocks),
-            .q_stride = .of(num_heads * head_dim),
-            .kv_block_stride = .of(block_size * num_kv_heads * head_dim),
+            .q_stride = .of(row_stride),
+            .kv_block_stride = .of(block_size * token_stride),
             .kv_head_stride = .of(head_dim),
             .num_seqs = .of(num_seqs),
             .sliding_window = .of(opts.sliding_window),
@@ -211,7 +214,7 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         .cfg = .{ .dtype = cfg.dtype },
         .grid = .{ @intCast(total_q_tokens), 1, 1 },
         .threadgroup = .{ 256, 1, 1 },
-        .constants = .{ .num_seqs = .of(num_seqs), .row_stride = .of(num_heads * head_dim) },
+        .constants = .{ .num_seqs = .of(num_seqs), .row_stride = .of(row_stride) },
     }).out;
 }
 

@@ -17,6 +17,19 @@ const masked_score = -flt_max / 2.0;
 const max_half = 65504.0;
 const simd_width = 32;
 
+pub fn i32Of(x: usize) i32 {
+    return @intCast(x);
+}
+
+/// Lane `lane`'s place in a 16x16 matmul2d fragment: it holds rows `row` and `row + 8`, four columns from `column`.
+pub fn tensorFragmentCoord(lane: Value) struct { row: Value, column: Value } {
+    const quad = lane.div(4);
+    return .{
+        .row = quad.bitAnd(4).bitOr(lane.div(2).bitAnd(3)),
+        .column = quad.bitAnd(2).bitOr(lane.bitAnd(1)).mul(4),
+    };
+}
+
 /// fa_vec_paged: bf16 decode over paged caches. Simdgroup s takes query head
 /// s % heads of the threadgroup's KV head group and position split s / heads.
 pub const FaVecPaged = struct {
@@ -646,6 +659,24 @@ pub const PagedAttentionTiled = struct {
         };
     }
 
+    /// The offset of position `kv_pos` of the sequence's KV head in the K and V caches, through its block table.
+    fn kvOffset(a: anytype, prologue: Prologue, block_table: Value, block_size: i32, kv_pos: Value) Value {
+        const page = block_table.load(kv_pos.div(block_size)).to(.long);
+        return page.mul(a.kv_block_stride).add(kv_pos.rem(block_size).mul(prologue.kv_token_stride)).add(prologue.kv_head_idx.mul(a.kv_head_stride));
+    }
+
+    /// Stores the four elements of `vector` into `tensor` from element `first_element`.
+    fn storeFragmentVector(tensor: Builder.CooperativeTensor, first_element: usize, vector: Value) void {
+        inline for (0..4) |j| {
+            tensor.element(first_element + j).store(0, vector.at(i32Of(j)));
+        }
+    }
+
+    /// The address of the simdgroup's first query row of the head, `column` elements in.
+    fn queryRowBase(a: anytype, prologue: Prologue, buffer: Value, sg_row: Value, head_size: i32, column: Value) Value {
+        return buffer.add(prologue.q_seq_start.add(prologue.q_pos_start).add(sg_row).mul(a.q_stride)).add(prologue.head_idx.mul(head_size)).add(column);
+    }
+
     fn smemStride(cfg: Cfg) i32 {
         return cfg.head_size + @divExact(16, @as(i32, @intCast(cfg.dtype.size())));
     }
@@ -660,8 +691,6 @@ pub const PagedAttentionTiled = struct {
         const NUM_SIMD_LANES = 32;
         const LD = smemStride(cfg);
         const seq_len = prologue.seq_len;
-        const kv_head_idx = prologue.kv_head_idx;
-        const kv_token_stride = prologue.kv_token_stride;
         const unroll: metal.LoopOpts = .{ .unroll = .enable };
         const VEC_BYTES: i32 = if (HEAD_SIZE >= 256) 16 else 8;
         const VEC = @divExact(VEC_BYTES, @as(i32, @intCast(T.size())));
@@ -673,8 +702,7 @@ pub const PagedAttentionTiled = struct {
             const kv_pos = tile_start.add(t);
             var present = b.openIfElse(kv_pos.lt(seq_len), .{});
             {
-                const pb = block_table.load(kv_pos.div(BLOCK_SIZE)).to(.long);
-                const off = pb.mul(a.kv_block_stride).add(kv_pos.rem(BLOCK_SIZE).mul(kv_token_stride)).add(kv_head_idx.mul(a.kv_head_stride));
+                const off = kvOffset(a, prologue, block_table, BLOCK_SIZE, kv_pos);
                 const k_ptr = a.k_cache.add(off);
                 const v_ptr = a.v_cache.add(off);
                 var loop = b.openForOpts(a.lane.mul(VEC).to(.int), HEAD_SIZE, NUM_SIMD_LANES * VEC, unroll);
@@ -703,10 +731,6 @@ pub const PagedAttentionTiled = struct {
         }
     }
 
-    fn i32Of(x: usize) i32 {
-        return @intCast(x);
-    }
-
     /// One simdgroup owns 16 query rows and multiplies 16x16 fragments with `matmul2d` tensor ops, which only
     /// M5-class GPUs run. A lane holds rows `fm` and `fm + 8` of every fragment, four columns from `fn`.
     fn tensorOpsBody(b: *Builder, cfg: Cfg, a: anytype) void {
@@ -720,7 +744,6 @@ pub const PagedAttentionTiled = struct {
         const arena = b.arena.allocator();
 
         const prologue = sequencePrologue(b, a, cfg.bq);
-        const head_idx = prologue.head_idx;
         const q_pos_start = prologue.q_pos_start;
         const seq_len = prologue.seq_len;
         const context_len = prologue.context_len;
@@ -729,10 +752,9 @@ pub const PagedAttentionTiled = struct {
         const qk: Builder.Matmul2d = .{ .m = 16, .n = 32, .k = 16, .transpose_left = false, .transpose_right = true, .left = T.scalar, .right = T.scalar, .destination = .float };
         const pv: Builder.Matmul2d = .{ .m = 16, .n = 32, .k = 16, .transpose_left = false, .transpose_right = false, .left = .float, .right = T.scalar, .destination = .float };
 
-        const lane = a.lane.to(.int);
-        const quad = lane.div(4);
-        const fm = quad.bitAnd(4).bitOr(lane.div(2).bitAnd(3));
-        const fn_ = quad.bitAnd(2).bitOr(lane.bitAnd(1)).mul(4);
+        const fragment = tensorFragmentCoord(a.lane.to(.int));
+        const fm = fragment.row;
+        const fn_ = fragment.column;
         const sg_row = a.sg_idx.mul(16).to(.int);
         b.returnIf(sg_row.ge(valid_q));
         const sg_valid_end = b.min(sg_row.add(16), valid_q);
@@ -741,7 +763,7 @@ pub const PagedAttentionTiled = struct {
         const scale_log2 = a.scale.mul(log2e);
 
         const q_tensors = arena.alloc(Builder.CooperativeTensor, TD) catch @panic("out of memory");
-        const q_base = a.q.add(prologue.q_seq_start.add(q_pos_start).add(sg_row).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE)).add(fn_);
+        const q_base = queryRowBase(a, prologue, a.q, sg_row, HEAD_SIZE, fn_);
         for (q_tensors, 0..) |*q_tensor, d| {
             q_tensor.* = b.cooperativeTensor(qk, .left);
             inline for (0..2) |rh| {
@@ -753,9 +775,7 @@ pub const PagedAttentionTiled = struct {
                 {
                     value.yieldElse(.{b.constant(T4, 0)});
                 }
-                inline for (0..4) |j| {
-                    q_tensor.element(rh * 4 + j).store(0, value.results[0].at(i32Of(j)));
-                }
+                storeFragmentVector(q_tensor.*, rh * 4, value.results[0]);
             }
         }
 
@@ -795,8 +815,7 @@ pub const PagedAttentionTiled = struct {
             var key_offsets: [4]Value = undefined;
             inline for (0..4) |slot| {
                 const kv_pos = b.min(tile_start.add(fm).add(i32Of((slot / 2) * 16 + (slot % 2) * 8)), seq_len.sub(1));
-                const page = block_table.load(kv_pos.div(cfg.block_size)).to(.long);
-                key_offsets[slot] = page.mul(a.kv_block_stride).add(kv_pos.rem(cfg.block_size).mul(prologue.kv_token_stride)).add(prologue.kv_head_idx.mul(a.kv_head_stride)).add(fn_);
+                key_offsets[slot] = kvOffset(a, prologue, block_table, cfg.block_size, kv_pos).add(fn_);
             }
 
             var active = b.openIf(sg_row.lt(valid_q));
@@ -808,10 +827,7 @@ pub const PagedAttentionTiled = struct {
                 for (q_tensors, 0..) |q_tensor, d| {
                     inline for (0..2) |blk| {
                         inline for (0..2) |rh| {
-                            const k_vec = a.k_cache.add(key_offsets[blk * 2 + rh]).add(i32Of(d * 16)).to(T4).load(0);
-                            inline for (0..4) |j| {
-                                k_right.element(blk * 8 + rh * 4 + j).store(0, k_vec.at(i32Of(j)));
-                            }
+                            storeFragmentVector(k_right, blk * 8 + rh * 4, a.k_cache.add(key_offsets[blk * 2 + rh]).add(i32Of(d * 16)).to(T4).load(0));
                         }
                     }
                     b.matmul2dRun(qk, q_tensor, k_right, s_tensor);
@@ -902,10 +918,7 @@ pub const PagedAttentionTiled = struct {
                     for (o_tensors, 0..) |o_tensor, dp| {
                         inline for (0..2) |dblk| {
                             inline for (0..2) |rh| {
-                                const v_vec = a.v_cache.add(key_offsets[blk * 2 + rh]).add(i32Of((2 * dp + dblk) * 16)).to(T4).load(0);
-                                inline for (0..4) |j| {
-                                    v_right.element(dblk * 8 + rh * 4 + j).store(0, v_vec.at(i32Of(j)));
-                                }
+                                storeFragmentVector(v_right, dblk * 8 + rh * 4, a.v_cache.add(key_offsets[blk * 2 + rh]).add(i32Of((2 * dp + dblk) * 16)).to(T4).load(0));
                             }
                         }
                         b.matmul2dRun(pv, p_left[blk], v_right, o_tensor);
@@ -917,7 +930,7 @@ pub const PagedAttentionTiled = struct {
             tiles.close();
         }
 
-        const out_base = a.out.add(prologue.q_seq_start.add(q_pos_start).add(sg_row).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE)).add(fn_);
+        const out_base = queryRowBase(a, prologue, a.out, sg_row, HEAD_SIZE, fn_);
         inline for (0..2) |rh| {
             const inv_sum = b.lift(1.0).div(sum_state.load(i32Of(rh)).add(@as(f32, 1e-6)));
             const row = fm.add(i32Of(rh * 8));
