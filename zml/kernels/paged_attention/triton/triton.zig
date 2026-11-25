@@ -203,27 +203,15 @@ fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Co
     };
 }
 
-pub const Config3D = struct {
-    const AttentionConfig = struct {
-        tile_size: usize,
-        num_segments_per_seq: usize,
-        num_warps: usize,
-        num_stages: usize,
-        block_q: usize,
-        block_m: usize,
-        total_q_blocks: usize,
-    };
-    const ReduceConfig = struct {
-        tile_size: usize,
-        num_segments_per_seq: usize,
-        num_warps: usize,
-        num_stages: usize,
-        block_q: usize,
-        block_m: usize,
-    };
-    attention: AttentionConfig,
-    reduce: ReduceConfig,
+const Config3D = struct {
+    tile_size: usize,
+    num_segments_per_seq: usize,
+    attention_num_warps: usize,
+    reduce_num_warps: usize,
 };
+
+// Both split-K kernels run single-stage.
+const split_kv_num_stages: i32 = 1;
 
 fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
@@ -248,23 +236,10 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     }
 
     return .{
-        .attention = .{
-            .tile_size = tile_size,
-            .num_segments_per_seq = num_segments,
-            .num_warps = attn_warps,
-            .num_stages = 1,
-            .block_m = options.block_m,
-            .block_q = options.block_q,
-            .total_q_blocks = options.total_q_blocks,
-        },
-        .reduce = .{
-            .tile_size = tile_size,
-            .num_segments_per_seq = num_segments,
-            .num_warps = reduce_num_warps,
-            .num_stages = 1,
-            .block_m = options.block_m,
-            .block_q = options.block_q,
-        },
+        .tile_size = tile_size,
+        .num_segments_per_seq = num_segments,
+        .attention_num_warps = attn_warps,
+        .reduce_num_warps = reduce_num_warps,
     };
 }
 
@@ -360,6 +335,10 @@ pub const paged = struct {
 
         pub fn maxSeqLenK(self: PagedAttentionOptions) usize {
             return self.max_num_block_per_seq * self.block_size;
+        }
+
+        pub fn headDimPadded(self: PagedAttentionOptions) usize {
+            return std.math.ceilPowerOfTwoAssert(usize, self.head_dim);
         }
     };
 
@@ -634,6 +613,88 @@ pub const paged = struct {
         return output;
     }
 
+    fn sinkOrFallback(opts: AttentionOptions, fallback: zml.Tensor) zml.Tensor {
+        const sink = opts.sink orelse return fallback;
+
+        return sink.convert(.f32);
+    }
+
+    const SharedInputs = struct {
+        dummy: zml.Tensor,
+        sink: zml.Tensor,
+        scale: zml.Tensor,
+        num_seqs: zml.Tensor,
+        block_table_stride: zml.Tensor,
+        query_stride_0: zml.Tensor,
+        query_stride_1: zml.Tensor,
+
+        fn init(parameters: Parameters, q: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) SharedInputs {
+            const dummy: zml.Tensor = .scalar(0, .i8);
+            const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
+
+            const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
+            const q_strides = q_shape.computeElementStrides().constSlice();
+
+            const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
+
+            return .{
+                .dummy = dummy,
+                .sink = sinkOrFallback(opts, dummy),
+                .scale = .scalar(scale, .f32),
+                .num_seqs = .scalar(parameters.block_table.dim(0), .i32),
+                .block_table_stride = .scalar(block_table_strides[0], .i64),
+                .query_stride_0 = .scalar(q_strides[0], .i64),
+                .query_stride_1 = .scalar(q_strides[1], .i64),
+            };
+        }
+    };
+
+    fn segmentShapes(paged_attention_opts: PagedAttentionOptions, num_segments_per_seq: usize) kernels.KernelUnifiedAttention3dPtr.Kernel.Outputs {
+        return .{
+            .segm_output = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, num_segments_per_seq, paged_attention_opts.headDimPadded() }, .f32),
+            .segm_max = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, num_segments_per_seq }, .f32),
+            .segm_expsum = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, num_segments_per_seq }, .f32),
+        };
+    }
+
+    fn reduceSegments(parameters: Parameters, q: zml.Tensor, paged_attention_opts: PagedAttentionOptions, shared: SharedInputs, config: Config3D, attn_output: anytype) zml.Tensor {
+        const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
+            .o_dtype = triton.from(q.dtype()),
+            .num_query_heads = @intCast(paged_attention_opts.num_heads),
+            .tile_size = @intCast(config.tile_size),
+            .head_size = @intCast(paged_attention_opts.head_dim),
+            .head_size_padded = @intCast(paged_attention_opts.headDimPadded()),
+            .block_q = @intCast(paged_attention_opts.block_q),
+            .num_segments_per_seq = @intCast(config.num_segments_per_seq),
+            .use_fp8 = false,
+        };
+        log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
+
+        const output = kernels.ReduceSegmentsPtr.Kernel.call(
+            .{
+                .segm_output_ptr = attn_output.segm_output,
+                .segm_max_ptr = attn_output.segm_max,
+                .segm_expsum_ptr = attn_output.segm_expsum,
+                .seq_lens_ptr = parameters.seq_lens,
+                .num_seqs_ptr = shared.num_seqs,
+                .out_scale_inv_ptr = shared.dummy,
+                .output_stride_0_ptr = shared.query_stride_0,
+                .output_stride_1_ptr = shared.query_stride_1,
+                .block_table_stride_ptr = shared.block_table_stride,
+                .query_start_len_ptr = parameters.query_start_len,
+            },
+            .{ .output = q.shape() },
+            .{
+                .cfg = reduce_kernel_config,
+                .grid = .{ @intCast(paged_attention_opts.num_tokens), @intCast(paged_attention_opts.num_heads), 1 },
+                .num_stages = split_kv_num_stages,
+                .num_warps = @intCast(config.reduce_num_warps),
+            },
+        );
+
+        return output.output;
+    }
+
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         // FP8 cache tiles can be dequantized to the query dtype before the dot.
         const element_bytes = @max(q.dtype().sizeOf(), k_cache.dtype().sizeOf(), v_cache.dtype().sizeOf());
@@ -652,7 +713,7 @@ pub const paged = struct {
             .block_size = @intCast(paged_attention_opts.block_size),
             .tile_size = @intCast(config.tile_size),
             .head_size = @intCast(paged_attention_opts.head_dim),
-            .head_size_padded = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim)),
+            .head_size_padded = @intCast(paged_attention_opts.headDimPadded()),
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
@@ -666,40 +727,31 @@ pub const paged = struct {
         };
         log.debug("pagedAttention2d config: {any}", .{kernel_config});
 
-        const dummy: zml.Tensor = .scalar(0, .i8);
-        const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
-
-        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
-        const q_strides = q_shape.computeElementStrides().constSlice();
-
-        const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
-        const num_seqs = parameters.block_table.dim(0);
-
-        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+        const shared = SharedInputs.init(parameters, q, opts, paged_attention_opts);
 
         const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = sink,
+                .sink_ptr = shared.sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
-                .alibi_slopes_ptr = dummy,
-                .qq_bias_ptr = dummy,
-                .scale_ptr = .scalar(scale, .f32),
-                .k_scale_ptr = dummy,
-                .v_scale_ptr = dummy,
-                .out_scale_ptr = dummy,
-                .softcap_ptr = dummy,
-                .block_table_stride_ptr = .scalar(block_table_strides[0], .i64),
-                .query_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .query_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .output_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .output_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .qq_bias_stride_0_ptr = dummy,
+                .alibi_slopes_ptr = shared.dummy,
+                .qq_bias_ptr = shared.dummy,
+                .scale_ptr = shared.scale,
+                .k_scale_ptr = shared.dummy,
+                .v_scale_ptr = shared.dummy,
+                .out_scale_ptr = shared.dummy,
+                .softcap_ptr = shared.dummy,
+                .block_table_stride_ptr = shared.block_table_stride,
+                .query_stride_0_ptr = shared.query_stride_0,
+                .query_stride_1_ptr = shared.query_stride_1,
+                .output_stride_0_ptr = shared.query_stride_0,
+                .output_stride_1_ptr = shared.query_stride_1,
+                .qq_bias_stride_0_ptr = shared.dummy,
                 .query_start_len_ptr = parameters.query_start_len,
-                .num_seqs_ptr = .scalar(num_seqs, .i32),
+                .num_seqs_ptr = shared.num_seqs,
             },
             .{ .output = q.shape() },
             .{
@@ -712,12 +764,19 @@ pub const paged = struct {
         return output.output;
     }
 
+    fn splitKvGrid(paged_attention_opts: PagedAttentionOptions, config: Config3D) [3]i32 {
+        return .{
+            @intCast(paged_attention_opts.total_q_blocks),
+            @intCast(paged_attention_opts.num_kv_heads),
+            @intCast(config.num_segments_per_seq),
+        };
+    }
+
     pub fn pagedAttention3d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         const config = select3dConfig(paged_attention_opts);
         const k_strides = k_cache.shape().computeElementStrides().constSlice();
         const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
-        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
         const attn_kernel_config: kernels.KernelUnifiedAttention3dPtr.Config = .{
             .q_dtype = triton.from(q.dtype()),
             .kv_dtype = triton.from(k_cache.dtype()),
@@ -726,112 +785,55 @@ pub const paged = struct {
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
             .block_size = @intCast(paged_attention_opts.block_size),
-            .tile_size = @intCast(config.attention.tile_size),
+            .tile_size = @intCast(config.tile_size),
             .head_size = @intCast(paged_attention_opts.head_dim),
-            .head_size_padded = head_size_padded,
+            .head_size_padded = @intCast(paged_attention_opts.headDimPadded()),
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
             .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
-            .block_q = @intCast(config.attention.block_q),
-            .block_m = @intCast(config.attention.block_m),
-            .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
+            .block_q = @intCast(paged_attention_opts.block_q),
+            .block_m = @intCast(paged_attention_opts.block_m),
+            .num_segments_per_seq = @intCast(config.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
-        const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
-            .o_dtype = triton.from(q.dtype()),
-            .num_query_heads = @intCast(paged_attention_opts.num_heads),
-            .tile_size = @intCast(config.reduce.tile_size),
-            .head_size = @intCast(paged_attention_opts.head_dim),
-            .head_size_padded = head_size_padded,
-            .block_q = @intCast(config.reduce.block_q),
-            .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
-            .use_fp8 = false,
-        };
-        log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
-
-        const dummy: zml.Tensor = .scalar(0, .i8);
-        const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
-
-        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
-        const q_strides = q_shape.computeElementStrides().constSlice();
-
-        const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
-        const num_seqs = parameters.block_table.dim(0);
-
-        const attn_grid: [3]i32 = .{
-            @intCast(config.attention.total_q_blocks),
-            @intCast(paged_attention_opts.num_kv_heads),
-            @intCast(config.attention.num_segments_per_seq),
-        };
-
-        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+        const shared = SharedInputs.init(parameters, q, opts, paged_attention_opts);
 
         const attn_output = kernels.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = sink,
+                .sink_ptr = shared.sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
-                .alibi_slopes_ptr = dummy,
-                .qq_bias_ptr = dummy,
-                .scale_ptr = .scalar(scale, .f32),
-                .k_scale_ptr = dummy,
-                .v_scale_ptr = dummy,
-                .softcap_ptr = dummy,
-                .block_table_stride_ptr = .scalar(block_table_strides[0], .i64),
-                .query_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .query_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .qq_bias_stride_0_ptr = dummy,
+                .alibi_slopes_ptr = shared.dummy,
+                .qq_bias_ptr = shared.dummy,
+                .scale_ptr = shared.scale,
+                .k_scale_ptr = shared.dummy,
+                .v_scale_ptr = shared.dummy,
+                .softcap_ptr = shared.dummy,
+                .block_table_stride_ptr = shared.block_table_stride,
+                .query_stride_0_ptr = shared.query_stride_0,
+                .query_stride_1_ptr = shared.query_stride_1,
+                .qq_bias_stride_0_ptr = shared.dummy,
                 .query_start_len_ptr = parameters.query_start_len,
-                .num_seqs_ptr = .scalar(num_seqs, .i32),
+                .num_seqs_ptr = shared.num_seqs,
             },
-            .{
-                .segm_output = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq, std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim) }, .f32),
-                .segm_max = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
-                .segm_expsum = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
-            },
+            segmentShapes(paged_attention_opts, config.num_segments_per_seq),
             .{
                 .cfg = attn_kernel_config,
-                .grid = attn_grid,
-                .num_stages = @intCast(config.attention.num_stages),
-                .num_warps = @intCast(config.attention.num_warps),
+                .grid = splitKvGrid(paged_attention_opts, config),
+                .num_stages = split_kv_num_stages,
+                .num_warps = @intCast(config.attention_num_warps),
             },
         );
 
-        const output = kernels.ReduceSegmentsPtr.Kernel.call(
-            .{
-                .segm_output_ptr = attn_output.segm_output,
-                .segm_max_ptr = attn_output.segm_max,
-                .segm_expsum_ptr = attn_output.segm_expsum,
-                .seq_lens_ptr = parameters.seq_lens,
-                .num_seqs_ptr = .scalar(num_seqs, .i32),
-                .out_scale_inv_ptr = dummy,
-                .output_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .output_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .block_table_stride_ptr = .scalar(block_table_strides[0], .i64),
-                .query_start_len_ptr = parameters.query_start_len,
-            },
-            .{ .output = q.shape() },
-            .{
-                .cfg = reduce_kernel_config,
-                .grid = .{
-                    @intCast(paged_attention_opts.num_tokens),
-                    @intCast(paged_attention_opts.num_heads),
-                    1,
-                },
-                .num_stages = @intCast(config.reduce.num_stages),
-                .num_warps = @intCast(config.reduce.num_warps),
-            },
-        );
-
-        return output.output;
+        return reduceSegments(parameters, q, paged_attention_opts, shared, config, attn_output);
     }
 
     /// oneAPI/Intel specialization of pagedAttention3d: routes the attention pass to
@@ -839,9 +841,6 @@ pub const paged = struct {
     /// path) while reusing the shared segment-reduce kernel. See unified_attention_oneapi.zig.
     pub fn pagedAttention3dOneapi(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         const config = select3dConfig(paged_attention_opts);
-
-        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
-
         const k_strides = k_cache.shape().computeElementStrides().constSlice();
         const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
@@ -851,18 +850,18 @@ pub const paged = struct {
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
             .block_size = @intCast(paged_attention_opts.block_size),
-            .tile_size = @intCast(config.attention.tile_size),
+            .tile_size = @intCast(config.tile_size),
             .head_size = @intCast(paged_attention_opts.head_dim),
-            .head_size_padded = head_size_padded,
+            .head_size_padded = @intCast(paged_attention_opts.headDimPadded()),
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
             .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .is_causal = opts.mask.isCausal(),
-            .block_q = @intCast(config.attention.block_q),
-            .block_m = @intCast(config.attention.block_m),
-            .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
+            .block_q = @intCast(paged_attention_opts.block_q),
+            .block_m = @intCast(paged_attention_opts.block_m),
+            .num_segments_per_seq = @intCast(config.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
             .stride_k_cache_0 = k_strides[k_cache.axis(.page)],
             .stride_k_cache_1 = k_strides[k_cache.axis(.k_chunk)],
@@ -876,49 +875,26 @@ pub const paged = struct {
         };
         log.debug("pagedAttention3dOneapi attention config: {any}", .{attn_kernel_config});
 
-        const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
-            .o_dtype = triton.from(q.dtype()),
-            .num_query_heads = @intCast(paged_attention_opts.num_heads),
-            .tile_size = @intCast(config.reduce.tile_size),
-            .head_size = @intCast(paged_attention_opts.head_dim),
-            .head_size_padded = head_size_padded,
-            .block_q = @intCast(config.reduce.block_q),
-            .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
-            .use_fp8 = false,
-        };
-        log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
-
-        const dummy: zml.Tensor = .scalar(0, .i8);
-        const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
-
-        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
-        const q_strides = q_shape.computeElementStrides().constSlice();
-
-        const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
-        const num_seqs = parameters.block_table.dim(0);
-
-        const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
-
-        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+        const shared = SharedInputs.init(parameters, q, opts, paged_attention_opts);
 
         const attn_output = kernels_oneapi.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = sink,
+                .sink_ptr = shared.sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
-                .alibi_slopes_ptr = dummy,
-                .qq_bias_ptr = dummy,
-                .scale_ptr = .scalar(scale, .f32),
-                .k_scale_ptr = dummy,
-                .v_scale_ptr = dummy,
-                .softcap_ptr = dummy,
-                .block_table_stride_ptr = .scalar(block_table_strides[0], .i64),
-                .query_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .query_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .qq_bias_stride_0_ptr = dummy,
+                .alibi_slopes_ptr = shared.dummy,
+                .qq_bias_ptr = shared.dummy,
+                .scale_ptr = shared.scale,
+                .k_scale_ptr = shared.dummy,
+                .v_scale_ptr = shared.dummy,
+                .softcap_ptr = shared.dummy,
+                .block_table_stride_ptr = shared.block_table_stride,
+                .query_stride_0_ptr = shared.query_stride_0,
+                .query_stride_1_ptr = shared.query_stride_1,
+                .qq_bias_stride_0_ptr = shared.dummy,
                 .stride_k_cache_0_ptr = .scalar(k_strides[k_cache.axis(.page)], .i64),
                 .stride_k_cache_1_ptr = .scalar(k_strides[k_cache.axis(.k_chunk)], .i64),
                 .stride_k_cache_2_ptr = .scalar(k_strides[k_cache.axis(.hkv)], .i64),
@@ -926,43 +902,17 @@ pub const paged = struct {
                 .stride_v_cache_1_ptr = .scalar(v_strides[v_cache.axis(.k_chunk)], .i64),
                 .stride_v_cache_2_ptr = .scalar(v_strides[v_cache.axis(.hkv)], .i64),
                 .query_start_len_ptr = parameters.query_start_len,
-                .num_seqs_ptr = .scalar(num_seqs, .i32),
+                .num_seqs_ptr = shared.num_seqs,
             },
-            .{
-                .segm_output = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq, std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim) }, .f32),
-                .segm_max = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
-                .segm_expsum = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
-            },
+            segmentShapes(paged_attention_opts, config.num_segments_per_seq),
             .{
                 .cfg = attn_kernel_config,
-                .grid = attn_grid,
-                .num_stages = @intCast(config.attention.num_stages),
-                .num_warps = @intCast(config.attention.num_warps),
+                .grid = splitKvGrid(paged_attention_opts, config),
+                .num_stages = split_kv_num_stages,
+                .num_warps = @intCast(config.attention_num_warps),
             },
         );
 
-        const output = kernels.ReduceSegmentsPtr.Kernel.call(
-            .{
-                .segm_output_ptr = attn_output.segm_output,
-                .segm_max_ptr = attn_output.segm_max,
-                .segm_expsum_ptr = attn_output.segm_expsum,
-                .seq_lens_ptr = parameters.seq_lens,
-                .num_seqs_ptr = .scalar(num_seqs, .i32),
-                .out_scale_inv_ptr = dummy,
-                .output_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .output_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .block_table_stride_ptr = .scalar(block_table_strides[0], .i64),
-                .query_start_len_ptr = parameters.query_start_len,
-            },
-            .{ .output = q.shape() },
-            .{
-                .cfg = reduce_kernel_config,
-                .grid = .{ @intCast(paged_attention_opts.num_tokens), @intCast(paged_attention_opts.num_heads), 1 },
-                .num_stages = @intCast(config.reduce.num_stages),
-                .num_warps = @intCast(config.reduce.num_warps),
-            },
-        );
-
-        return output.output;
+        return reduceSegments(parameters, q, paged_attention_opts, shared, config, attn_output);
     }
 };
