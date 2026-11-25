@@ -3194,8 +3194,8 @@ pub const Builder = struct {
         op: nvvm.ops.ReductionOp,
         /// The PTX type, which also sets the signedness of `min` and `max`.
         type: nvvm.ops.ReductionType,
-        /// PTX defaults to `relaxed`.
-        sem: ?enum { relaxed, release } = null,
+        /// PTX defaults to `relaxed`, and libNVVM requires an explicit ordering.
+        sem: enum { relaxed, release } = .relaxed,
         /// PTX defaults to `gpu`.
         scope: ?nvvm.ops.MemScopeKind = null,
     };
@@ -3223,10 +3223,10 @@ pub const Builder = struct {
             (nvvm.ops.ReductionOpAttr.get(self.ctx, .{ .value = opts.op }) catch @panic("invalid reduction op")).attribute(),
             (nvvm.ops.ReductionTypeAttr.get(self.ctx, .{ .value = opts.type }) catch @panic("invalid reduction type")).attribute(),
             .{
-                .memOrder = if (opts.sem) |sem| (nvvm.ops.MemOrderKindAttr.get(self.ctx, .{ .value = switch (sem) {
+                .memOrder = (nvvm.ops.MemOrderKindAttr.get(self.ctx, .{ .value = switch (opts.sem) {
                     .relaxed => .relaxed,
                     .release => .release,
-                } }) catch @panic("invalid memory order")).attribute() else null,
+                } }) catch @panic("invalid memory order")).attribute(),
                 .memScope = if (opts.scope) |scope| (nvvm.ops.MemScopeKindAttr.get(self.ctx, .{ .value = scope }) catch @panic("invalid memory scope")).attribute() else null,
             },
             self.loc(),
@@ -4496,6 +4496,7 @@ test "warp, reduction, packed BF16 and inline PTX primitives lower like Python's
         "nvvm.minctasm = 1 : i32",
     }) |op| try expectContains(ir, op);
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, ir, "\"nvvm.red\""));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, ir, "#nvvm.mem_order<relaxed>"));
     try expectContains(ir, "(!llvm.ptr<7>, i32) -> ()");
 
     const parsed = try mlir.Module.parse(ctx, ir);
