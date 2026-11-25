@@ -299,6 +299,7 @@ http_archive(
 
 http_aea_archive = use_repo_rule("//bazel:http_aea_archive.bzl", "http_aea_archive")
 
+# See platforms/metal/README.md for how to update this toolchain.
 http_aea_archive(
     name = "metal_toolchain",
     archive_decryption_key = "zIZ89LUdcdQ66mceeKpURt8POdwcLIu57HoZzQrxsPI=",
