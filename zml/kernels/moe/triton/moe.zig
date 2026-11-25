@@ -209,7 +209,33 @@ pub const FusedMoe = struct {
         naive_block_assignment: bool,
         compute_type: DType,
         quant_scheme: ?Quantization.Scheme,
+        /// The values behind the dimension and stride pointers, when the graph knows them:
+        /// the kernel then folds them instead of loading them in every program.
+        dims: ?Dims = null,
     };
+
+    pub const Dims = struct {
+        n: i64,
+        k: i64,
+        em: i64,
+        num_valid_tokens: i64,
+        stride_am: i64,
+        stride_be: i64,
+        stride_bn: i64,
+        stride_cm: i64,
+        stride_asm: i64,
+        stride_ask: i64,
+        stride_bse: i64,
+        stride_bsk: i64,
+        stride_bsn: i64,
+        stride_bbe: i64,
+        stride_bbn: i64,
+
+        fn value(b: *Builder, dims: ?Dims, comptime field: []const u8, ptr: Value) Value {
+            return if (dims) |known| b.constant(.i64, @field(known, field)) else b.load(ptr);
+        }
+    };
+
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "fused_moe_kernel",
         .inputs = &.{
@@ -286,14 +312,14 @@ pub const FusedMoe = struct {
 
         // Matrix dimensions, strides, and padded routing capacity are checked
         // for 16-element alignment by the caller.
-        const n_raw = b.load(a.N_ptr);
-        const k_raw = b.load(a.K_ptr);
-        const em_raw = b.load(a.EM_ptr);
-        const num_valid_tokens = b.load(a.num_valid_tokens_ptr);
-        const stride_am_raw = b.load(a.stride_am_ptr);
-        const stride_be_raw = b.load(a.stride_be_ptr);
-        const stride_bn_raw = b.load(a.stride_bn_ptr);
-        const stride_cm_raw = b.load(a.stride_cm_ptr);
+        const n_raw = Dims.value(b, cfg.dims, "n", a.N_ptr);
+        const k_raw = Dims.value(b, cfg.dims, "k", a.K_ptr);
+        const em_raw = Dims.value(b, cfg.dims, "em", a.EM_ptr);
+        const num_valid_tokens = Dims.value(b, cfg.dims, "num_valid_tokens", a.num_valid_tokens_ptr);
+        const stride_am_raw = Dims.value(b, cfg.dims, "stride_am", a.stride_am_ptr);
+        const stride_be_raw = Dims.value(b, cfg.dims, "stride_be", a.stride_be_ptr);
+        const stride_bn_raw = Dims.value(b, cfg.dims, "stride_bn", a.stride_bn_ptr);
+        const stride_cm_raw = Dims.value(b, cfg.dims, "stride_cm", a.stride_cm_ptr);
         const n_block = blockFloor16(n_raw);
         const k_block = blockFloor16(k_raw);
         const em_block = blockFloor16(em_raw);
@@ -369,7 +395,13 @@ pub const FusedMoe = struct {
 
         // CSE `pid_n * BLOCK_SIZE_N` so it reuses across offs_bn / offs_cn.
         const pid_n_block_n = pid_n.mul(block_size_n);
-        const offs_bn = pid_n_block_n.add(b.arange(0, block_size_n, .i64)).rem(n_block);
+        // Whole tiles need neither the wrap-around nor the masks of partial ones.
+        const whole_n = if (cfg.dims) |dims| @mod(dims.n, block_size_n) == 0 else false;
+        const whole_k = if (cfg.dims) |dims| @mod(dims.k, block_size_k) == 0 else false;
+        const offs_bn = if (whole_n)
+            pid_n_block_n.add(b.arange(0, block_size_n, .i64))
+        else
+            pid_n_block_n.add(b.arange(0, block_size_n, .i64)).rem(n_block);
 
         // offs_k stays i32 through expand_dims; extsi to i64 happens on the 2D form.
         const offs_k_i32 = b.arange(0, block_size_ak, .i32);
@@ -420,7 +452,7 @@ pub const FusedMoe = struct {
             const offs_k_lt_a = offs_k_row_a.lt(b.splat(k_remaining_a, &.{ 1, block_size_ak }));
             const token_mask_full_a = b.broadcastTo(token_mask_col_a, &.{ block_size_m, block_size_ak });
             const offs_k_lt_a_full = b.broadcastTo(offs_k_lt_a, &.{ block_size_m, block_size_ak });
-            const mask_a = token_mask_full_a.bitAnd(offs_k_lt_a_full);
+            const mask_a = if (whole_k) token_mask_full_a else token_mask_full_a.bitAnd(offs_k_lt_a_full);
 
             const a_val = b.loadOpts(a_ptrs, .{
                 .mask = mask_a,
@@ -431,7 +463,7 @@ pub const FusedMoe = struct {
             const offs_k_lt_b = offs_k_col_b.lt(b.splat(k_remaining.cdiv(weight_packing), &.{ block_size_bk, 1 }));
             const mask_b = b.broadcastTo(offs_k_lt_b, &.{ block_size_bk, block_size_n });
 
-            const b_val = b.loadOpts(b_ptrs, .{
+            const b_val = if (whole_k) b.load(b_ptrs) else b.loadOpts(b_ptrs, .{
                 .mask = mask_b,
                 .other = b.zeros(&.{ block_size_bk, block_size_n }, cfg.b_dtype),
             });
@@ -443,9 +475,9 @@ pub const FusedMoe = struct {
                     const group: i64 = if (nvfp4) 16 else 32;
                     const scale_k = @divExact(block_size_k, group);
                     const groups = k_iter.mul(scale_k).add(b.arange(0, scale_k, .i64));
-                    const stride_bse = b.load(a.stride_bse_ptr);
-                    const stride_bsk = b.load(a.stride_bsk_ptr);
-                    const stride_bsn = b.load(a.stride_bsn_ptr);
+                    const stride_bse = Dims.value(b, cfg.dims, "stride_bse", a.stride_bse_ptr);
+                    const stride_bsk = Dims.value(b, cfg.dims, "stride_bsk", a.stride_bsk_ptr);
+                    const stride_bsn = Dims.value(b, cfg.dims, "stride_bsn", a.stride_bsn_ptr);
                     // dot_scaled expects RHS scales in [N, K/32] order.
                     const rows = off_experts.mul(stride_bse).add(offs_bn.mul(stride_bsn)).expandDims(1);
                     const cols = groups.mul(stride_bsk).expandDims(0);
@@ -453,13 +485,13 @@ pub const FusedMoe = struct {
                         .add(b.broadcastTo(cols, &.{ block_size_n, scale_k }));
                     const n_mask = b.broadcastTo(offs_bn.lt(n_block).expandDims(1), &.{ block_size_n, scale_k });
                     const k_mask = b.broadcastTo(groups.lt(k_block.cdiv(group)).expandDims(0), &.{ block_size_n, scale_k });
-                    const scales = b.loadOpts(a.b_scale_ptr.addPtr(offsets), .{
+                    const scales = if (whole_n and whole_k) b.load(a.b_scale_ptr.addPtr(offsets)) else b.loadOpts(a.b_scale_ptr.addPtr(offsets), .{
                         .mask = n_mask.bitAnd(k_mask),
                         .other = if (nvfp4) b.zeros(&.{ block_size_n, scale_k }, cfg.b_scale_dtype.?) else b.full(&.{ block_size_n, scale_k }, 127, .i8),
                     });
                     const a_scales: ?Value = if (cfg.a_scale_dtype != null) input_scales: {
-                        const a_rows = offs_token.div(top_k).mul(b.load(a.stride_asm_ptr)).expandDims(1);
-                        const a_cols = groups.mul(b.load(a.stride_ask_ptr)).expandDims(0);
+                        const a_rows = offs_token.div(top_k).mul(Dims.value(b, cfg.dims, "stride_asm", a.stride_asm_ptr)).expandDims(1);
+                        const a_cols = groups.mul(Dims.value(b, cfg.dims, "stride_ask", a.stride_ask_ptr)).expandDims(0);
                         const a_offsets = b.broadcastTo(a_rows, &.{ block_size_m, scale_k })
                             .add(b.broadcastTo(a_cols, &.{ block_size_m, scale_k }));
                         const a_mask = b.broadcastTo(token_mask.expandDims(1), &.{ block_size_m, scale_k })
@@ -493,9 +525,9 @@ pub const FusedMoe = struct {
                     // Activation scales are [token, K/block] and weight scales are
                     // [expert, N/block, K/block]. Compute their addresses from the
                     // loop index; activation scales are optional.
-                    const stride_bse = b.load(a.stride_bse_ptr);
-                    const stride_bsk = b.load(a.stride_bsk_ptr);
-                    const stride_bsn = b.load(a.stride_bsn_ptr);
+                    const stride_bse = Dims.value(b, cfg.dims, "stride_bse", a.stride_bse_ptr);
+                    const stride_bsk = Dims.value(b, cfg.dims, "stride_bsk", a.stride_bsk_ptr);
+                    const stride_bsn = Dims.value(b, cfg.dims, "stride_bsn", a.stride_bsn_ptr);
                     const b_scale_ptrs = a.b_scale_ptr.addPtr(
                         off_experts.mul(stride_bse)
                             .add(offs_bn.div(fp8_block_size).mul(stride_bsn))
@@ -512,8 +544,8 @@ pub const FusedMoe = struct {
                     var scaled_dot = dot.mul(b_s.expandDims(0));
                     if (cfg.a_scale_dtype) |dtype| {
                         const a_scale_ptrs = a.a_scale_ptr.addPtr(
-                            offs_token.div(top_k).mul(b.load(a.stride_asm_ptr))
-                                .add(k_iter.mul(b.load(a.stride_ask_ptr))),
+                            offs_token.div(top_k).mul(Dims.value(b, cfg.dims, "stride_asm", a.stride_asm_ptr))
+                                .add(k_iter.mul(Dims.value(b, cfg.dims, "stride_ask", a.stride_ask_ptr))),
                         );
                         const a_s = b.loadOpts(a_scale_ptrs, .{
                             .mask = token_mask,
@@ -543,9 +575,9 @@ pub const FusedMoe = struct {
 
         if (cfg.quant_scheme == .fp8_per_channel or cfg.quant_scheme == .fp8_per_tensor) {
             // These scales are constant along K, so apply them after accumulation.
-            const expert_offset = off_experts.mul(b.load(a.stride_bse_ptr));
+            const expert_offset = off_experts.mul(Dims.value(b, cfg.dims, "stride_bse", a.stride_bse_ptr));
             const offsets = if (cfg.quant_scheme == .fp8_per_channel)
-                expert_offset.add(offs_bn.mul(b.load(a.stride_bsn_ptr)))
+                expert_offset.add(offs_bn.mul(Dims.value(b, cfg.dims, "stride_bsn", a.stride_bsn_ptr)))
             else
                 b.splat(expert_offset, &.{block_size_n});
             const scales = b.loadOpts(a.b_scale_ptr.addPtr(offsets), .{
@@ -554,7 +586,7 @@ pub const FusedMoe = struct {
             }).to(.f32);
             accumulator = accumulator.mul(scales.expandDims(0));
             if (cfg.a_scale_dtype) |dtype| {
-                const offsets_a = offs_token.div(top_k).mul(b.load(a.stride_asm_ptr));
+                const offsets_a = offs_token.div(top_k).mul(Dims.value(b, cfg.dims, "stride_asm", a.stride_asm_ptr));
                 const scales_a = b.loadOpts(a.a_scale_ptr.addPtr(offsets_a), .{
                     .mask = token_mask,
                     .other = b.zeros(&.{block_size_m}, dtype),
@@ -564,8 +596,8 @@ pub const FusedMoe = struct {
         }
 
         if (cfg.b_bias_dtype) |dtype| {
-            const offsets = off_experts.mul(b.load(a.stride_bbe_ptr))
-                .add(offs_bn.mul(b.load(a.stride_bbn_ptr)));
+            const offsets = off_experts.mul(Dims.value(b, cfg.dims, "stride_bbe", a.stride_bbe_ptr))
+                .add(offs_bn.mul(Dims.value(b, cfg.dims, "stride_bbn", a.stride_bbn_ptr)));
             const bias = b.loadOpts(a.b_bias_ptr.addPtr(offsets), .{
                 .mask = offs_bn.lt(n_block),
                 .other = b.zeros(&.{block_size_n}, dtype),
