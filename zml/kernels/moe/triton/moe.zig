@@ -7,14 +7,15 @@
 
 const std = @import("std");
 
+const Activation = @import("zml/kernels/moe/api").Activation;
+const Nvfp4QuantizationStrategy = @import("zml/quantization").Nvfp4QuantizationStrategy;
 const Quantization = @import("zml/quantization").Quantization;
-
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const zml = @import("zml/core");
 const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
-const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 
 const log = std.log.scoped(.@"zml/moe/triton_kernels");
 
@@ -949,6 +950,157 @@ pub fn tiles(tokens: i64, topk: i64, experts: i64, bn: i64) i64 {
     if (tokens == 1) return topk;
     return @min(tokens * topk, @divTrunc(tokens * topk + experts * (bn - 1) + bn - 1, bn));
 }
+
+// =============================================================================
+// nvfp4_quantize_rows
+// =============================================================================
+
+/// NVFP4 quantization of activation rows, as `quantization.quantizeNvfp4Rows`, in one
+/// program per row: the row's power-of-two scale, then the E4M3 scale and the E2M1 values
+/// of every block of 16. Rows of gate and up projections are activated first, and rows
+/// can take a weight, so a projection's GEMM reads what the previous one wrote.
+pub const QuantizeNvfp4Rows = struct {
+    pub const Cfg = struct {
+        /// Values per quantized row.
+        width: i64,
+        input_dtype: DType,
+        strategy: Nvfp4QuantizationStrategy,
+        /// Applied to input rows holding the gate values then the up values.
+        activation: ?Activation,
+        /// The dtype of each row's weight, applied after the activation.
+        weight_dtype: ?DType,
+    };
+
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "nvfp4_quantize_rows",
+        .inputs = &.{ "x", "weights" },
+        .outputs = &.{ "values", "scales", "row_scale" },
+        .run = run,
+    });
+
+    pub fn supports(activation: ?Activation) bool {
+        return if (activation) |kind| kind == .capped_swiglu else true;
+    }
+
+    const scale_min_normal = 0x1p-6;
+    const scale_max = 448.0;
+
+    const Candidate = struct { even: Value, odd: Value, scales: Value, err: Value };
+
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{
+            .x = .{ .ptr = c.input_dtype },
+            .weights = .{ .ptr = c.weight_dtype orelse .f32 },
+            .values = .{ .ptr = .i8 },
+            .scales = .{ .ptr = .f8e4m3fn },
+            .row_scale = .{ .ptr = .f32 },
+        });
+        const pairs = @divExact(c.width, 2);
+        const blocks = @divExact(c.width, 16);
+        // Even and odd values share a byte, so the row is held as two padded halves.
+        const half: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(pairs)));
+        const row = b.programId(.x);
+        const pair = ar(b, half);
+        const in_row = pair.lt(pairs);
+
+        const weight: ?Value = if (c.weight_dtype != null) b.load(a.weights.addPtr(row)).to(.f32) else null;
+        var parts: [2]Value = undefined;
+        for (&parts, 0..) |*part, parity| {
+            const column = pair.mul(2).add(@as(i64, @intCast(parity)));
+            var value = if (c.activation) |activation| switch (activation) {
+                .capped_swiglu => |caps| blk: {
+                    const offsets = row.mul(2 * c.width).add(column);
+                    const gate = ld(b, a.x.addPtr(offsets), in_row, c.input_dtype, 0).to(.f32);
+                    const up = ld(b, a.x.addPtr(offsets.add(c.width)), in_row, c.input_dtype, 0).to(.f32);
+                    const sigmoid = b.constant(.f32, 1.0).div(b.exp(b.constant(.f32, 0.0).sub(gate)).add(1.0));
+                    break :blk softcap(b, gate, caps.gate_cap).mul(sigmoid).mul(softcap(b, up, caps.up_cap));
+                },
+                else => return error.InvalidMlir,
+            } else ld(b, a.x.addPtr(row.mul(c.width).add(column)), in_row, c.input_dtype, 0).to(.f32);
+            if (weight) |w| value = value.mul(w);
+            // Rows are rounded to BF16 like the inputs of BF16 GEMMs.
+            part.* = value.to(.bf16).to(.f32);
+        }
+
+        // A power of two keeps the block scales of the divided row in E4M3's normal range.
+        const amax = parts[0].abs().max().maximum(parts[1].abs().max());
+        const raw = amax.mul(1.0 / 1536.0).maximum(std.math.floatMin(f32));
+        const row_scale = raw.bitCast(.i32).add(0x7fffff).bitAnd(@as(i32, @bitCast(@as(u32, 0xff800000)))).bitCast(.f32);
+        b.store(a.row_scale.addPtr(row), row_scale);
+
+        const even = b.reshape(parts[0].div(row_scale), &.{ @divExact(half, 8), 8 });
+        const odd = b.reshape(parts[1].div(row_scale), &.{ @divExact(half, 8), 8 });
+        const six = candidate(b, even, odd, 6);
+        const chosen: Candidate = switch (c.strategy) {
+            .largest_maps_to_six => six,
+            .best_of_four_or_six => blk: {
+                // The finer steps of amax/4 give up the largest value; ties keep amax/6.
+                const four = candidate(b, even, odd, 4);
+                const use_four = four.err.lt(six.err);
+                const use_four_values = use_four.expandDims(1);
+                break :blk .{
+                    .even = b.select(b.broadcastTo(use_four_values, six.even.shape().constSlice()), four.even, six.even),
+                    .odd = b.select(b.broadcastTo(use_four_values, six.odd.shape().constSlice()), four.odd, six.odd),
+                    .scales = b.select(use_four, four.scales, six.scales),
+                    .err = six.err,
+                };
+            },
+        };
+
+        const packed_values = b.reshape(chosen.even.add(chosen.odd.mul(16)), &.{half}).to(.i8);
+        b.storeOpts(a.values.addPtr(row.mul(pairs).add(pair)), packed_values, .{ .mask = in_row });
+        const block = ar(b, @divExact(half, 8));
+        b.storeOpts(a.scales.addPtr(row.mul(blocks).add(block)), chosen.scales.to(.f8e4m3fn), .{ .mask = block.lt(blocks) });
+    }
+
+    /// `cap * tanh(x / cap)`, with the tanh written over the exponential Triton lowers.
+    fn softcap(b: *Builder, x: Value, cap: f32) Value {
+        const tanh = b.constant(.f32, 1.0).sub(b.constant(.f32, 2.0).div(b.exp(x.mul(2.0 / cap)).add(1.0)));
+        return tanh.mul(cap);
+    }
+
+    /// The codes of the blocks whose largest magnitude maps to `value_max`, with their
+    /// E4M3 scales and absolute reconstruction errors.
+    fn candidate(b: *Builder, even: Value, odd: Value, value_max: f32) Candidate {
+        const amax = blockMax(even, value_max).maximum(blockMax(odd, value_max));
+        // E4M3 round-to-nearest, ties-to-even, of a normal value: three mantissa bits.
+        const bits = amax.bitCast(.i32);
+        const tie = b.shrui(bits, b.full(bits.shape().constSlice(), 20, .i32)).bitAnd(1);
+        const scales = bits.add(tie).add(0x7ffff).bitAnd(@as(i32, @bitCast(@as(u32, 0xfff00000)))).bitCast(.f32);
+        const divisor = scales.expandDims(1);
+        const even_codes = e2m1(b, even.div(divisor));
+        const odd_codes = e2m1(b, odd.div(divisor));
+        const even_error = even_codes.value.mul(divisor).sub(even).abs().sumOpts(.{ .axis = 1 });
+        const odd_error = odd_codes.value.mul(divisor).sub(odd).abs().sumOpts(.{ .axis = 1 });
+        return .{ .even = even_codes.code, .odd = odd_codes.code, .scales = scales, .err = even_error.add(odd_error) };
+    }
+
+    fn blockMax(x: Value, value_max: f32) Value {
+        return x.abs().mul(1.0 / value_max).maximum(scale_min_normal).minimum(scale_max).maxOpts(.{ .axis = 1 });
+    }
+
+    /// E2M1 round-to-nearest, ties-to-even, with saturation: the 4-bit code, sign in
+    /// bit 3, and the value it encodes.
+    fn e2m1(b: *Builder, x: Value) struct { code: Value, value: Value } {
+        const shape = x.shape().constSlice();
+        const magnitude = x.abs();
+        var code = b.full(shape, 7, .i32);
+        var value = b.full(shape, 6.0, .f32);
+        const thresholds = [_]f32{ 5, 3.5, 2.5, 1.75, 1.25, 0.75, 0.25 };
+        const values = [_]f32{ 4, 3, 2, 1.5, 1, 0.5, 0 };
+        for (thresholds, values, 0..) |threshold, rounded, i| {
+            // Even codes win midpoint ties.
+            const below = if (i % 2 == 0) magnitude.le(threshold) else magnitude.lt(threshold);
+            code = b.select(below, b.full(shape, @as(i64, @intCast(6 - i)), .i32), code);
+            value = b.select(below, b.full(shape, rounded, .f32), value);
+        }
+        const negative = x.lt(0.0);
+        return .{
+            .code = b.select(negative, code.add(8), code),
+            .value = b.select(negative, b.constant(.f32, 0.0).sub(value), value),
+        };
+    }
+};
 
 // =============================================================================
 // mxfp4_triton_quant
