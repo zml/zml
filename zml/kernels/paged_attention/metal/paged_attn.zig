@@ -456,6 +456,29 @@ pub const ZeroPaddingRows = struct {
 
 /// paged_attention_tiled: FlashAttention-2 over 8x8 simdgroup matrices, causal
 /// or bidirectional, one threadgroup per (query head, query block).
+/// Tensor ops need an M5-class GPU, whose device kind reads "Apple M5 Max".
+pub fn tensorOpsSupported(device_kind: []const u8) bool {
+    const prefix = "Apple M";
+    if (!std.mem.startsWith(u8, device_kind, prefix)) {
+        return false;
+    }
+
+    var end: usize = prefix.len;
+    while (end < device_kind.len and std.ascii.isDigit(device_kind[end])) {
+        end += 1;
+    }
+    const generation = std.fmt.parseInt(u32, device_kind[prefix.len..end], 10) catch return false;
+    return generation >= 5;
+}
+
+test tensorOpsSupported {
+    try std.testing.expect(tensorOpsSupported("Apple M5 Max"));
+    try std.testing.expect(tensorOpsSupported("Apple M12"));
+    try std.testing.expect(!tensorOpsSupported("Apple M4 Pro"));
+    try std.testing.expect(!tensorOpsSupported("Apple M"));
+    try std.testing.expect(!tensorOpsSupported("NVIDIA GH200"));
+}
+
 pub const PagedAttentionTiled = struct {
     pub const Cfg = struct {
         /// half or bfloat.
@@ -467,6 +490,8 @@ pub const PagedAttentionTiled = struct {
         num_threads: i32 = 128,
         /// Bidirectional when false.
         causal: bool = true,
+        /// Multiplies with matmul2d tensor ops, on GPUs that have them.
+        tensor_ops: bool,
     };
 
     pub const Kernel = metal.Kernel(Cfg, .{
@@ -480,18 +505,29 @@ pub const PagedAttentionTiled = struct {
     /// What the MSL instantiates: half or bfloat, a head size of tileConfig
     /// with its tiles, and pages of 8, 16 or 32 positions.
     fn supported(cfg: Cfg) bool {
-        const tile = tileConfig(cfg.head_size) orelse return false;
+        const tile = tileConfig(cfg.head_size, cfg.tensor_ops) orelse return false;
         return (cfg.dtype.eql(.half) or cfg.dtype.eql(.bfloat)) and
             (cfg.block_size == 8 or cfg.block_size == 16 or cfg.block_size == 32) and
             cfg.bq == tile[0] and cfg.tile_kv == tile[1] and cfg.num_threads == tile[2];
     }
 
     /// The (bq, tile_kv, num_threads) of a head size, null when unsupported.
-    pub fn tileConfig(head_size: i64) ?[3]i32 {
+    pub fn tileConfig(head_size: i64, tensor_ops: bool) ?[3]i32 {
+        if (tensor_ops) {
+            return tensorOpsTileConfig(head_size);
+        }
         return switch (head_size) {
             32, 64, 96, 128 => .{ 32, 32, 128 },
             256 => .{ 16, 16, 64 },
             512 => .{ 8, 8, 32 },
+            else => null,
+        };
+    }
+
+    /// Four simdgroups of 16 rows each.
+    fn tensorOpsTileConfig(head_size: i64) ?[3]i32 {
+        return switch (head_size) {
+            32, 64, 96, 128 => .{ 64, 32, 128 },
             else => null,
         };
     }
@@ -529,48 +565,24 @@ pub const PagedAttentionTiled = struct {
         p.store(i, p.load(i).insert(lane, x));
     }
 
-    fn run(b: *Builder, cfg: Cfg) metal.FinishError!void {
-        if (!supported(cfg)) std.debug.panic("paged_attention_tiled: {s} at head size {d}, block size {d} (8, 16 or 32) and tiles {d}, {d}, {d} unsupported", .{ cfg.dtype.name(), cfg.head_size, cfg.block_size, cfg.bq, cfg.tile_kv, cfg.num_threads });
-        const T = cfg.dtype;
-        const HEAD_SIZE = cfg.head_size;
-        const BLOCK_SIZE = cfg.block_size;
-        const BQ = cfg.bq;
-        const TILE_KV = cfg.tile_kv;
-        const NUM_THREADS = cfg.num_threads;
-        const int_arg: ArgSpec = .{ .constant = .int };
-        const float_arg: ArgSpec = .{ .constant = .float };
-        const a = try b.declareArgs(.{
-            .out = .{ .buffer = .{ .type = T } },
-            .q = .{ .buffer = .{ .type = T, .const_ = true } },
-            .k_cache = .{ .buffer = .{ .type = T, .const_ = true } },
-            .v_cache = .{ .buffer = .{ .type = T, .const_ = true } },
-            .num_kv_heads = int_arg,
-            .scale = float_arg,
-            .softcapping = float_arg,
-            .block_tables = .{ .buffer = .{ .type = .uint, .const_ = true } },
-            .context_lens = .{ .buffer = .{ .type = .uint, .const_ = true } },
-            .max_num_blocks_per_seq = int_arg,
-            .q_stride = int_arg,
-            .kv_block_stride = int_arg,
-            .kv_head_stride = int_arg,
-            .cu_seqlens_q = .{ .buffer = .{ .type = .int, .const_ = true } },
-            .num_seqs = int_arg,
-            .sliding_window = int_arg,
-            .shared_mem = .{ .threadgroup = .char },
-            .tgp = .{ .threadgroup_position_in_grid = .uint3 },
-            .tgpg = .{ .threadgroups_per_grid = .uint3 },
-            .tpt = .{ .thread_position_in_threadgroup = .uint3 },
-            .sg_idx = .{ .simdgroup_index_in_threadgroup = .uint },
-            .lane = .{ .thread_index_in_simdgroup = .uint },
-        });
 
-        const NUM_SIMD_LANES = 32;
-        const NUM_SG = @divExact(NUM_THREADS, NUM_SIMD_LANES);
-        const TD = @divExact(HEAD_SIZE, 8);
-        const TK = @divExact(TILE_KV, 8);
-        if (@divExact(BQ, NUM_SG) != 8) @panic("paged_attention_tiled: ROWS_PER_SG must be 8");
-        const unroll: metal.LoopOpts = .{ .unroll = .enable };
+    const Prologue = struct {
+        thread_idx: Value,
+        head_idx: Value,
+        num_queries_per_kv: Value,
+        kv_head_idx: Value,
+        kv_token_stride: Value,
+        seq_idx: Value,
+        q_seq_start: Value,
+        cur_batch_query_len: Value,
+        q_pos_start: Value,
+        seq_len: Value,
+        context_len: Value,
+        valid_q: Value,
+    };
 
+    /// Finds the query block's sequence and returns early when the block is past it.
+    fn sequencePrologue(b: *Builder, a: anytype, BQ: i32) Prologue {
         const thread_idx = a.tpt.x().to(.int);
         const head_idx = a.tgp.x().to(.int);
         const q_block_global_idx = a.tgp.y().to(.int);
@@ -613,6 +625,374 @@ pub const PagedAttentionTiled = struct {
         const seq_len = a.context_lens.load(seq_idx).to(.int);
         const context_len = seq_len.sub(cur_batch_query_len);
         const valid_q = b.min(BQ, cur_batch_query_len.sub(q_pos_start));
+
+        return .{
+            .thread_idx = thread_idx,
+            .head_idx = head_idx,
+            .num_queries_per_kv = num_queries_per_kv,
+            .kv_head_idx = kv_head_idx,
+            .kv_token_stride = kv_token_stride,
+            .seq_idx = seq_idx,
+            .q_seq_start = q_seq_start,
+            .cur_batch_query_len = cur_batch_query_len,
+            .q_pos_start = q_pos_start,
+            .seq_len = seq_len,
+            .context_len = context_len,
+            .valid_q = valid_q,
+        };
+    }
+
+    fn smemStride(cfg: Cfg) i32 {
+        return cfg.head_size + @divExact(16, @as(i32, @intCast(cfg.dtype.size())));
+    }
+
+    /// Copies the K and V rows of the tile at `tile_start` into threadgroup memory, zeroing the rows past the sequence.
+    fn loadKvTile(b: *Builder, cfg: Cfg, a: anytype, prologue: Prologue, block_table: Value, tile_start: Value, K_smem: Value, V_smem: Value) void {
+        const T = cfg.dtype;
+        const HEAD_SIZE = cfg.head_size;
+        const BLOCK_SIZE = cfg.block_size;
+        const TILE_KV = cfg.tile_kv;
+        const NUM_SG = @divExact(cfg.num_threads, 32);
+        const NUM_SIMD_LANES = 32;
+        const LD = smemStride(cfg);
+        const seq_len = prologue.seq_len;
+        const kv_head_idx = prologue.kv_head_idx;
+        const kv_token_stride = prologue.kv_token_stride;
+        const unroll: metal.LoopOpts = .{ .unroll = .enable };
+        const VEC_BYTES: i32 = if (HEAD_SIZE >= 256) 16 else 8;
+        const VEC = @divExact(VEC_BYTES, @as(i32, @intCast(T.size())));
+        const LoadUnit: Type = if (VEC_BYTES == 16) .uint4 else .uint2;
+        std.debug.assert(@rem(LD, VEC) == 0);
+        var rows = b.openForOpts(0, @divExact(TILE_KV, NUM_SG), 1, unroll);
+        {
+            const t = a.sg_idx.mul(@divExact(TILE_KV, NUM_SG)).add(rows.iv).to(.int);
+            const kv_pos = tile_start.add(t);
+            var present = b.openIfElse(kv_pos.lt(seq_len), .{});
+            {
+                const pb = block_table.load(kv_pos.div(BLOCK_SIZE)).to(.long);
+                const off = pb.mul(a.kv_block_stride).add(kv_pos.rem(BLOCK_SIZE).mul(kv_token_stride)).add(kv_head_idx.mul(a.kv_head_stride));
+                const k_ptr = a.k_cache.add(off);
+                const v_ptr = a.v_cache.add(off);
+                var loop = b.openForOpts(a.lane.mul(VEC).to(.int), HEAD_SIZE, NUM_SIMD_LANES * VEC, unroll);
+                {
+                    const d = loop.iv;
+                    const k = k_ptr.add(d).to(LoadUnit).load(0);
+                    K_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, k);
+                    const v = v_ptr.add(d).to(LoadUnit).load(0);
+                    V_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, v);
+                    loop.close();
+                }
+                present.elseBranch();
+            }
+            {
+                const zero = b.constant(LoadUnit, 0);
+                var loop = b.openForOpts(a.lane.mul(VEC).to(.int), HEAD_SIZE, NUM_SIMD_LANES * VEC, unroll);
+                {
+                    const d = loop.iv;
+                    K_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, zero);
+                    V_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, zero);
+                    loop.close();
+                }
+                present.close();
+            }
+            rows.close();
+        }
+    }
+
+    fn i32Of(x: usize) i32 {
+        return @intCast(x);
+    }
+
+    /// One simdgroup owns 16 query rows and multiplies 16x16 fragments with `matmul2d` tensor ops, which only
+    /// M5-class GPUs run. A lane holds rows `fm` and `fm + 8` of every fragment, four columns from `fn`.
+    fn tensorOpsBody(b: *Builder, cfg: Cfg, a: anytype) void {
+        const T = cfg.dtype;
+        const T4: Type = .vec(T.scalar, 4);
+        const HEAD_SIZE = cfg.head_size;
+        const TILE_KV = cfg.tile_kv;
+        std.debug.assert(TILE_KV == 32);
+        const TD: usize = @intCast(@divExact(HEAD_SIZE, 16));
+        const DP = TD / 2;
+        const LD = smemStride(cfg);
+        const arena = b.arena.allocator();
+
+        const prologue = sequencePrologue(b, a, cfg.bq);
+        const head_idx = prologue.head_idx;
+        const q_pos_start = prologue.q_pos_start;
+        const seq_len = prologue.seq_len;
+        const context_len = prologue.context_len;
+        const valid_q = prologue.valid_q;
+
+        const K_smem = a.shared_mem.to(T);
+        const V_smem = K_smem.add(TILE_KV * LD);
+
+        const qk: Builder.Matmul2d = .{ .m = 16, .n = 32, .k = 16, .transpose_left = false, .transpose_right = true, .left = T.scalar, .right = T.scalar, .destination = .float };
+        const pv: Builder.Matmul2d = .{ .m = 16, .n = 32, .k = 16, .transpose_left = false, .transpose_right = false, .left = .float, .right = T.scalar, .destination = .float };
+
+        const lane = a.lane.to(.int);
+        const quad = lane.div(4);
+        const fm = quad.bitAnd(4).bitOr(lane.div(2).bitAnd(3));
+        const fn_ = quad.bitAnd(2).bitOr(lane.bitAnd(1)).mul(4);
+        const sg_row = a.sg_idx.mul(16).to(.int);
+
+        const log2e: f32 = std.math.log2e;
+        const scale_log2 = a.scale.mul(log2e);
+
+        const q_tensors = arena.alloc(Builder.CooperativeTensor, TD) catch @panic("out of memory");
+        const q_base = a.q.add(prologue.q_seq_start.add(q_pos_start).add(sg_row).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE)).add(fn_);
+        for (q_tensors, 0..) |*q_tensor, d| {
+            q_tensor.* = b.cooperativeTensor(qk, .left);
+            inline for (0..2) |rh| {
+                const row = fm.add(i32Of(rh * 8));
+                var value = b.openIfElse(sg_row.add(row).lt(valid_q), .{T4});
+                {
+                    value.yieldThen(.{q_base.add(row.mul(a.q_stride)).add(i32Of(d * 16)).to(T4).load(0)});
+                }
+                {
+                    value.yieldElse(.{b.constant(T4, 0)});
+                }
+                inline for (0..4) |j| {
+                    q_tensor.element(rh * 4 + j).store(0, value.results[0].at(i32Of(j)));
+                }
+            }
+        }
+
+        const k_right = b.cooperativeTensor(qk, .right);
+        const s_tensor = b.cooperativeTensor(qk, .destination);
+        const p_left = [2]Builder.CooperativeTensor{ b.cooperativeTensor(pv, .left), b.cooperativeTensor(pv, .left) };
+        const v_right = b.cooperativeTensor(pv, .right);
+        const o_tensors = arena.alloc(Builder.CooperativeTensor, DP) catch @panic("out of memory");
+        for (o_tensors) |*o_tensor| {
+            o_tensor.* = b.cooperativeTensor(pv, .destination);
+            inline for (0..16) |e| {
+                o_tensor.element(e).store(0, 0.0);
+            }
+        }
+
+        const max_state = b.array(.float, 2);
+        const sum_state = b.zeroedArray(.float, 2);
+        max_state.store(0, masked_score);
+        max_state.store(1, masked_score);
+
+        const block_table = a.block_tables.add(prologue.seq_idx.mul(a.max_num_blocks_per_seq));
+        const num_kv_tiles = seq_len.add(TILE_KV).sub(1).div(TILE_KV);
+
+        var tiles = b.openFor(0, num_kv_tiles, 1);
+        {
+            const tile_start = tiles.iv.mul(TILE_KV);
+
+            if (cfg.causal) {
+                var past = b.openIf(tile_start.gt(context_len.add(q_pos_start).add(valid_q).sub(1)));
+                {
+                    tiles.breakLoop();
+                    past.close();
+                }
+            }
+
+            loadKvTile(b, cfg, a, prologue, block_table, tile_start, K_smem, V_smem);
+
+            b.threadgroupBarrier(.mem_threadgroup);
+
+            var active = b.openIf(sg_row.lt(valid_q));
+            {
+                inline for (0..16) |e| {
+                    s_tensor.element(e).store(0, 0.0);
+                }
+
+                for (q_tensors, 0..) |q_tensor, d| {
+                    inline for (0..2) |blk| {
+                        inline for (0..2) |rh| {
+                            const key_row = fm.add(i32Of(blk * 16 + rh * 8));
+                            const k_vec = K_smem.add(key_row.mul(LD).add(i32Of(d * 16)).add(fn_)).to(T4).load(0);
+                            inline for (0..4) |j| {
+                                k_right.element(blk * 8 + rh * 4 + j).store(0, k_vec.at(i32Of(j)));
+                            }
+                        }
+                    }
+                    b.matmul2dRun(qk, q_tensor, k_right, s_tensor);
+                }
+
+                const row_masked = [2]Value{ sg_row.add(fm).ge(valid_q), sg_row.add(fm).add(8).ge(valid_q) };
+                const q_abs_pos = [2]Value{ context_len.add(q_pos_start).add(sg_row).add(fm), context_len.add(q_pos_start).add(sg_row).add(fm).add(8) };
+                const min_q_abs_pos = context_len.add(q_pos_start);
+                var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
+                if (cfg.causal) {
+                    tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
+                }
+
+                var masking = b.openIfElse(tile_no_mask.bitAnd(row_masked[0].bitOr(row_masked[1]).eq(false)), .{});
+                {
+                    inline for (0..16) |e| {
+                        const s_element = s_tensor.element(e);
+                        s_element.store(0, s_element.load(0).mul(scale_log2));
+                    }
+                    masking.elseBranch();
+                }
+                {
+                    inline for (0..16) |e| {
+                        const rh = (e % 8) / 4;
+                        const s_element = s_tensor.element(e);
+                        const s = b.local(.float, s_element.load(0).mul(scale_log2));
+                        var capped = b.openIf(a.softcapping.gt(0.0));
+                        {
+                            const s_orig = s.div(log2e);
+                            s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
+                            capped.close();
+                        }
+                        const kv_pos = tile_start.add(fn_).add(i32Of((e / 8) * 16 + e % 4));
+                        var masked = row_masked[rh].bitOr(kv_pos.ge(seq_len));
+                        if (cfg.causal) {
+                            masked = masked.bitOr(kv_pos.gt(q_abs_pos[rh]));
+                        }
+                        const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos[rh].add(1).sub(a.sliding_window)));
+                        masked = masked.bitOr(before_window);
+                        s_element.store(0, b.ternary(masked, masked_score, s));
+                    }
+                    masking.close();
+                }
+
+                var factors: [2]Value = undefined;
+                inline for (0..2) |rh| {
+                    const local_max = b.local(.float, masked_score);
+                    inline for (0..2) |blk| {
+                        inline for (0..4) |j| {
+                            local_max.assign(b.max(local_max.rvalue(), s_tensor.element(blk * 8 + rh * 4 + j).load(0)));
+                        }
+                    }
+                    const row_max = fragRowReduce(b, .max, local_max);
+
+                    const prev_max = max_state.load(i32Of(rh));
+                    const grown_max = b.max(prev_max, row_max);
+                    const grew = grown_max.gt(prev_max);
+                    const was_empty = prev_max.eq(masked_score);
+                    factors[rh] = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
+                    const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
+                    max_state.store(i32Of(rh), grown_max);
+
+                    const local_sum = b.local(.float, 0.0);
+                    inline for (0..2) |blk| {
+                        inline for (0..4) |j| {
+                            const s_element = s_tensor.element(blk * 8 + rh * 4 + j);
+                            const s = s_element.load(0);
+                            const prob = b.ternary(s.eq(masked_score), 0.0, b.fast().exp2(s.sub(new_max)));
+                            s_element.store(0, prob);
+                            local_sum.assign(local_sum.add(prob));
+                        }
+                    }
+                    const row_sum = fragRowReduce(b, .sum, local_sum);
+                    sum_state.store(i32Of(rh), sum_state.load(i32Of(rh)).mul(factors[rh]).add(row_sum));
+                }
+
+                for (o_tensors) |o_tensor| {
+                    inline for (0..16) |e| {
+                        const o_element = o_tensor.element(e);
+                        o_element.store(0, o_element.load(0).mul(factors[(e % 8) / 4]));
+                    }
+                }
+
+                inline for (0..2) |blk| {
+                    inline for (0..8) |i| {
+                        p_left[blk].element(i).store(0, s_tensor.element(blk * 8 + i).load(0));
+                    }
+                    for (o_tensors, 0..) |o_tensor, dp| {
+                        inline for (0..2) |dblk| {
+                            inline for (0..2) |rh| {
+                                const key_row = fm.add(i32Of(blk * 16 + rh * 8));
+                                const v_vec = V_smem.add(key_row.mul(LD).add(i32Of((2 * dp + dblk) * 16)).add(fn_)).to(T4).load(0);
+                                inline for (0..4) |j| {
+                                    v_right.element(dblk * 8 + rh * 4 + j).store(0, v_vec.at(i32Of(j)));
+                                }
+                            }
+                        }
+                        b.matmul2dRun(pv, p_left[blk], v_right, o_tensor);
+                    }
+                }
+                active.close();
+            }
+
+            b.threadgroupBarrier(.mem_threadgroup);
+            tiles.close();
+        }
+
+        const out_base = a.out.add(prologue.q_seq_start.add(q_pos_start).add(sg_row).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE)).add(fn_);
+        inline for (0..2) |rh| {
+            const inv_sum = b.lift(1.0).div(sum_state.load(i32Of(rh)).add(@as(f32, 1e-6)));
+            const row = fm.add(i32Of(rh * 8));
+            var row_valid = b.openIf(sg_row.add(row).lt(valid_q));
+            {
+                for (o_tensors, 0..) |o_tensor, dp| {
+                    inline for (0..2) |dblk| {
+                        const base = (rh * 4) + dblk * 8;
+                        const out_vec = b.vec(.float4, .{
+                            o_tensor.element(base).load(0).mul(inv_sum),
+                            o_tensor.element(base + 1).load(0).mul(inv_sum),
+                            o_tensor.element(base + 2).load(0).mul(inv_sum),
+                            o_tensor.element(base + 3).load(0).mul(inv_sum),
+                        });
+                        out_base.add(row.mul(a.q_stride)).add(i32Of((2 * dp + dblk) * 16)).to(T4).store(0, out_vec.to(T4));
+                    }
+                }
+                row_valid.close();
+            }
+        }
+    }
+
+    fn run(b: *Builder, cfg: Cfg) metal.FinishError!void {
+        if (!supported(cfg)) std.debug.panic("paged_attention_tiled: {s} at head size {d}, block size {d} (8, 16 or 32) and tiles {d}, {d}, {d} unsupported", .{ cfg.dtype.name(), cfg.head_size, cfg.block_size, cfg.bq, cfg.tile_kv, cfg.num_threads });
+        const T = cfg.dtype;
+        const HEAD_SIZE = cfg.head_size;
+        const BQ = cfg.bq;
+        const TILE_KV = cfg.tile_kv;
+        const NUM_THREADS = cfg.num_threads;
+        const int_arg: ArgSpec = .{ .constant = .int };
+        const float_arg: ArgSpec = .{ .constant = .float };
+        const a = try b.declareArgs(.{
+            .out = .{ .buffer = .{ .type = T } },
+            .q = .{ .buffer = .{ .type = T, .const_ = true } },
+            .k_cache = .{ .buffer = .{ .type = T, .const_ = true } },
+            .v_cache = .{ .buffer = .{ .type = T, .const_ = true } },
+            .num_kv_heads = int_arg,
+            .scale = float_arg,
+            .softcapping = float_arg,
+            .block_tables = .{ .buffer = .{ .type = .uint, .const_ = true } },
+            .context_lens = .{ .buffer = .{ .type = .uint, .const_ = true } },
+            .max_num_blocks_per_seq = int_arg,
+            .q_stride = int_arg,
+            .kv_block_stride = int_arg,
+            .kv_head_stride = int_arg,
+            .cu_seqlens_q = .{ .buffer = .{ .type = .int, .const_ = true } },
+            .num_seqs = int_arg,
+            .sliding_window = int_arg,
+            .shared_mem = .{ .threadgroup = .char },
+            .tgp = .{ .threadgroup_position_in_grid = .uint3 },
+            .tgpg = .{ .threadgroups_per_grid = .uint3 },
+            .tpt = .{ .thread_position_in_threadgroup = .uint3 },
+            .sg_idx = .{ .simdgroup_index_in_threadgroup = .uint },
+            .lane = .{ .thread_index_in_simdgroup = .uint },
+        });
+
+        if (cfg.tensor_ops) {
+            tensorOpsBody(b, cfg, a);
+            return;
+        }
+
+        const NUM_SIMD_LANES = 32;
+        const NUM_SG = @divExact(NUM_THREADS, NUM_SIMD_LANES);
+        const TD = @divExact(HEAD_SIZE, 8);
+        const TK = @divExact(TILE_KV, 8);
+        if (@divExact(BQ, NUM_SG) != 8) @panic("paged_attention_tiled: ROWS_PER_SG must be 8");
+        const unroll: metal.LoopOpts = .{ .unroll = .enable };
+
+        const prologue = sequencePrologue(b, a, BQ);
+        const thread_idx = prologue.thread_idx;
+        const head_idx = prologue.head_idx;
+        const num_queries_per_kv = prologue.num_queries_per_kv;
+        const seq_idx = prologue.seq_idx;
+        const q_seq_start = prologue.q_seq_start;
+        const q_pos_start = prologue.q_pos_start;
+        const seq_len = prologue.seq_len;
+        const context_len = prologue.context_len;
+        const valid_q = prologue.valid_q;
 
         // A block of at most one stripe of rows leaves the other simdgroups idle: they take the next query heads
         // of the KV group instead, so one K/V stream serves them all.
@@ -696,44 +1076,7 @@ pub const PagedAttentionTiled = struct {
                 }
             }
 
-            const VEC_BYTES: i32 = if (HEAD_SIZE >= 256) 16 else 8;
-            const VEC = @divExact(VEC_BYTES, @as(i32, @intCast(T.size())));
-            const LoadUnit: Type = if (VEC_BYTES == 16) .uint4 else .uint2;
-            std.debug.assert(@rem(LD, VEC) == 0);
-            var rows = b.openForOpts(0, @divExact(TILE_KV, NUM_SG), 1, unroll);
-            {
-                const t = a.sg_idx.mul(@divExact(TILE_KV, NUM_SG)).add(rows.iv).to(.int);
-                const kv_pos = tile_start.add(t);
-                var present = b.openIfElse(kv_pos.lt(seq_len), .{});
-                {
-                    const pb = block_table.load(kv_pos.div(BLOCK_SIZE)).to(.long);
-                    const off = pb.mul(a.kv_block_stride).add(kv_pos.rem(BLOCK_SIZE).mul(kv_token_stride)).add(kv_head_idx.mul(a.kv_head_stride));
-                    const k_ptr = a.k_cache.add(off);
-                    const v_ptr = a.v_cache.add(off);
-                    var loop = b.openForOpts(a.lane.mul(VEC).to(.int), HEAD_SIZE, NUM_SIMD_LANES * VEC, unroll);
-                    {
-                        const d = loop.iv;
-                        const k = k_ptr.add(d).to(LoadUnit).load(0);
-                        K_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, k);
-                        const v = v_ptr.add(d).to(LoadUnit).load(0);
-                        V_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, v);
-                        loop.close();
-                    }
-                    present.elseBranch();
-                }
-                {
-                    const zero = b.constant(LoadUnit, 0);
-                    var loop = b.openForOpts(a.lane.mul(VEC).to(.int), HEAD_SIZE, NUM_SIMD_LANES * VEC, unroll);
-                    {
-                        const d = loop.iv;
-                        K_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, zero);
-                        V_smem.add(t.mul(LD).add(d)).to(LoadUnit).store(0, zero);
-                        loop.close();
-                    }
-                    present.close();
-                }
-                rows.close();
-            }
+            loadKvTile(b, cfg, a, prologue, block_table, tile_start, K_smem, V_smem);
 
             b.threadgroupBarrier(.mem_threadgroup);
 
@@ -906,9 +1249,11 @@ test "the paged attention kernels emit verified modules" {
     for ([_]Type{ .half, .bfloat }) |dtype| {
         allocator.free(try ZeroPaddingRows.Kernel.emit(allocator, .{ .dtype = dtype }));
         for ([_]i32{ 32, 64, 96, 128, 256, 512 }) |head_size| {
-            const tile = PagedAttentionTiled.tileConfig(head_size).?;
-            for ([_]bool{ true, false }) |causal| {
-                allocator.free(try PagedAttentionTiled.Kernel.emit(allocator, .{ .dtype = dtype, .head_size = head_size, .block_size = 16, .bq = tile[0], .tile_kv = tile[1], .num_threads = tile[2], .causal = causal }));
+            for ([_]bool{ false, true }) |tensor_ops| {
+                const tile = PagedAttentionTiled.tileConfig(head_size, tensor_ops) orelse continue;
+                for ([_]bool{ true, false }) |causal| {
+                    allocator.free(try PagedAttentionTiled.Kernel.emit(allocator, .{ .dtype = dtype, .head_size = head_size, .block_size = 16, .bq = tile[0], .tile_kv = tile[1], .num_threads = tile[2], .causal = causal, .tensor_ops = tensor_ops }));
+                }
             }
         }
     }

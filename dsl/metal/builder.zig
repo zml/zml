@@ -721,10 +721,50 @@ pub const Builder = struct {
     /// The block code goes to; null after a `break` or a `return`.
     insert: ?*mlir.Block = null,
     arguments: std.ArrayList(Argument) = .empty,
+    declared_externals: std.ArrayList([]const u8) = .empty,
 
     pub const Opts = struct {
         /// MSL's default; `-fno-fast-math` otherwise.
         fast_math: bool = true,
+    };
+
+    /// A `mpp::tensor_ops::matmul2d` of one simdgroup, multiply_accumulate with relaxed precision:
+    /// `destination[m x n] += left[m x k] * right[k x n]`, the operands held in the lanes' registers.
+    pub const Matmul2d = struct {
+        m: u32,
+        n: u32,
+        k: u32,
+        transpose_left: bool,
+        transpose_right: bool,
+        left: Scalar,
+        right: Scalar,
+        destination: Scalar,
+
+        pub const Operand = enum { left, right, destination };
+
+        pub fn elementScalar(self: Matmul2d, operand: Operand) Scalar {
+            return switch (operand) {
+                .left => self.left,
+                .right => self.right,
+                .destination => self.destination,
+            };
+        }
+    };
+
+    /// One operand of a `Matmul2d`, in registers.
+    pub const CooperativeTensor = struct {
+        builder: *Builder,
+        op: Matmul2d,
+        operand: Matmul2d.Operand,
+        storage: Value,
+
+        /// A pointer to the lane's element `index`, as `tensor[index]` addresses it.
+        pub fn element(self: CooperativeTensor, index: usize) Value {
+            const b = self.builder;
+            const pointer = b.cooperativeElementPointer(self, b.constant(.short, @as(i32, @intCast(index))).inner);
+            const pointee: Type = .{ .scalar = self.op.elementScalar(self.operand) };
+            return .{ .inner = pointer, .kernel = b, .kind = .{ .pointer = .{ .space = .thread, .pointee = pointee } } };
+        }
     };
 
     pub fn open(allocator: std.mem.Allocator, ctx: *mlir.Context, name: []const u8, opts: Opts) Builder {
@@ -1282,6 +1322,230 @@ pub const Builder = struct {
     /// `T a[n];` in thread memory, as a pointer to its first element.
     pub fn array(self: *Builder, t: Type, n: u32) Value {
         return .{ .inner = self.allocate(llvm.arrayType(t.memory().mlirType(self.ctx), n), t.alignment()), .kernel = self, .kind = .{ .pointer = .{ .space = .thread, .pointee = t } } };
+    }
+
+    const stub_body_stores = 150;
+
+    /// Defines `name` once, in `section "air.externally_defined"`, where Apple's runtime supplies the real
+    /// function when it builds the pipeline. The MLIR translation only sets a section on a function with a
+    /// body, so the stub has one; weak and optnone keep the optimizer from reading it.
+    fn declareExternal(self: *Builder, name: []const u8, parameters: []const []const u8, result: []const u8) void {
+        for (self.declared_externals.items) |declared| {
+            if (std.mem.eql(u8, declared, name)) {
+                return;
+            }
+        }
+        // Apple's runtime cannot link a module that carries the debug info version flag the translation adds by
+        // default, so the module sets it to a version with no debug info to read.
+        if (!self.isDeclared("llvm.module_flags")) {
+            const arena = self.arena.allocator();
+            self.declared_externals.append(arena, "llvm.module_flags") catch @panic("dsl/metal: out of memory");
+            const module_flags = mlir.Operation.parse(self.ctx, "llvm.module_flags [#llvm.mlir.module_flag<warning, \"Debug Info Version\", 0 : i32>]", "module flags") catch @panic("dsl/metal: module flags");
+            _ = module_flags.appendTo(self.module.body());
+        }
+        const arena = self.arena.allocator();
+        self.declared_externals.append(arena, arena.dupe(u8, name) catch @panic("dsl/metal: out of memory")) catch @panic("dsl/metal: out of memory");
+
+        var text: std.ArrayList(u8) = .empty;
+        text.print(arena, "llvm.func available_externally @{s}(", .{name}) catch @panic("dsl/metal: out of memory");
+        for (parameters, 0..) |parameter, i| {
+            if (i > 0) {
+                text.appendSlice(arena, ", ") catch @panic("dsl/metal: out of memory");
+            }
+            text.print(arena, "%a{d}: {s}", .{ i, parameter }) catch @panic("dsl/metal: out of memory");
+        }
+        text.print(arena, "){s} attributes {{section = \"air.externally_defined\", passthrough = [\"convergent\", \"noinline\", \"optnone\"]}} {{\n", .{result}) catch @panic("dsl/metal: out of memory");
+        // The optimizer inlines available_externally bodies, and drops the attributes that forbid it, so the body
+        // is too costly to inline: volatile stores it can neither fold nor remove.
+        text.appendSlice(arena, "  %zero = llvm.mlir.constant(0 : i8) : i8\n  %one = llvm.mlir.constant(1 : i32) : i32\n  %slot = llvm.alloca %one x i8 : (i32) -> !llvm.ptr\n") catch @panic("dsl/metal: out of memory");
+        for (0..stub_body_stores) |_| {
+            text.appendSlice(arena, "  llvm.store volatile %zero, %slot : i8, !llvm.ptr\n") catch @panic("dsl/metal: out of memory");
+        }
+        if (result.len == 0) {
+            text.appendSlice(arena, "  llvm.return\n}") catch @panic("dsl/metal: out of memory");
+        } else if (std.mem.endsWith(u8, result, "i64")) {
+            text.appendSlice(arena, "  %null = llvm.mlir.constant(0 : i64) : i64\n  llvm.return %null : i64\n}") catch @panic("dsl/metal: out of memory");
+        } else {
+            text.appendSlice(arena, "  %null = llvm.mlir.zero : !llvm.ptr\n  llvm.return %null : !llvm.ptr\n}") catch @panic("dsl/metal: out of memory");
+        }
+        const declaration = mlir.Operation.parse(self.ctx, text.items, "external declaration") catch std.debug.panic("dsl/metal: cannot parse {s}", .{text.items});
+        _ = declaration.appendTo(self.module.body());
+    }
+
+    fn resultTypes(buffer: *[1]*const mlir.Type, result: ?*const mlir.Type) []const *const mlir.Type {
+        const t = result orelse return buffer[0..0];
+        buffer[0] = t;
+        return buffer[0..1];
+    }
+
+    /// `call @name(operands)` of a declared external function.
+    fn callExternal(self: *Builder, name: []const u8, operands: []const *const mlir.Value, result: ?*const mlir.Type) ?*const mlir.Value {
+        const ctx = self.ctx;
+        var result_buffer: [1]*const mlir.Type = undefined;
+        const results = resultTypes(&result_buffer, result);
+        const op = mlir.Operation.make(ctx, "llvm.call", .{
+            .operands = .{ .flat = operands },
+            .results = .{ .flat = results },
+            .attributes = &.{
+                .named(ctx, "callee", .flatSymbolRef(ctx, name)),
+                .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &.{ @intCast(operands.len), 0 })),
+                .named(ctx, "op_bundle_sizes", .denseArray(ctx, .i32, &.{})),
+            },
+            .location = self.loc(),
+        });
+        _ = op.appendTo(self.currentBlock());
+        if (result == null) {
+            return null;
+        }
+        return op.result(0);
+    }
+
+    fn tensorOpsTypeCode(scalar: Scalar) i32 {
+        return switch (scalar) {
+            .half => 0x10000010,
+            .float => 0x10000020,
+            .bfloat => @as(i32, @bitCast(@as(u32, 0x90000010))),
+            else => std.debug.panic("dsl/metal: no tensor op type code for {t}", .{scalar}),
+        };
+    }
+
+    fn tensorOpsTypeSuffix(scalar: Scalar) []const u8 {
+        return switch (scalar) {
+            .half => "f16",
+            .float => "f32",
+            .bfloat => "b16",
+            else => std.debug.panic("dsl/metal: no tensor op type suffix for {t}", .{scalar}),
+        };
+    }
+
+    /// The leading arguments every tensor op function takes: `M, N, K, transpose, transpose, relaxed, mode`.
+    fn matmul2dHeader(self: *Builder, op: Matmul2d) [7]*const mlir.Value {
+        return .{
+            self.constant(.int, @as(i32, @intCast(op.m))).inner,
+            self.constant(.int, @as(i32, @intCast(op.n))).inner,
+            self.constant(.int, @as(i32, @intCast(op.k))).inner,
+            self.constant(.char, @as(i32, @intFromBool(op.transpose_left))).inner,
+            self.constant(.char, @as(i32, @intFromBool(op.transpose_right))).inner,
+            self.constant(.char, 1).inner,
+            self.constant(.int, 1).inner,
+        };
+    }
+
+    fn matmul2dTypeCodes(self: *Builder, op: Matmul2d) [3]*const mlir.Value {
+        return .{
+            self.constant(.int, tensorOpsTypeCode(op.left)).inner,
+            self.constant(.int, tensorOpsTypeCode(op.right)).inner,
+            self.constant(.int, tensorOpsTypeCode(op.destination)).inner,
+        };
+    }
+
+    /// `op.get_*_cooperative_tensor<...>()`: per-lane register storage of one operand of the
+    /// matmul `op`, whose elements `element` addresses. Every operand takes as much room as
+    /// the destination, 16 floats for a 16x32 tile.
+    pub fn cooperativeTensor(self: *Builder, op: Matmul2d, operand: Matmul2d.Operand) CooperativeTensor {
+        self.declareExternal("__tensorops_impl_matmul2d_op_cooperative_tensor_init", &.{ "i32", "i32", "i32", "i32", "i8", "i8", "i8", "i32", "!llvm.ptr", "i32", "i32", "i32", "i32" }, "");
+        const storage = self.cooperativeStorage(op, operand);
+        const header = self.matmul2dHeader(op);
+        const codes = self.matmul2dTypeCodes(op);
+        var args: [13]*const mlir.Value = undefined;
+        args[0] = self.constant(.int, @as(i32, @intFromEnum(operand))).inner;
+        @memcpy(args[1..8], &header);
+        args[8] = storage;
+        @memcpy(args[9..12], &codes);
+        args[12] = self.constant(.int, 32).inner;
+        _ = self.callExternal("__tensorops_impl_matmul2d_op_cooperative_tensor_init", &args, null);
+        return .{ .builder = self, .op = op, .operand = operand, .storage = .{ .inner = storage, .kernel = self, .kind = .{ .pointer = .{ .space = .thread, .pointee = .float } } } };
+    }
+
+    /// Thread memory for one operand, sized as Apple's runtime sizes it: the allocation's size is a call to a
+    /// function marked `deferred-static-alloca-size`, which the runtime folds to a constant when it links.
+    fn cooperativeStorage(self: *Builder, op: Matmul2d, operand: Matmul2d.Operand) *const mlir.Value {
+        self.declareExternal("__tensorops_impl_matmul2d_op_cooperative_tensor_data_size", &.{ "i32", "i32", "i32", "i32", "i8", "i8", "i8", "i32", "i32", "i32", "i32", "i32" }, " -> i64");
+        const arena = self.arena.allocator();
+        const name = std.fmt.allocPrint(arena, "zml_cooperative_storage_size_{d}_{d}_{d}_{d}_{d}{d}_{s}_{s}_{s}", .{ @intFromEnum(operand), op.m, op.n, op.k, @intFromBool(op.transpose_left), @intFromBool(op.transpose_right), tensorOpsTypeSuffix(op.left), tensorOpsTypeSuffix(op.right), tensorOpsTypeSuffix(op.destination) }) catch @panic("dsl/metal: out of memory");
+        if (!self.isDeclared(name)) {
+            const text = std.fmt.allocPrint(arena,
+                \\llvm.func linkonce_odr @{s}() -> i64 attributes {{passthrough = ["deferred-static-alloca-size"]}} {{
+                \\  %operand = llvm.mlir.constant({d} : i32) : i32
+                \\  %m = llvm.mlir.constant({d} : i32) : i32
+                \\  %n = llvm.mlir.constant({d} : i32) : i32
+                \\  %k = llvm.mlir.constant({d} : i32) : i32
+                \\  %tl = llvm.mlir.constant({d} : i8) : i8
+                \\  %tr = llvm.mlir.constant({d} : i8) : i8
+                \\  %relaxed = llvm.mlir.constant(1 : i8) : i8
+                \\  %mode = llvm.mlir.constant(1 : i32) : i32
+                \\  %a = llvm.mlir.constant({d} : i32) : i32
+                \\  %b = llvm.mlir.constant({d} : i32) : i32
+                \\  %c = llvm.mlir.constant({d} : i32) : i32
+                \\  %simd = llvm.mlir.constant(32 : i32) : i32
+                \\  %size = llvm.call @__tensorops_impl_matmul2d_op_cooperative_tensor_data_size(%operand, %m, %n, %k, %tl, %tr, %relaxed, %mode, %a, %b, %c, %simd) : (i32, i32, i32, i32, i8, i8, i8, i32, i32, i32, i32, i32) -> i64
+                \\  llvm.return %size : i64
+                \\}}
+            , .{ name, @intFromEnum(operand), op.m, op.n, op.k, @intFromBool(op.transpose_left), @intFromBool(op.transpose_right), tensorOpsTypeCode(op.left), tensorOpsTypeCode(op.right), tensorOpsTypeCode(op.destination) }) catch @panic("dsl/metal: out of memory");
+            self.declared_externals.append(arena, name) catch @panic("dsl/metal: out of memory");
+            // A function parsed alone cannot see the symbol it calls, so it is parsed beside a declaration of it.
+            const module_text = std.fmt.allocPrint(arena, "module {{\n  llvm.func @__tensorops_impl_matmul2d_op_cooperative_tensor_data_size(i32, i32, i32, i32, i8, i8, i8, i32, i32, i32, i32, i32) -> i64\n{s}\n}}", .{text}) catch @panic("dsl/metal: out of memory");
+            const scratch = mlir.Module.parse(self.ctx, module_text) catch std.debug.panic("dsl/metal: cannot parse {s}", .{module_text});
+            defer scratch.deinit();
+            const declaration = scratch.body().firstOperation() orelse unreachable;
+            _ = declaration.nextInBlock().clone().appendTo(self.module.body());
+        }
+        const i64_type = Type.long.mlirType(self.ctx);
+        const size = self.callExternal(name, &.{}, i64_type).?;
+        const alloca = llvm.alloca(self.ctx, size, llvm.pointerType(self.ctx, AddressSpace.thread), Type.char.mlirType(self.ctx), .{ .alignment = 4 }, self.loc());
+        _ = alloca.appendTo(self.currentBlock());
+        return alloca.result(0);
+    }
+
+    fn isDeclared(self: *const Builder, name: []const u8) bool {
+        for (self.declared_externals.items) |declared| {
+            if (std.mem.eql(u8, declared, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// `op.run(left, right, destination)`: `destination += left * right` on the simdgroup.
+    pub fn matmul2dRun(self: *Builder, op: Matmul2d, left: CooperativeTensor, right: CooperativeTensor, destination: CooperativeTensor) void {
+        const arena = self.arena.allocator();
+        const name = std.fmt.allocPrint(arena, "__tensorops_impl_matmul2d_op_run_cooperative_{s}_{s}_{s}", .{ tensorOpsTypeSuffix(op.left), tensorOpsTypeSuffix(op.right), tensorOpsTypeSuffix(op.destination) }) catch @panic("dsl/metal: out of memory");
+        self.declareExternal(name, &.{ "!llvm.ptr", "!llvm.ptr", "!llvm.ptr", "!llvm.ptr", "i32" }, "");
+
+        // The descriptor struct is {i32 M, i32 N, i32 K, i8 transpose, i8 transpose, i8 relaxed, i32 mode}.
+        const descriptor = self.array(.int, 5);
+        const flags: i32 = @as(i32, @intFromBool(op.transpose_left)) | (@as(i32, @intFromBool(op.transpose_right)) << 8) | (1 << 16);
+        descriptor.store(0, @as(i32, @intCast(op.m)));
+        descriptor.store(1, @as(i32, @intCast(op.n)));
+        descriptor.store(2, @as(i32, @intCast(op.k)));
+        descriptor.store(3, flags);
+        descriptor.store(4, @as(i32, 1));
+
+        const args = [_]*const mlir.Value{
+            descriptor.inner,
+            self.cooperativeBase(left),
+            self.cooperativeBase(right),
+            self.cooperativeBase(destination),
+            self.constant(.int, 32).inner,
+        };
+        _ = self.callExternal(name, &args, null);
+    }
+
+    fn cooperativeElementPointer(self: *Builder, tensor: CooperativeTensor, index: *const mlir.Value) *const mlir.Value {
+        self.declareExternal("__tensorops_impl_matmul2d_op_cooperative_tensor_get_element_pointer", &.{ "i32", "i32", "i32", "i32", "i8", "i8", "i8", "i32", "!llvm.ptr", "i16", "i32", "i32", "i32" }, " -> !llvm.ptr");
+        const header = self.matmul2dHeader(tensor.op);
+        const codes = self.matmul2dTypeCodes(tensor.op);
+        var args: [13]*const mlir.Value = undefined;
+        args[0] = self.constant(.int, @as(i32, @intFromEnum(tensor.operand))).inner;
+        @memcpy(args[1..8], &header);
+        args[8] = tensor.storage.inner;
+        args[9] = index;
+        @memcpy(args[10..13], &codes);
+        return self.callExternal("__tensorops_impl_matmul2d_op_cooperative_tensor_get_element_pointer", &args, llvm.pointerType(self.ctx, AddressSpace.thread)).?;
+    }
+
+    fn cooperativeBase(self: *Builder, tensor: CooperativeTensor) *const mlir.Value {
+        return self.cooperativeElementPointer(tensor, self.constant(.short, -1).inner);
     }
 
     fn floatMath(self: *Builder, comptime name: []const u8, mode: MathMode, args: anytype) Value {

@@ -10,6 +10,7 @@ const log = std.log.scoped(.@"zml/attention/metal");
 
 test {
     _ = paged_attn;
+    _ = @import("nax_probe.zig");
 }
 
 pub const Options = struct {
@@ -162,7 +163,8 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         }).dst;
     }
 
-    const tile = paged_attn.PagedAttentionTiled.tileConfig(head_dim) orelse std.debug.panic("paged attention: head_dim {d} unsupported", .{head_dim});
+    const tensor_ops = tensorOpsEnabled(head_dim);
+    const tile = paged_attn.PagedAttentionTiled.tileConfig(head_dim, tensor_ops) orelse std.debug.panic("paged attention: head_dim {d} unsupported", .{head_dim});
 
     const cfg: paged_attn.PagedAttentionTiled.Cfg = .{
         .dtype = zml.kernel.metal.from(dtype),
@@ -172,6 +174,7 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         .tile_kv = tile[1],
         .num_threads = tile[2],
         .causal = opts.is_causal,
+        .tensor_ops = tensor_ops,
     };
 
     const total_q_blocks = @divTrunc(total_q_tokens, tile[0]) + num_seqs;
@@ -210,6 +213,15 @@ fn dispatch(q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, block_table
         .threadgroup = .{ 256, 1, 1 },
         .constants = .{ .num_seqs = .of(num_seqs), .row_stride = .of(num_heads * head_dim) },
     }).out;
+}
+
+/// The tensor-op kernel runs head size 128 on GPUs that have tensor ops.
+fn tensorOpsEnabled(head_dim: i32) bool {
+    if (head_dim != 128) {
+        return false;
+    }
+    const platform = zml.Compiler.current().platform;
+    return paged_attn.tensorOpsSupported(platform.devices[0].pjrt_desc.kind(platform.pjrt_api));
 }
 
 fn chooseWant(few_rows: bool, heads: i32) i32 {
