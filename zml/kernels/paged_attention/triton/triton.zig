@@ -15,11 +15,44 @@ fn isOneapiTarget() bool {
     return zml.Compiler.current().platform.target == .oneapi;
 }
 
-fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize) bool {
+fn isRocmTarget() bool {
+    return zml.Compiler.current().platform.target == .rocm;
+}
+
+// Keeps the K and V tiles at 16 KiB each, so wide heads do not exhaust the 64 KiB of shared memory.
+const rocm_decode_tile_bytes: usize = 16 * 1024;
+const rocm_max_decode_tile_size: usize = 64;
+
+// Below this a decode sequence is too short to pay for the second (reduce) kernel of split-KV.
+const rocm_min_split_seqlen_k: usize = 2048;
+
+fn decodeTileSize(options: paged.PagedAttentionOptions) usize {
+    if (options.all_decode and isRocmTarget()) {
+        const head_dim_padded = std.math.ceilPowerOfTwoAssert(usize, options.head_dim);
+        return @max(options.block_size, @min(rocm_max_decode_tile_size, rocm_decode_tile_bytes / (head_dim_padded * 2)));
+    }
+
+    return options.block_size;
+}
+
+// With short keys a prefill is latency-bound, so more and smaller query blocks win; with long keys each extra
+// query block rereads the whole K and V, so the large block wins.
+const rocm_short_prefill_seqlen_k: usize = 1024;
+
+fn rocm_prefill_block_m(options: paged.PagedAttentionOptions) usize {
+    if (isRocmTarget() and options.maxSeqLenK() <= rocm_short_prefill_seqlen_k) {
+        return @max(32, options.block_m);
+    }
+
+    return 128;
+}
+
+fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize, max_seqlen_k: usize) bool {
     // Intel decode spills the 2D whole-sequence kernel; force the 3D split-K path.
     if (all_decode and isOneapiTarget()) return false;
     // prefill uses 2D; decode uses 3D until the batch is large enough to
     // provide at least 128 2D launch programs across KV heads.
+    if (all_decode and isRocmTarget()) return max_seqlen_k < rocm_min_split_seqlen_k;
     if (all_decode) {
         const seq_threshold_3d = @divFloor(128, num_kv_heads);
         return batch_size > seq_threshold_3d;
@@ -110,6 +143,12 @@ fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Co
 
     var num_stages_2d: usize, var num_warps: usize, var tile_size: usize = if (!options.all_decode) .{ 1, 2, 64 } else .{ 3, 2, options.block_size };
 
+    if (options.all_decode and isRocmTarget()) {
+        tile_size = decodeTileSize(options);
+        num_warps = 4;
+        num_stages_2d = 2;
+    }
+
     var block_m = options.block_m;
     var block_q = options.block_q;
     if (long_prefill) {
@@ -117,7 +156,7 @@ fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Co
             block_m = 64;
             tile_size = 16;
         } else {
-            block_m = 128;
+            block_m = rocm_prefill_block_m(options);
         }
 
         if (is_gb300) {
@@ -189,8 +228,8 @@ pub const Config3D = struct {
 fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
     // Intel decode needs more warps to spread the work and avoid register spill.
-    const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else 2;
-    const tile_size = options.block_size;
+    const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else if (options.all_decode and isRocmTarget()) 4 else 2;
+    const tile_size = decodeTileSize(options);
 
     //const MAX_SEGMENTS: usize = @min(128, std.math.divCeil(usize, max_seqlen_k, tile_size));
     var num_segments = std.math.divCeil(usize, options.target_num_prgms, options.num_2d_prgms) catch unreachable;
@@ -378,6 +417,7 @@ pub const paged = struct {
             paged_attention_opts.all_decode,
             paged_attention_opts.batch_size,
             paged_attention_opts.num_kv_heads,
+            paged_attention_opts.maxSeqLenK(),
         );
         const output = if (use_2d_kernel)
             pagedAttention2d(parameters, q, k_cache, v_cache, opts, paged_attention_opts)
