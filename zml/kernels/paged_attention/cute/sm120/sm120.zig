@@ -3,6 +3,7 @@ const stdx = @import("stdx");
 const zml = @import("zml/core");
 const cute = @import("../cute.zig");
 const kernel = @import("attention.zig");
+const sm90 = @import("../sm90/sm90.zig");
 
 pub const Options = cute.Options;
 pub const Parameters = cute.Parameters;
@@ -35,6 +36,10 @@ fn warpsPerQuery(decode: bool, head_dim: i64, tokens: i64, batch: i64, group: i6
 }
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: cute.AttentionOptions) zml.Tensor {
+    if (sm90.isAvailable(zml.Compiler.current().platform) and sm90.supports(parameters, q, k, opts)) {
+        return sm90.pagedAttention(parameters, q, k, v, opts);
+    }
+
     const q_ = q.transpose(.{ .b, .hkv, .hg, .hd });
     const k_ = k.transpose(.{ .page, .k_chunk, .hkv, .hd });
     const v_ = v.transpose(.{ .page, .k_chunk, .hkv, .hd });
