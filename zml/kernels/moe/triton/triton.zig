@@ -1041,8 +1041,9 @@ fn launchConfig(scheme: ?Quantization.Scheme, num_tokens: i64) LaunchConfig {
     return config;
 }
 
-/// CUDA's native FP4 MMAs need long K tiles to stream NVFP4 expert weights.
-/// Tuned on an RTX 5090 with Inkling-2-Mini's experts, close to vLLM's sm_120 choice.
+/// NVFP4 expert weights stream best through long K tiles, with native FP4 MMAs (sm_120)
+/// and without them (sm_103). Tuned on an RTX 5090 and a GB300 with Inkling-2-Mini's
+/// experts, close to vLLM's sm_120 choice.
 fn nvfp4LaunchConfig(num_tokens: i64) LaunchConfig {
     // Decode reads each routed expert for a row or two; prefill shares it across more.
     const block_size_m: usize = if (num_tokens <= 64) 16 else 64;
@@ -1075,11 +1076,15 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-/// NVFP4 relies on the native block-scaled MMA, which is only validated on SM120.
+/// NVFP4 multiplies with the native block-scaled MMA on SM120 and with Triton's
+/// decomposition of it on SM10x; it is only validated on those.
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
     const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major == 12;
+    return switch (cc.major) {
+        10, 12 => true,
+        else => false,
+    };
 }
 
 pub fn validateOptions(opts: Options) void {
