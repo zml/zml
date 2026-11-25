@@ -28,8 +28,7 @@ const rocm_min_split_seqlen_k: usize = 2048;
 
 fn decodeTileSize(options: paged.PagedAttentionOptions) usize {
     if (options.all_decode and isRocmTarget()) {
-        const head_dim_padded = std.math.ceilPowerOfTwoAssert(usize, options.head_dim);
-        return @max(options.block_size, @min(rocm_max_decode_tile_size, rocm_decode_tile_bytes / (head_dim_padded * 2)));
+        return @max(options.block_size, @min(rocm_max_decode_tile_size, rocm_decode_tile_bytes / (options.headDimPadded() * 2)));
     }
 
     return options.block_size;
@@ -163,8 +162,7 @@ fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Co
             // Halving BLOCK_M for every doubling of the head keeps that product
             // constant: 128 at head_dim 128, 64 at 256, 32 at 512. The first two
             // are the values this branch has always picked.
-            const head_dim_padded = std.math.ceilPowerOfTwoAssert(usize, options.head_dim);
-            block_m = @min(128, max_query_tile_elements / head_dim_padded);
+            block_m = @min(128, max_query_tile_elements / options.headDimPadded());
         }
         num_stages_2d = 1;
         num_warps = 4;
@@ -184,7 +182,7 @@ fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Co
         const tile = fitOneapiPrefillTile(.{
             .preferred = .{ .query_rows = block_m, .kv_rows = tile_size },
             .min_query_rows = options.numQueriesPerKv(),
-            .head_bytes = std.math.ceilPowerOfTwoAssert(usize, options.head_dim) * element_bytes,
+            .head_bytes = options.headDimPadded() * element_bytes,
             .shared_bytes = shared_bytes,
         }) orelse stdx.debug.panic("OneAPI prefill tiles for head width {d} exceed the {d}-byte shared local memory limit", .{ options.head_dim, shared_bytes });
         block_m = tile.query_rows;
@@ -435,17 +433,12 @@ pub const paged = struct {
             pagedSparseAttention3d(parameters, q, k_cache, v_cache, opts, config);
     }
 
-    pub fn pagedSparseAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, tuning: SparseConfig) zml.Tensor {
-        std.debug.assert(tuning.num_segments == 1);
-
+    fn sparseKernelConfig(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, tuning: SparseConfig) kernels_sparse.SparseAttentionConfig {
         const indices = opts.mask.indices;
-
         const group = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
         std.debug.assert(num_kv_heads == k_cache.dim(.hkv) and num_kv_heads == v_cache.dim(.hkv));
         std.debug.assert(q.dim(.hd) == k_cache.dim(.hd) and q.dim(.hd) == v_cache.dim(.hd));
-
-        const all_decode = !parameters.options_.is_prefill;
 
         const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
 
@@ -455,21 +448,19 @@ pub const paged = struct {
         const is = indices.shape().computeElementStrides().constSlice();
         const ts = parameters.block_table.shape().computeElementStrides().constSlice();
 
-        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(16, q.dim(.hd)))));
-
-        const config: kernels_sparse.SparseAttentionConfig = .{
+        return .{
             .dtype = triton.from(q.dtype()),
             .num_seqs = @intCast(parameters.block_table.dim(.b)),
             .num_query_heads = num_kv_heads * group,
             .num_queries_per_kv = group,
             .head_size = q.dim(.hd),
-            .head_size_padded = head_size_padded,
+            .head_size_padded = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(16, q.dim(.hd))))),
             .block_m = @intCast(@max(16, std.math.ceilPowerOfTwoAssert(u64, @intCast(group)))),
             .block_size = k_cache.dim(.k_chunk),
             .tile_size = @intCast(tuning.tile_size),
             .indices_count = indices.dim(.topk),
             .num_segments = @intCast(tuning.num_segments),
-            .decode_sequence_grid = all_decode and parameters.options_.max_seqlen_q == 1,
+            .decode_sequence_grid = !parameters.options_.is_prefill and parameters.options_.max_seqlen_q == 1,
             .use_sinks = opts.sink != null,
             .scale = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd))))),
             .block_table_stride = ts[parameters.block_table.axis(.b)],
@@ -478,25 +469,34 @@ pub const paged = struct {
             .value_strides = .{ vs[v_cache.axis(.page)], vs[v_cache.axis(.k_chunk)], vs[v_cache.axis(.hkv)], vs[v_cache.axis(.hd)] },
             .indices_strides = .{ is[indices.axis(.b)], is[indices.axis(.topk)] },
         };
+    }
 
-        const inputs: kernels_sparse.KernelSparseAttention2dPtr.Kernel.Inputs = .{
+    fn sparseKernelInputs(comptime Inputs: type, parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) Inputs {
+        return .{
             .query_ptr = q,
             .key_ptr = k_cache,
             .value_ptr = v_cache,
-            .indices_ptr = indices,
+            .indices_ptr = opts.mask.indices,
             .block_tables_ptr = parameters.block_table,
             .seq_lens_ptr = parameters.seq_lens,
             .query_start_len_ptr = parameters.query_start_len,
-            .sink_ptr = if (opts.sink) |sink| sink.convert(.f32) else .scalar(0, .f32),
+            .sink_ptr = sinkOrFallback(opts, .scalar(0, .f32)),
         };
+    }
+
+    pub fn pagedSparseAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, tuning: SparseConfig) zml.Tensor {
+        std.debug.assert(tuning.num_segments == 1);
+
+        const config = sparseKernelConfig(parameters, q, k_cache, v_cache, opts, tuning);
+        const inputs = sparseKernelInputs(kernels_sparse.KernelSparseAttention2dPtr.Kernel.Inputs, parameters, q, k_cache, v_cache, opts);
 
         const grid: [3]i32 = .{
             if (config.decode_sequence_grid) config.num_seqs else @intCast(q.dim(.b)),
-            @intCast(num_kv_heads),
+            @intCast(q.dim(.hkv)),
             1,
         };
 
-        const warps: i32 = if (all_decode and isOneapiTarget()) 8 else 4;
+        const warps: i32 = if (!parameters.options_.is_prefill and isOneapiTarget()) 8 else 4;
 
         const output = kernels_sparse.KernelSparseAttention2dPtr.Kernel.call(inputs, .{
             .output = q.shape(),
@@ -513,66 +513,18 @@ pub const paged = struct {
     pub fn pagedSparseAttention3d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, tuning: SparseConfig) zml.Tensor {
         std.debug.assert(tuning.num_segments > 1);
 
-        const indices = opts.mask.indices;
-        const group = q.dim(.hg);
-        const num_kv_heads = q.dim(.hkv);
-        std.debug.assert(num_kv_heads == k_cache.dim(.hkv) and num_kv_heads == v_cache.dim(.hkv));
-        std.debug.assert(q.dim(.hd) == k_cache.dim(.hd) and q.dim(.hd) == v_cache.dim(.hd));
-
-        const all_decode = !parameters.options_.is_prefill;
-
-        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
-
-        const qs = q_shape.computeElementStrides().constSlice();
-        const ks = k_cache.shape().computeElementStrides().constSlice();
-        const vs = v_cache.shape().computeElementStrides().constSlice();
-        const is = indices.shape().computeElementStrides().constSlice();
-        const ts = parameters.block_table.shape().computeElementStrides().constSlice();
-
-        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(16, q.dim(.hd)))));
-
-        const config: kernels_sparse.SparseAttentionConfig = .{
-            .dtype = triton.from(q.dtype()),
-            .num_seqs = @intCast(parameters.block_table.dim(.b)),
-            .num_query_heads = num_kv_heads * group,
-            .num_queries_per_kv = group,
-            .head_size = q.dim(.hd),
-            .head_size_padded = head_size_padded,
-            .block_m = @intCast(@max(16, std.math.ceilPowerOfTwoAssert(u64, @intCast(group)))),
-            .block_size = k_cache.dim(.k_chunk),
-            .tile_size = @intCast(tuning.tile_size),
-            .indices_count = indices.dim(.topk),
-            .num_segments = @intCast(tuning.num_segments),
-            .decode_sequence_grid = all_decode and parameters.options_.max_seqlen_q == 1,
-            .use_sinks = opts.sink != null,
-            .scale = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd))))),
-            .block_table_stride = ts[parameters.block_table.axis(.b)],
-            .query_strides = .{ qs[q_shape.axis(.b)], qs[q_shape.axis(.h)], qs[q_shape.axis(.hd)] },
-            .key_strides = .{ ks[k_cache.axis(.page)], ks[k_cache.axis(.k_chunk)], ks[k_cache.axis(.hkv)], ks[k_cache.axis(.hd)] },
-            .value_strides = .{ vs[v_cache.axis(.page)], vs[v_cache.axis(.k_chunk)], vs[v_cache.axis(.hkv)], vs[v_cache.axis(.hd)] },
-            .indices_strides = .{ is[indices.axis(.b)], is[indices.axis(.topk)] },
-        };
-
-        const inputs: kernels_sparse.KernelSparseAttention3dPtr.Kernel.Inputs = .{
-            .query_ptr = q,
-            .key_ptr = k_cache,
-            .value_ptr = v_cache,
-            .indices_ptr = indices,
-            .block_tables_ptr = parameters.block_table,
-            .seq_lens_ptr = parameters.seq_lens,
-            .query_start_len_ptr = parameters.query_start_len,
-            .sink_ptr = if (opts.sink) |sink| sink.convert(.f32) else .scalar(0, .f32),
-        };
+        const config = sparseKernelConfig(parameters, q, k_cache, v_cache, opts, tuning);
+        const inputs = sparseKernelInputs(kernels_sparse.KernelSparseAttention3dPtr.Kernel.Inputs, parameters, q, k_cache, v_cache, opts);
+        const head_size_padded = config.head_size_padded;
 
         const partition = kernels_sparse.SparseSegments.init(config.indices_count, config.num_segments, config.tile_size);
         const grid: [3]i32 = .{
             if (config.decode_sequence_grid) config.num_seqs else @intCast(q.dim(.b)),
-            @intCast(num_kv_heads),
+            @intCast(q.dim(.hkv)),
             @intCast(partition.launched),
         };
 
-        const warps: i32 = if (all_decode) 8 else 4;
-
+        const warps: i32 = if (!parameters.options_.is_prefill) 8 else 4;
         const stats_shape = zml.Shape.init(.{ q.dim(.b), config.num_segments, config.num_query_heads }, .f32);
 
         const partials = kernels_sparse.KernelSparseAttention3dPtr.Kernel.call(inputs, .{
