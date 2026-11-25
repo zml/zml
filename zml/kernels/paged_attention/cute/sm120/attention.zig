@@ -95,7 +95,7 @@ fn mma(b: *B, comptime dtype: cute.DType, a: [4]V, k: [2]V, acc: [4]V) [4]V {
 fn run(b: *B, c: Config) cute.FinishError!void {
     switch (c.head_dim) {
         inline 32, 64, 128, 256, 512 => |d| switch (c.warps_per_query) {
-            inline 2, 4 => |w| switch (c.kv_tile) {
+            inline 1, 2, 4 => |w| switch (c.kv_tile) {
                 inline 32, 64 => |n| switch (c.dtype) {
                     inline .bf16, .f16 => |dt| try runTile(b, c, d, w, n, dt),
                     else => unreachable,
