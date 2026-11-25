@@ -161,7 +161,7 @@ pub fn forwardBackend(i: Inputs, c: cases.Case, backend: Backend) zml.Tensor {
     };
 }
 
-pub fn upload(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {
+pub fn upload(_: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {
     var result: zml.Bufferized(Inputs) = undefined;
     var initialized: usize = 0;
     errdefer inline for (@typeInfo(Inputs).@"struct".field_names, 0..) |name, index| {
