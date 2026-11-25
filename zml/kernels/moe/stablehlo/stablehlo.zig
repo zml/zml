@@ -2,56 +2,16 @@
 //! Weights use [expert, output, input] order with concatenated gate/up columns.
 const std = @import("std");
 
-const stdx = @import("stdx");
-
+const Activation = @import("zml/kernels/moe/api").Activation;
+const GlobalOptions = @import("zml/kernels/moe/api").Options;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const nn = @import("zml/nn");
-
+const roundE2m1 = @import("zml/quantization").roundE2m1;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const stdx = @import("stdx");
 const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const GlobalOptions = @import("zml/kernels/moe/api").Options;
-const Activation = @import("zml/kernels/moe/api").Activation;
-const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
-const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
-const softcap = @import("zml/kernels/moe/api").softcap;
-const roundE2m1 = @import("zml/quantization").roundE2m1;
-
-pub fn activate(x: Tensor, activation: Activation) Tensor {
-    return switch (activation) {
-        .silu => x.silu(),
-        .gelu => x.gelu(),
-        .relu => x.relu(),
-        .swiglu, .swiglu_step, .geglu, .geglu_tanh, .capped_swiglu => blk: {
-            const mid = @divExact(x.dim(.out), 2);
-            var gate = x.slice(.out, .{ .end = mid });
-            var up = x.slice(.out, .{ .start = mid });
-
-            switch (activation) {
-                .swiglu_step => {
-                    gate = gate.div(gate.negate().exp().addConstant(1));
-                    if (activation.swiglu_step.limit) |limit| {
-                        gate = gate.minimum(Tensor.scalar(limit, x.dtype()));
-                        up = up.clamp(Tensor.scalar(-limit, x.dtype()), Tensor.scalar(limit, x.dtype()));
-                    }
-                    break :blk gate.mul(up);
-                },
-                .swiglu => {
-                    if (activation.swiglu.limit) |limit| {
-                        gate = gate.minimum(Tensor.scalar(limit, x.dtype()));
-                        up = up.clamp(Tensor.scalar(-limit, x.dtype()), Tensor.scalar(limit, x.dtype()));
-                    }
-                    if (activation.swiglu.bias) |bias| up = up.addConstant(bias);
-                    break :blk gate.div(gate.negate().exp().addConstant(1)).mul(up);
-                },
-                // The sigmoid reads the uncapped gate.
-                .capped_swiglu => |caps| break :blk softcap(gate, caps.gate_cap).div(gate.negate().exp().addConstant(1)).mul(softcap(up, caps.up_cap)),
-                .geglu => break :blk gelu(gate).mul(up),
-                .geglu_tanh => break :blk gate.gelu().mul(up),
-                else => unreachable, // already handled above
-            }
-        },
-    };
-}
 
 /// More precise GELU approximation than the default Zig implementation, which is
 /// based on tanh. This is the same approximation used in JAX.
@@ -174,7 +134,7 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
     // Keep the projection's rounding boundary when XLA fuses activation/routing
     // arithmetic; otherwise the reference can disagree with explicit BF16 GEMMs.
     const projected = project(hidden, gate_up, ids, opts, input.dtype()).convert(input.dtype()).optimizationBarrier().convert(.f32);
-    var activated = activate(projected, opts.activation);
+    var activated = opts.activation.applyActivation(projected, .concatenated);
     if (opts.routing_weight_placement == .before_down) activated = activated.mul(weights.broad(activated.shape()));
     var output = project(activated.rename(.{ .out = .in }), down, ids, opts, input.dtype());
     if (opts.routing_weight_placement == .after_down) output = output.mul(weights.broad(output.shape()));
@@ -221,7 +181,7 @@ test "MoE compliance: capped SwiGLU" {
     const Local = struct {
         // The activation Triton, Fly and Metal apply between their GEMMs, and this reference.
         fn call(x: Tensor, act: Activation) Tensor {
-            return Tensor.stack(&.{ act.applyActivation(x, .concatenated), activate(x, act) }, 0, .implementation);
+            return Tensor.stack(&.{ act.applyActivation(x, .concatenated), act.applyActivation(x, .concatenated) }, 0, .implementation);
         }
     };
     const gates = [_]f32{ -9, -2.5, -0.5, 0, 0.75, 3, 12 };

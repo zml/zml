@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-
 const Tensor = @import("zml/core").Tensor;
 
 const log = std.log.scoped(.@"zml/moe");
@@ -97,7 +96,7 @@ pub const Activation = union(ActivationKind) {
                         up = if (limit) |l| up.clamp(l.negate(), l) else up;
                         break :b gate.mul(up);
                     },
-                    .capped_swiglu => |caps| softcap(gate, caps.gate_cap).mul(gate.sigmoid()).mul(softcap(up, caps.up_cap)),
+                    .capped_swiglu => |caps| gate.softcap(caps.gate_cap).mul(gate.sigmoid()).mul(up.softcap(caps.up_cap)),
                     .geglu_tanh => gate.gelu().mul(up),
                     .geglu => {
                         log.warn("The geglu activation function was requested but we only support the tanh approximation", .{});
@@ -109,11 +108,6 @@ pub const Activation = union(ActivationKind) {
         };
     }
 };
-
-/// Smoothly bounds `x` to (-cap, cap).
-pub fn softcap(x: Tensor, cap: f32) Tensor {
-    return x.divByConst(cap).tanh().scale(cap);
-}
 
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
