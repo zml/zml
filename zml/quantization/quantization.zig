@@ -2,9 +2,7 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-
 const zml = @import("zml/core");
-
 const DataType = zml.DataType;
 const platform_mod = zml.platform;
 const Platform = platform_mod.Platform;
@@ -125,7 +123,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
 
     return switch (quantization.scheme) {
-        .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis, .six) else null,
+        .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis, .largest_maps_to_six) else null,
         .fp8_block32, .fp8_block128 => blk: {
             const dtype: DataType = switch (platform.target) {
                 .cuda => .f8e4m3fn,
@@ -253,20 +251,20 @@ pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataTy
 }
 
 /// How NVFP4 quantization picks the E4M3 scale of each 16-value block.
-pub const Nvfp4BlockScale = enum {
+pub const Nvfp4QuantizationStrategy = enum {
     /// The block's largest magnitude maps to 6, the largest E2M1 value.
-    six,
+    largest_maps_to_six,
     /// Whichever of amax/6 and amax/4 reconstructs the block with the lower absolute error.
     /// amax/4 gives up the largest value for finer steps; ties keep amax/6.
-    four_or_six,
+    best_of_four_or_six,
 };
 
-pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype, block_scale: Nvfp4BlockScale) QuantizedInput {
+pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype, block_scale: Nvfp4QuantizationStrategy) QuantizedInput {
     const grouped = nvfp4Blocks(x, input_global_scale, axis);
     const six = nvfp4Candidate(grouped, 6);
     const values, const scales = switch (block_scale) {
-        .six => .{ six.values, six.scales },
-        .four_or_six => blk: {
+        .largest_maps_to_six => .{ six.values, six.scales },
+        .best_of_four_or_six => blk: {
             const four = nvfp4Candidate(grouped, 4);
             const use_four = nvfp4Error(four, grouped).cmp(.LT, nvfp4Error(six, grouped));
             break :blk .{
@@ -284,7 +282,7 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype, bloc
 
 /// NVFP4 quantization of activation rows over their `nvfp4RowScale`, which becomes
 /// the result's global scale, with the reduced axis kept as size 1.
-pub fn quantizeNvfp4Rows(rows: Tensor, axis: anytype, block_scale: Nvfp4BlockScale) QuantizedInput {
+pub fn quantizeNvfp4Rows(rows: Tensor, axis: anytype, block_scale: Nvfp4QuantizationStrategy) QuantizedInput {
     return quantizeNvfp4(rows, nvfp4RowScale(rows, axis), axis, block_scale);
 }
 
@@ -550,8 +548,8 @@ test "NVFP4 four-or-six keeps the block scale with the lower error" {
         }
 
         fn forward(x: Tensor) Outputs {
-            const best = quantizeNvfp4(x, null, .k, .four_or_six);
-            return .{ .six = reconstruct(quantizeNvfp4(x, null, .k, .six)), .best = reconstruct(best), .scales = best.scales.convert(.f32) };
+            const best = quantizeNvfp4(x, null, .k, .best_of_four_or_six);
+            return .{ .six = reconstruct(quantizeNvfp4(x, null, .k, .largest_maps_to_six)), .best = reconstruct(best), .scales = best.scales.convert(.f32) };
         }
     };
     const x: Tensor = .init(.{ .k = 2 * nvfp4_block_size }, .f32);
