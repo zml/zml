@@ -7,6 +7,7 @@ const scaling = @import("./scaling.zig");
 const layer = @import("./layer.zig");
 const masking = @import("./masking.zig");
 const debug = @import("./debug.zig");
+const meta = @import("./meta.zig");
 
 const assertTags = debug.assertTags;
 const assertedTags = debug.assertedTags;
@@ -38,6 +39,10 @@ pub const Config = struct {
     split_context_horizon_attn: bool,
     attend_missing_patches: bool,
     quantile_width_factor: f32,
+
+    pub fn pick(self: Config, comptime SubConf: type) SubConf {
+        return meta.shallowPick(self, SubConf);
+    }
 };
 
 pub const Roles = enum(u8) {
@@ -244,10 +249,76 @@ pub const AttentionMasking = struct {
     }
 };
 
+pub const Transformer = struct {
+    pub const Options = struct {
+        block_schedule: []const Config.LayerKind,
+        d_model: u32,
+        num_heads: u32,
+        mlp_hidden_dim: u32,
+        rope_theta: f32,
+        rope_partial_factor: f32,
+        norm_eps: f32,
+        attn_bias: bool,
+        mlp_bias: bool,
+        time_attn_gate: Config.AttentionGate,
+        variate_attn_gate: Config.AttentionGate,
+    };
+
+    options: Options,
+    rope: layer.SinCosRope,
+    out_norm: layer.RmsNorm,
+
+    pub fn init(store: zml.io.TensorStore.View, options: Options) Transformer {
+        const rope_dim = options.d_model / options.num_heads;
+        const rope_dim_f32: f32 = @floatFromInt(rope_dim);
+        return .{
+            .options = options,
+            .rope = .{
+                .dim = rope_dim,
+                .base = options.rope_theta,
+                .rotary_dim = @intFromFloat(rope_dim_f32 * options.rope_partial_factor),
+                .dtype = .f32,
+            },
+            .out_norm = .init(store.withPrefix("out_norm"), options.norm_eps),
+        };
+    }
+
+    /// Run the stack on `patches` `(R, N, D)` with integer time `positions` `(R, N)`.
+    pub fn forward(
+        self: Transformer,
+        patches: Tensor,
+        mask: AttentionMasking.Mask,
+        positions: Tensor,
+    ) Tensor {
+        assertTags(patches, .{ .row, .token, .h });
+        assertTags(mask.time, .{ .row, .token_q, .token_k });
+        assertTags(mask.variate, .{ .token, .row_q, .row_k });
+        assertTags(positions, .{.row});
+        const rope = self.rope(patches, positions);
+        _ = rope;
+    }
+};
+
 pub const Model = struct {
     patcher: PatchBuilder,
     representation: PatchRepresentation,
     attn_masking: AttentionMasking,
+    transformer: Transformer,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config) Model {
+        return .{
+            .representation = .init(store.withPrefix("representation")),
+            .patcher = .{ .options = config.pick(PatchBuilder.Options) },
+            .attn_masking = .{
+                .options = config.pick(AttentionMasking.Options),
+                .horizon = 64, // TODO hardcoded
+            },
+            .transformer = .init(
+                store.withPrefix("transformer"),
+                config.pick(Transformer.Options),
+            ),
+        };
+    }
 
     pub fn forward(self: Model, targets: Tensor) Tensor {
         assertTags(targets, .{ .batch, .variate, .time });

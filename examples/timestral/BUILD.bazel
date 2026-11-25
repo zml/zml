@@ -2,7 +2,14 @@ load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "timestral",
-    srcs = ["model.zig", "layer.zig", "scaling.zig"],
+    srcs = [
+        "debug.zig",
+        "layer.zig",
+        "masking.zig",
+        "meta.zig",
+        "model.zig",
+        "scaling.zig",
+    ],
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
@@ -10,7 +17,14 @@ zig_binary(
 
 zig_test(
     name = "test",
-    srcs = ["model.zig", "layer.zig", "scaling.zig"],
+    srcs = [
+        "debug.zig",
+        "layer.zig",
+        "masking.zig",
+        "meta.zig",
+        "model.zig",
+        "scaling.zig",
+    ],
     main = "main.zig",
     deps = ["//zml"],
 )
