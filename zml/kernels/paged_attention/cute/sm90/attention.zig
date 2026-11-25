@@ -13,7 +13,11 @@ const V = cute.Value;
 
 pub const block_rows: i64 = 128;
 pub const block_keys: i64 = 128;
-pub const thread_count: i64 = 256;
+pub const thread_count: i64 = 384;
+const producer_threads: i64 = 128;
+const stages: i64 = 2;
+const producer_registers: u32 = 40;
+const consumer_registers: u32 = 232;
 
 pub const Config = struct {
     head_dim: i64,
@@ -41,10 +45,13 @@ pub const Config = struct {
         return block_rows * c.head_dim * 2;
     }
     fn valueBase(c: Config) i64 {
-        return c.keyBase() + 2 * c.tileBytes();
+        return c.keyBase() + stages * c.tileBytes();
+    }
+    fn barrierBase(c: Config) i64 {
+        return c.valueBase() + stages * c.tileBytes();
     }
     fn sharedBytes(c: Config) i64 {
-        return c.valueBase() + 2 * c.tileBytes();
+        return c.barrierBase() + 8 * (1 + 2 * stages);
     }
 };
 
@@ -95,12 +102,43 @@ const TileContext = struct {
     qlen: V,
     klen: V,
 
+    // Pages hold 16 rows, so the page table is read once per page and shared by K and V instead of once per 16-byte copy.
+    fn loadKeyValue(t: TileContext, comptime head_dim: i64, key_base: V, stage: V) void {
+        const b = t.b;
+        const c = t.c;
+        const chunks = @divExact(head_dim, 8);
+        const rows_per_pass = @divExact(producer_threads, chunks);
+        const passes = @divExact(block_keys, rows_per_pass);
+        const tile_pages = @divExact(block_keys, 16);
+        const chunk = t.tid.rem(chunks);
+        const first_row = t.tid.div(chunks);
+        var pages: [tile_pages]V = undefined;
+        for (&pages, 0..) |*page, index| {
+            const first_key = key_base.add(index * 16);
+            const logical_page = b.select(first_key.lt(t.klen), first_key.div(16), b.constant(.i32, 0));
+            page.* = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
+        }
+        const head_offset = t.head.to(.i64).mul(c.head_dim).add(chunk.mul(8).to(.i64));
+        const slab_offset = chunk.div(8).mul(block_keys * 128);
+        const swizzled = chunk.rem(8).bitXor(first_row.rem(8)).mul(16);
+        const key_destination = t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())).add(slab_offset).add(swizzled);
+        const value_destination = t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())).add(slab_offset).add(swizzled);
+        inline for (0..@as(usize, @intCast(passes))) |pass| {
+            const row = first_row.add(pass * rows_per_pass);
+            const valid = key_base.add(row).lt(t.klen);
+            const page = pages[(pass * @as(usize, @intCast(rows_per_pass))) / 16];
+            const element = page.to(.i64).mul(16 * c.kv_heads * c.head_dim).add(row.rem(16).to(.i64).mul(c.kv_heads * c.head_dim)).add(head_offset);
+            b.cpAsync16(key_destination.add(row.mul(128)), t.k.add(element.mul(2)), valid);
+            b.cpAsync16(value_destination.add(row.mul(128)), t.v.add(element.mul(2)), valid);
+        }
+    }
+
     fn loadRows(t: TileContext, source: V, key_base: V, destination: V, comptime is_query: bool) void {
         const b = t.b;
         const c = t.c;
         const chunks = @divExact(c.head_dim, 8);
         const row_count = if (is_query) block_rows else block_keys;
-        var copy = b.openFor(t.tid, row_count * chunks, thread_count, .{});
+        var copy = b.openFor(t.tid, row_count * chunks, producer_threads, .{});
         {
             const row = copy.iv.div(chunks);
             const chunk = copy.iv.rem(chunks);
@@ -124,6 +162,14 @@ const TileContext = struct {
         }
     }
 };
+
+fn fullBarrier(t: TileContext, stage: V) V {
+    return t.shared.add(t.c.barrierBase() + 8).add(stage.mul(8));
+}
+
+fn emptyBarrier(t: TileContext, stage: V) V {
+    return t.shared.add(t.c.barrierBase() + 8 + 8 * stages).add(stage.mul(8));
+}
 
 fn rowOf(index: usize) usize {
     return (index % 4) / 2;
@@ -191,7 +237,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
         const lo = first_tile.add(tiles.mul(split).div(c.splits));
         const hi = first_tile.add(tiles.mul(split.add(1)).div(c.splits));
 
-        const warpgroup = tid.div(128);
+        const warpgroup = tid.div(128).sub(1);
         const lane = tid.rem(32);
         const row_in_tile = warpgroup.mul(64).add(tid.rem(128).div(32).mul(16)).add(lane.div(4));
         const column0 = lane.rem(4).mul(2);
@@ -199,11 +245,47 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
         const neg_inf = b.constant(.f32, -std.math.inf(f32));
         const scale_log2 = b.constant(.f32, c.scale * std.math.log2e);
 
-        t.loadRows(t.q, b.constant(.i32, 0), t.shared, true);
-        t.loadRows(t.k, lo.mul(block_keys), t.shared.add(c.keyBase()), false);
-        t.loadRows(t.v, lo.mul(block_keys), t.shared.add(c.valueBase()), false);
+        const query_barrier = t.shared.add(c.barrierBase());
+        var initializer = b.openIf(tid.eq(0));
+        {
+            b.mbarrierInit(query_barrier, producer_threads);
+            inline for (0..stages) |stage_index| {
+                b.mbarrierInit(fullBarrier(t, b.constant(.i32, stage_index)), producer_threads);
+                b.mbarrierInit(emptyBarrier(t, b.constant(.i32, stage_index)), 2);
+            }
+            b.fenceMbarrierInit();
+            initializer.close();
+        }
+        b.syncThreads();
 
+        var producer = b.openIf(tid.lt(producer_threads));
+        {
+            b.setMaxRegisterDecrease(producer_registers);
+            t.loadRows(t.q, b.constant(.i32, 0), t.shared, true);
+            b.cpAsyncMbarrierArrive(query_barrier, true);
+            var loads = b.openFor(lo, hi, 1, .{});
+            {
+                const step = loads.iv.sub(lo);
+                const stage = step.bitAnd(1);
+                b.mbarrierWait(emptyBarrier(t, stage), step.shrLogical(1).bitAnd(1).bitXor(1), .{});
+                if (c.page_size == 16) {
+                    t.loadKeyValue(d, loads.iv.mul(block_keys), stage);
+                } else {
+                    t.loadRows(t.k, loads.iv.mul(block_keys), t.shared.add(c.keyBase()).add(stage.mul(c.tileBytes())), false);
+                    t.loadRows(t.v, loads.iv.mul(block_keys), t.shared.add(c.valueBase()).add(stage.mul(c.tileBytes())), false);
+                }
+                b.cpAsyncMbarrierArrive(fullBarrier(t, stage), true);
+                loads.close();
+            }
+            producer.close();
+        }
+
+        var consumer = b.openIf(tid.ge(producer_threads));
+        {
+        b.setMaxRegisterIncrease(consumer_registers);
         const query_descriptor = ptx.matrixDescriptor(b, t.shared.add(warpgroup.mul(64 * 128)), 16, 1024);
+        b.mbarrierWait(query_barrier, b.constant(.i32, 0), .{});
+        ptx.asyncProxyFence(b);
 
         var initial: [5]V = undefined;
         const zero_output: [accumulator_count]V = @splat(zero);
@@ -214,18 +296,10 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
         initial[4] = zero;
         var loop = b.openFor(lo, hi, 1, initial);
         {
-            b.cpAsyncWaitAll();
+            const step = loop.iv.sub(lo);
+            const stage = step.bitAnd(1);
+            b.mbarrierWait(fullBarrier(t, stage), step.shrLogical(1).bitAnd(1), .{});
             ptx.asyncProxyFence(b);
-            b.syncThreads();
-            const stage = loop.iv.sub(lo).bitAnd(1);
-            const next_stage = stage.bitXor(1);
-            var has_next = b.openIf(loop.iv.add(1).lt(hi));
-            {
-                const next_keys = loop.iv.add(1).mul(block_keys);
-                t.loadRows(t.k, next_keys, t.shared.add(c.keyBase()).add(next_stage.mul(c.tileBytes())), false);
-                t.loadRows(t.v, next_keys, t.shared.add(c.valueBase()).add(next_stage.mul(c.tileBytes())), false);
-                has_next.close();
-            }
 
             var output = ptx.unpackVector(b, accumulator_count, loop.carried[0], .f32);
             var scores: [score_count]V = @splat(zero);
@@ -297,6 +371,11 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
             ptx.wgmmaWait(b, 0);
             ptx.fenceOperands(b, .f32, &output);
             next[0] = ptx.packVector(b, &output);
+            var leader = b.openIf(tid.rem(128).eq(0));
+            {
+                builder.mbarrierArrive(b, emptyBarrier(t, stage));
+                leader.close();
+            }
             loop.yield(next);
         }
 
@@ -341,6 +420,8 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
                 }
                 valid.close();
             }
+        }
+        consumer.close();
         }
         active.close();
     }
