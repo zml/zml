@@ -35,6 +35,18 @@ fn decodeTileSize(options: paged.PagedAttentionOptions) usize {
     return options.block_size;
 }
 
+// With short keys a prefill is latency-bound, so more and smaller query blocks win; with long keys each extra
+// query block rereads the whole K and V, so the large block wins.
+const rocm_short_prefill_seqlen_k: usize = 1024;
+
+fn rocm_prefill_block_m(options: paged.PagedAttentionOptions) usize {
+    if (isRocmTarget() and options.maxSeqLenK() <= rocm_short_prefill_seqlen_k) {
+        return @max(32, options.block_m);
+    }
+
+    return 128;
+}
+
 fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize, max_seqlen_k: usize) bool {
     // Intel decode spills the 2D whole-sequence kernel; force the 3D split-K path.
     if (all_decode and isOneapiTarget()) return false;
@@ -144,7 +156,7 @@ fn select2dConfig(options: paged.PagedAttentionOptions, element_bytes: usize) Co
             block_m = 64;
             tile_size = 16;
         } else {
-            block_m = 128;
+            block_m = rocm_prefill_block_m(options);
         }
 
         if (is_gb300) {
