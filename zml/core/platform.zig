@@ -758,6 +758,8 @@ pub const CreateOptions = struct {
         /// The PJRT C API still exposes this under legacy
         /// `use_tfrt_gpu_client` name.
         gpu_async_dispatch: bool = false,
+        /// On Metal, keep device allocations wired while idle using a periodic GCD timer.
+        keep_resident: bool = true,
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
         // node_id
@@ -835,6 +837,7 @@ pub const CreateOptions = struct {
             }
             switch (target) {
                 .cuda => values.appendAssumeCapacity(.init(.bool, "use_tfrt_gpu_client", self.gpu_async_dispatch)),
+                .metal => values.appendAssumeCapacity(.init(.bool, "metal_keep_resident", self.keep_resident)),
                 else => {},
             }
         }
