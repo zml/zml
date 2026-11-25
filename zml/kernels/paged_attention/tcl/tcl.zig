@@ -89,7 +89,7 @@ pub const paged = struct {
     };
 
     /// `q` is `{.b = tokens, .hkv, .hg, .hd}`, the caches `{.page, .k_chunk, .hkv, .hd}`.
-    /// Sinks are one logit per query head.
+    /// Sinks may vary per token. Relative bias is indexed by logical query-key distance.
     pub fn pagedAttention(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: AttentionOptions) Tensor {
         if (opts.mask == .indices) @panic("Sparse attention masks are not supported by TCL paged attention");
         stdx.debug.assert(q.rank() == 4 and k_cache.rank() == 4 and v_cache.rank() == 4 and k_cache.shape().eqlDims(v_cache.shape()), "TCL attention requires matching rank-four split K/V caches", .{});
@@ -145,6 +145,8 @@ pub const paged = struct {
             .scale = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd))))),
             .decode = decode,
             .use_sink = opts.sink != null,
+            .query_sink = if (opts.sink) |sink| sink.rank() == 2 else false,
+            .extent = if (opts.rel_bias) |bias| bias.dim(.distance) else 0,
             .is_causal = opts.mask.isCausal(),
             .window = @intCast(opts.mask.slidingWindow() orelse 0),
         };
@@ -153,10 +155,22 @@ pub const paged = struct {
         // over a non-power-of-two page count fail to compile, so straight decode reads
         // BF16 caches and pads the table. Repro: repro_sparse_propagation_transmute.py,
         // repro_metadata_page_count_cover_valid_range.py. Remove once both compile.
-        const straight = decode and k_cache.dtype() == .bf16 and v_cache.dtype() == .bf16;
+        const profiled = cfg.query_sink or opts.rel_bias != null;
+        if (profiled and q.dtype() == .f32) cfg.output_dtype = .f32;
+        const straight = decode and !profiled and k_cache.dtype() == .bf16 and v_cache.dtype() == .bf16;
         const straight_keys = if (straight and cfg.tokens > 1) @as(i64, @intCast(std.math.ceilPowerOfTwo(u64, @intCast(@divExact(keys, page))) catch unreachable)) * page else keys;
-        const plan = calibration_plan orelse defaultPlan(cfg, straight_keys, parameters.block_table.dim(.p), plain_decode and straight, straight, chunk);
-        const sink = if (opts.sink) |s| s.convert(.f32).reshape(.{ .hkv = cfg.hkv, .hg = cfg.g }) else Tensor.zeroes(.init(.{ .hkv = cfg.hkv, .hg = cfg.g }, .f32));
+        // Each score also gathers a head row from the relative bias profile.
+        // Bound that intermediate and the native compiler's layout search.
+        // Inkling rounds the exponential weights within a 128-key block before
+        // accumulating values in FP32. Longer blocks can change the routed experts.
+        const profile_keys: i64 = if (cfg.output_dtype == .f32) 128 else 512;
+        const profile_chunk = @min(chunk, @max(1, @divTrunc(profile_keys, alignment)) * alignment);
+        const plan = if (profiled) Plan{ .head = 0, .chunk = profile_chunk, .group = rows } else calibration_plan orelse defaultPlan(cfg, straight_keys, parameters.block_table.dim(.p), plain_decode and straight, straight, chunk);
+        const heads = .{ .hkv = cfg.hkv, .hg = cfg.g };
+        const sink = if (opts.sink) |value|
+            (if (cfg.query_sink) value.convert(.f32).splitAxis(.h, heads) else value.convert(.f32).reshape(heads))
+        else
+            Tensor.zeroes(.init(heads, .f32));
         if (plan.head > 0 and plan.chunk > 0) {
             stdx.debug.assert(plain_decode and cfg.tokens == 1, "TCL hybrid attention takes one plain decode token", .{});
             return hybridDecodeAttention(parameters, q, k_cache, v_cache, cfg.scale, cfg.is_causal, plan).convert(q.dtype());
@@ -198,9 +212,14 @@ pub const paged = struct {
             .k_cache = k_cache.convert(.bf16),
             .v_cache = v_cache.convert(.bf16),
             .sink = sink.pad(0, .{ .hg = Tensor.Pad{ .high = extra } }),
+            // Gather complete head rows with a single token * extent + distance index.
+            .profile = if (opts.rel_bias) |bias| bias.convert(.bf16).splitAxis(.h, heads)
+                .transpose(.{ .b, .distance, .hkv, .hg })
+                .pad(0, .{ .hg = Tensor.Pad{ .high = extra } })
+                .merge(.{ .row = .{ .b, .distance } }) else Tensor.zeroes(.init(.{1}, .bf16)),
         };
-        const outputs: OneShot.Outputs = .{ .out = queries.shape() };
-        const out = if (cfg.a == cfg.chunk)
+        const outputs: OneShot.Outputs = .{ .out = queries.shape().withDtype(if (cfg.output_dtype == .f32) .f32 else .bf16) };
+        const out = if (cfg.a == cfg.chunk and cfg.output_dtype != .f32)
             OneShot.call(inputs, outputs, .{ .cfg = cfg }).out
         else
             Flash.call(inputs, outputs, .{ .cfg = cfg }).out;
@@ -749,12 +768,18 @@ const Cfg = struct {
     scale: f32,
     decode: bool,
     use_sink: bool = false,
+    query_sink: bool = false,
+    extent: i64 = 0,
+    output_dtype: tcl.DType = .bf16,
     is_causal: bool = true,
     window: i32 = -1,
 };
 
 /// Prefill bounds the tactic shapes searched (fewer for narrow heads): the compute-bound hint compiles too slowly.
 fn configure(b: *tcl.Builder, cfg: Cfg) void {
+    // The I/O-bound search for unprofiled decode uses over 40 GiB of host memory
+    // for a single Inkling query. TCC's default schedule handles the profile gather directly.
+    if (cfg.decode and cfg.tokens == 1 and (cfg.query_sink or cfg.extent > 0)) return;
     const shapes: i64 = if (cfg.hkv * cfg.g * cfg.d >= 1024) 16 else 8;
     if (cfg.decode) b.compilerConfig(.{
         .enable_einsum_fusion = true,
@@ -824,9 +849,15 @@ const NativeInputs = struct {
     k_cache: builder.Tensor,
     v_cache: builder.Tensor,
     sink: builder.Tensor,
+    profile: builder.Tensor,
 };
 
-fn declareInputs(b: *tcl.Builder, a: Axes) tcl.FinishError!NativeInputs {
+fn declareInputs(b: *tcl.Builder, a: Axes, cfg: Cfg) tcl.FinishError!NativeInputs {
+    const sink_axes: []const tcl.Axis = if (cfg.query_sink) &.{ a.T, a.Hkv, a.G } else &.{ a.Hkv, a.G };
+    const profile_axes: []const tcl.Axis = if (cfg.extent > 0)
+        &.{ b.axis("ProfileRow", cfg.tokens * cfg.extent), a.Hkv, a.G }
+    else
+        &.{b.axis("Unused", 1)};
     const t = try b.declareArgs(.{
         .q = .{ .dtype = .bf16, .axes = &.{ a.T, a.Hkv, a.G, a.D } },
         .pages = .{ .dtype = .i32, .axes = &.{ a.S, a.AP } },
@@ -834,13 +865,15 @@ fn declareInputs(b: *tcl.Builder, a: Axes) tcl.FinishError!NativeInputs {
         .query_offsets = .{ .dtype = .i32, .axes = &.{a.O} },
         .k_cache = .{ .dtype = .bf16, .axes = &.{ a.P, a.PG, a.Hkv, a.D } },
         .v_cache = .{ .dtype = .bf16, .axes = &.{ a.P, a.PG, a.Hkv, a.D } },
-        .sink = .{ .dtype = .f32, .axes = &.{ a.Hkv, a.G } },
+        .sink = .{ .dtype = .f32, .axes = sink_axes },
+        .profile = .{ .dtype = .bf16, .axes = profile_axes },
     });
-    return .{ .q = t.q, .pages = t.pages, .seq_lens = t.seq_lens, .query_offsets = t.query_offsets, .k_cache = t.k_cache, .v_cache = t.v_cache, .sink = t.sink };
+    return .{ .q = t.q, .pages = t.pages, .seq_lens = t.seq_lens, .query_offsets = t.query_offsets, .k_cache = t.k_cache, .v_cache = t.v_cache, .sink = t.sink, .profile = t.profile };
 }
 
 const Prepared = struct {
     q: builder.Tensor,
+    token: builder.Tensor,
     /// Page table rows: one per block for decode, one per sequence for prefill (blocks select theirs with `pick`).
     pages: builder.Tensor,
     pick: ?builder.Tensor,
@@ -916,6 +949,7 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
         const q = if (cfg.tokens == 1) t.q else try b.gather(t.q, safe_start, a.T, &.{ a.S, a.Hkv, a.G, a.D }, .{});
         return .{
             .q = try b.reshape(q, &.{ a.B, a.I, a.Hkv, a.G, a.D }, .{}),
+            .token = try b.reshape(safe_start, &.{ a.B, a.I }, .{}),
             .pages = try b.reshape(t.pages, &.{ a.B, a.AP }, .{}),
             .pick = null,
             .qpos = try b.reshape(qpos, &.{ a.B, a.I }, .{}),
@@ -975,7 +1009,7 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
     const row = try op.commit(op.fetch(token_block, .{}).muli(cfg.i).addi(op.fetch(tokens, .{})).subi(op.fetch(token_begin, .{})).binary(.maxi, 0).binary(.mini, cfg.b * cfg.i - 1), .{});
     op = b.tensorOperation(.{});
     const first = try op.commit(op.fetch(t.seq_lens, .{}).subi(op.fetch(qlen, .{})), .{});
-    return .{ .q = q, .pages = t.pages, .pick = pick, .qpos = qpos, .kvlen = kvlen, .row = row, .active = active, .first = first, .keys = t.seq_lens };
+    return .{ .q = q, .token = qidx, .pages = t.pages, .pick = pick, .qpos = qpos, .kvlen = kvlen, .row = row, .active = active, .first = first, .keys = t.seq_lens };
 }
 
 fn restoreQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, prepared: Prepared, output: builder.Tensor) tcl.FinishError!builder.Tensor {
@@ -986,7 +1020,7 @@ fn restoreQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, prepared: Prepared, output
     const op = b.tensorOperation(.{ .tactic = .elementwise });
     // Establish the full data layout before broadcasting the I32 row mask.
     const values = op.fetch(ordered, .{});
-    return op.commit(op.where(op.fetch(prepared.active, .{ .broadcast_to = ordered.axes }), .ne, 0, values, 0.0), .{ .dtype = .bf16 });
+    return op.commit(op.where(op.fetch(prepared.active, .{ .broadcast_to = ordered.axes }), .ne, 0, values, 0.0), .{ .dtype = cfg.output_dtype });
 }
 
 const score_min = -std.math.floatMax(f32);
@@ -1042,10 +1076,40 @@ fn attentionMask(b: *tcl.Builder, cfg: Cfg, qpos: builder.Tensor, kvlen: builder
     return mask;
 }
 
-fn maskedScores(b: *tcl.Builder, a: Axes, cfg: Cfg, q: builder.Tensor, k: builder.Tensor, mask: builder.Tensor, keys: tcl.Axis) tcl.FinishError!builder.Tensor {
+fn querySink(b: *tcl.Builder, a: Axes, cfg: Cfg, sink: builder.Tensor, token: builder.Tensor) tcl.FinishError!builder.Tensor {
+    if (!cfg.query_sink) return sink;
+    // Every live query uses the only sink row. TCC has no gather tactic for a singleton table.
+    if (cfg.tokens == 1) {
+        if (cfg.b == 1 and cfg.i == 1) return b.reshape(sink, &.{ a.Hkv, a.G, a.B, a.I }, .{});
+        return b.reshape(sink, &.{ a.Hkv, a.G }, .{});
+    }
+    const selected = try b.gather(sink, token, a.T, &.{ a.B, a.I, a.Hkv, a.G }, .{});
+    const op = b.tensorOperation(.{});
+    return op.commit(op.fetch(selected, .{}), .{ .axes = &.{ a.Hkv, a.G, a.B, a.I } });
+}
+
+fn maskedScores(b: *tcl.Builder, a: Axes, cfg: Cfg, prepared: Prepared, k: builder.Tensor, mask: builder.Tensor, position: builder.Tensor, profile: builder.Tensor, keys: tcl.Axis) tcl.FinishError!builder.Tensor {
     const scores_axes = &.{ a.Hkv, a.G, a.B, a.I, keys };
     var op = b.tensorOperation(.{});
-    const scores = try op.commit(op.contract(q, k, scores_axes).mulf(cfg.scale), .{});
+    var scores = try op.commit(op.contract(prepared.q, k, scores_axes).mulf(cfg.scale), .{});
+    if (cfg.extent > 0) {
+        const pairs = &.{ a.B, a.I, keys };
+        op = b.tensorOperation(.{});
+        const query = try op.commit(op.fetch(prepared.qpos, .{ .broadcast_to = pairs }), .{});
+        op = b.tensorOperation(.{ .tactic = .elementwise });
+        const distance = try op.commit(op.fetch(query, .{}).subi(op.fetch(position, .{})), .{});
+        const index = try validIndices(b, distance, cfg.extent);
+        op = b.tensorOperation(.{});
+        const base = try op.commit(op.fetch(prepared.token, .{}).muli(cfg.extent), .{});
+        op = b.tensorOperation(.{ .tactic = .elementwise });
+        const row = try op.commit(op.fetch(index.safe, .{}).addi(op.fetch(base, .{})), .{});
+        const values = try b.gather(profile, row, profile.axes[0], &.{ a.B, a.I, keys, a.Hkv, a.G }, .{});
+        op = b.tensorOperation(.{ .tactic = .elementwise });
+        const data = op.fetch(values, .{});
+        const bias = try op.commit(op.where(op.fetch(index.valid, .{ .broadcast_to = values.axes }), .ne, 0, data, 0.0), .{ .axes = scores_axes, .dtype = .f32 });
+        op = b.tensorOperation(.{ .tactic = .elementwise });
+        scores = try op.commit(op.fetch(scores, .{}).addf(op.fetch(bias, .{})), .{});
+    }
     op = b.tensorOperation(.{});
     const s = op.fetch(scores, .{});
     return op.commit(op.where(op.fetch(mask, .{}), .ne, 0, s, score_min), .{});
@@ -1072,7 +1136,7 @@ fn safeDenominator(b: *tcl.Builder, sum: builder.Tensor) tcl.FinishError!builder
 
 const OneShot = tcl.Kernel(Cfg, .{
     .name = "attention",
-    .inputs = &.{ "q", "pages", "seq_lens", "query_offsets", "k_cache", "v_cache", "sink" },
+    .inputs = &.{ "q", "pages", "seq_lens", "query_offsets", "k_cache", "v_cache", "sink", "profile" },
     .outputs = &.{"out"},
     .run = struct {
         fn run(b: *tcl.Builder, cfg: Cfg) tcl.FinishError!void {
@@ -1080,8 +1144,9 @@ const OneShot = tcl.Kernel(Cfg, .{
             const a: Axes = .init(b, cfg);
             const A = b.axis("A", cfg.a);
             const Nb = b.axis("Nb", cfg.pages * cfg.pg);
-            const t = try declareInputs(b, a);
+            const t = try declareInputs(b, a, cfg);
             const prepared = try prepareQueries(b, cfg, a, t);
+            const sink = try querySink(b, a, cfg, t.sink, prepared.token);
             const kc = try b.reshape(t.k_cache, &.{ Nb, a.Hkv, a.D }, .{});
             const vc = try b.reshape(t.v_cache, &.{ Nb, a.Hkv, a.D }, .{});
             const page_indices = try validIndices(b, try prepared.blockPages(b, a, prepared.pages), cfg.pages);
@@ -1100,17 +1165,17 @@ const OneShot = tcl.Kernel(Cfg, .{
             const k = try maskCacheValues(b, try b.gather(kc, slots, Nb, &.{ a.B, A, a.Hkv, a.D }, .{ .valid_length = valid_length }), valid_cache);
             const v = try maskCacheValues(b, try b.gather(vc, slots, Nb, &.{ a.B, A, a.Hkv, a.D }, .{ .valid_length = valid_length }), valid_cache);
             const mask = try attentionMask(b, cfg, prepared.qpos, prepared.kvlen, position, valid_keys);
-            const masked = try maskedScores(b, a, cfg, prepared.q, k, mask, A);
+            const masked = try maskedScores(b, a, cfg, prepared, k, mask, position, t.profile, A);
             var op = b.tensorOperation(.{});
             const p = if (cfg.decode) compact: {
-                const exp_sink = if (cfg.use_sink) sink: {
-                    const maximum = try op.commit(op.fetch(masked, .{}).reduce(&.{A}, .maxf).maxf(op.fetch(t.sink, .{})), .{});
-                    break :sink try expDifference(b, t.sink, maximum);
+                const exp_sink = if (cfg.use_sink) exponent_blk: {
+                    const maximum = try op.commit(op.fetch(masked, .{}).reduce(&.{A}, .maxf).maxf(op.fetch(sink, .{})), .{});
+                    break :exponent_blk try expDifference(b, sink, maximum);
                 } else null;
                 op = b.tensorOperation(.{});
                 const scores = op.fetch(masked, .{});
                 var maximum = scores.reduce(&.{A}, .maxf);
-                if (cfg.use_sink) maximum = maximum.maxf(op.fetch(t.sink, .{}));
+                if (cfg.use_sink) maximum = maximum.maxf(op.fetch(sink, .{}));
                 const e = scores.subf(maximum).exp();
                 var sum = e.reduce(&.{A}, .addf);
                 if (exp_sink) |s| sum = sum.addf(op.fetch(s, .{}));
@@ -1121,10 +1186,10 @@ const OneShot = tcl.Kernel(Cfg, .{
             } else tiled: {
                 // Separate reductions schedule better for multi-query blocks with the current compiler.
                 var m = op.fetch(masked, .{}).reduce(&.{A}, .maxf);
-                if (cfg.use_sink) m = m.maxf(op.fetch(t.sink, .{}));
+                if (cfg.use_sink) m = m.maxf(op.fetch(sink, .{}));
                 const maximum = try op.commit(m, .{});
                 const e = try maskedExp(b, masked, maximum, mask);
-                const exp_sink = if (cfg.use_sink) try expDifference(b, t.sink, maximum) else null;
+                const exp_sink = if (cfg.use_sink) try expDifference(b, sink, maximum) else null;
                 op = b.tensorOperation(.{});
                 var sum = op.fetch(e, .{}).reduce(&.{A}, .addf);
                 if (exp_sink) |s| sum = sum.addf(op.fetch(s, .{}));
@@ -1141,7 +1206,7 @@ const OneShot = tcl.Kernel(Cfg, .{
 
 const Flash = tcl.Kernel(Cfg, .{
     .name = "flash_attention",
-    .inputs = &.{ "q", "pages", "seq_lens", "query_offsets", "k_cache", "v_cache", "sink" },
+    .inputs = &.{ "q", "pages", "seq_lens", "query_offsets", "k_cache", "v_cache", "sink", "profile" },
     .outputs = &.{"out"},
     .run = struct {
         fn run(b: *tcl.Builder, cfg: Cfg) tcl.FinishError!void {
@@ -1150,8 +1215,9 @@ const Flash = tcl.Kernel(Cfg, .{
             const C = b.axis("C", @divExact(cfg.a, cfg.chunk));
             const Ck = b.axis("Ck", cfg.chunk);
             const Cp = b.axis("Cp", @divExact(cfg.chunk, cfg.pg));
-            const t = try declareInputs(b, a);
+            const t = try declareInputs(b, a, cfg);
             const prepared = try prepareQueries(b, cfg, a, t);
+            const sink = try querySink(b, a, cfg, t.sink, prepared.token);
             const rows = prepared.pages.axes[0];
             const by_row = try b.reshape(prepared.pages, &.{ rows, C, Cp }, .{});
             const page_op = b.tensorOperation(.{});
@@ -1221,22 +1287,40 @@ const Flash = tcl.Kernel(Cfg, .{
                 const mask = try attentionMask(b, cfg, prepared.qpos, prepared.kvlen, position, valid_keys);
                 const k = try b.reshape(try b.gather(t.k_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{});
                 const v = try b.reshape(try b.gather(t.v_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{});
-                const masked = try maskedScores(b, a, cfg, prepared.q, k, mask, Ck);
+                const masked = try maskedScores(b, a, cfg, prepared, k, mask, position, t.profile, Ck);
                 op = b.tensorOperation(.{});
                 const max_cur = try op.commit(op.fetch(masked, .{}).reduce(&.{Ck}, .maxf), .{});
                 op = b.tensorOperation(.{ .tactic = .elementwise });
                 const max_new = try op.commit(op.fetch(max_cur, .{}).maxf(op.fetch(max_acc, .{})), .{});
                 const rescale = try expDifference(b, max_acc, max_new);
-                const e = try maskedExp(b, masked, max_new, mask);
+                // Round the block's own exponentials for PV, then merge its FP32
+                // sum and numerator using the same scale. This also covers one block.
+                const independent = cfg.output_dtype == .f32;
+                const beta = if (independent) try expDifference(b, max_cur, max_new) else null;
+                const e = try maskedExp(b, masked, if (independent) max_cur else max_new, mask);
                 op = b.tensorOperation(.{});
-                const sum_cur = try op.commit(op.fetch(e, .{}).reduce(&.{Ck}, .addf), .{});
+                var sum_cur = try op.commit(op.fetch(e, .{}).reduce(&.{Ck}, .addf), .{});
+                if (beta) |factor| {
+                    op = b.tensorOperation(.{});
+                    sum_cur = try op.commit(op.fetch(sum_cur, .{}).mulf(op.fetch(factor, .{})), .{});
+                }
                 op = b.tensorOperation(.{});
                 const sum_new = try op.commit(op.fetch(sum_acc, .{}).mulf(op.fetch(rescale, .{})).addf(op.fetch(sum_cur, .{})), .{});
                 op = b.tensorOperation(.{});
                 // Materialize the narrowing conversion through the vector engine.
                 const p = try op.commit(op.fetch(e, .{}).mulf(1.0), .{ .dtype = .bf16 });
                 op = b.tensorOperation(.{});
-                const qkv_cur = try op.commit(op.contract(p, v, out_axes), .{});
+                const values = if (cfg.extent > 0 or cfg.query_sink)
+                    try maskCacheValues(b, v, try cacheMask(b, valid_keys, prepared.kvlen, position))
+                else
+                    v;
+                var qkv_cur = try op.commit(op.contract(p, values, out_axes), .{});
+                // TCC requires each elementwise instruction to consume the previous result.
+                // Scale the current tile separately from the running numerator.
+                if (beta) |factor| {
+                    op = b.tensorOperation(.{});
+                    qkv_cur = try op.commit(op.fetch(qkv_cur, .{}).mulf(op.fetch(factor, .{})), .{});
+                }
                 op = b.tensorOperation(.{});
                 const qkv_new = try op.commit(op.fetch(qkv_acc, .{}).mulf(op.fetch(rescale, .{})).addf(op.fetch(qkv_cur, .{})), .{});
                 try loop.yield(.{ sum_new, qkv_new, max_new });
@@ -1246,9 +1330,9 @@ const Flash = tcl.Kernel(Cfg, .{
             var numerator = loop.results[1];
             if (cfg.use_sink) {
                 op = b.tensorOperation(.{});
-                const maximum = try op.commit(op.fetch(loop.results[2], .{}).maxf(op.fetch(t.sink, .{})), .{});
+                const maximum = try op.commit(op.fetch(loop.results[2], .{}).maxf(op.fetch(sink, .{})), .{});
                 const alpha = try expDifference(b, loop.results[2], maximum);
-                const exp_sink = try expDifference(b, t.sink, maximum);
+                const exp_sink = try expDifference(b, sink, maximum);
                 op = b.tensorOperation(.{});
                 sum = try op.commit(op.fetch(sum, .{}).mulf(op.fetch(alpha, .{})).addf(op.fetch(exp_sink, .{})), .{});
                 op = b.tensorOperation(.{});
@@ -1256,7 +1340,7 @@ const Flash = tcl.Kernel(Cfg, .{
             }
             const denominator = try safeDenominator(b, sum);
             op = b.tensorOperation(.{});
-            const output = try op.commit(op.fetch(numerator, .{}).divf(op.fetch(denominator, .{})), .{ .dtype = .bf16 });
+            const output = try op.commit(op.fetch(numerator, .{}).divf(op.fetch(denominator, .{})), .{ .dtype = cfg.output_dtype });
             b.ret(&.{try restoreQueries(b, cfg, a, prepared, output)});
         }
     }.run,

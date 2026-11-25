@@ -9,17 +9,44 @@ const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const tcl = zml.kernel.tcl;
 const kernels = @import("moe.zig");
+const block_scaled = @import("block_scaled.zig");
 const api = @import("zml/kernels/moe/api");
+
+/// Both projections own the same experts. Each denominator is a checkpoint scalar.
+pub fn scalePartitionSpecs(
+    scales: api.Options.FuriosaScales,
+    experts: zml.Sharding.Partitioning.Logical,
+) zml.ops.PartitionSpecs(api.Options.FuriosaScales) {
+    const spec: zml.ops.PartitionSpecs(api.Options.FuriosaScale) = .{
+        .amax = experts,
+        .denominator = .replicated,
+    };
+    return .{
+        .gate_up = if (scales.gate_up != null) spec else null,
+        .down = if (scales.down != null) spec else null,
+    };
+}
+
+pub fn supports(scheme: ?nn.Quantization.Scheme, dtype: zml.DataType) bool {
+    return switch (scheme orelse return true) {
+        .fp8_block128, .mxfp8 => dtype == .f8e4m3fn,
+        .nvfp4 => dtype == .u8 or dtype == .f4e2m1,
+        .mxfp4, .fp8_per_channel, .fp8_per_tensor, .fp8_block32 => false,
+    };
+}
 
 /// `input` is `{.t, .d}`, routing IDs and weights are `{.t, .topk}`, `gate_up`
 /// is `{.expert, .dout = 2 * inter (gate then up), .d}`, and `down` is
-/// `{.expert, .d, .dout = inter}`. Experts are BF16 or block-128 FP8 with
-/// BF16/F32 scales. Supports plain SwiGLU and BF16 GEGLU with tanh GELU.
+/// `{.expert, .d, .dout = inter}`. Select the projection from this layer's metadata.
 pub fn fusedExperts(input: Tensor, routing: api.LocalRouting, gate_up_linear: nn.Linear, down_linear: nn.Linear, opts: api.Options) Tensor {
     const topk_ids = routing.localIds();
-    stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL MoE requires quantize_input=false and routing_weight_placement=after_down", .{});
     stdx.debug.assert(gate_up_linear.bias == null and down_linear.bias == null, "TCL MoE takes experts without bias", .{});
     stdx.debug.assert(input.dtype() == .bf16 and topk_ids.dtype() == .i32, "TCL MoE takes BF16 activations and i32 ids", .{});
+    if (gate_up_linear.quantizationScheme()) |scheme| switch (scheme) {
+        .nvfp4, .mxfp8 => return block_scaled.fusedExperts(input, topk_ids, routing.weights, gate_up_linear, down_linear, opts),
+        else => {},
+    };
+    stdx.debug.assert(!opts.quantize_input and opts.routing_weight_placement == .after_down, "TCL BF16/block-128 MoE requires quantize_input=false and routing_weight_placement=after_down", .{});
     const format = expertFormat(gate_up_linear, down_linear);
     const swiglu = opts.activation == .swiglu and std.meta.eql(opts.activation.swiglu, .{});
     stdx.debug.assert(swiglu or (format == .bf16 and opts.activation == .geglu_tanh), "TCL MoE supports plain SwiGLU or GEGLU-tanh with BF16 experts, got {s}", .{@tagName(opts.activation)});

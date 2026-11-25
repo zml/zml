@@ -2,7 +2,10 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "tcl",
-    srcs = ["moe.zig"],
+    srcs = [
+        "block_scaled.zig",
+        "moe.zig",
+    ],
     import_name = "zml/kernels/moe/tcl",
     main = "tcl.zig",
     visibility = ["//visibility:public"],
@@ -12,6 +15,7 @@ zig_library(
         "//zml/core",
         "//zml/kernels/moe/api",
         "//zml/nn",
+        "//zml/quantization",
     ],
 )
 

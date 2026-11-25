@@ -76,13 +76,7 @@ pub const Backend = enum {
                 };
             },
             .tpu => if (scheme == null) .mosaic_tpu else error.UnsupportedQuantization,
-            .furiosa => b: {
-                const s = scheme orelse break :b .tcl;
-                break :b switch (s) {
-                    .fp8_block128 => if (dtype == .f8e4m3fn) .tcl else error.UnsupportedQuantization,
-                    .mxfp4, .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block32 => error.UnsupportedQuantization,
-                };
-            },
+            .furiosa => if (tcl.supports(scheme, dtype)) .tcl else error.UnsupportedQuantization,
             .metal => b: {
                 const s = scheme orelse break :b .metal;
                 break :b switch (s) {
@@ -298,6 +292,12 @@ pub fn forwardMoe(
             .weights = partitioning.in_specs.weights,
             .gate_up = projection_specs[0],
             .down = projection_specs[1],
+            .opts = .{
+                .furiosa_scales = tcl.scalePartitionSpecs(
+                    opts.furiosa_scales,
+                    projection_specs[0].weight,
+                ),
+            },
         },
         .out_specs = partitioning.out_specs,
     });
