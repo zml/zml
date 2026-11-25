@@ -334,8 +334,9 @@ fn quantizeRowsKernel(b: *B, cfg: RowQuantConfig) cute.FinishError!void {
     }
 
     // The row maximum: each warp's, then all of them through shared memory.
+    const warp_maximum = b.warpMaxF32(maximum);
     var first_lane = b.openIf(lane.eq(0));
-    warp_maxima.set(.{word.div(32)}, b.warpMaxF32(maximum));
+    warp_maxima.set(.{word.div(32)}, warp_maximum);
     first_lane.close();
     b.syncThreads();
     var row_maximum = zero;
