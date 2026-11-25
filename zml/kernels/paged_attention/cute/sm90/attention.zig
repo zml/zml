@@ -15,9 +15,10 @@ pub const block_rows: i64 = 128;
 pub const block_keys: i64 = 128;
 pub const thread_count: i64 = 384;
 const producer_threads: i64 = 128;
+const consumer_threads: u32 = 256;
 const stages: i64 = 3;
-const producer_registers: u32 = 40;
-const consumer_registers: u32 = 232;
+const producer_registers: u32 = 56;
+const consumer_registers: u32 = 216;
 
 pub const Config = struct {
     head_dim: i64,
@@ -203,6 +204,8 @@ fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
         zero: V,
         neg_inf: V,
         release_leader: V,
+        turn_barrier: V,
+        next_turn_barrier: V,
 
         const SoftmaxState = struct { maximum: [2]V, sum: [2]V, scale: [2]V };
 
@@ -214,6 +217,15 @@ fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
             const step = block.sub(self.lo);
             self.b.mbarrierWait(fullBarrier(self.t, self.stageOf(block)), step.div(stages).bitAnd(1), .{});
             ptx.asyncProxyFence(self.b);
+        }
+
+        // Warpgroups issue their wgmma batches in turn so one's softmax runs while the other's GEMMs use the tensor cores.
+        fn waitTurn(self: Self) void {
+            ptx.namedBarrierSync(self.b, self.turn_barrier, consumer_threads);
+        }
+
+        fn passTurn(self: Self) void {
+            ptx.namedBarrierArrive(self.b, self.next_turn_barrier, consumer_threads);
         }
 
         fn release(self: Self, block: V) void {
@@ -272,32 +284,19 @@ fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
         // Masks the scores of `block`, folds them into the running maximum and sum, and replaces them by probabilities.
         fn softmax(self: Self, block: V, scores: *[score_count]V, previous_maximum: [2]V, previous_sum: [2]V) SoftmaxState {
             const b = self.b;
-            const c = self.c;
-            const t = self.t;
-            // A column offset (relative to this thread's first key) is visible when lower <= offset <= upper, one compare per bound.
-            var upper: [2]V = undefined;
-            var lower: [2]V = undefined;
-            const thread_key = block.mul(block_keys).add(self.column0);
-            for (0..2) |h| {
-                const row = self.first_row.add(self.row_in_tile).add(h * 8);
-                const position = t.klen.sub(t.qlen).add(row.div(c.group));
-                var last_key = t.klen.sub(1);
-                if (c.causal) {
-                    last_key = last_key.minimum(position);
-                }
-                upper[h] = b.select(row.lt(t.qlen.mul(c.group)), last_key.sub(thread_key), b.constant(.i32, -1));
-                lower[h] = position.sub(c.window - 1).sub(thread_key);
+            const unmasked = ptx.packVector(b, scores);
+            var masked = b.openIfElse(self.blockNeedsMask(block), .{unmasked.type_()});
+            {
+                self.maskScores(block, scores);
+                masked.yieldThen(.{ptx.packVector(b, scores)});
             }
+            {
+                masked.yieldElse(.{unmasked});
+            }
+            scores.* = ptx.unpackVector(b, score_count, masked.results[0], .f32);
             var thread_max: [2]V = .{ self.neg_inf, self.neg_inf };
-            for (scores, 0..) |*score, index| {
-                const h = rowOf(index);
-                const column_offset: i32 = @intCast((index / 4) * 8 + index % 2);
-                var valid = upper[h].ge(column_offset);
-                if (c.window > 0) {
-                    valid = valid.bitAnd(lower[h].le(column_offset));
-                }
-                score.* = b.select(valid, score.*, self.neg_inf);
-                thread_max[h] = b.fmax(thread_max[h], score.*, .{ .ftz = true });
+            for (scores, 0..) |score, index| {
+                thread_max[rowOf(index)] = b.fmax(thread_max[rowOf(index)], score, .{ .ftz = true });
             }
             var state: SoftmaxState = undefined;
             var offset: [2]V = undefined;
@@ -314,6 +313,53 @@ fn Mainloop(comptime d: usize, comptime dt: cute.DType) type {
                 state.sum[rowOf(index)] = state.sum[rowOf(index)].add(score.*);
             }
             return state;
+        }
+
+        // True when some score of the CTA's rows and this block falls outside the visible keys, so interior blocks skip the masking.
+        fn blockNeedsMask(self: Self, block: V) V {
+            const c = self.c;
+            const t = self.t;
+            const first_position = t.klen.sub(t.qlen).add(self.first_row.div(c.group));
+            const last_position = t.klen.sub(t.qlen).add(self.first_row.add(block_rows - 1).div(c.group));
+            var last_visible = t.klen.sub(1);
+            if (c.causal) {
+                last_visible = last_visible.minimum(first_position);
+            }
+            const block_start = block.mul(block_keys);
+            var needs_mask = self.first_row.add(block_rows).gt(t.qlen.mul(c.group)).bitOr(block_start.add(block_keys - 1).gt(last_visible));
+            if (c.window > 0) {
+                needs_mask = needs_mask.bitOr(block_start.lt(last_position.sub(c.window - 1)));
+            }
+            return needs_mask;
+        }
+
+        // A column offset (relative to this thread's first key) is visible when lower <= offset <= upper, one compare per bound.
+        fn maskScores(self: Self, block: V, scores: *[score_count]V) void {
+            const b = self.b;
+            const c = self.c;
+            const t = self.t;
+            var upper: [2]V = undefined;
+            var lower: [2]V = undefined;
+            const thread_key = block.mul(block_keys).add(self.column0);
+            for (0..2) |h| {
+                const row = self.first_row.add(self.row_in_tile).add(h * 8);
+                const position = t.klen.sub(t.qlen).add(row.div(c.group));
+                var last_key = t.klen.sub(1);
+                if (c.causal) {
+                    last_key = last_key.minimum(position);
+                }
+                upper[h] = b.select(row.lt(t.qlen.mul(c.group)), last_key.sub(thread_key), b.constant(.i32, -1));
+                lower[h] = position.sub(c.window - 1).sub(thread_key);
+            }
+            for (scores, 0..) |*score, index| {
+                const h = rowOf(index);
+                const column_offset: i32 = @intCast((index / 4) * 8 + index % 2);
+                var valid = upper[h].ge(column_offset);
+                if (c.window > 0) {
+                    valid = valid.bitAnd(lower[h].le(column_offset));
+                }
+                score.* = b.select(valid, score.*, self.neg_inf);
+            }
         }
     };
 }
@@ -433,14 +479,24 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
             .zero = zero,
             .neg_inf = neg_inf,
             .release_leader = tid.rem(128).eq(0),
+            .turn_barrier = warpgroup.add(1),
+            .next_turn_barrier = b.constant(.i32, 2).sub(warpgroup),
         };
         const zero_output: [accumulator_count]V = @splat(zero);
         const zero_packed = ptx.packVector(b, &zero_output);
-        var nonempty = b.openIfElse(hi.gt(lo), .{ zero_packed.type_(), zero.type_(), zero.type_(), zero.type_(), zero.type_() });
+        const has_rows = first_row.add(warpgroup.mul(64)).lt(qlen.mul(c.group));
+        var nonempty = b.openIfElse(hi.gt(lo).bitAnd(has_rows), .{ zero_packed.type_(), zero.type_(), zero.type_(), zero.type_(), zero.type_() });
         {
             var scores: [score_count]V = @splat(zero);
+            var bootstrap = b.openIf(warpgroup.eq(1));
+            {
+                ptx.namedBarrierArrive(b, b.constant(.i32, 1), consumer_threads);
+                bootstrap.close();
+            }
             mainloop.waitFull(lo);
+            mainloop.waitTurn();
             mainloop.issueScores(&scores, lo);
+            mainloop.passTurn();
             ptx.wgmmaWait(b, 0);
             ptx.fenceOperands(b, .f32, &scores);
             const first = mainloop.softmax(lo, &scores, .{ neg_inf, neg_inf }, .{ zero, zero });
@@ -453,9 +509,11 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
                 var previous_words = ptx.unpackVector(b, score_count / 2, loop.carried[1], .i32);
                 var block_scores: [score_count]V = @splat(zero);
                 mainloop.waitFull(block);
+                mainloop.waitTurn();
                 mainloop.issueScores(&block_scores, block);
                 mainloop.rescale(&output, loop.carried[6..8].*);
                 mainloop.issueValues(&output, &previous_words, block.sub(1));
+                mainloop.passTurn();
                 ptx.wgmmaWait(b, 1);
                 ptx.fenceOperands(b, .f32, &block_scores);
                 const state = mainloop.softmax(block, &block_scores, loop.carried[2..4].*, loop.carried[4..6].*);
@@ -475,6 +533,24 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime dt: cute.DType) cute.Fi
             nonempty.yieldThen(.{ ptx.packVector(b, &output), loop.results[2], loop.results[3], loop.results[4], loop.results[5] });
         }
         {
+            // A warpgroup without valid rows still plays its part in the stage and turn handshakes so the other warpgroup's protocol stays whole.
+            var drain_needed = b.openIf(hi.gt(lo));
+            {
+                var bootstrap = b.openIf(warpgroup.eq(1));
+                {
+                    ptx.namedBarrierArrive(b, b.constant(.i32, 1), consumer_threads);
+                    bootstrap.close();
+                }
+                var drain = b.openFor(lo, hi, 1, .{});
+                {
+                    mainloop.waitFull(drain.iv);
+                    mainloop.waitTurn();
+                    mainloop.passTurn();
+                    mainloop.release(drain.iv);
+                    drain.close();
+                }
+                drain_needed.close();
+            }
             nonempty.yieldElse(.{ zero_packed, neg_inf, neg_inf, zero, zero });
         }
 

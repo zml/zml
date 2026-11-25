@@ -46,6 +46,14 @@ pub fn unpackVector(b: *B, comptime n: usize, packed_values: V, dtype: DType) [n
     return values;
 }
 
+pub fn namedBarrierSync(b: *B, id: V, comptime threads: u32) void {
+    builder.asmVoid(b, print(b, "bar.sync $0, {d};", .{threads}), &.{id}, "r,~{memory}");
+}
+
+pub fn namedBarrierArrive(b: *B, id: V, comptime threads: u32) void {
+    builder.asmVoid(b, print(b, "bar.arrive $0, {d};", .{threads}), &.{id}, "r,~{memory}");
+}
+
 pub fn wgmmaFence(b: *B) void {
     builder.asmVoid(b, "wgmma.fence.sync.aligned;", &.{}, "~{memory}");
 }
