@@ -310,7 +310,7 @@ fn kernelUnifiedAttention3d(
         offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
-    const query_mask_0 = query_pos.lt(cur_batch_query_len);
+    const query_mask_0 = shared.queryPositionMask(query_pos, cur_batch_query_len, offs_m, BLOCK_Q * NUM_QUERIES_PER_KV);
     const query_mask_1 = query_offset_1.lt(@as(i32, @intCast(NUM_QUERY_HEADS)));
 
     const q_mask_pre = k.expandDims(query_mask_0, 1).bitAnd(k.expandDims(query_mask_1, 1));
@@ -368,8 +368,7 @@ fn kernelUnifiedAttention3d(
     else
         null;
 
-    const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-    const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
+    const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, @intCast(BLOCK_Q)));
     const max_seq_prefix_len = if (config.is_causal) max_prefix_raw.minimum(seq_len) else seq_len;
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
