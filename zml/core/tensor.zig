@@ -4776,6 +4776,11 @@ pub const Tensor = struct {
         );
     }
 
+    /// Smoothly bounds `x` to (-cap, cap).
+    pub fn softcap(x: Tensor, cap: f32) Tensor {
+        return x.divByConst(cap).tanh().scale(cap);
+    }
+
     fn binaryOp(
         op_name: []const u8,
         op_fn: fn (*mlir.Context, *const mlir.Value, *const mlir.Value, *const mlir.Location) *mlir.Operation,

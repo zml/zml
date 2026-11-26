@@ -2,52 +2,16 @@
 //! Weights use [expert, output, input] order with concatenated gate/up columns.
 const std = @import("std");
 
-const stdx = @import("stdx");
-
+const Activation = @import("zml/kernels/moe/api").Activation;
+const GlobalOptions = @import("zml/kernels/moe/api").Options;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const nn = @import("zml/nn");
-
+const roundE2m1 = @import("zml/quantization").roundE2m1;
+const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
+const stdx = @import("stdx");
 const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const GlobalOptions = @import("zml/kernels/moe/api").Options;
-const Activation = @import("zml/kernels/moe/api").Activation;
-const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
-const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
-
-pub fn activate(x: Tensor, activation: Activation) Tensor {
-    return switch (activation) {
-        .silu => x.silu(),
-        .gelu => x.gelu(),
-        .relu => x.relu(),
-        .swiglu, .swiglu_step, .geglu, .geglu_tanh => blk: {
-            const mid = @divExact(x.dim(.out), 2);
-            var gate = x.slice(.out, .{ .end = mid });
-            var up = x.slice(.out, .{ .start = mid });
-
-            switch (activation) {
-                .swiglu_step => {
-                    gate = gate.div(gate.negate().exp().addConstant(1));
-                    if (activation.swiglu_step.limit) |limit| {
-                        gate = gate.minimum(Tensor.scalar(limit, x.dtype()));
-                        up = up.clamp(Tensor.scalar(-limit, x.dtype()), Tensor.scalar(limit, x.dtype()));
-                    }
-                    break :blk gate.mul(up);
-                },
-                .swiglu => {
-                    if (activation.swiglu.limit) |limit| {
-                        gate = gate.minimum(Tensor.scalar(limit, x.dtype()));
-                        up = up.clamp(Tensor.scalar(-limit, x.dtype()), Tensor.scalar(limit, x.dtype()));
-                    }
-                    if (activation.swiglu.bias) |bias| up = up.addConstant(bias);
-                    break :blk gate.div(gate.negate().exp().addConstant(1)).mul(up);
-                },
-                .geglu => break :blk gelu(gate).mul(up),
-                .geglu_tanh => break :blk gate.gelu().mul(up),
-                else => unreachable, // already handled above
-            }
-        },
-    };
-}
 
 /// More precise GELU approximation than the default Zig implementation, which is
 /// based on tanh. This is the same approximation used in JAX.
@@ -87,20 +51,6 @@ pub fn dequantize(linear: nn.Linear) Tensor {
     return result;
 }
 
-// E2M1 round-to-nearest, ties-to-even expressed independently of native
-// float-to-FP4 lowering. Even encoding indices win midpoint ties.
-fn roundFp4(x: Tensor) Tensor {
-    const magnitude = x.abs();
-    var rounded = Tensor.scalar(6, .f32).broad(x.shape());
-    const thresholds = [_]f32{ 5, 3.5, 2.5, 1.75, 1.25, 0.75, 0.25 };
-    const values = [_]f32{ 4, 3, 2, 1.5, 1, 0.5, 0 };
-    inline for (thresholds, values, 0..) |threshold, value, i| {
-        rounded = magnitude.cmp(if (i % 2 == 0) .LE else .LT, Tensor.scalar(threshold, .f32))
-            .select(Tensor.scalar(value, .f32).broad(x.shape()), rounded);
-    }
-    return x.cmp(.LT, Tensor.scalar(0, .f32)).select(rounded.negate(), rounded);
-}
-
 // Quantize and dequantize activation groups using tensor math, independently of
 // Triton's quantizer. The return value is the represented value in FP32.
 fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType) Tensor {
@@ -118,7 +68,7 @@ fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType
             .minimum(Tensor.scalar(448, .f32))
             .convert(.f8e4m3fn).optimizationBarrier().convert(.f32).broad(grouped.shape());
         const divisor = scale.cmp(.NE, Tensor.scalar(0, .f32)).select(scale, Tensor.scalar(1, .f32).broad(scale.shape()));
-        return roundFp4(grouped.mul(Tensor.scalar(1, .f32).div(divisor))).mul(scale)
+        return roundE2m1(grouped.mul(Tensor.scalar(1, .f32).div(divisor))).mul(scale)
             .reshape(x.shape().withDtype(.f32)).mul(global.asScalar());
     }
     if (opts.input_quantization == .automatic and (!opts.quantize_input or scheme == .mxfp4)) return x.convert(dtype).convert(.f32);
@@ -184,7 +134,7 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
     // Keep the projection's rounding boundary when XLA fuses activation/routing
     // arithmetic; otherwise the reference can disagree with explicit BF16 GEMMs.
     const projected = project(hidden, gate_up, ids, opts, input.dtype()).convert(input.dtype()).optimizationBarrier().convert(.f32);
-    var activated = activate(projected, opts.activation);
+    var activated = opts.activation.applyActivation(projected, .concatenated);
     if (opts.routing_weight_placement == .before_down) activated = activated.mul(weights.broad(activated.shape()));
     var output = project(activated.rename(.{ .out = .in }), down, ids, opts, input.dtype());
     if (opts.routing_weight_placement == .after_down) output = output.mul(weights.broad(output.shape()));
@@ -206,7 +156,7 @@ pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: nn.Linear, do
 test "MoE compliance: FP4 midpoint rounding" {
     const Local = struct {
         fn call(x: Tensor) Tensor {
-            return roundFp4(x);
+            return roundE2m1(x);
         }
     };
     const values = [_]f32{ -7, -5, -3.5, -2.5, -1.75, -1.25, -0.75, -0.25, 0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 7 };
@@ -224,4 +174,36 @@ test "MoE compliance: FP4 midpoint rounding" {
     const actual = try output.toSliceAlloc(allocator, io);
     defer actual.free(allocator);
     try std.testing.expectEqualSlices(f32, &expected, actual.constItems(f32));
+}
+
+test "MoE compliance: capped SwiGLU" {
+    const activation: Activation = .{ .capped_swiglu = .{ .gate_cap = 4, .up_cap = 25 } };
+    const Local = struct {
+        // The activation Triton, Fly and Metal apply between their GEMMs, and this reference.
+        fn call(x: Tensor, act: Activation) Tensor {
+            return Tensor.stack(&.{ act.applyActivation(x, .concatenated), act.applyActivation(x, .concatenated) }, 0, .implementation);
+        }
+    };
+    const gates = [_]f32{ -9, -2.5, -0.5, 0, 0.75, 3, 12 };
+    const ups = [_]f32{ 40, -30, 2, 7, -1.5, 0.25, -60 };
+    const values = gates ++ ups;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const x: Tensor = .init(.{ .token = 1, .out = values.len }, .f32);
+    var exe = try platform.compileFn(allocator, io, Local.call, .{ x, activation }, .{});
+    defer exe.deinit();
+    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
+    defer input.deinit();
+    var output = try exe.eval(allocator, io, .{input});
+    defer output.deinit();
+    const actual = try output.toSliceAlloc(allocator, io);
+    defer actual.free(allocator);
+    const results = actual.constItems(f32);
+    for (0..2) |implementation| {
+        for (gates, ups, 0..) |gate, up, i| {
+            const expected = 4 * std.math.tanh(gate / 4) / (1 + @exp(-gate)) * 25 * std.math.tanh(up / 25);
+            try std.testing.expectApproxEqAbs(expected, results[implementation * gates.len + i], 1e-4 * @max(1, @abs(expected)));
+        }
+    }
 }
