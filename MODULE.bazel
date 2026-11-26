@@ -158,6 +158,14 @@ register_toolchains("@zls_toolchains//:all")
 
 ### LLVM Bootstrapped toolchains
 register_toolchains("@llvm//toolchain:all")
+
+osx = use_extension("@llvm//extensions:osx.bzl", "osx")
+osx.frameworks(names = [
+    "CoreFoundation",
+    "Foundation",
+    "IOKit",
+])
+osx.libraries(names = ["libIOReport"])
 ###
 
 uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = True)

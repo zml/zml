@@ -1,12 +1,11 @@
 //! Inspired by mactop.
 
 const std = @import("std");
-const iokit = @import("iokit.zig");
+const c = @import("c.zig");
 
 const Smc = @This();
 
-api: iokit.Api,
-connection: iokit.Object,
+connection: c.io_connect_t,
 temperatures: []const Key,
 fans: []const Fan,
 /// Whole-machine power: the system total (laptops), the DC-in total, then the DC-in rail,
@@ -41,16 +40,15 @@ const min_celsius = 10;
 const max_celsius = 150;
 const max_watts = 1000;
 
-pub fn open(arena: std.mem.Allocator, api: iokit.Api) !Smc {
-    const service = api.IOServiceGetMatchingService(iokit.main_port, api.IOServiceMatching("AppleSMC"));
+pub fn open(arena: std.mem.Allocator) !Smc {
+    const service = c.IOServiceGetMatchingService(c.kIOMainPortDefault, c.IOServiceMatching("AppleSMC"));
     if (service == 0) return error.SmcNotFound;
-    defer _ = api.IOObjectRelease(service);
+    defer _ = c.IOObjectRelease(service);
 
-    var connection: iokit.Object = 0;
-    try iokit.check(api.IOServiceOpen(service, std.c.mach_task_self(), 0, &connection));
+    var connection: c.io_connect_t = 0;
+    try check(c.IOServiceOpen(service, std.c.mach_task_self(), 0, &connection));
 
     var smc: Smc = .{
-        .api = api,
         .connection = connection,
         .temperatures = &.{},
         .fans = &.{},
@@ -66,7 +64,7 @@ pub fn open(arena: std.mem.Allocator, api: iokit.Api) !Smc {
 }
 
 pub fn close(self: Smc) void {
-    _ = self.api.IOServiceClose(self.connection);
+    _ = c.IOServiceClose(self.connection);
 }
 
 pub fn temperature(self: Smc) ?u64 {
@@ -157,10 +155,14 @@ fn call(self: Smc, args: struct { key: u32 = 0, size: u32 = 0, command: Call.Com
 
     var output = std.mem.zeroes(Call);
     var size: usize = @sizeOf(Call);
-    try iokit.check(self.api.IOConnectCallStructMethod(self.connection, 2, &request, @sizeOf(Call), &output, &size));
+    try check(c.IOConnectCallStructMethod(self.connection, 2, &request, @sizeOf(Call), &output, &size));
     if (output.result != 0) return error.SmcError;
 
     return output;
+}
+
+fn check(status: c.kern_return_t) error{IoKitError}!void {
+    if (status != c.KERN_SUCCESS) return error.IoKitError;
 }
 
 fn find(self: Smc, name: u32) !Key {
