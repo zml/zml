@@ -1,5 +1,5 @@
 load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
-load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 upb_c_proto_library(
@@ -18,21 +18,6 @@ cc_library(
     name = "posix",
     hdrs = ["posix.h"],
     tags = ["manual"],
-)
-
-cc_import(
-    name = "libcxx",
-    static_library = "@llvm//runtimes/libcxx:libcxx.static",
-)
-
-cc_import(
-    name = "libcxxabi",
-    static_library = "@llvm//runtimes/libcxx:libcxxabi.static",
-)
-
-cc_import(
-    name = "libunwind",
-    static_library = "@llvm//runtimes/libunwind:libunwind.static",
 )
 
 zig_library(
@@ -99,9 +84,7 @@ zig_library(
     ] + select({
         # The platform C++ toolchain normally contributes these to the final link.
         "//bazel:zig_direct_enabled": [
-            ":libcxx",
-            ":libcxxabi",
-            ":libunwind",
+            "@rules_zig//zig/lib:static_cpp_runtime",
         ],
         "//conditions:default": [],
     }) + select({
