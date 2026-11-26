@@ -189,28 +189,6 @@ pub fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
     return bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
 }
 
-/// E2M1 round-to-nearest, ties-to-even, in FP32 and independent of native FP4 lowering.
-/// Even encoding indices win midpoint ties; magnitudes above 5 round to 6.
-pub fn roundE2m1(x: Tensor) Tensor {
-    const magnitude = x.abs();
-    var rounded = Tensor.scalar(6, .f32).broad(x.shape());
-    const thresholds = [_]f32{ 5, 3.5, 2.5, 1.75, 1.25, 0.75, 0.25 };
-    const values = [_]f32{ 4, 3, 2, 1.5, 1, 0.5, 0 };
-    inline for (thresholds, values, 0..) |threshold, value, i| {
-        rounded = magnitude.cmp(if (i % 2 == 0) .LE else .LT, Tensor.scalar(threshold, .f32))
-            .select(Tensor.scalar(value, .f32).broad(x.shape()), rounded);
-    }
-    return x.cmp(.LT, Tensor.scalar(0, .f32)).select(rounded.negate(), rounded);
-}
-
-/// E4M3 round-to-nearest, ties-to-even, in FP32, for positive values in E4M3's normal range
-/// [2^-6, 448]: keeps three mantissa bits.
-pub fn roundE4m3Normal(x: Tensor) Tensor {
-    const bits = x.bitCast(.u32);
-    const odd = bits.shiftRightLogical(.scalar(20, .u32)).logical(.AND, .scalar(1, .u32));
-    return bits.add(odd).addConstant(0x7ffff).logical(.AND, .scalar(0xfff00000, .u32)).bitCast(.f32);
-}
-
 /// Quantize activation blocks, preserving the input's axes.
 /// E8M0 scales round upward to a power of two to avoid overflowing FP8 values.
 pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataType, scale_dtype: DataType) QuantizedInput {

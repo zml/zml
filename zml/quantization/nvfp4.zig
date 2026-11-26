@@ -151,12 +151,6 @@ fn reconstructionError(blocks: Tensor, scale: Tensor, scaling: Scaling) Tensor {
     return sum;
 }
 
-/// A power of two per row that keeps the NVFP4 block scales of `rows / scale` in E4M3's normal range.
-/// Dynamic activation quantization uses it in place of a calibrated input scale.
-pub fn rowScale(rows: Tensor, axis: anytype) Tensor {
-    return quantization.ceilPowerOfTwo(rows.abs().max(axis).scale(1.0 / 1536.0).maximum(.scalar(std.math.floatMin(f32), .f32)));
-}
-
 test "NVFP4 four-or-six keeps the block scale with the lower error, a calibrated scale is factored out" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
