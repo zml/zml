@@ -71,8 +71,8 @@ pub const Backend = enum {
             .oneapi => b: {
                 const s = scheme orelse break :b .triton;
                 break :b switch (s) {
-                    .mxfp4 => .triton,
-                    .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => error.UnsupportedQuantization,
+                    .mxfp4, .nvfp4, .mxfp8 => .triton,
+                    .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => error.UnsupportedQuantization,
                 };
             },
             .tpu => if (scheme == null) .mosaic_tpu else error.UnsupportedQuantization,
