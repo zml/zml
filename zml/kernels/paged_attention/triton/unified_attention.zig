@@ -399,6 +399,13 @@ fn dequantKv(loaded: Value, scale: Value, kv_is_fp8: bool, q_dtype: DType) Value
     return loaded.to(.f32).mul(scale).to(q_dtype);
 }
 
+/// Exclude trailing rows that would otherwise address the next query tile.
+pub fn queryPositionMask(query_pos: Value, query_len: Value, row: Value, tile_rows: i64) Value {
+    const within_sequence = query_pos.lt(query_len);
+    if (tile_rows == row.shape().get(0)) return within_sequence;
+    return within_sequence.bitAnd(row.lt(@as(i32, @intCast(tile_rows))));
+}
+
 /// Offsets of `[token, head]` entries.
 pub fn tokenHeadOffsets(token: Value, head: Value, num_query_heads: i64) Value {
     return token.mul(@as(i32, @intCast(num_query_heads))).add(head);
@@ -500,7 +507,7 @@ fn kernelUnifiedAttention2d(
         offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
-    const query_mask_0 = query_pos.lt(cur_batch_query_len);
+    const query_mask_0 = queryPositionMask(query_pos, cur_batch_query_len, offs_m, BLOCK_Q * NUM_QUERIES_PER_KV);
     const query_mask_1 = query_offset_1.lt(@as(i32, @intCast(NUM_QUERY_HEADS)));
 
     // Q : (BLOCK_M, HEAD_SIZE_PADDED)
@@ -557,9 +564,8 @@ fn kernelUnifiedAttention2d(
     // In causal mode, each query block only scans keys up to the last query
     // represented in this block. In non-causal mode, scan the whole sequence
     // so draft rows can attend to all rows written for the same sequence.
-    const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
     const max_seq_prefix_len = if (config.is_causal) b: {
-        const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
+        const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, @intCast(BLOCK_Q)));
         break :b max_prefix_raw.minimum(seq_len);
     } else seq_len;
 
@@ -571,7 +577,7 @@ fn kernelUnifiedAttention2d(
     if (SLIDING_WINDOW > 0) {
         const qpos_lo = q_local_bq;
         if (config.is_causal) {
-            const qpos_hi_raw = qpos_lo.add(pad_term - 1);
+            const qpos_hi_raw = qpos_lo.add(@as(i32, @intCast(BLOCK_Q - 1)));
             const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(1));
             const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
             const last_allowed_key = context_len.add(qpos_hi);
@@ -827,7 +833,7 @@ fn kernelUnifiedAttention3d(
         offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
-    const query_mask_0 = query_pos.lt(cur_batch_query_len);
+    const query_mask_0 = queryPositionMask(query_pos, cur_batch_query_len, offs_m, BLOCK_Q * NUM_QUERIES_PER_KV);
     const query_mask_1 = query_offset_1.lt(@as(i32, @intCast(NUM_QUERY_HEADS)));
 
     const q_mask_pre = k.expandDims(query_mask_0, 1).bitAnd(k.expandDims(query_mask_1, 1));
@@ -886,9 +892,8 @@ fn kernelUnifiedAttention3d(
     else
         null;
 
-    const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
     const max_seq_prefix_len = if (config.is_causal) b: {
-        const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
+        const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, @intCast(BLOCK_Q)));
         break :b max_prefix_raw.minimum(seq_len);
     } else seq_len;
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
