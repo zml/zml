@@ -110,6 +110,111 @@ pub const FusedSwiGlu = struct {
     }
 };
 
+/// Multi-head attention over the time axis (`is_time=True`) or the variate axis.
+///
+/// Time attention applies RoPE; variate attention has no positional encoding. With the
+/// `sdpa_sigmoid` gate, the attention output is multiplied by `sigmoid(x @ W_g)` before
+/// the output projection.
+pub const Attention = struct {
+    pub const AttentionGate = enum { none, sdpa_sigmoid };
+
+    const Options = struct {
+        embed_dim: u32,
+        num_heads: u32,
+        is_time: bool,
+        gate: AttentionGate,
+
+        pub fn head_dim(self: Options) u32 {
+            return self.embed_dim / self.num_heads;
+        }
+    };
+
+    options: Options,
+    wQKV: zml.nn.Linear,
+    wO: zml.nn.Linear,
+    _gate: ?zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View, options: Options) Attention {
+        const gate = if (store.hasKey("_gate"))
+            loadLinear(store.withPrefix("_gate"), .{ .hidden, .in })
+        else
+            null;
+        return .{
+            .options = options,
+            .wQKV = loadLinear(store.withPrefix("wQKV"), .{ .hidden, .in }),
+            .wO = loadLinear(store.withPrefix("wO"), .{ .out, .hidden }),
+            ._gate = gate,
+        };
+    }
+
+    pub fn forward(self: Attention, x: Tensor, mask: Tensor, sin_cos: SinCosRope.CosSin) Tensor {
+        var qkv = self.forwardQKV(x);
+        if (self.options.is_time) {
+            qkv = applyRotary(qkv, sin_cos, .in);
+        }
+        // TODO: apply config.split_context_horizon_attn to reduce size of attention matrix
+
+        var h = sdpa(qkv, mask);
+        if (self._gate) |gate| {
+            const g = gate.forward(x, x.dtype());
+            h = .mul(h, g.sigmoid());
+        }
+        return self.wO.forward(h, h.dtype());
+    }
+
+    const QKV = struct {
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+    };
+
+    /// Project and fused the input into Q, K, V heads.
+    fn forwardQKV(self: Attention, x: Tensor) QKV {
+        const qkv = self.wQKV.forward(x, x.dtype()).splitAxis(.h, .{
+            .qkv = 3,
+            .head_dim = self.options.head_dim(),
+            .head = self.options.num_heads,
+        }).chunkExact(.qkv, 3);
+        return .{
+            .q = qkv[0].squeeze(.qkv),
+            .k = qkv[1].squeeze(.qkv),
+            .v = qkv[2].squeeze(.qkv),
+        };
+    }
+
+    fn rotateHalf(x: Tensor, axis: anytype) Tensor {
+        const midpoint = x.dim(axis) / 2;
+        const x1 = x.slice(axis, .{ .end = midpoint });
+        const x2 = x.slice(axis, .{ .start = midpoint });
+        return .concatenate(&.{ x2.negate(), x1 }, axis);
+    }
+
+    /// Rotate `q`, `k` along the head-dim `axis`; `cos`/`sin` broadcast to `q`'s shape (e.g. over `.head`).
+    fn applyRotary(qkv: QKV, sin_cos: SinCosRope.CosSin, axis: anytype) QKV {
+        const shape = qkv.q.shape();
+        const cos = sin_cos.cos.broad(shape);
+        const sin = sin_cos.sin.broad(shape);
+        const q: Tensor = .add(.mul(qkv.q, cos), .mul(rotateHalf(qkv.q, axis), sin));
+        const k: Tensor = .add(.mul(qkv.k, cos), .mul(rotateHalf(qkv.k, axis), sin));
+        return .{ .q = q, .k = k, .v = qkv.v };
+    }
+
+    /// Scaled dot-product attention; `q`, `k`, `v` carry `.head` and `.head_dim` axes.
+    ///
+    /// `mask` is boolean, true = attend. Returns `.head` and `.head_dim` merged (head-major) into `.d`.
+    fn sdpa(qkv: QKV, mask: Tensor) Tensor {
+        const dtype = qkv.q.dtype();
+        const attn_mask = mask.select(Tensor.scalar(0, dtype), Tensor.scalar(-std.math.inf(f32), dtype));
+        const out = zml.nn.sdpa(
+            qkv.q.renameTag(.head, .h).renameTag(.head_dim, .hd),
+            qkv.k.renameTag(.head, .h).renameTag(.head_dim, .hd),
+            qkv.v.renameTag(.head, .h).renameTag(.head_dim, .hd),
+            .{ .attn_mask = attn_mask },
+        );
+        return out.mergeTranspose(.{ .h, .hd }, .out);
+    }
+};
+
 /// Load a replicated linear layer with `weight` tagged `{out, in}` and `bias` tagged `{out}`.
 fn loadLinear(store: zml.io.TensorStore.View, tags: anytype) zml.nn.Linear {
     const out, const in = tags;

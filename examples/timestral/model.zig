@@ -15,7 +15,7 @@ const Tensor = zml.Tensor;
 
 pub const Config = struct {
     pub const LayerKind = enum { time, variate, time_variate, variate_time };
-    pub const AttentionGate = enum { none, sdpa_sigmoid };
+    pub const AttentionGate = layer.Attention.AttentionGate;
 
     patch_size: u32,
     d_model: u32,
