@@ -202,7 +202,7 @@ const PatchRepresentation = struct {
     forecast_query: Tensor,
 
     pub fn init(store: zml.io.TensorStore.View, patch_size: u32) PatchRepresentation {
-        const query = store.createTensor("forecast_query", .{.h}, .replicated, .{ .h = .replicated });
+        const query = store.createTensor("forecast_query", .{.d}, .replicated, .{ .d = .replicated });
         return .{
             .patch_size = patch_size,
             .patch_proj = .init(store.withPrefix("patch_proj")),
@@ -210,19 +210,19 @@ const PatchRepresentation = struct {
         };
     }
 
-    /// Embed `{.row, .time}` rows into `{.row, .token, .h}` patch tokens.
+    /// Embed `{.row, .time}` rows into `{.row, .token, .d}` patch tokens.
     pub fn forward(self: *const PatchRepresentation, rows: PatchBuilder.PatchRows) Tensor {
         assertTags(rows.values, .{ .row, .token, .h });
         assertTags(rows.mask, .{ .row, .token, .h });
         const dtype = rows.values.dtype();
         const x: Tensor = .concatenate(&[_]Tensor{ rows.values, rows.mask.not().convert(dtype) }, .h);
-        const out = self.patch_proj.forward(x.renameTag(.h, .in)).renameTag(.out, .h);
-        return assertedTags(out, .{ .row, .token, .h });
+        const out = self.patch_proj.forward(x.renameTag(.h, .in)).renameTag(.out, .d);
+        return assertedTags(out, .{ .row, .token, .d });
     }
 
     pub fn forecast_tokens(self: *const PatchRepresentation, rows: u32, n_patches: u32) Tensor {
-        assertTags(self.forecast_query, .{.h});
-        const token = self.forecast_query.reshape(.{ .batch = 1, .token = 1, .h = .auto });
+        assertTags(self.forecast_query, .{.d});
+        const token = self.forecast_query.reshape(.{ .batch = 1, .token = 1, .d = .auto });
         return token.broad(token.shape().setDim(.batch, rows).setDim(.token, n_patches));
     }
 };
@@ -299,7 +299,7 @@ pub const Transformer = struct {
         mask: AttentionLocator.Mask,
         positions: Tensor,
     ) Tensor {
-        assertTags(patches, .{ .row, .token, .h });
+        assertTags(patches, .{ .row, .token, .d });
         assertTags(mask.time, .{ .row, .token_q, .token_k });
         assertTags(mask.variate, .{ .token, .row_q, .row_k });
         assertTags(positions, .{.row});
