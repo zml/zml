@@ -9,7 +9,7 @@ const log = std.log.scoped(.@"zml/moe");
 pub const Options = struct {
     activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs, and emulate quantized NVFP4 and MXFP8
-    /// activations on Metal; false keeps BF16 activations. Triton and Fly NVFP4 experts
+    /// activations on Metal; false keeps BF16 activations. Triton, Fly and CuTe NVFP4 experts
     /// always quantize their activations.
     quantize_input: bool,
     /// Where routing weights are applied; FlashInfer, Mosaic and TCL require after_down.
