@@ -59,7 +59,13 @@ fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType
     const fixed_mxfp8 = opts.input_quantization == .mxfp8 or opts.input_quantization == .mxfp8_bf16;
     const scheme = if (fixed_mxfp8) .fp8_block32 else q.scheme;
     if (scheme == .nvfp4) {
-        const global = if (q.input_scale) |scale| scale.asMultiplier() else Tensor.scalar(1, .f32);
+        const strategy = q.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input");
+        stdx.debug.assert(strategy.block_scale == .largest_maps_to_six, "reference scales NVFP4 activation blocks by amax/6, got {}", .{strategy.block_scale});
+        const global = switch (strategy.global_scale) {
+            .none => Tensor.scalar(1, .f32),
+            .calibrated => |scale| scale.asMultiplier(),
+            .per_row => @panic("reference does not quantize NVFP4 activations row by row"),
+        };
         stdx.debug.assert(global.count() == 1, "reference NVFP4 input scale must be global", .{});
         // Keep both stored rounding boundaries when XLA fuses the quantizer.
         const grouped = x.convert(.bf16).optimizationBarrier().convert(.f32).div(global.asScalar())
@@ -146,7 +152,6 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
 
 pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: nn.Linear, down: nn.Linear, opts: GlobalOptions) Tensor {
     stdx.debug.assert(routing.ids.dim(.topk) > 0 and routing.ids.dim(.topk) <= routing.global_num_experts, "MoE top-k must fit the global expert count", .{});
-    stdx.debug.assert(opts.nvfp4_input_scale == .largest_maps_to_six, "stablehlo backend scales NVFP4 activation blocks by amax/6", .{});
     return reference(input, routing.localIds(), routing.weights, gate_up, down, .{
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,

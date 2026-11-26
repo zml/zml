@@ -5,7 +5,7 @@
 //! before the down projection, with the reference model's BF16 rounding.
 const std = @import("std");
 
-const Nvfp4QuantizationStrategy = @import("zml/quantization").Nvfp4QuantizationStrategy;
+const quantization = @import("zml/quantization");
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const stdx = @import("stdx");
 const triton_kernels = @import("zml/kernels/moe/triton").kernels;
@@ -267,9 +267,9 @@ pub const Nvfp4Options = struct {
 
 /// NVFP4 activations without calibrated scales: each row takes a dynamic power-of-two
 /// scale, computed from its largest value, and each of its blocks the E4M3 scale
-/// `strategy` picks. See `nvfp4.quantizeRows`.
+/// `block_scale_strategy` picks. See `nvfp4.quantizeRows`.
 pub const Nvfp4RowScaled = struct {
-    strategy: Nvfp4QuantizationStrategy,
+    block_scale_strategy: quantization.nvfp4.QuantizationStrategy.BlockScale,
     activation: nvfp4.CappedSwiglu,
 };
 
@@ -392,7 +392,7 @@ fn forwardNvfp4RowScaled(tokens: i64, hidden: i64, intermediate: i64, experts: i
         .group_size = up_cfg.groupRows(),
         .capacity = routing.groups,
         .direct = direct,
-        .strategy = row_scaled.strategy,
+        .block_scale_strategy = row_scaled.block_scale_strategy,
     });
     const up = nvfp4_persistent.downRows(up_cfg, .{
         .weight = a.w1,
@@ -411,7 +411,7 @@ fn forwardNvfp4RowScaled(tokens: i64, hidden: i64, intermediate: i64, experts: i
         .group_size = down_cfg.groupRows(),
         .capacity = routing.groups,
         .direct = direct,
-        .strategy = row_scaled.strategy,
+        .block_scale_strategy = row_scaled.block_scale_strategy,
         .activation = row_scaled.activation,
         .pre_scale_rows = topk,
         .weights = before_down,

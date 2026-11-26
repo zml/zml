@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const Nvfp4QuantizationStrategy = @import("zml/quantization").Nvfp4QuantizationStrategy;
 const Quantization = @import("zml/quantization").Quantization;
 const stdx = @import("stdx");
 const Tensor = @import("zml/core").Tensor;
@@ -15,8 +14,6 @@ pub const Options = struct {
     quantize_input: bool,
     /// Where routing weights are applied; FlashInfer, Mosaic and TCL require after_down.
     routing_weight_placement: RoutingWeightPlacement,
-    /// How quantized NVFP4 activations pick the E4M3 scale of each block.
-    nvfp4_input_scale: Nvfp4QuantizationStrategy = .largest_maps_to_six,
 };
 
 pub const ActivationKind = enum {

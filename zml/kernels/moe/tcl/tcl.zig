@@ -84,7 +84,7 @@ fn expertFormat(gate_up: nn.Linear, down: nn.Linear) Format {
 
 fn fp8Scales(linear: nn.Linear) Tensor {
     const q = linear.quantization.?;
-    stdx.debug.assert(linear.weight.dtype() == .f8e4m3fn and !q.swizzled_scales and q.global_scale == null and q.input_scale == null, "TCL MoE takes plain E4M3FN block-128 weights", .{});
+    stdx.debug.assert(linear.weight.dtype() == .f8e4m3fn and !q.swizzled_scales and q.global_scale == null and q.nvfp4_input == null, "TCL MoE takes plain E4M3FN block-128 weights", .{});
     stdx.debug.assert(q.scales.dtype() == .bf16 or q.scales.dtype() == .f32, "TCL MoE FP8 scales must be BF16 or F32", .{});
     const w = linear.weight;
     const scale = q.scales;
