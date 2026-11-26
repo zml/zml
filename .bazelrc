@@ -109,7 +109,6 @@ common:alldebug --strategy=local
 common:zig_direct --compilation_mode=opt
 common:zig_direct --@rules_zig//zig/settings:mode=debug
 common:zig_direct --@rules_zig//zig/settings:use_cc_common_link=false
-common:zig_direct --@rules_zig//zig/settings:cc_toolchain_cpp_runtime=true
 common:zig_direct --@rules_zig//zig/settings:incremental=true
 common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-llvm
 common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-lld
