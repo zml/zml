@@ -15,6 +15,8 @@ const Case = struct {
     backend: zml.moe.Backend,
     activation: Activation = .{ .swiglu = .{} },
     scheme: ?zml.Quantization.Scheme = null,
+    /// Required with NVFP4 experts.
+    nvfp4_block_scale: ?zml.quantization.nvfp4.QuantizationStrategy.BlockScale = null,
     activation_dtype: zml.DataType = .bf16,
     quantize_input: bool = false,
     placement: Placement = .after_down,
@@ -106,10 +108,10 @@ fn generateFp4Tensor(shape: Shape, multiplier: i64) Tensor {
 }
 
 /// Create a Linear fixture with a reproducible pattern, optionally quantized and biased.
-fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier: i64) zml.nn.Linear {
-    const fixture_bias = if (bias) generateDeterministicTensor(shape.remove(2), 3, 32).convert(shape.dtype()) else null;
+fn linear(shape: Shape, c: Case, multiplier: i64) zml.nn.Linear {
+    const fixture_bias = if (c.bias) generateDeterministicTensor(shape.remove(2), 3, 32).convert(shape.dtype()) else null;
 
-    const s = scheme orelse return .{
+    const s = c.scheme orelse return .{
         .weight = generateDeterministicTensor(shape, multiplier, 16).convert(shape.dtype()),
         .tag = shape.tag(2),
         .bias = fixture_bias,
@@ -135,7 +137,7 @@ fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier
 
     const nvfp4_input: ?zml.quantization.nvfp4.QuantizationStrategy = if (s == .nvfp4) .{
         .global_scale = .{ .calibrated = .{ .value = Tensor.scalar(1, .f32), .operation = .multiply } },
-        .block_scale = .largest_maps_to_six,
+        .block_scale = c.nvfp4_block_scale orelse @panic("NVFP4 fixture needs a block scale strategy"),
     } else null;
     const global_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = Tensor.scalar(1, .f32).broad(.init(.{ .expert = shape.dim(0) }, .f32)), .operation = .multiply } else null;
 
@@ -164,8 +166,8 @@ fn makeExpertFixture(c: Case) ExpertFixture {
         else => 2 * c.intermediate,
     };
     var fixture: ExpertFixture = .{
-        .gate_up = linear(.init(.{ .expert = c.experts, .dout = projection_width, .d = c.width }, c.activation_dtype), c.scheme, c.bias, 7),
-        .down = linear(.init(.{ .expert = c.experts, .d = c.width, .dout = c.intermediate }, c.activation_dtype), c.scheme, c.bias, 11),
+        .gate_up = linear(.init(.{ .expert = c.experts, .dout = projection_width, .d = c.width }, c.activation_dtype), c, 7),
+        .down = linear(.init(.{ .expert = c.experts, .d = c.width, .dout = c.intermediate }, c.activation_dtype), c, 11),
     };
     if (c.non_unit_scales) {
         for ([_]*zml.nn.Linear{ &fixture.gate_up, &fixture.down }, 0..) |projection, i| {
@@ -401,6 +403,8 @@ const specialized_shapes_cute = [_]FixtureShape{
 const Format = struct {
     non_unit_scales: bool = false,
     scheme: ?zml.Quantization.Scheme = null,
+    /// Required with NVFP4 experts.
+    nvfp4_block_scale: ?zml.quantization.nvfp4.QuantizationStrategy.BlockScale = null,
     activation_dtype: zml.DataType = .bf16,
 };
 
@@ -436,6 +440,7 @@ const Matrix = struct {
             .backend = backend,
             .activation = activation,
             .scheme = format.scheme,
+            .nvfp4_block_scale = format.nvfp4_block_scale,
             .activation_dtype = format.activation_dtype,
             .non_unit_scales = format.non_unit_scales,
             .quantize_input = quantize_input,
@@ -665,8 +670,8 @@ test "Triton NVFP4 compatibility matrix" {
 
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
         .formats = &.{
-            .{ .scheme = .nvfp4 },
-            .{ .scheme = .nvfp4, .non_unit_scales = true },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six, .non_unit_scales = true },
         },
         // The up-bias variants are left out: one of their cases misses the shared NVFP4 budget by a few elements.
         .activations = &.{
@@ -709,7 +714,7 @@ test "FlashInfer compatibility matrix" {
 
     // Only default SwiGLU, no linear bias, and routing after the down projection.
     try pipeline.run(std.testing.io, std.testing.allocator, .flashinfer_cutlass, .{
-        .formats = &.{.{ .scheme = .nvfp4 }},
+        .formats = &.{.{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six }},
         .activations = &.{.{ .swiglu = .{} }},
     }, .{});
 }
@@ -735,8 +740,8 @@ test "CuTe NVFP4 compatibility matrix" {
     const pipeline: Pipeline = .{ .platform = platform };
     try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
         .formats = &.{
-            .{ .scheme = .nvfp4 },
-            .{ .scheme = .nvfp4, .non_unit_scales = true },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six, .non_unit_scales = true },
         },
         .activations = &.{ .{ .swiglu = .{} }, .{ .swiglu = .{ .limit = 0.25 } }, .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } } },
         .placements = &.{ .before_down, .after_down },
@@ -755,8 +760,8 @@ test "CuTe NVFP4 row-scaled activation quantization matrix" {
     const pipeline: Pipeline = .{ .platform = platform };
     try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
         .formats = &.{
-            .{ .scheme = .nvfp4 },
-            .{ .scheme = .nvfp4, .non_unit_scales = true },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six, .non_unit_scales = true },
         },
         .activations = &.{.{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } }},
         .quantize_inputs = &.{true},
@@ -811,8 +816,8 @@ test "Fly NVFP4 compatibility matrix" {
     // Triton does, which the reference only matches closely at these widths.
     try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
         .formats = &.{
-            .{ .scheme = .nvfp4 },
-            .{ .scheme = .nvfp4, .non_unit_scales = true },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six, .non_unit_scales = true },
         },
         .activations = &.{
             .{ .swiglu = .{} },
@@ -854,7 +859,7 @@ test "Fly routes without an expert" {
 
     // Decode GEMVs write zero rows for them; sorted MFMA tiles skip them.
     try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
-        .formats = &.{ .{ .scheme = .mxfp4 }, .{ .scheme = .nvfp4 } },
+        .formats = &.{ .{ .scheme = .mxfp4 }, .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six } },
         .activations = &.{.{ .swiglu = .{} }},
         .placements = &.{.before_down},
         .shapes = &.{
@@ -875,7 +880,7 @@ test "Metal compatibility matrix" {
             .{},
             .{ .activation_dtype = .f16 },
             .{ .activation_dtype = .f32 },
-            .{ .scheme = .nvfp4 },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
             .{ .scheme = .mxfp8 },
             .{ .scheme = .fp8_block128 },
         },
@@ -885,7 +890,7 @@ test "Metal compatibility matrix" {
     // Emulated NVFP4 and MXFP8 activations, routing before down, routes without an expert,
     // and the grouped GEMV, which packed NVFP4 experts run from 128 routes.
     try pipeline.run(std.testing.io, std.testing.allocator, .metal, .{
-        .formats = &.{ .{ .scheme = .nvfp4 }, .{ .scheme = .mxfp8 } },
+        .formats = &.{ .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six }, .{ .scheme = .mxfp8 } },
         .activations = &.{
             .{ .swiglu = .{} },
             .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } },
