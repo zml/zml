@@ -400,13 +400,13 @@ fn dequantKv(loaded: Value, scale: Value, kv_is_fp8: bool, q_dtype: DType) Value
 }
 
 /// Offsets of `[token, head]` entries.
-fn tokenHeadOffsets(token: Value, head: Value, num_query_heads: i64) Value {
+pub fn tokenHeadOffsets(token: Value, head: Value, num_query_heads: i64) Value {
     return token.mul(@as(i32, @intCast(num_query_heads))).add(head);
 }
 
 /// Adds to the log2 scores `S` the bias of each key `distance` positions before its
 /// query, read from the query rows' biases for distances below `extent`.
-fn addRelBias(k: *Builder, S: Value, row_ptrs: Value, distance: Value, mask: Value, extent: i64, dtype: DType) Value {
+pub fn addRelBias(k: *Builder, S: Value, row_ptrs: Value, distance: Value, mask: Value, extent: i64, dtype: DType) Value {
     const shape = S.shape();
     const near = distance.ge(0).bitAnd(distance.lt(@as(i32, @intCast(extent))));
     const bias = k.loadOpts(k.broadcastTo(row_ptrs.expandDims(1), shape.constSlice()).addPtr(distance), .{

@@ -325,12 +325,12 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        if (opts.mask == .indices or isOneapiTarget()) stdx.debug.assert(
-            opts.rel_bias == null and (opts.sink == null or opts.sink.?.rank() == 1),
-            "Triton sparse and oneAPI paged attention take neither per-token sinks nor relative biases",
-            .{},
-        );
         if (opts.mask == .indices) {
+            stdx.debug.assert(
+                opts.rel_bias == null and (opts.sink == null or opts.sink.?.rank() == 1),
+                "Triton sparse paged attention takes neither per-token sinks nor relative biases",
+                .{},
+            );
             return pagedSparseAttention(parameters, q, k_cache, v_cache, opts);
         }
 
@@ -835,6 +835,9 @@ pub const paged = struct {
             .use_qq_bias = false,
             .use_softcap = false,
             .use_sinks = (opts.sink != null),
+            .per_token_sinks = if (opts.sink) |sink| sink.rank() == 2 else false,
+            .rel_bias_extent = if (opts.rel_bias) |bias| bias.dim(.distance) else 0,
+            .rel_bias_dtype = if (opts.rel_bias) |bias| triton.from(bias.dtype()) else .f32,
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .is_causal = opts.mask.isCausal(),
             .block_q = @intCast(config.attention.block_q),
@@ -876,7 +879,8 @@ pub const paged = struct {
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
 
-        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+        const sink = if (opts.sink) |sink| (if (sink.rank() == 2) sink.transpose(.{ .b, .h }) else sink).convert(.f32) else dummy;
+        const rel_bias = if (opts.rel_bias) |bias| bias.transpose(.{ .b, .h, .distance }) else dummy;
 
         const attn_output = kernels_oneapi.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
@@ -888,6 +892,7 @@ pub const paged = struct {
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
                 .qq_bias_ptr = dummy,
+                .rel_bias_ptr = rel_bias,
                 .scale_ptr = .scalar(scale, .f32),
                 .k_scale_ptr = dummy,
                 .v_scale_ptr = dummy,

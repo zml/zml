@@ -473,7 +473,8 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                 },
                 .grid = .{ @intCast(sort_grid_x), 1, 1 },
                 .num_stages = 1,
-                .num_warps = 4,
+                // The packaged Intel Triton compiler fails to compile this sort with four warps.
+                .num_warps = if (zml.Compiler.current().platform.target == .oneapi) 1 else 4,
                 .output_operand_aliases = .{
                     .sorted_token_ids = .sorted_token_ids_ptr,
                     .cumsum = .cumsum_ptr,
