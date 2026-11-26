@@ -4,6 +4,7 @@ const mlir = @import("mlir");
 const ttir = @import("mlir/dialects/ttir");
 
 const zml = @import("zml/core");
+const shared = @import("unified_attention.zig");
 const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;
@@ -98,6 +99,9 @@ pub const KernelUnifiedAttention3dPtr = struct {
         use_qq_bias: bool,
         use_softcap: bool,
         use_sinks: bool,
+        per_token_sinks: bool = false,
+        rel_bias_extent: i64 = 0,
+        rel_bias_dtype: DType = .f32,
         sliding_window: i64,
         is_causal: bool = true,
 
@@ -120,12 +124,13 @@ pub const KernelUnifiedAttention3dPtr = struct {
     pub const Kernel = tri.Kernel(Config, .{
         .name = "kernel_unified_attention_3d_ptr_oneapi",
         .inputs = &.{
-            "query_ptr",              "key_cache_ptr",        "value_cache_ptr",      "sink_ptr",
-            "block_tables_ptr",       "seq_lens_ptr",         "alibi_slopes_ptr",     "qq_bias_ptr",
-            "scale_ptr",              "k_scale_ptr",          "v_scale_ptr",          "softcap_ptr",
-            "block_table_stride_ptr", "query_stride_0_ptr",   "query_stride_1_ptr",   "qq_bias_stride_0_ptr",
-            "stride_k_cache_0_ptr",   "stride_k_cache_1_ptr", "stride_k_cache_2_ptr", "stride_v_cache_0_ptr",
-            "stride_v_cache_1_ptr",   "stride_v_cache_2_ptr", "query_start_len_ptr",  "num_seqs_ptr",
+            "query_ptr",            "key_cache_ptr",          "value_cache_ptr",      "sink_ptr",
+            "block_tables_ptr",     "seq_lens_ptr",           "alibi_slopes_ptr",     "qq_bias_ptr",
+            "rel_bias_ptr",         "scale_ptr",              "k_scale_ptr",          "v_scale_ptr",
+            "softcap_ptr",          "block_table_stride_ptr", "query_stride_0_ptr",   "query_stride_1_ptr",
+            "qq_bias_stride_0_ptr", "stride_k_cache_0_ptr",   "stride_k_cache_1_ptr", "stride_k_cache_2_ptr",
+            "stride_v_cache_0_ptr", "stride_v_cache_1_ptr",   "stride_v_cache_2_ptr", "query_start_len_ptr",
+            "num_seqs_ptr",
         },
         .outputs = &.{ "segm_output", "segm_max", "segm_expsum" },
         .run = run,
@@ -140,6 +145,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
             .seq_lens_ptr = .{ .ptr = .i32 },
             .alibi_slopes_ptr = .{ .ptr = cfg.scale_dtype },
             .qq_bias_ptr = .{ .ptr = cfg.scale_dtype },
+            .rel_bias_ptr = .{ .ptr = cfg.rel_bias_dtype },
             .scale_ptr = .{ .ptr = .f32 },
             .k_scale_ptr = .{ .ptr = .f32 },
             .v_scale_ptr = .{ .ptr = .f32 },
@@ -190,6 +196,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
             a.seq_lens_ptr,
             a.alibi_slopes_ptr,
             a.qq_bias_ptr,
+            a.rel_bias_ptr,
             scale,
             k_scale,
             v_scale,
@@ -224,6 +231,7 @@ fn kernelUnifiedAttention3d(
     seq_lens_ptr: Value,
     alibi_slopes_ptr: Value,
     qq_bias_ptr: Value,
+    rel_bias_ptr: Value,
     scale: Value,
     k_scale: Value,
     v_scale: Value,
@@ -323,8 +331,9 @@ fn kernelUnifiedAttention3d(
     const m_init: Value = if (config.use_sinks) mb: {
         var mi = k.openIfElse(segm_is_zero, .{k.tensorTy(&.{BLOCK_M}, .f32)});
         {
-            const loaded = k.loadOpts(sink_ptr.addPtr(query_offset_1), .{
-                .mask = query_mask_1,
+            const offsets = if (config.per_token_sinks) shared.tokenHeadOffsets(query_offset_0, query_offset_1, NUM_QUERY_HEADS) else query_offset_1;
+            const loaded = k.loadOpts(sink_ptr.addPtr(offsets), .{
+                .mask = query_mask_0.bitAnd(query_mask_1),
                 .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
             });
             mi.yieldThen(.{loaded.to(.f32).mul(RCP_LN2)});
@@ -354,6 +363,10 @@ fn kernelUnifiedAttention3d(
         qq_bias_ptr.addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
     else
         qq_bias_ptr.splatTo(&.{BLOCK_M});
+    const rel_bias_rows: ?Value = if (config.rel_bias_extent > 0)
+        rel_bias_ptr.addPtr(shared.tokenHeadOffsets(query_offset_0, query_offset_1, NUM_QUERY_HEADS).to(.i64).mul(config.rel_bias_extent))
+    else
+        null;
 
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
     const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
@@ -478,6 +491,11 @@ fn kernelUnifiedAttention3d(
                 .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
             });
             S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
+        }
+
+        if (rel_bias_rows) |row_ptrs| {
+            const distance = ql_2d_i32.add(context_len).sub(so_2d);
+            S = shared.addRelBias(k, S, row_ptrs, distance, keep_mask, config.rel_bias_extent, config.rel_bias_dtype);
         }
 
         var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));
