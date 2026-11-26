@@ -81,8 +81,13 @@ pub fn fusedExpertsBase(
     const num_tokens = hidden_states.dim(.t);
     const gate_up_scheme = gate_up_.quantizationScheme();
     const down_scheme = down_.quantizationScheme();
-    const launch_config = launchConfig(gate_up_scheme, num_tokens);
-    const down_launch_config = launchConfig(down_scheme, num_tokens);
+    const platform = zml.Compiler.current().platform;
+    var launch_config = launchConfig(platform, gate_up_scheme, num_tokens);
+    var down_launch_config = launchConfig(platform, down_scheme, num_tokens);
+    // Both projections interpret the same routing tiles.
+    const block_size_m = @min(launch_config.block_size_m, down_launch_config.block_size_m);
+    launch_config.block_size_m = block_size_m;
+    down_launch_config.block_size_m = block_size_m;
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = gate_up_.weight.withTags(.{ .expert, .out, .in });
@@ -120,7 +125,7 @@ pub fn fusedExpertsBase(
         stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "triton backend expected a rank-1 i32 expert map, got rank {} and dtype {}", .{ expert_map.rank(), expert_map.dtype() });
 
     const num_experts = if (expert_map_) |expert_map| expert_map.dim(.expert) else gate_up.dim(.expert);
-    const routing = prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
+    const routing = prepareRouting(ids, num_experts, @intCast(block_size_m));
 
     const expert_ids = if (expert_map_) |expert_map|
         expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
@@ -192,10 +197,11 @@ pub const GemmOptions = struct {
 };
 
 pub fn gemm(opts: GemmOptions) Tensor {
+    const platform = zml.Compiler.current().platform;
     const nvfp4 = opts.quant_scheme == .nvfp4;
-    const weight = bytePackedFp4(opts.weight);
-    // NVFP4 activations are FP4 like the weights.
-    const input = bytePackedFp4(opts.input);
+    const dequantize_to_bf16 = requiresBf16Dot(platform, opts.quant_scheme);
+    const weight = gemmOperand(opts.weight, dequantize_to_bf16);
+    const input = gemmOperand(opts.input, dequantize_to_bf16);
     const weight_k = weight.dim(2) * @as(i64, if (opts.quant_scheme == .mxfp4 or nvfp4) 2 else 1);
     const input_k = input.dim(1) * @as(i64, if (nvfp4) 2 else 1);
     stdx.debug.assert(input_k == weight_k, "input width {} must match logical weight K {}", .{ input_k, weight_k });
@@ -233,18 +239,18 @@ pub fn gemm(opts: GemmOptions) Tensor {
     const weight_scale: ?Tensor = if (opts.weight_scale) |scale| blk: {
         const scheme = opts.quant_scheme orelse break :blk scale;
         break :blk switch (scheme) {
-            // dot_scaled takes E8M0 encodings as bytes, including native E8M0 tensors.
-            .mxfp4, .mxfp8 => scale.bitCast(.u8),
+            .mxfp4, .mxfp8, .nvfp4 => gemmScale(scale, dequantize_to_bf16),
             .fp8_per_channel => scale.reshape(.{ weight.dim(0), weight.dim(1), 1 }),
             .fp8_per_tensor => if (scale.count() == 1) scale else scale.reshape(.{ weight.dim(0), 1, 1 }),
             // Tiled FP8 uses ordinary dot products with FP32 scale arithmetic.
             .fp8_block32 => scale.convert(.f32),
-            .fp8_block128, .nvfp4 => scale,
+            .fp8_block128 => scale,
         };
     } else null;
 
-    const stride_asm: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) scale.dim(1) else 0) else 0;
-    const stride_ask: i64 = if (opts.input_scale) |scale| (if (scale.rank() == 2) 1 else 0) else 0;
+    const input_scale = if (opts.input_scale) |scale| gemmScale(scale, dequantize_to_bf16) else null;
+    const stride_asm: i64 = if (input_scale) |scale| (if (scale.rank() == 2) scale.dim(1) else 0) else 0;
+    const stride_ask: i64 = if (input_scale) |scale| (if (scale.rank() == 2) 1 else 0) else 0;
     const has_weight_scale_expert_stride = if (weight_scale) |scale|
         !(opts.quant_scheme == .fp8_per_tensor and scale.count() == 1)
     else
@@ -270,12 +276,15 @@ pub fn gemm(opts: GemmOptions) Tensor {
         .stride_bbe = if (opts.bias) |bias| (if (bias.rank() == 2 and bias.dim(0) > 1) bias.dim(1) else 0) else 0,
         .stride_bbn = if (opts.bias) |bias| (if (bias.rank() > 0 and bias.dim(-1) > 1) 1 else 0) else 0,
     };
+    // Intel Triton otherwise combines aligned MXFP8 weight loads into
+    // 32-element vectors beyond the SPIR-V translator's limit.
+    const weight_divisibility: u32 = if (platform.target == .oneapi and opts.quant_scheme == .mxfp8) 1 else 16;
     return kernels.FusedMoe.Kernel.call(
         .{
             .a_ptr = input,
             .b_ptr = weight,
             .b_bias_ptr = opts.bias orelse Tensor.scalar(0, .f32),
-            .a_scale_ptr = opts.input_scale orelse Tensor.scalar(1.0, .f32),
+            .a_scale_ptr = input_scale orelse Tensor.scalar(1.0, .f32),
             .b_scale_ptr = weight_scale orelse Tensor.scalar(1.0, .f32),
             .routing_weights_ptr = opts.routing_weights orelse Tensor.scalar(1.0, .f32),
             .sorted_token_ids_ptr = opts.routing.sorted_token_ids,
@@ -302,8 +311,9 @@ pub fn gemm(opts: GemmOptions) Tensor {
             .cfg = .{
                 .a_dtype = toDType(input.dtype()),
                 .b_dtype = toDType(weight.dtype()),
+                .b_ptr_divisibility = weight_divisibility,
                 .c_dtype = toDType(opts.output_shape.dtype()),
-                .a_scale_dtype = if (opts.input_scale) |scale| toDType(scale.dtype()) else null,
+                .a_scale_dtype = if (input_scale) |scale| toDType(scale.dtype()) else null,
                 .b_scale_dtype = if (weight_scale) |scale| toDType(scale.dtype()) else null,
                 .b_bias_dtype = if (opts.bias) |bias| toDType(bias.dtype()) else null,
                 .routing_weights_dtype = if (opts.routing_weights) |weights| toDType(weights.dtype()) else null,
@@ -315,6 +325,7 @@ pub fn gemm(opts: GemmOptions) Tensor {
                 .naive_block_assignment = opts.routing.naive_block_assignment,
                 .compute_type = .bf16,
                 .quant_scheme = opts.quant_scheme,
+                .dequantize_to_bf16 = dequantize_to_bf16,
                 .dims = dims,
             },
             .grid = .{ @intCast(grid_x), 1, 1 },
@@ -324,10 +335,19 @@ pub fn gemm(opts: GemmOptions) Tensor {
     ).c;
 }
 
-/// Native FP4 tensors expose logical K; Triton reads FP4 operands as bytes of two values.
-fn bytePackedFp4(x: Tensor) Tensor {
-    if (x.dtype() != .f4e2m1) return x;
-    return x.reshape(x.shape().setDim(-1, @divExact(x.dim(-1), 2)).append(.{ .nibble = 2 })).bitCast(.u8);
+fn gemmOperand(x: Tensor, dequantize_to_bf16: bool) Tensor {
+    return switch (x.dtype()) {
+        // Native FP4 tensors expose logical K. Triton reads two FP4 values per byte.
+        .f4e2m1 => x.reshape(x.shape().setDim(-1, @divExact(x.dim(-1), 2)).append(.{ .nibble = 2 })).bitCast(.u8),
+        .f8e4m3fn => if (dequantize_to_bf16) x.bitCast(.u8) else x,
+        else => x,
+    };
+}
+
+fn gemmScale(scale: Tensor, dequantize_to_bf16: bool) Tensor {
+    // Both dot implementations read E8M0 scales as exponent bytes.
+    if (scale.dtype() == .f8e8m0) return scale.bitCast(.u8);
+    return gemmOperand(scale, dequantize_to_bf16);
 }
 
 pub const Routing = struct {
@@ -644,7 +664,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
-    if (platform.target != .cuda) return error.SkipZigTest;
+    if (platform.target != .cuda and platform.target != .oneapi) return error.SkipZigTest;
 
     const Local = struct {
         const Outputs = struct { actual: Tensor, expected: Tensor };
@@ -669,14 +689,15 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
             if (quantize_input) {
                 input, input_scale = quantizeFp8Input(x, scheme, .f8e4m3fn);
                 const scale = if (scheme == .mxfp8) input_scale.?.bitCast(.f8e8m0) else input_scale.?;
-                reference_input = input.convert(.f32).withTags(x.shape().tags())
+                const values = if (input.dtype() == .u8) input.bitCast(.f8e4m3fn) else input;
+                reference_input = values.convert(.f32).withTags(x.shape().tags())
                     .mul(expandScales(scale.convert(.f32), x.shape()));
             }
             const weight_scale = if (scheme == .mxfp8) blk: {
                 const native = scales.convert(.f8e8m0);
                 break :blk if (mx_native) native else native.bitCast(.u8);
             } else scales;
-            const config = launchConfigForTokens(8);
+            const config = launchConfig(zml.Compiler.current().platform, scheme, x.dim(.token));
             const routing = prepareRouting(ids, w.dim(.expert), @intCast(config.block_size_m));
             const actual = gemm(.{
                 .input = input,
@@ -706,6 +727,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
     };
 
     for ([_]Quantization.Scheme{ .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128 }) |scheme| {
+        if (platform.target == .oneapi and scheme != .mxfp8) continue;
         for ([_]bool{ false, true }) |quantize_input| {
             for ([_]i64{ 1, 17 }) |tokens| {
                 const n: i64 = if (scheme == .fp8_block128) 256 else 48;
@@ -788,7 +810,8 @@ test "NVFP4 row quantization matches the reference quantizer" {
         }
 
         fn dequantize(quantized: quantization.QuantizedInput, shape: Shape) Tensor {
-            return quantization.dequantizeNvfp4(.{ .values = quantized.values, .scales = quantized.scales, .global_scale = quantized.global_scale }, .in).reshape(shape);
+            const scales = if (quantized.scales.dtype() == .u8) quantized.scales.bitCast(.f8e4m3fn) else quantized.scales;
+            return quantization.dequantizeNvfp4(.{ .values = quantized.values, .scales = scales, .global_scale = quantized.global_scale }, .in).reshape(shape);
         }
 
         fn forward(tokens: i64, width: i64, activated: bool, strategy: quantization.Nvfp4QuantizationStrategy) Outputs {
@@ -851,7 +874,7 @@ test "NVFP4 routed GEMM matches dequantized operands" {
                 .routing_weight_placement = .before_down,
                 .nvfp4_input_scale = strategy,
             }, .{});
-            const config = launchConfigForTokens(x.dim(.token));
+            const config = launchConfig(zml.Compiler.current().platform, .nvfp4, x.dim(.token));
             const routing = prepareRouting(ids, w.dim(.expert), @intCast(config.block_size_m));
             const actual = gemm(.{
                 .input = operand.input,
@@ -871,7 +894,9 @@ test "NVFP4 routed GEMM matches dequantized operands" {
             const weight = quantization.dequantizeNvfp4(.{ .values = linear.weight, .scales = linear.quantization.?.scales, .global_scale = null }, .in);
             // The operand packs two FP4 values per byte.
             const values = operand.input.bitCast(.f4e2m1).reshape(.{ .token = x.dim(.token), .in = x.dim(.in) });
-            const rows = quantization.dequantizeNvfp4(.{ .values = values, .scales = operand.input_scale.?, .global_scale = null }, .in);
+            const input_scale = operand.input_scale.?;
+            const input_scales = if (input_scale.dtype() == .u8) input_scale.bitCast(.f8e4m3fn) else input_scale;
+            const rows = quantization.dequantizeNvfp4(.{ .values = values, .scales = input_scales, .global_scale = null }, .in);
             const dot = rows.dot(weight.gather(.{ .expert = ids.squeeze(.topk) }, .{}), .in);
             return .{ .actual = actual, .expected = dot.mul(operand.output_scale.?.squeeze(.topk).broad(dot.shape())).convert(.bf16) };
         }
@@ -922,7 +947,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
-    if (platform.target != .cuda) return error.SkipZigTest;
+    if (platform.target != .cuda and platform.target != .oneapi) return error.SkipZigTest;
     const Local = struct {
         fn forward(x: Tensor, layout: ProjectionLayout, placement: RoutingWeightPlacement, storage_dtype: DataType) Tensor {
             const fp4 = storage_dtype != .bf16;
@@ -933,16 +958,17 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 .row_interleaved_8 => columns.divByConst(8).remainder(Tensor.scalar(2, .i32)).cmp(.EQ, Tensor.scalar(0, .i32)),
             };
             const dtype: DataType = if (fp4) .u8 else .bf16;
-            // E2M1 codes 1, 2, 3 encode 0.5, 1, 1.5; each byte holds two values.
-            const gate_value = if (fp4) Tensor.scalar(0x11, .u8) else Tensor.scalar(0.5, .bf16);
-            const up_value = if (fp4) Tensor.scalar(0x33, .u8) else Tensor.scalar(1.5, .bf16);
+            // Packed low/high E2M1 values are (0.5, 1.5) and (1.5, -1).
+            const gate_value = if (fp4) Tensor.scalar(0x31, .u8) else Tensor.scalar(0.5, .bf16);
+            const up_value = if (fp4) Tensor.scalar(0xa3, .u8) else Tensor.scalar(1.5, .bf16);
             const gate_up_values = is_gate.select(gate_value, up_value);
+            const scales = Tensor.constantTensor(.init(.{ .block = 4 }, .u8), &.{ 126, 128, 126, 128 });
             var gate_up: nn.Linear = .{
                 .weight = gate_up_values.broad(Shape.init(.{ .expert = 8, .dout = 256, .d = @as(i64, if (fp4) 64 else 128) }, dtype)),
                 .tag = Shape.toTag(.d),
                 .quantization = if (fp4) .{
                     .scheme = .mxfp4,
-                    .scales = Tensor.scalar(127, .u8).broad(Shape.init(.{ .expert = 8, .dout = 256, .d = 4 }, .u8)),
+                    .scales = scales.rename(.{ .block = .d }).broad(Shape.init(.{ .expert = 8, .dout = 256, .d = 4 }, .u8)),
                 } else null,
             };
             var down: nn.Linear = .{
@@ -951,7 +977,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 .tag = Shape.toTag(.dout),
                 .quantization = if (fp4) .{
                     .scheme = .mxfp4,
-                    .scales = Tensor.scalar(127, .u8).broad(Shape.init(.{ .expert = 8, .d = 128, .dout = 4 }, .u8)),
+                    .scales = scales.rename(.{ .block = .dout }).broad(Shape.init(.{ .expert = 8, .d = 128, .dout = 4 }, .u8)),
                 } else null,
             };
             if (storage_dtype == .f4e2m1) {
@@ -975,11 +1001,16 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
         }
     };
     for ([_]DataType{ .bf16, .u8, .f4e2m1 }) |storage_dtype| {
+        const fp4 = storage_dtype != .bf16;
         const tokens: i64 = if (storage_dtype == .u8) 17 else 1;
         const x: Tensor = .init(.{ .t = tokens, .d = 128 }, .bf16);
         const host = try zml.Slice.alloc(allocator, x.shape());
         defer host.free(allocator);
-        @memset(host.items(zml.floats.BFloat16), .fromF32(1.0 / 128.0));
+        for (host.items(zml.floats.BFloat16), 0..) |*value, i| {
+            const block_factor: f32 = if (i % 64 < 32) 1 else 0.5;
+            const lane_factor: f32 = if (i % 2 == 0) 1 else 0.5;
+            value.* = .fromF32(if (fp4) block_factor * lane_factor / 128 else 1.0 / 128.0);
+        }
         var input = try zml.Buffer.fromSlice(io, platform, host);
         defer input.deinit();
         for ([_]ProjectionLayout{ .concatenated, .row_interleaved_1 }) |layout| {
@@ -990,10 +1021,15 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 defer output.deinit();
                 var actual = try output.toSliceAlloc(allocator, io);
                 defer actual.free(allocator);
-                const activation: f32 = 0.5 / (1 + @exp(@as(f32, -0.5))) * 1.5;
+                // The scaled even and odd inputs sum to 3/8 and 3/16. The down
+                // weights are all one with block scales alternating 0.5 and 2.
+                const gate: f32 = if (fp4) 0.5 * 0.375 + 1.5 * 0.1875 else 0.5;
+                const up: f32 = if (fp4) 1.5 * 0.375 - 0.1875 else 1.5;
+                const down_sum: f32 = if (fp4) 128 * 1.25 else 128;
+                const activation = gate / (1 + @exp(-gate)) * up;
                 // The two routes have weights 0.25 and 0.5. Bias distinguishes placement.
                 const bias: f32 = if (placement == .before_down) 4 else 1.5;
-                const expected = 128 * activation * 0.75 + bias;
+                const expected = down_sum * activation * 0.75 + bias;
                 for (actual.constItems(zml.floats.BFloat16)) |value| {
                     try std.testing.expectApproxEqAbs(expected, value.toF32(), 0.5);
                 }
@@ -1036,14 +1072,29 @@ const launch_configs = [_]struct { tokens: i64, config: LaunchConfig }{
     .{ .tokens = 4096, .config = .{ .block_size_m = 128, .block_size_n = 256, .block_size_k = 64, .group_size_m = 16, .num_warps = 8, .num_stages = 4 } },
 };
 
+/// Use ordinary BF16 dots for block-scaled MoE on oneAPI.
+fn requiresBf16Dot(platform: *const zml.Platform, scheme: ?Quantization.Scheme) bool {
+    return platform.target == .oneapi and (scheme == .nvfp4 or scheme == .mxfp4 or scheme == .mxfp8);
+}
+
 /// The launch configuration of a projection's GEMM.
-fn launchConfig(scheme: ?Quantization.Scheme, num_tokens: i64) LaunchConfig {
+fn launchConfig(platform: *const zml.Platform, scheme: ?Quantization.Scheme, num_tokens: i64) LaunchConfig {
+    if (requiresBf16Dot(platform, scheme)) {
+        return .{
+            .block_size_m = 16,
+            .block_size_n = 32,
+            .block_size_k = 64,
+            .group_size_m = 1,
+            .num_warps = 4,
+            .num_stages = 1,
+        };
+    }
     var config = launchConfigForTokens(num_tokens);
     switch (scheme orelse return config) {
         // Each K tile spans one scale block.
         .fp8_block128 => config.block_size_k = 128,
         .fp8_block32 => config.block_size_k = 32,
-        .nvfp4 => if (isNvfp4Supported(zml.Compiler.current().platform)) {
+        .nvfp4 => if (isNvfp4Supported(platform)) {
             config = nvfp4LaunchConfig(num_tokens);
         },
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
@@ -1086,9 +1137,10 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-/// NVFP4 multiplies with the native block-scaled MMA on SM120 and with Triton's
-/// decomposition of it on SM10x; it is only validated on those.
+/// NVFP4 uses a BF16 dot on oneAPI, native block-scaled MMA on SM120,
+/// and Triton's decomposition of that MMA on SM10x.
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
+    if (requiresBf16Dot(platform, .nvfp4)) return true;
     if (platform.target != .cuda) return false;
     const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
     return switch (cc.major) {

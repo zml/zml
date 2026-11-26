@@ -8,8 +8,9 @@
 const std = @import("std");
 
 const Activation = @import("zml/kernels/moe/api").Activation;
-const Nvfp4QuantizationStrategy = @import("zml/quantization").Nvfp4QuantizationStrategy;
-const Quantization = @import("zml/quantization").Quantization;
+const quantization = @import("zml/quantization");
+const Nvfp4QuantizationStrategy = quantization.Nvfp4QuantizationStrategy;
+const Quantization = quantization.Quantization;
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const zml = @import("zml/core");
 const tri = zml.kernel.triton;
@@ -209,12 +210,90 @@ fn writeZerosToOutput(
 // fused_moe_kernel
 // =============================================================================
 
+fn decodeE4m3(b: *Builder, bytes: Value) Value {
+    const code = bytes.to(.i32);
+    const magnitude = code.bitAnd(0x7f);
+    const exponent = magnitude.div(8);
+    const mantissa = magnitude.bitAnd(7);
+    const normal = exponent.add(127 - 7).mul(0x800000).bitOr(mantissa.mul(0x100000));
+    const subnormal = mantissa.to(.f32).mul(0x1p-9).bitCast(.i32);
+    const decoded = b.select(exponent.eq(0), subnormal, normal);
+    const nan = b.full(code.shape().constSlice(), 0x7fc00000, .i32);
+    const sign = code.bitAnd(0x80).mul(0x1000000);
+    return b.select(magnitude.eq(0x7f), nan, decoded).bitOr(sign).bitCast(.f32);
+}
+
+fn decodeE8m0(b: *Builder, bytes: Value) Value {
+    const exponent = bytes.to(.i32).bitAnd(0xff);
+    const shape = exponent.shape().constSlice();
+    const bits = b.select(exponent.eq(0), b.full(shape, 0x400000, .i32), exponent.mul(0x800000));
+    return b.select(exponent.eq(255), b.full(shape, 0x7fc00000, .i32), bits).bitCast(.f32);
+}
+
+fn decodePackedE2m1(b: *Builder, encoded: Value) Value {
+    const bytes = encoded.to(.i32).bitAnd(0xff);
+    // The low nibble holds the lower K index.
+    const codes = b.join(bytes.bitAnd(15), bytes.div(16));
+    const magnitude = codes.bitAnd(7);
+    const normal = magnitude.div(2).add(126).mul(0x800000).bitOr(magnitude.bitAnd(1).mul(0x400000));
+    const subnormal = magnitude.mul(0x3f000000);
+    const sign = codes.bitAnd(8).mul(0x10000000);
+    return b.select(magnitude.lt(2), subnormal, normal).bitOr(sign).bitCast(.f32);
+}
+
+/// Values in [row, K] order, with one scale per block along K.
+const ScaledTile = struct { values: Value, scales: Value };
+
+fn applyBlockScalesAsBf16(b: *Builder, tile: ScaledTile, group_size: i64) Value {
+    const rows = tile.scales.shape().get(0);
+    const groups = tile.scales.shape().get(1);
+    const shape = [_]i64{ rows, groups, group_size };
+    const scaled = b.reshape(tile.values, &shape).mul(b.broadcastTo(tile.scales.expandDims(2), &shape));
+    return b.reshape(scaled.to(.bf16), &.{ rows, groups * group_size });
+}
+
+fn nvfp4TileAsBf16(b: *Builder, tile: ScaledTile) Value {
+    return applyBlockScalesAsBf16(b, .{
+        .values = decodePackedE2m1(b, tile.values),
+        .scales = decodeE4m3(b, tile.scales),
+    }, quantization.nvfp4_block_size);
+}
+
+/// The row and expert scales are applied in the epilogue.
+fn nvfp4DotAsBf16(b: *Builder, input: ScaledTile, weight: ScaledTile, acc: Value) Value {
+    const lhs = nvfp4TileAsBf16(b, input);
+    const rhs = nvfp4TileAsBf16(b, weight);
+    return b.dot(lhs, b.trans(rhs, &.{ 1, 0 }), acc);
+}
+
+fn mxfp4DotAsBf16(b: *Builder, input: Value, weight: ScaledTile, acc: Value) Value {
+    const rhs = applyBlockScalesAsBf16(b, .{
+        .values = decodePackedE2m1(b, weight.values),
+        .scales = decodeE8m0(b, weight.scales),
+    }, quantization.mx_block_size);
+    return b.dot(input, b.trans(rhs, &.{ 1, 0 }), acc);
+}
+
+fn mxfp8TileAsBf16(b: *Builder, tile: ScaledTile) Value {
+    return applyBlockScalesAsBf16(b, .{
+        .values = decodeE4m3(b, tile.values),
+        .scales = decodeE8m0(b, tile.scales),
+    }, quantization.mx_block_size);
+}
+
+fn mxfp8DotAsBf16(b: *Builder, input: Value, input_scales: ?Value, weight: ScaledTile, acc: Value) Value {
+    const lhs = if (input_scales) |scales| mxfp8TileAsBf16(b, .{ .values = input, .scales = scales }) else input;
+    const rhs = mxfp8TileAsBf16(b, weight);
+    return b.dot(lhs, b.trans(rhs, &.{ 1, 0 }), acc);
+}
+
 /// Routed GEMM supporting BF16, MXFP4, MXFP8, NVFP4, and per-tensor, per-channel, or
 /// 128x128 block-scaled FP8 weights.
 pub const FusedMoe = struct {
     pub const Cfg = struct {
         a_dtype: DType,
         b_dtype: DType,
+        b_ptr_divisibility: u32,
         c_dtype: DType,
         a_scale_dtype: ?DType,
         b_scale_dtype: ?DType,
@@ -228,6 +307,7 @@ pub const FusedMoe = struct {
         naive_block_assignment: bool,
         compute_type: DType,
         quant_scheme: ?Quantization.Scheme,
+        dequantize_to_bf16: bool,
         /// The values behind the dimension and stride pointers, when the graph knows them:
         /// the kernel then folds them instead of loading them in every program.
         dims: ?Dims = null,
@@ -284,9 +364,25 @@ pub const FusedMoe = struct {
             return error.InvalidMlir;
         }
 
+        if (cfg.dequantize_to_bf16) {
+            const scheme = cfg.quant_scheme orelse return error.InvalidMlir;
+            const byte_input = cfg.a_dtype == .i8 and cfg.a_scale_dtype == .i8;
+            const bf16_input = cfg.a_dtype == .bf16 and cfg.a_scale_dtype == null;
+            const valid_input = switch (scheme) {
+                .nvfp4 => byte_input,
+                .mxfp4 => bf16_input,
+                .mxfp8 => byte_input or bf16_input,
+                else => false,
+            };
+            if (!valid_input or cfg.b_dtype != .i8 or cfg.b_scale_dtype != .i8) {
+                log.err("fused_moe_kernel: invalid operands for {s} BF16 dot: input {any}, input scales {any}, weights {any}, weight scales {any}", .{ @tagName(scheme), cfg.a_dtype, cfg.a_scale_dtype, cfg.b_dtype, cfg.b_scale_dtype });
+                return error.InvalidMlir;
+            }
+        }
+
         const a = try b.declareArgs(.{
             .a_ptr = .{ .ptr = cfg.a_dtype },
-            .b_ptr = .{ .ptr = cfg.b_dtype },
+            .b_ptr = .{ .ptr_opts = .{ .dtype = cfg.b_dtype, .divisibility = cfg.b_ptr_divisibility } },
             // The fixed signature requires concrete pointer types even for absent,
             // unused inputs. FP32 matches the caller's placeholder tensors.
             .b_bias_ptr = .{ .ptr = cfg.b_bias_dtype orelse .f32 },
@@ -491,7 +587,7 @@ pub const FusedMoe = struct {
                 .mxfp4, .mxfp8, .nvfp4 => scaled: {
                     // NVFP4 has one E4M3 scale per 16 values, MX formats one E8M0 scale per 32.
                     const nvfp4 = scheme == .nvfp4;
-                    const group: i64 = if (nvfp4) 16 else 32;
+                    const group: i64 = if (nvfp4) quantization.nvfp4_block_size else quantization.mx_block_size;
                     const scale_k = @divExact(block_size_k, group);
                     const groups = k_iter.mul(scale_k).add(b.arange(0, scale_k, .i64));
                     const stride_bse = Dims.value(b, cfg.dims, "stride_bse", a.stride_bse_ptr);
@@ -520,6 +616,15 @@ pub const FusedMoe = struct {
                             .other = if (nvfp4) b.zeros(&.{ block_size_m, scale_k }, cfg.a_scale_dtype.?) else b.full(&.{ block_size_m, scale_k }, 127, .i8),
                         });
                     } else null;
+                    if (cfg.dequantize_to_bf16) {
+                        const weight: ScaledTile = .{ .values = b.trans(b_val, &.{ 1, 0 }), .scales = scales };
+                        break :scaled switch (scheme) {
+                            .nvfp4 => nvfp4DotAsBf16(b, .{ .values = a_val, .scales = a_scales orelse return error.InvalidMlir }, weight, acc),
+                            .mxfp4 => mxfp4DotAsBf16(b, a_val, weight, acc),
+                            .mxfp8 => mxfp8DotAsBf16(b, a_val, a_scales, weight, acc),
+                            else => unreachable,
+                        };
+                    }
                     break :scaled b.dotScaledOpts(
                         a_val,
                         b_val,
@@ -700,6 +805,7 @@ test "FusedMoe emits each FP8 and MXFP4 scaling path" {
                     const ir = try FusedMoe.Kernel.emit(allocator, .{
                         .a_dtype = if (quantize_input) fp8_dtype else .bf16,
                         .b_dtype = if (scheme == .mxfp4) .i8 else if (scheme != null) fp8_dtype else .bf16,
+                        .b_ptr_divisibility = 16,
                         .c_dtype = .bf16,
                         .a_scale_dtype = if (quantize_input) (if (scheme == .mxfp8) .i8 else .f32) else null,
                         .b_scale_dtype = if (scheme == .mxfp4 or scheme == .mxfp8) .i8 else if (scheme != null) .f32 else null,
@@ -713,6 +819,7 @@ test "FusedMoe emits each FP8 and MXFP4 scaling path" {
                         .naive_block_assignment = false,
                         .compute_type = .bf16,
                         .quant_scheme = scheme,
+                        .dequantize_to_bf16 = false,
                     });
                     defer allocator.free(ir);
                     if (scheme == .mxfp4 or scheme == .mxfp8) {
@@ -727,6 +834,41 @@ test "FusedMoe emits each FP8 and MXFP4 scaling path" {
                 }
             }
         }
+    }
+}
+
+test "FusedMoe emits BF16 dot for NVFP4, MXFP4 and MXFP8 operands" {
+    const allocator = std.testing.allocator;
+    const cases: []const struct { scheme: Quantization.Scheme, input_dtype: DType } = &.{
+        .{ .scheme = .nvfp4, .input_dtype = .i8 },
+        .{ .scheme = .mxfp4, .input_dtype = .bf16 },
+        .{ .scheme = .mxfp8, .input_dtype = .bf16 },
+        .{ .scheme = .mxfp8, .input_dtype = .i8 },
+    };
+    for (cases) |case| {
+        const ir = try FusedMoe.Kernel.emit(allocator, .{
+            .a_dtype = case.input_dtype,
+            .b_dtype = .i8,
+            .b_ptr_divisibility = if (case.scheme == .mxfp8) 1 else 16,
+            .c_dtype = .bf16,
+            .a_scale_dtype = if (case.input_dtype == .i8) .i8 else null,
+            .b_scale_dtype = .i8,
+            .b_bias_dtype = null,
+            .routing_weights_dtype = .f32,
+            .block_size_m = 16,
+            .block_size_n = 32,
+            .block_size_k = 64,
+            .group_size_m = 1,
+            .top_k = 2,
+            .naive_block_assignment = false,
+            .compute_type = .bf16,
+            .quant_scheme = case.scheme,
+            .dequantize_to_bf16 = true,
+        });
+        defer allocator.free(ir);
+        try std.testing.expect(std.mem.indexOf(u8, ir, "tt.dot") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ir, "tt.dot_scaled") == null);
+        try std.testing.expect(std.mem.indexOf(u8, ir, "f8") == null);
     }
 }
 
