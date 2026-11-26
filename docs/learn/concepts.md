@@ -4,7 +4,7 @@
 ## Model lifecycle
 
 ZML is an inference stack that helps running Machine Learning (ML) models, and
-particulary Neural Networks (NN).
+particularly Neural Networks (NN).
 
 The lifecycle of a model is implemented in the following steps:
 
@@ -59,7 +59,7 @@ Let's explain all that.
     `Shape.init(.{}, .i32)` represents a 32-bit signed integer.
 
 * `Slice`: _is_ the combination of a `Shape` and raw bytes (bytes that are **on the CPU**).
-  - can own the underlying memory - but can also accomodate non-owned memory.
+  - can own the underlying memory - but can also accommodate non-owned memory.
 
 * `Buffer`: _is_ a multi-dimension array, whose memory is allocated **on an
   accelerator**.
@@ -129,7 +129,7 @@ corresponding types.
 2. Instantiate a model struct -> `Model` struct (with `zml.Tensor` inside)
 
 3. Compile the model struct and its `forward` function into an executable.
-   `foward` is a `Tensor -> Tensor` function, executable is a
+   `forward` is a `Tensor -> Tensor` function, executable is a
    `zml.Executable`
 
 4. Load the model weights from disk, onto accelerator memory ->

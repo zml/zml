@@ -83,7 +83,7 @@ pub const PipeSpec = struct {
 
     /// Optional custom DMA behavior for this operand.
     transfer_strategy: ?BufferedRefStrategy = null,
-    /// Override the role infered from whether this spec appears
+    /// Override the role inferred from whether this spec appears
     /// in `in_specs` or `out_specs`
     buffer_type: ?BufferType = null,
 };
