@@ -106,6 +106,7 @@ common:alldebug --strategy=local
 # Experimental Linux x86-64 development build with a persistent Zig linker.
 # Optimized C++ objects avoid extended ELF section indexes in large dialects.
 # Restart Bazel after changing native link inputs.
+common:zig_direct --platforms=//platforms:linux_amd64
 common:zig_direct --compilation_mode=opt
 common:zig_direct --@rules_zig//zig/settings:mode=debug
 common:zig_direct --@rules_zig//zig/settings:use_cc_common_link=false
