@@ -25,12 +25,12 @@ zig_binary(
     data = glob(["lib/**/*.zig"]),
     srcs = glob(["src/**/*.zig"]),
     main = "src/main.zig",
-    linkopts = ["-lc"],
     deps = [
         ":build_options",
         ":c_builtins",
         ":helpers",
         "@arocc//:aro",
+        "@rules_zig//zig/lib:libc",
     ],
     visibility = ["//visibility:public"],
 )
@@ -45,5 +45,7 @@ zig_configure_binary(
     name = "translate-c",
     actual = ":translate-c_raw",
     bootstrapped = 0,
+    host_use_cc_common_link = 0,
+    use_cc_common_link = 0,
     visibility = ["//visibility:public"],
 )

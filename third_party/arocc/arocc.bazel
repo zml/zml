@@ -1,5 +1,5 @@
 load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary", "zig_library")
 load("@zml//bazel:zig_options.bzl", "zig_option", "zig_options")
 
 zig_option(
@@ -110,7 +110,7 @@ zig_library(
 )
 
 zig_binary(
-    name = "arocc",
+    name = "arocc_raw",
     srcs = glob(["src/**/*.zig"]),
     main = "src/main.zig",
     deps = [
@@ -120,9 +120,24 @@ zig_binary(
     ],
 )
 
+zig_configure_binary(
+    name = "arocc",
+    actual = ":arocc_raw",
+    host_use_cc_common_link = 0,
+    use_cc_common_link = 0,
+)
+
 zig_binary(
-    name = "generate-def",
+    name = "generate-def_raw",
     main = "build/generate_def.zig",
+)
+
+# Pure Zig tools own their startup code even when LLMD uses a C/C++ host linker.
+zig_configure_binary(
+    name = "generate-def",
+    actual = ":generate-def_raw",
+    host_use_cc_common_link = 0,
+    use_cc_common_link = 0,
 )
 
 [
