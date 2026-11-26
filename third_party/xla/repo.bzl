@@ -7,7 +7,6 @@ def repo():
         commit = "fc31477d352ed8edc223648524382f9b10a7699b",
         patches = [
             "//third_party/xla:cuda-root-path-local-defines.patch",
-            "//third_party/xla:host-alwayslink.patch",
         ],
         patch_args = ["-p1"],
     )
