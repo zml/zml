@@ -126,6 +126,25 @@ pub fn nvfp4OutputScale(row_scale: ?Tensor, quantization: Quantization, ids: Ten
     return if (rows) |r| r.mul(experts) else experts;
 }
 
+/// What the GEMM output of each route is left to multiply by: the global scales of its input
+/// and of its expert's weights, which GEMMs do not read.
+pub fn routeGlobalScale(in: struct {
+    /// A scalar, or one per row of the input, which the routes of that row share.
+    input_scale: ?Tensor,
+    /// A scalar or one per expert.
+    expert_scale: ?Quantization.GlobalScale,
+    /// The local expert of each route, negative without one, laid out like the input's rows:
+    /// {.token, .topk} when they are tokens (gate/up), {.route} when they are routes (down).
+    local_experts_ids: Tensor,
+}) ?Tensor {
+    const route_shape = in.local_experts_ids.shape().withDtype(.f32);
+    const routed_input_scale: ?Tensor = if (in.input_scale) |scale| scale.broad(route_shape) else null;
+    const expert_scale = (in.expert_scale orelse return routed_input_scale).asMultiplier();
+    // Routes without a local expert produce no output; any expert works for them.
+    const routed_expert_scale = if (expert_scale.rank() == 0) expert_scale.broad(route_shape) else expert_scale.withTags(.{.expert}).gather(.{ .expert = in.local_experts_ids.maximum(.scalar(0, .i32)) }, .{});
+    return if (routed_input_scale) |scale| scale.mul(routed_expert_scale) else routed_expert_scale;
+}
+
 pub const ProjectionLayout = enum {
     concatenated, // G0 G1 … Gn U0 U1 … Un
     row_interleaved_1, // G0 U0 G1 U1 …

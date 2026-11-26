@@ -46,6 +46,10 @@ pub const Linear = struct {
         return if (self.quantization) |q| q.scales else null;
     }
 
+    pub fn quantizationGlobalScale(self: Linear) ?Quantization.GlobalScale {
+        return if (self.quantization) |q| q.global_scale else null;
+    }
+
     pub fn forward(self: Linear, x: Tensor, out_dtype: DataType) Tensor {
         if (self.quantization) |q| {
             if (quantization.quantizeInput(q, x, self.tag, zml.Compiler.current().platform)) |input| {
