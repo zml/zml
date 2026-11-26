@@ -39,6 +39,12 @@ pub const KernelUnifiedAttention2dPtr = struct {
         use_softcap: bool,
         use_sinks: bool,
         sliding_window: i64,
+        /// Sinks laid out `[token, head]` instead of one per head.
+        per_token_sinks: bool = false,
+        /// Width of a `[token, head, distance]` logit bias indexed by the distance from
+        /// the query to the key; zero disables it.
+        rel_bias_extent: i64 = 0,
+        rel_bias_dtype: DType = .f32,
 
         stride_k_cache_3: i64 = 1,
         stride_v_cache_3: i64 = 1,
@@ -55,12 +61,12 @@ pub const KernelUnifiedAttention2dPtr = struct {
     pub const Kernel = tri.Kernel(Config, .{
         .name = "kernel_unified_attention_2d_ptr",
         .inputs = &.{
-            "query_ptr",           "key_cache_ptr",          "value_cache_ptr",      "sink_ptr",
-            "block_tables_ptr",    "seq_lens_ptr",           "alibi_slopes_ptr",     "qq_bias_ptr",
-            "scale_ptr",           "k_scale_ptr",            "v_scale_ptr",          "out_scale_ptr",
-            "softcap_ptr",         "block_table_stride_ptr", "query_stride_0_ptr",   "query_stride_1_ptr",
-            "output_stride_0_ptr", "output_stride_1_ptr",    "qq_bias_stride_0_ptr", "query_start_len_ptr",
-            "num_seqs_ptr",
+            "query_ptr",           "key_cache_ptr",       "value_cache_ptr",        "sink_ptr",
+            "block_tables_ptr",    "seq_lens_ptr",        "alibi_slopes_ptr",       "qq_bias_ptr",
+            "rel_bias_ptr",        "scale_ptr",           "k_scale_ptr",            "v_scale_ptr",
+            "out_scale_ptr",       "softcap_ptr",         "block_table_stride_ptr", "query_stride_0_ptr",
+            "query_stride_1_ptr",  "output_stride_0_ptr", "output_stride_1_ptr",    "qq_bias_stride_0_ptr",
+            "query_start_len_ptr", "num_seqs_ptr",
         },
         .outputs = &.{"output"},
         .run = run,
@@ -75,6 +81,7 @@ pub const KernelUnifiedAttention2dPtr = struct {
             .seq_lens_ptr = .{ .ptr = .i32 },
             .alibi_slopes_ptr = .{ .ptr = cfg.scale_dtype },
             .qq_bias_ptr = .{ .ptr = cfg.scale_dtype },
+            .rel_bias_ptr = .{ .ptr = cfg.rel_bias_dtype },
             .scale_ptr = .{ .ptr = .f32 },
             .k_scale_ptr = .{ .ptr = .f32 },
             .v_scale_ptr = .{ .ptr = .f32 },
@@ -115,6 +122,7 @@ pub const KernelUnifiedAttention2dPtr = struct {
             a.seq_lens_ptr,
             a.alibi_slopes_ptr,
             a.qq_bias_ptr,
+            a.rel_bias_ptr,
             scale,
             k_scale,
             v_scale,
@@ -155,6 +163,12 @@ pub const KernelUnifiedAttention3dPtr = struct {
         use_softcap: bool,
         use_sinks: bool,
         sliding_window: i64,
+        /// Sinks laid out `[token, head]` instead of one per head.
+        per_token_sinks: bool = false,
+        /// Width of a `[token, head, distance]` logit bias indexed by the distance from
+        /// the query to the key; zero disables it.
+        rel_bias_extent: i64 = 0,
+        rel_bias_dtype: DType = .f32,
 
         stride_k_cache_3: i64 = 1,
         stride_v_cache_3: i64 = 1,
@@ -169,11 +183,11 @@ pub const KernelUnifiedAttention3dPtr = struct {
     pub const Kernel = tri.Kernel(Config, .{
         .name = "kernel_unified_attention_3d_ptr",
         .inputs = &.{
-            "query_ptr",              "key_cache_ptr",      "value_cache_ptr",    "sink_ptr",
-            "block_tables_ptr",       "seq_lens_ptr",       "alibi_slopes_ptr",   "qq_bias_ptr",
-            "scale_ptr",              "k_scale_ptr",        "v_scale_ptr",        "softcap_ptr",
-            "block_table_stride_ptr", "query_stride_0_ptr", "query_stride_1_ptr", "qq_bias_stride_0_ptr",
-            "query_start_len_ptr",    "num_seqs_ptr",
+            "query_ptr",            "key_cache_ptr",          "value_cache_ptr",    "sink_ptr",
+            "block_tables_ptr",     "seq_lens_ptr",           "alibi_slopes_ptr",   "qq_bias_ptr",
+            "rel_bias_ptr",         "scale_ptr",              "k_scale_ptr",        "v_scale_ptr",
+            "softcap_ptr",          "block_table_stride_ptr", "query_stride_0_ptr", "query_stride_1_ptr",
+            "qq_bias_stride_0_ptr", "query_start_len_ptr",    "num_seqs_ptr",
         },
         .outputs = &.{ "segm_output", "segm_max", "segm_expsum" },
         .run = run,
@@ -188,6 +202,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
             .seq_lens_ptr = .{ .ptr = .i32 },
             .alibi_slopes_ptr = .{ .ptr = cfg.scale_dtype },
             .qq_bias_ptr = .{ .ptr = cfg.scale_dtype },
+            .rel_bias_ptr = .{ .ptr = cfg.rel_bias_dtype },
             .scale_ptr = .{ .ptr = .f32 },
             .k_scale_ptr = .{ .ptr = .f32 },
             .v_scale_ptr = .{ .ptr = .f32 },
@@ -226,6 +241,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
             a.seq_lens_ptr,
             a.alibi_slopes_ptr,
             a.qq_bias_ptr,
+            a.rel_bias_ptr,
             scale,
             k_scale,
             v_scale,
@@ -383,6 +399,23 @@ fn dequantKv(loaded: Value, scale: Value, kv_is_fp8: bool, q_dtype: DType) Value
     return loaded.to(.f32).mul(scale).to(q_dtype);
 }
 
+/// Offsets of `[token, head]` entries.
+fn tokenHeadOffsets(token: Value, head: Value, num_query_heads: i64) Value {
+    return token.mul(@as(i32, @intCast(num_query_heads))).add(head);
+}
+
+/// Adds to the log2 scores `S` the bias of each key `distance` positions before its
+/// query, read from the query rows' biases for distances below `extent`.
+fn addRelBias(k: *Builder, S: Value, row_ptrs: Value, distance: Value, mask: Value, extent: i64, dtype: DType) Value {
+    const shape = S.shape();
+    const near = distance.ge(0).bitAnd(distance.lt(@as(i32, @intCast(extent))));
+    const bias = k.loadOpts(k.broadcastTo(row_ptrs.expandDims(1), shape.constSlice()).addPtr(distance), .{
+        .mask = near.bitAnd(mask),
+        .other = k.zeros(shape.constSlice(), dtype),
+    });
+    return S.add(bias.to(.f32).mul(RCP_LN2));
+}
+
 fn kernelUnifiedAttention2d(
     k: *Builder,
     output_ptr: Value,
@@ -394,6 +427,7 @@ fn kernelUnifiedAttention2d(
     seq_lens_ptr: Value,
     alibi_slopes_ptr: Value,
     qq_bias_ptr: Value,
+    rel_bias_ptr: Value,
     scale: Value,
     k_scale: Value,
     v_scale: Value,
@@ -483,10 +517,11 @@ fn kernelUnifiedAttention2d(
 
     const block_table_offset = seq_idx.to(.i64).mul(block_table_stride);
 
-    // M init — sinks or -inf.
+    // M init — sinks or -inf. Padding rows read no sink.
     const m_init: Value = if (config.use_sinks) mb: {
-        const loaded = k.loadOpts(sink_ptr.addPtr(query_offset_1), .{
-            .mask = query_mask_1,
+        const offsets = if (config.per_token_sinks) tokenHeadOffsets(query_offset_0, query_offset_1, NUM_QUERY_HEADS) else query_offset_1;
+        const loaded = k.loadOpts(sink_ptr.addPtr(offsets), .{
+            .mask = query_mask_0.bitAnd(query_mask_1),
             .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
         });
         break :mb loaded.to(.f32).mul(RCP_LN2);
@@ -513,6 +548,11 @@ fn kernelUnifiedAttention2d(
         qq_bias_ptr.addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
     else
         qq_bias_ptr.splatTo(&.{BLOCK_M});
+
+    const rel_bias_rows: ?Value = if (config.rel_bias_extent > 0)
+        rel_bias_ptr.addPtr(tokenHeadOffsets(query_offset_0, query_offset_1, NUM_QUERY_HEADS).to(.i64).mul(config.rel_bias_extent))
+    else
+        null;
 
     // In causal mode, each query block only scans keys up to the last query
     // represented in this block. In non-causal mode, scan the whole sequence
@@ -641,6 +681,11 @@ fn kernelUnifiedAttention2d(
             S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
         }
 
+        if (rel_bias_rows) |row_ptrs| {
+            const distance = ql_2d_i32.add(context_len).sub(so_2d);
+            S = addRelBias(k, S, row_ptrs, distance, qm0_2d.bitAnd(qm1_2d), config.rel_bias_extent, config.rel_bias_dtype);
+        }
+
         // m_j = max(M, max(S, axis=1))
         var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));
         m_j = k.where(m_j.gt(-std.math.inf(f32)), m_j, k.full(&.{BLOCK_M}, 0.0, .f32));
@@ -703,6 +748,7 @@ fn kernelUnifiedAttention3d(
     seq_lens_ptr: Value,
     alibi_slopes_ptr: Value,
     qq_bias_ptr: Value,
+    rel_bias_ptr: Value,
     scale: Value,
     k_scale: Value,
     v_scale: Value,
@@ -797,13 +843,14 @@ fn kernelUnifiedAttention3d(
 
     const block_table_offset = seq_idx.to(.i64).mul(block_table_stride);
 
-    // M init: USE_SINKS + segm_idx==0 → loaded sinks; else -inf.
+    // M init: USE_SINKS + segm_idx==0 → loaded sinks; else -inf. Padding rows read no sink.
     const segm_is_zero = segm_idx.eq(0);
     const m_init: Value = if (config.use_sinks) mb: {
         var mi = k.openIfElse(segm_is_zero, .{k.tensorTy(&.{BLOCK_M}, .f32)});
         {
-            const loaded = k.loadOpts(sink_ptr.addPtr(query_offset_1), .{
-                .mask = query_mask_1,
+            const offsets = if (config.per_token_sinks) tokenHeadOffsets(query_offset_0, query_offset_1, NUM_QUERY_HEADS) else query_offset_1;
+            const loaded = k.loadOpts(sink_ptr.addPtr(offsets), .{
+                .mask = query_mask_0.bitAnd(query_mask_1),
                 .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
             });
             mi.yieldThen(.{loaded.to(.f32).mul(RCP_LN2)});
@@ -834,6 +881,11 @@ fn kernelUnifiedAttention3d(
     else
         qq_bias_ptr.splatTo(&.{BLOCK_M});
 
+    const rel_bias_rows: ?Value = if (config.rel_bias_extent > 0)
+        rel_bias_ptr.addPtr(tokenHeadOffsets(query_offset_0, query_offset_1, NUM_QUERY_HEADS).to(.i64).mul(config.rel_bias_extent))
+    else
+        null;
+
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
     const max_seq_prefix_len = if (config.is_causal) b: {
         const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
@@ -841,8 +893,20 @@ fn kernelUnifiedAttention3d(
     } else seq_len;
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
-    const segm_tile_lo = segm_idx.mul(tiles_per_segment);
-    const segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
+    var segm_tile_lo = segm_idx.mul(tiles_per_segment);
+    var segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
+    if (SLIDING_WINDOW > 0) {
+        // Sliding window: only the window's tiles hold visible keys, so they are the ones
+        // split, over the segments reduceSegments reads for this sequence length. A segment
+        // left without tiles runs no iteration, and its -inf max (or the sink, in segment 0)
+        // gives it no weight there.
+        const first_allowed_key = context_len.add(q_local_bq).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
+        const first_tile = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(0);
+        const read_segments = cdivFn(seq_len, tiles_per_segment.mul(@as(i32, @intCast(TILE_SIZE))));
+        const window_tiles_per_segment = cdivFn(num_tiles.sub(first_tile), read_segments);
+        segm_tile_lo = first_tile.add(segm_idx.mul(window_tiles_per_segment));
+        segm_tile_hi = first_tile.add(segm_idx.add(1).mul(window_tiles_per_segment)).minimum(num_tiles);
+    }
 
     const kv_cache_mod: ttir.CacheModifier =
         if (config.all_decode) .cg else .none;
@@ -936,6 +1000,11 @@ fn kernelUnifiedAttention3d(
                 .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
             });
             S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
+        }
+
+        if (rel_bias_rows) |row_ptrs| {
+            const distance = ql_2d_i32.add(context_len).sub(so_2d);
+            S = addRelBias(k, S, row_ptrs, distance, qm0_2d.bitAnd(qm1_2d), config.rel_bias_extent, config.rel_bias_dtype);
         }
 
         var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));

@@ -29,6 +29,11 @@ pub const FaVecPaged = struct {
         position_stride: i32,
         heads: i32,
         splits: i32,
+        /// Reads a sink logit per query token and head, `sinks[tokens, heads]`.
+        sinks: bool = false,
+        /// Distances covered by the relative bias `rel_bias[tokens, heads, extent]`,
+        /// added to the logit of the key that many positions before the query; 0 for none.
+        bias_extent: i32 = 0,
     };
 
     pub const Args: metal.Struct = .{ .name = "fa_vec_paged_args", .fields = &.{
@@ -52,7 +57,7 @@ pub const FaVecPaged = struct {
 
     pub const Kernel = metal.Kernel(Cfg, .{
         .name = "fa_vec_paged",
-        .inputs = &.{ "q", "k_cache", "v_cache", "block_tables", "seq_lens", "cu_seqlens_q" },
+        .inputs = &.{ "q", "k_cache", "v_cache", "block_tables", "seq_lens", "cu_seqlens_q", "sinks", "rel_bias" },
         .outputs = &.{"dst"},
         .constants = &.{"args"},
         .run = run,
@@ -73,6 +78,8 @@ pub const FaVecPaged = struct {
             .block_tables = int_in,
             .seq_lens = int_in,
             .cu_seqlens_q = int_in,
+            .sinks = .{ .buffer = .{ .type = .float, .const_ = true } },
+            .rel_bias = .{ .buffer = .{ .type = .bfloat, .const_ = true } },
             .dst = .{ .buffer = .{ .type = .char } },
             .tgpig = .{ .threadgroup_position_in_grid = .uint3 },
             .tgpg = .{ .threadgroups_per_grid = .uint3 },
@@ -154,8 +161,10 @@ pub const FaVecPaged = struct {
             init.close();
         }
 
-        const S = b.local(.float, 0.0);
-        const M = b.local(.float, -flt_max / 2.0);
+        // A sink is one more logit with a zero value. With splits, the reduction adds it.
+        const sinked = cfg.sinks and NWG == 1;
+        const S = b.local(.float, @as(f32, if (sinked) 1.0 else 0.0));
+        const M = if (sinked) b.local(.float, a.sinks.load(rid)) else b.local(.float, -flt_max / 2.0);
 
         const ic0 = b.local(.int, ic0_lo.add(iwg));
         var blocks = b.openLoop(.{});
@@ -194,7 +203,10 @@ pub const FaVecPaged = struct {
 
             const pos = ic.add(a.tiisg.to(.int));
             const in_kv = pos.lt(kv_len).bitAnd(pos.ge(kv_lo));
-            const score = b.ternary(in_kv, s.mul(a.args.field("scale")), b.constant(.float, -max_half));
+            var logit = s.mul(a.args.field("scale"));
+            // The query is at kv_len - 1.
+            if (cfg.bias_extent > 0) logit = logit.add(relativeBias(b, a.rel_bias, rid, kv_len.sub(1).sub(pos), cfg.bias_extent));
+            const score = b.ternary(in_kv, logit, b.constant(.float, -max_half));
 
             const m = M.rvalue();
             M.assign(b.simdMax(b.max(M.rvalue(), score)));
@@ -309,19 +321,28 @@ fn liveSplits(b: *Builder, seq: anytype, splits: i32) Value {
     return b.min(splits, chunks);
 }
 
+/// The bias `rel_bias[row, distance]` of the key `distance` positions before the
+/// query, for distances below `extent`; 0 otherwise.
+fn relativeBias(b: *Builder, rel_bias: Value, row: Value, distance: Value, extent: i32) Value {
+    const bias = rel_bias.load(row.mul(extent).add(b.clamp(distance, 0, extent - 1))).to(.float);
+    return b.ternary(distance.ge(0).bitAnd(distance.lt(extent)), bias, b.constant(.float, 0));
+}
+
 /// fa_vec_paged_reduce: merges the fa_vec_paged split partials.
 pub const FaVecPagedReduce = struct {
     pub const Cfg = struct {
         splits: i32,
         /// The head dimension.
         head_dim: i32,
+        /// Adds a sink logit per query token and head, `sinks[tokens, heads]`.
+        sinks: bool = false,
     };
 
     pub const simdgroups = 8;
 
     pub const Kernel = metal.Kernel(Cfg, .{
         .name = "fa_vec_paged_reduce",
-        .inputs = &.{ "htmp", "seq_lens", "cu_seqlens_q" },
+        .inputs = &.{ "htmp", "seq_lens", "cu_seqlens_q", "sinks" },
         .outputs = &.{"dst"},
         .constants = &.{"args"},
         .run = run,
@@ -334,6 +355,7 @@ pub const FaVecPagedReduce = struct {
             .htmp = .{ .buffer = .{ .type = .char, .const_ = true } },
             .seq_lens = int_in,
             .cu_seqlens_q = int_in,
+            .sinks = .{ .buffer = .{ .type = .float, .const_ = true } },
             .dst = .{ .buffer = .{ .type = .char } },
             .tgpig = .{ .threadgroup_position_in_grid = .uint2 },
             .tgpg = .{ .threadgroups_per_grid = .uint2 },
@@ -383,7 +405,8 @@ pub const FaVecPagedReduce = struct {
             mx.assign(b.max(mx.rvalue(), Mj.load(j)));
             load.close();
         }
-        const m = b.simdMax(mx.rvalue());
+        const sink = if (cfg.sinks) a.sinks.load(rid) else null;
+        const m = if (sink) |x| b.max(b.simdMax(mx.rvalue()), x) else b.simdMax(mx.rvalue());
         const sum = b.local(.float, 0.0);
         var weigh = b.openForOpts(b.constant(.short, 0), NP, 1, full);
         {
@@ -392,7 +415,7 @@ pub const FaVecPagedReduce = struct {
             sum.assign(sum.add(Sj.load(j).mul(Mj.load(j))));
             weigh.close();
         }
-        const S = b.simdSum(sum.rvalue());
+        const S = if (sink) |x| b.simdSum(sum.rvalue()).add(b.exp(x.sub(m))) else b.simdSum(sum.rvalue());
         const inv_sum = b.ternary(S.eq(0.0), 0.0, b.lift(1.0).div(S));
 
         const htmp4 = a.htmp.to(.float4).add(rid.mul(DV4).mul(NWG));
@@ -467,22 +490,27 @@ pub const PagedAttentionTiled = struct {
         num_threads: i32 = 128,
         /// Bidirectional when false.
         causal: bool = true,
+        /// Reads a sink logit per query token and head, `sinks[tokens, heads]`.
+        sinks: bool = false,
+        /// Distances covered by the relative bias `rel_bias[tokens, heads, extent]`,
+        /// added to the logit of the key that many positions before the query; 0 for none.
+        bias_extent: i32 = 0,
     };
 
     pub const Kernel = metal.Kernel(Cfg, .{
         .name = "paged_attention_tiled",
-        .inputs = &.{ "q", "k_cache", "v_cache", "block_tables", "context_lens", "cu_seqlens_q" },
+        .inputs = &.{ "q", "k_cache", "v_cache", "block_tables", "context_lens", "cu_seqlens_q", "sinks", "rel_bias" },
         .outputs = &.{"out"},
         .constants = &.{ "num_kv_heads", "scale", "softcapping", "max_num_blocks_per_seq", "q_stride", "kv_block_stride", "kv_head_stride", "num_seqs", "sliding_window" },
         .run = run,
     });
 
     /// What the MSL instantiates: half or bfloat, a head size of tileConfig
-    /// with its tiles, and pages of 8, 16 or 32 positions.
+    /// with its tiles, and pages of 8, 16, 32 or 64 positions.
     fn supported(cfg: Cfg) bool {
         const tile = tileConfig(cfg.head_size) orelse return false;
         return (cfg.dtype.eql(.half) or cfg.dtype.eql(.bfloat)) and
-            (cfg.block_size == 8 or cfg.block_size == 16 or cfg.block_size == 32) and
+            (cfg.block_size == 8 or cfg.block_size == 16 or cfg.block_size == 32 or cfg.block_size == 64) and
             cfg.bq == tile[0] and cfg.tile_kv == tile[1] and cfg.num_threads == tile[2];
     }
 
@@ -555,6 +583,8 @@ pub const PagedAttentionTiled = struct {
             .cu_seqlens_q = .{ .buffer = .{ .type = .int, .const_ = true } },
             .num_seqs = int_arg,
             .sliding_window = int_arg,
+            .sinks = .{ .buffer = .{ .type = .float, .const_ = true } },
+            .rel_bias = .{ .buffer = .{ .type = .bfloat, .const_ = true } },
             .shared_mem = .{ .threadgroup = .char },
             .tgp = .{ .threadgroup_position_in_grid = .uint3 },
             .tgpg = .{ .threadgroups_per_grid = .uint3 },
@@ -658,8 +688,12 @@ pub const PagedAttentionTiled = struct {
         const fm = fc.y();
         const fn_ = fc.x();
 
-        const max_score = b.local(.float, masked_score);
-        const sum_score = b.local(.float, 0.0);
+        // This lane's query row and token, clamped to a real token for padding rows.
+        const row_token = q_seq_start.add(q_pos_start).add(b.min(a.sg_idx.mul(8).add(fm).to(.int), valid_q.sub(1)));
+        const row_head = row_token.to(.long).mul(num_heads).add(head_idx);
+        // A sink is one more logit with a zero value.
+        const max_score = if (cfg.sinks) b.local(.float, a.sinks.load(row_head).mul(log2e)) else b.local(.float, masked_score);
+        const sum_score = b.local(.float, @as(f32, if (cfg.sinks) 1.0 else 0.0));
 
         const o_reg = b.array(.float2, @intCast(TD));
         var zero_o = b.openForOpts(0, TD, 1, unroll);
@@ -752,6 +786,8 @@ pub const PagedAttentionTiled = struct {
             const min_q_abs_pos = context_len.add(q_pos_start);
             var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
             if (cfg.causal) tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
+            // Relative biases go through the per-key path.
+            if (cfg.bias_extent > 0) tile_no_mask = b.constant(.bool, false);
 
             var masking = b.openIfElse(tile_no_mask.bitAnd(row_masked.eq(false)), .{});
             {
@@ -779,6 +815,7 @@ pub const PagedAttentionTiled = struct {
                             capped.close();
                         }
                         const kv_pos = tile_start.add(k.mul(8)).add(fn_).add(jj);
+                        if (cfg.bias_extent > 0) s.assign(s.add(relativeBias(b, a.rel_bias, row_head, q_abs_pos.sub(kv_pos), cfg.bias_extent).mul(log2e)));
                         var masked = row_masked.bitOr(kv_pos.ge(seq_len));
                         if (cfg.causal) masked = masked.bitOr(kv_pos.gt(q_abs_pos));
                         const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window)));
@@ -891,9 +928,11 @@ test "the paged attention kernels emit verified modules" {
     for ([_]i32{ 32, 64, 128, 256, 512 }) |head_dim| {
         for ([_][2]i32{ .{ 1, 1 }, .{ 4, 1 }, .{ 2, 8 }, .{ 4, 128 } }) |launch| {
             allocator.free(try FaVecPaged.Kernel.emit(allocator, .{ .head_dim = head_dim, .block_size = 16, .position_stride = 2 * head_dim, .heads = launch[0], .splits = launch[1] }));
+            allocator.free(try FaVecPaged.Kernel.emit(allocator, .{ .head_dim = head_dim, .block_size = 64, .position_stride = 2 * head_dim, .heads = launch[0], .splits = launch[1], .sinks = true, .bias_extent = 1024 }));
         }
         for ([_]i32{ 8, 128 }) |splits| {
             allocator.free(try FaVecPagedReduce.Kernel.emit(allocator, .{ .splits = splits, .head_dim = head_dim }));
+            allocator.free(try FaVecPagedReduce.Kernel.emit(allocator, .{ .splits = splits, .head_dim = head_dim, .sinks = true }));
         }
     }
     for ([_]Type{ .half, .bfloat }) |dtype| {
@@ -902,6 +941,7 @@ test "the paged attention kernels emit verified modules" {
             const tile = PagedAttentionTiled.tileConfig(head_size).?;
             for ([_]bool{ true, false }) |causal| {
                 allocator.free(try PagedAttentionTiled.Kernel.emit(allocator, .{ .dtype = dtype, .head_size = head_size, .block_size = 16, .bq = tile[0], .tile_kv = tile[1], .num_threads = tile[2], .causal = causal }));
+                allocator.free(try PagedAttentionTiled.Kernel.emit(allocator, .{ .dtype = dtype, .head_size = head_size, .block_size = 64, .bq = tile[0], .tile_kv = tile[1], .num_threads = tile[2], .causal = causal, .sinks = true, .bias_extent = 1024 }));
             }
         }
     }
