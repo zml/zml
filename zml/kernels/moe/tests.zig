@@ -808,8 +808,7 @@ test "Fly general projection shapes" {
 test "Fly NVFP4 compatibility matrix" {
     const pipeline: Pipeline = .{ .platform = zml.testing.env() };
 
-    // The default shapes cover GEMV and sorted MFMA. Fly rounds activations to NVFP4 as
-    // Triton does, which the reference only matches closely at these widths.
+    // The default shapes cover GEMV and sorted MFMA.
     try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
         .formats = &.{
             .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
@@ -824,6 +823,8 @@ test "Fly NVFP4 compatibility matrix" {
             .geglu,
             .geglu_tanh,
         },
+        // Calibrated input scales, then activations quantized row by row.
+        .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
     }, .{});
 }
