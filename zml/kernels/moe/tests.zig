@@ -18,6 +18,7 @@ const Case = struct {
     /// Required with NVFP4 experts.
     nvfp4_block_scale: ?zml.quantization.nvfp4.QuantizationStrategy.BlockScale = null,
     activation_dtype: zml.DataType = .bf16,
+    /// NVFP4 experts then have no calibrated input scale: their activations are quantized row by row.
     quantize_input: bool = false,
     placement: Placement = .after_down,
     bias: bool = false,
@@ -182,6 +183,9 @@ fn makeExpertFixture(c: Case) ExpertFixture {
             };
         }
     }
+    if (c.scheme == .nvfp4 and c.quantize_input) {
+        for ([_]*zml.nn.Linear{ &fixture.gate_up, &fixture.down }) |projection| projection.quantization.?.nvfp4_input.?.global_scale = .per_row;
+    }
     return fixture;
 }
 
@@ -263,9 +267,7 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend, row_sca
                     q.scales = q.scales.bitCast(.u8);
                     // CuTe takes the input quantization multiplier and a GEMM
                     // output multiplier that folds in its inverse.
-                    if (row_scaled) {
-                        q.nvfp4_input.?.global_scale = .per_row;
-                    } else {
+                    if (!row_scaled) {
                         const input_scale = q.nvfp4_input.?.global_scale.calibrated.asMultiplier();
                         q.global_scale = .{ .value = q.global_scale.?.asMultiplier().mul(input_scale), .operation = .multiply };
                         q.nvfp4_input.?.global_scale = .{ .calibrated = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply } };
@@ -329,16 +331,6 @@ fn forward(input: Tensor, c: Case) Outputs {
         },
         .out_specs = data_spec,
     }, options);
-    // The StableHLO reference quantizes activations with static scales. Activations quantized
-    // row by row are checked against the Triton backend, which quantizes them the same way.
-    if (c.backend == .cute and c.scheme == .nvfp4 and c.quantize_input) {
-        const triton = prepareForBackend(canonical, .triton, true);
-        const expected = zml.moe.forwardMoe(input.replicate(), ids, weights, triton.gate_up, triton.down, .triton, c.expert_mesh, .{
-            .in_specs = .{ .input = .replicated, .ids = .replicated, .weights = .replicated, .gate_up = expert_spec, .down = expert_spec },
-            .out_specs = .replicated,
-        }, options);
-        return .{ .actual = actual, .expected = expected };
-    }
     // Keep the oracle input replicated so token sharding does not change its GEMM rounding.
     const expected = reference.reference(input.replicate(), ids, weights, canonical.gate_up, canonical.down, .{
         .activation = c.activation,
@@ -671,7 +663,9 @@ test "Triton NVFP4 compatibility matrix" {
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
         .formats = &.{
             .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .best_of_four_or_six },
             .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six, .non_unit_scales = true },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .best_of_four_or_six, .non_unit_scales = true },
         },
         // The up-bias variants are left out: one of their cases misses the shared NVFP4 budget by a few elements.
         .activations = &.{
@@ -683,6 +677,8 @@ test "Triton NVFP4 compatibility matrix" {
             .geglu,
             .geglu_tanh,
         },
+        // Calibrated input scales, then activations quantized row by row.
+        .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
         .shapes = &(fixture_shapes ++ [_]FixtureShape{.{ .tokens = 17, .topk = 2, .unrouted = true }}),
     }, .{});

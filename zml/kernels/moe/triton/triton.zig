@@ -4,11 +4,11 @@ const Activation = @import("zml/kernels/moe/api").Activation;
 const ExpertsLayout = @import("zml/kernels/moe/api").ExpertsLayout;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const nn = @import("zml/nn");
-const nvfp4OutputScale = @import("zml/kernels/moe/api").nvfp4OutputScale;
 const Options = @import("zml/kernels/moe/api").Options;
 const ProjectionLayout = @import("zml/kernels/moe/api").ProjectionLayout;
 const quantization = @import("zml/quantization");
 const Quantization = quantization.Quantization;
+const routeGlobalScale = @import("zml/kernels/moe/api").routeGlobalScale;
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const stdx = @import("stdx");
 const zml = @import("zml/core");
@@ -108,6 +108,9 @@ pub fn fusedExpertsBase(
     stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and routing_weights.dim(.token) == hidden.dim(.token), "triton backend expected routing ids and weights to match hidden token count, got {}, {} and {}", .{ ids.dim(.token), routing_weights.dim(.token), hidden.dim(.token) });
     stdx.debug.assert(ids.dim(.topk) == routing_weights.dim(.topk), "triton backend expected routing ids and weights to have matching top-k dimensions, got {} and {}", .{ ids.dim(.topk), routing_weights.dim(.topk) });
     stdx.debug.assert(gate_up.dim(.expert) == down.dim(.expert), "triton backend expected gate/up and down expert counts to match, got {} and {}", .{ gate_up.dim(.expert), down.dim(.expert) });
+    // The GEMM adds the bias before it multiplies the output of a route: a global scale would scale the bias too.
+    for ([_]nn.Linear{ gate_up_, down_ }) |linear|
+        stdx.debug.assert(linear.bias == null or linear.quantizationGlobalScale() == null, "triton backend expected no bias on experts whose weights have a global scale", .{});
     if (expert_map_) |expert_map|
         stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "triton backend expected a rank-1 i32 expert map, got rank {} and dtype {}", .{ expert_map.rank(), expert_map.dtype() });
 
@@ -120,39 +123,48 @@ pub fn fusedExpertsBase(
         routing.expert_ids;
 
     const local_ids = routing_.localIds().reshape(ids.shape());
-    const gate_up_operand = prepareOperand(hidden, gate_up_, local_ids, opts, .{});
+    const gate_up_input = prepareInput(hidden, gate_up_, opts);
 
     const gate_up_out = gemm(.{
-        .input = gate_up_operand.input,
+        .input = gate_up_input.values,
         .weight = gate_up,
         .bias = gate_up_.bias,
-        .input_scale = gate_up_operand.input_scale,
+        .input_scale = gate_up_input.scales,
         .weight_scale = gate_up_.quantizationScales(),
-        .routing_weights = gate_up_operand.output_scale,
+        .routing_weights = routeGlobalScale(.{
+            .input_scale = gate_up_input.global_scale,
+            .expert_scale = gate_up_.quantizationGlobalScale(),
+            .local_experts_ids = local_ids,
+        }),
         .routing = routing,
         .expert_ids = expert_ids,
         .launch_config = launch_config,
         .quant_scheme = gate_up_scheme,
         .top_k = @intCast(ids.dim(.topk)),
-        .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
+        .output_shape = Shape.init(.{ .route = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    const down_operand = prepareOperand(gate_up_out, down_, local_ids, opts, .{
-        .activation = opts.activation,
-        .layout = layout,
-        .weights = switch (opts.routing_weight_placement) {
-            .before_down => routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32),
-            .after_down => null,
-        },
-    });
+    // The rows of the down projection are routes: one routing weight and one expert each.
+    const route_weights = routing_weights.merge(.{ .route = .{ .token, .topk } });
+    const route_local_ids = local_ids.merge(.{ .route = .{ .token, .topk } });
+    var activated = opts.activation.applyActivation(gate_up_out, layout);
+    if (opts.routing_weight_placement == .before_down) activated = activated.mul(route_weights.convert(.f32).broad(activated.shape()));
+    const down_input = prepareInput(activated.rename(.{ .out = .in }), down_, opts);
 
     const down_out = gemm(.{
-        .input = down_operand.input,
+        .input = down_input.values,
         .weight = down,
         .bias = down_.bias,
-        .input_scale = down_operand.input_scale,
+        .input_scale = down_input.scales,
         .weight_scale = down_.quantizationScales(),
-        .routing_weights = product(down_operand.output_scale, if (opts.routing_weight_placement == .after_down) routing_weights else null),
+        .routing_weights = product(
+            routeGlobalScale(.{
+                .input_scale = down_input.global_scale,
+                .expert_scale = down_.quantizationGlobalScale(),
+                .local_experts_ids = route_local_ids,
+            }),
+            if (opts.routing_weight_placement == .after_down) route_weights else null,
+        ),
         .routing = routing,
         .expert_ids = expert_ids,
         .launch_config = down_launch_config,
@@ -459,89 +471,32 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
 }
 
-/// What a projection's GEMM reads: its input, the input's block scales, and the
-/// factor that dequantizes the output of each route.
-const Operand = struct {
-    input: Tensor,
-    input_scale: ?Tensor = null,
-    output_scale: ?Tensor = null,
+/// The rows of a projection, quantized or not: `quantization.QuantizedInput` when they are,
+/// BF16 `values` alone otherwise. The GEMM reads `values` and their block `scales`; its output
+/// is left to multiply by `global_scale`.
+const MaybeQuantizedInput = struct {
+    values: Tensor,
+    scales: ?Tensor = null,
+    global_scale: ?Tensor = null,
 };
 
-/// The operand of `linear` for the rows of `x` after `prologue`, whose routes select the
-/// local experts `ids`.
-fn prepareOperand(x: Tensor, linear: nn.Linear, ids: Tensor, opts: Options, prologue: RowPrologue) Operand {
-    const scheme = linear.quantizationScheme();
-    if (scheme == .nvfp4 and prologue.fusesWithNvfp4()) return nvfp4Operand(x, linear, ids, prologue);
-
-    const rows = prologue.apply(x);
-    switch (scheme orelse return .{ .input = rows.convert(.bf16) }) {
+/// The input of `linear`'s GEMM for the rows `x`: tokens {.token, .in} or routes {.route, .in}.
+fn prepareInput(x: Tensor, linear: nn.Linear, opts: Options) MaybeQuantizedInput {
+    const scheme = linear.quantizationScheme() orelse return .{ .values = x.convert(.bf16) };
+    switch (scheme) {
         // MXFP4 GEMMs read BF16 activations.
-        .mxfp4 => return .{ .input = rows.convert(.bf16) },
-        .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => |fp8| {
-            if (!opts.quantize_input) return .{ .input = rows.convert(.bf16) };
-            const input, const scale = quantizeFp8Input(rows, fp8, linear.weight.dtype());
-            return .{ .input = input, .input_scale = scale };
+        .mxfp4 => return .{ .values = x.convert(.bf16) },
+        .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => {
+            if (!opts.quantize_input) return .{ .values = x.convert(.bf16) };
+            const input, const scale = quantizeFp8Input(x, scheme, linear.weight.dtype());
+            return .{ .values = input, .scales = scale };
         },
-        .nvfp4 => return nvfp4Operand(rows, linear, ids, .{}),
-    }
-}
-
-/// What the rows of a projection's input go through before their quantization.
-const RowPrologue = struct {
-    /// Rows hold the gate and up values of this activation.
-    activation: ?Activation = null,
-    layout: ProjectionLayout = .concatenated,
-    /// `[token]` weight of each activated row.
-    weights: ?Tensor = null,
-
-    /// Whether the NVFP4 row quantizer runs the prologue itself.
-    fn fusesWithNvfp4(self: RowPrologue) bool {
-        return self.layout == .concatenated and kernels.QuantizeNvfp4Rows.supports(self.activation);
-    }
-
-    fn apply(self: RowPrologue, x: Tensor) Tensor {
-        var rows = if (self.activation) |activation| activation.applyActivation(x, self.layout) else x;
-        if (self.weights) |weights| rows = rows.mul(weights.broad(rows.shape()));
-        return rows;
-    }
-};
-
-/// NVFP4 activations, quantized row by row. Rows are rounded to BF16 like the inputs of
-/// BF16 GEMMs, then normalized by a power of two that keeps their block scales in E4M3's
-/// normal range, so no calibrated input scale is needed. The row scale and the expert's
-/// global scale dequantize the output of each route.
-fn nvfp4Operand(x: Tensor, linear: nn.Linear, ids: Tensor, prologue: RowPrologue) Operand {
-    const strategy = linear.quantization.?.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input");
-    const quantized = quantizeNvfp4Rows(x, strategy.block_scale, prologue);
-    return .{ .input = quantized.values, .input_scale = quantized.scales, .output_scale = nvfp4OutputScale(quantized.global_scale, linear.quantization.?, ids) };
-}
-
-/// The rows of `x` after their prologue, as packed FP4 bytes, block scales and row scales.
-fn quantizeNvfp4Rows(x: Tensor, block_scale_strategy: quantization.nvfp4.QuantizationStrategy.BlockScale, prologue: RowPrologue) quantization.QuantizedInput {
-    const input = x.withTags(.{ .token, .in });
-    const rows = input.dim(.token);
-    const width = if (prologue.activation != null) @divExact(input.dim(.in), 2) else input.dim(.in);
-    const quantized = kernels.QuantizeNvfp4Rows.Kernel.call(
-        .{ .x = input, .weights = prologue.weights orelse Tensor.scalar(1.0, .f32) },
-        .{
-            .values = Shape.init(.{ .token = rows, .in = @divExact(width, 2) }, .u8),
-            .scales = Shape.init(.{ .token = rows, .sc = @divExact(width, 16) }, .f8e4m3fn),
-            .row_scale = Shape.init(.{ .token = rows, .in = 1 }, .f32),
+        .nvfp4 => {
+            const strategy = linear.quantization.?.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input");
+            const quantized = quantization.nvfp4.quantize(x, .in, strategy);
+            return .{ .values = quantized.values, .scales = quantized.scales, .global_scale = quantized.global_scale };
         },
-        .{
-            .cfg = .{
-                .width = width,
-                .input_dtype = toDType(input.dtype()),
-                .block_scale_strategy = block_scale_strategy,
-                .activation = prologue.activation,
-                .weight_dtype = if (prologue.weights) |weights| toDType(weights.dtype()) else null,
-            },
-            .grid = .{ @intCast(rows), 1, 1 },
-            .num_stages = 1,
-            .num_warps = 8,
-        },
-    );
-    return .{ .values = quantized.values, .scales = quantized.scales, .global_scale = quantized.row_scale };
+    }
 }
 
 /// The product of the factors that are present.
@@ -758,74 +713,6 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
     }
 }
 
-test "NVFP4 row quantization matches the reference quantizer" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    const platform = zml.testing.env();
-    if (!isNvfp4Supported(platform)) return error.SkipZigTest;
-
-    const Local = struct {
-        const Outputs = struct { actual: Tensor, expected: Tensor };
-        const activation: Activation = .{ .capped_swiglu = .{ .gate_cap = 4, .up_cap = 25 } };
-
-        /// Rows spanning several magnitudes, with zeros, negatives and an all-zero row.
-        fn rows(tokens: i64, width: i64) Tensor {
-            const shape = Shape.init(.{ .token = tokens, .in = width }, .i32);
-            const flat = Tensor.iota(Shape.init(.{ .i = shape.count() }, .i32), .i);
-            const values = flat.mul(flat.addConstant(11)).remainderConst(257).subConstant(128).convert(.f32).reshape(shape);
-            const magnitude = Tensor.iota(shape, .token).remainderConst(5).subConstant(1).convert(.f32).scale(0.03);
-            return values.mul(magnitude).convert(.bf16);
-        }
-
-        fn dequantize(quantized: quantization.QuantizedInput, shape: Shape) Tensor {
-            return quantization.nvfp4.dequantize(quantized, .in).reshape(shape);
-        }
-
-        fn forward(tokens: i64, width: i64, activated: bool, block_scale_strategy: quantization.nvfp4.QuantizationStrategy.BlockScale) Outputs {
-            const x = rows(tokens, if (activated) 2 * width else width);
-            const weights: ?Tensor = if (activated) Tensor.iota(Shape.init(.{ .token = tokens }, .i32), .token).addConstant(1).convert(.f32).scale(0.125) else null;
-            const shape = Shape.init(.{ .token = tokens, .in = width }, .f32);
-
-            var reference = if (activated) activation.applyActivation(x.rename(.{ .in = .out }), .concatenated).rename(.{ .out = .in }) else x.convert(.f32);
-            if (weights) |w| reference = reference.mul(w.broad(reference.shape()));
-            const expected = quantization.nvfp4.quantize(reference, .in, .{
-                .global_scale = .per_row,
-                .block_scale = block_scale_strategy,
-            });
-
-            var actual = quantizeNvfp4Rows(x, block_scale_strategy, .{
-                .activation = if (activated) activation else null,
-                .weights = weights,
-            });
-            // The kernel packs two FP4 values per byte.
-            actual.values = actual.values.bitCast(.f4e2m1).reshape(shape.withDtype(.f4e2m1));
-            return .{ .actual = dequantize(actual, shape), .expected = dequantize(expected, shape) };
-        }
-    };
-
-    const cases = [_]struct { tokens: i64, width: i64, activated: bool, block_scale_strategy: quantization.nvfp4.QuantizationStrategy.BlockScale }{
-        .{ .tokens = 7, .width = 2304, .activated = false, .block_scale_strategy = .largest_maps_to_six },
-        .{ .tokens = 7, .width = 2304, .activated = false, .block_scale_strategy = .best_of_four_or_six },
-        .{ .tokens = 9, .width = 1152, .activated = true, .block_scale_strategy = .best_of_four_or_six },
-        .{ .tokens = 3, .width = 256, .activated = false, .block_scale_strategy = .best_of_four_or_six },
-    };
-    for (cases) |case| {
-        var exe = try platform.compileFn(allocator, io, Local.forward, .{ case.tokens, case.width, case.activated, case.block_scale_strategy }, .{});
-        defer exe.deinit();
-        var output: zml.Bufferized(Local.Outputs) = undefined;
-        var runner = try exe.runner(allocator);
-        defer runner.deinit(allocator);
-        runner.run(io, .{}, .{&output}, .{ .wait = true });
-        defer zml.Buffer.deinitAll(Local.Outputs, &output);
-        // Plain rows quantize exactly; activated rows may round a BF16 ulp apart.
-        const tolerance: f32 = if (case.activated) 0.02 else 0;
-        zml.testing.expectClose(io, output.expected, output.actual, .{ .absolute_tolerance = tolerance, .relative_tolerance = tolerance }) catch |err| {
-            log.warn("NVFP4 row quantization failed for tokens={}, width={}, activated={}, block_scale_strategy={s}", .{ case.tokens, case.width, case.activated, @tagName(case.block_scale_strategy) });
-            return err;
-        };
-    }
-}
-
 test "NVFP4 routed GEMM matches dequantized operands" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -848,19 +735,24 @@ test "NVFP4 routed GEMM matches dequantized operands" {
                     },
                 },
             };
-            const operand = prepareOperand(x, linear, ids, .{
+            const input = prepareInput(x, linear, .{
                 .activation = .{ .swiglu = .{} },
                 .quantize_input = false,
                 .routing_weight_placement = .before_down,
-            }, .{});
+            });
+            const global_scale = routeGlobalScale(.{
+                .input_scale = input.global_scale,
+                .expert_scale = linear.quantizationGlobalScale(),
+                .local_experts_ids = ids,
+            }).?;
             const config = launchConfigForTokens(x.dim(.token));
             const routing = prepareRouting(ids, w.dim(.expert), @intCast(config.block_size_m));
             const actual = gemm(.{
-                .input = operand.input,
+                .input = input.values,
                 .weight = linear.weight,
-                .input_scale = operand.input_scale,
+                .input_scale = input.scales,
                 .weight_scale = linear.quantization.?.scales,
-                .routing_weights = operand.output_scale,
+                .routing_weights = global_scale,
                 .routing = routing,
                 .expert_ids = routing.expert_ids,
                 .launch_config = config,
@@ -871,11 +763,9 @@ test "NVFP4 routed GEMM matches dequantized operands" {
 
             // Dequantize the stored operands, not the values they were rounded from.
             const weight = quantization.nvfp4.dequantize(.{ .values = linear.weight, .scales = linear.quantization.?.scales, .global_scale = null }, .in);
-            // The operand packs two FP4 values per byte.
-            const values = operand.input.bitCast(.f4e2m1).reshape(.{ .token = x.dim(.token), .in = x.dim(.in) });
-            const rows = quantization.nvfp4.dequantize(.{ .values = values, .scales = operand.input_scale.?, .global_scale = null }, .in);
+            const rows = quantization.nvfp4.dequantize(.{ .values = input.values, .scales = input.scales.?, .global_scale = null }, .in);
             const dot = rows.dot(weight.gather(.{ .expert = ids.squeeze(.topk) }, .{}), .in);
-            return .{ .actual = actual, .expected = dot.mul(operand.output_scale.?.squeeze(.topk).broad(dot.shape())).convert(.bf16) };
+            return .{ .actual = actual, .expected = dot.mul(global_scale.squeeze(.topk).broad(dot.shape())).convert(.bf16) };
         }
     };
 
