@@ -6,7 +6,7 @@ const Activation = @import("zml/kernels/moe/api").Activation;
 const GlobalOptions = @import("zml/kernels/moe/api").Options;
 const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
 const nn = @import("zml/nn");
-const roundE2m1 = @import("zml/quantization").roundE2m1;
+const quantization = @import("zml/quantization");
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const stdx = @import("stdx");
 const zml = @import("zml/core");
@@ -51,33 +51,26 @@ pub fn dequantize(linear: nn.Linear) Tensor {
     return result;
 }
 
-// Quantize and dequantize activation groups using tensor math, independently of
-// Triton's quantizer. The return value is the represented value in FP32.
-fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType) Tensor {
-    if (opts.input_quantization == .none) return x.convert(dtype).convert(.f32);
-    const q = linear.quantization orelse return x.convert(dtype).convert(.f32);
+/// The rows of a projection, quantized or not. The GEMM reads `values`, the rows their
+/// quantization represents, in FP32; its output is left to multiply by their `global_scale`,
+/// a scalar or one per row.
+const MaybeQuantizedInput = struct { values: Tensor, global_scale: ?Tensor = null };
+
+// Quantize and dequantize activation groups using tensor math. NVFP4 goes through the
+// quantizer the backends share, which its own tests compare with vLLM.
+fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType) MaybeQuantizedInput {
+    if (opts.input_quantization == .none) return .{ .values = x.convert(dtype).convert(.f32) };
+    const q = linear.quantization orelse return .{ .values = x.convert(dtype).convert(.f32) };
     const fixed_mxfp8 = opts.input_quantization == .mxfp8 or opts.input_quantization == .mxfp8_bf16;
     const scheme = if (fixed_mxfp8) .fp8_block32 else q.scheme;
     if (scheme == .nvfp4) {
-        const strategy = q.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input");
-        stdx.debug.assert(strategy.block_scale == .largest_maps_to_six, "reference scales NVFP4 activation blocks by amax/6, got {}", .{strategy.block_scale});
-        const global = switch (strategy.global_scale) {
-            .none => Tensor.scalar(1, .f32),
-            .calibrated => |scale| scale.asMultiplier(),
-            .per_row => @panic("reference does not quantize NVFP4 activations row by row"),
-        };
-        stdx.debug.assert(global.count() == 1, "reference NVFP4 input scale must be global", .{});
-        // Keep both stored rounding boundaries when XLA fuses the quantizer.
-        const grouped = x.convert(.bf16).optimizationBarrier().convert(.f32).div(global.asScalar())
-            .splitAxis(.in, .{ .group = @divExact(x.dim(.in), 16), .element = 16 });
-        const scale = grouped.abs().max(.element).scale(1.0 / 6.0)
-            .minimum(Tensor.scalar(448, .f32))
-            .convert(.f8e4m3fn).optimizationBarrier().convert(.f32).broad(grouped.shape());
-        const divisor = scale.cmp(.NE, Tensor.scalar(0, .f32)).select(scale, Tensor.scalar(1, .f32).broad(scale.shape()));
-        return roundE2m1(grouped.mul(Tensor.scalar(1, .f32).div(divisor))).mul(scale)
-            .reshape(x.shape().withDtype(.f32)).mul(global.asScalar());
+        const quantized = quantization.nvfp4.quantize(x, .in, q.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input"));
+        // Without the global scale, which multiplies the GEMM's output as in the kernels:
+        // multiplied into the rows, the sum rounds differently from theirs.
+        const values = quantization.nvfp4.dequantize(.{ .values = quantized.values, .scales = quantized.scales, .global_scale = null }, .in);
+        return .{ .values = values, .global_scale = quantized.global_scale };
     }
-    if (opts.input_quantization == .automatic and (!opts.quantize_input or scheme == .mxfp4)) return x.convert(dtype).convert(.f32);
+    if (opts.input_quantization == .automatic and (!opts.quantize_input or scheme == .mxfp4)) return .{ .values = x.convert(dtype).convert(.f32) };
     const output_dtype = if (fixed_mxfp8) .f8e4m3fn else linear.weight.dtype();
     const group: i64 = switch (scheme) {
         .mxfp8, .fp8_block32 => 32,
@@ -92,14 +85,16 @@ fn roundedInput(x: Tensor, linear: nn.Linear, opts: Options, dtype: zml.DataType
     var scale = grouped.abs().max(.element).maximum(Tensor.scalar(epsilon, .f32)).scale(1 / max_value);
     if (scheme == .mxfp8 or scheme == .fp8_block32) scale = scale.log().scale(1 / @log(@as(f32, 2))).ceil().scale(@log(@as(f32, 2))).exp();
     const broad = scale.broad(grouped.shape());
-    return grouped.div(broad).clamp(Tensor.scalar(-max_value, .f32), Tensor.scalar(max_value, .f32))
-        .convert(output_dtype).optimizationBarrier().convert(.f32).mul(broad).reshape(x.shape().withDtype(.f32));
+    return .{ .values = grouped.div(broad).clamp(Tensor.scalar(-max_value, .f32), Tensor.scalar(max_value, .f32))
+        .convert(output_dtype).optimizationBarrier().convert(.f32).mul(broad).reshape(x.shape().withDtype(.f32)) };
 }
 
 fn project(x: Tensor, linear: nn.Linear, ids: Tensor, opts: Options, dtype: zml.DataType) Tensor {
     const weight = dequantize(linear).withTags(.{ .expert, .out, .in });
     const selected = weight.gather(.{ .expert = ids }, .{});
-    var result = roundedInput(x, linear, opts, dtype).dot(selected, .in);
+    const input = roundedInput(x, linear, opts, dtype);
+    var result = input.values.dot(selected, .in);
+    if (input.global_scale) |scale| result = result.mul(scale.broad(result.shape()));
     if (linear.bias) |bias| {
         const selected_bias = if (bias.rank() == 2)
             bias.withTags(.{ .expert, .out }).gather(.{ .expert = ids }, .{})
@@ -159,19 +154,40 @@ pub fn fusedExperts(input: Tensor, routing: LocalRouting, gate_up: nn.Linear, do
     });
 }
 
-test "MoE compliance: FP4 midpoint rounding" {
+test "NVFP4 experts without a calibrated scale quantize each row over its own" {
+    const width = 32;
     const Local = struct {
-        fn call(x: Tensor) Tensor {
-            return roundE2m1(x);
+        fn forward(x: Tensor) Tensor {
+            // Identity projections: the experts return relu(x) when x survives its quantization.
+            const weight: Shape = .init(.{ .expert = 1, .out = width, .in = width }, .f4e2m1);
+            const projection: nn.Linear = .{
+                .weight = Tensor.iota(weight, .out).cmp(.EQ, .iota(weight, .in)).convert(.f32).convert(.f4e2m1),
+                .tag = Shape.toTag(.in),
+                .quantization = .{
+                    .scheme = .nvfp4,
+                    .nvfp4_input = .{ .global_scale = .per_row, .block_scale = .best_of_four_or_six },
+                    .scales = Tensor.scalar(1, .f32).broad(.init(.{ .expert = 1, .out = width, .sc = width / 16 }, .f32)).convert(.f8e4m3fn),
+                },
+            };
+            const routes: Shape = .init(.{ .t = x.dim(.t), .topk = 1 }, .i32);
+            return reference(x, .zeroes(routes), Tensor.scalar(1, .f32).broad(routes.withDtype(.f32)), projection, projection, .{
+                .activation = .relu,
+            });
         }
     };
-    const values = [_]f32{ -7, -5, -3.5, -2.5, -1.75, -1.25, -0.75, -0.25, 0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 7 };
-    const expected = [_]f32{ -6, -4, -4, -2, -2, -1, -1, 0, 0, 0, 1, 1, 2, 2, 4, 4, 6 };
+    // Rows 2^22 apart, each exact in NVFP4 over its own scale: no single scale holds both.
+    const pattern = [8]f32{ 6, -3, 1.5, 0.5, 1, -6, 2, 0 };
+    var values: [2 * width]f32 = undefined;
+    var expected: [2 * width]f32 = undefined;
+    for (&values, &expected, 0..) |*value, *rectified, i| {
+        value.* = std.math.ldexp(pattern[i % pattern.len], if (i < width) -12 else 10);
+        rectified.* = @max(value.*, 0);
+    }
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
-    const x: Tensor = .init(.{values.len}, .f32);
-    var exe = try platform.compileFn(allocator, io, Local.call, .{x}, .{});
+    const x: Tensor = .init(.{ .t = 2, .d = width }, .f32);
+    var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
     defer exe.deinit();
     var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
     defer input.deinit();
