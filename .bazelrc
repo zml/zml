@@ -103,6 +103,20 @@ common:alldebug --compilation_mode=dbg
 common:alldebug --@rules_zig//zig/settings:mode=debug
 common:alldebug --strategy=local
 
+# Experimental Linux x86-64 development build with a persistent Zig linker.
+# Optimized C++ objects avoid extended ELF section indexes in large dialects.
+# Restart Bazel after changing native link inputs.
+common:zig_direct --compilation_mode=opt
+common:zig_direct --@rules_zig//zig/settings:mode=debug
+common:zig_direct --@rules_zig//zig/settings:use_cc_common_link=false
+common:zig_direct --@rules_zig//zig/settings:incremental=true
+common:zig_direct --//bazel:zig_direct=true
+common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-llvm
+common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-lld
+common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-new-linker
+build:zig_direct --strategy=ZigIncrementalCompile=worker
+build:zig_direct --worker_max_instances=ZigIncrementalCompile=1
+
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
 common:release  --strip=always
