@@ -21,6 +21,14 @@ pub const kernels = @import("moe.zig");
 
 const log = std.log.scoped(.@"zml/moe/triton");
 
+/// Intel Triton cannot lower the conversion to E4M3FN in the MoE quantizers.
+fn fp8StorageDtype(dtype: DataType) DataType {
+    const fp8_support = zml.Compiler.current().platform.target != .oneapi;
+    if (fp8_support) return dtype;
+    stdx.debug.assert(dtype == .f8e4m3fn, "the byte encoder requires E4M3FN, got {}", .{dtype});
+    return .u8;
+}
+
 fn numStages(config: LaunchConfig) i32 {
     const platform = zml.Compiler.current().platform;
     if (platform.target != .rocm) return config.num_stages;
@@ -520,20 +528,20 @@ fn quantizeNvfp4Rows(x: Tensor, strategy: quantization.Nvfp4QuantizationStrategy
     const input = x.withTags(.{ .token, .in });
     const rows = input.dim(.token);
     const width = if (prologue.activation != null) @divExact(input.dim(.in), 2) else input.dim(.in);
-    const fp8_support = zml.Compiler.current().platform.target != .oneapi;
+    const scale_dtype = fp8StorageDtype(.f8e4m3fn);
     const quantized = kernels.QuantizeNvfp4Rows.Kernel.call(
         .{ .x = input, .weights = prologue.weights orelse Tensor.scalar(1.0, .f32) },
         .{
             .values = Shape.init(.{ .token = rows, .in = @divExact(width, 2) }, .u8),
-            .scales = Shape.init(.{ .token = rows, .sc = @divExact(width, 16) }, if (fp8_support) .f8e4m3fn else .u8),
+            .scales = Shape.init(.{ .token = rows, .sc = @divExact(width, 16) }, scale_dtype),
             .row_scale = Shape.init(.{ .token = rows, .in = 1 }, .f32),
         },
         .{
             .cfg = .{
                 .width = width,
                 .input_dtype = toDType(input.dtype()),
+                .scale_dtype = toDType(scale_dtype),
                 .strategy = strategy,
-                .fp8_support = fp8_support,
                 .activation = prologue.activation,
                 .weight_dtype = if (prologue.weights) |weights| toDType(weights.dtype()) else null,
             },
@@ -564,8 +572,9 @@ fn quantizeFp8Input(x: Tensor, scheme: Quantization.Scheme, output_dtype: DataTy
     stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "activation width must be divisible by group size {d}, got {d}", .{ group_size, x.dim(1) });
 
     const groups_per_row = @divExact(x.dim(1), group_size);
-    const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, output_dtype));
-    const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, scale_dtype));
+    const storage_dtype = if (scheme == .mxfp8) fp8StorageDtype(output_dtype) else output_dtype;
+    const quantized = Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, storage_dtype);
+    const scales = Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, scale_dtype);
 
     const outs = kernels.PerTokenGroupQuantFp8.Kernel.call(
         .{
@@ -575,12 +584,12 @@ fn quantizeFp8Input(x: Tensor, scheme: Quantization.Scheme, output_dtype: DataTy
             .y_row_stride_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             .eps_ptr = Tensor.scalar(absmax_epsilon, .f32),
         },
-        .{ .y_q = quantized.shape(), .y_s = scales.shape() },
+        .{ .y_q = quantized, .y_s = scales },
         .{
             .cfg = .{
                 .input_dtype = toDType(x.dtype()),
-                .output_dtype = toDType(output_dtype),
-                .scale_dtype = toDType(scale_dtype),
+                .output_dtype = toDType(quantized.dtype()),
+                .scale_dtype = toDType(scales.dtype()),
                 .block = std.math.ceilPowerOfTwoAssert(usize, @intCast(group_size)),
                 .quant_scheme = scheme,
             },

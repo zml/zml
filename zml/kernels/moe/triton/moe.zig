@@ -25,8 +25,11 @@ fn blockFloor16(v: Value) Value {
     return v.div(16).mul(16);
 }
 
-/// Round a finite, clamped FP32 value to the E4M3FN byte encoding.
-fn encodeE4m3(b: *Builder, x: Value) Value {
+/// Round a finite, clamped FP32 value to FP8. An I8 destination holds the E4M3FN bits.
+fn toFp8(b: *Builder, x: Value, storage_dtype: DType) Value {
+    if (storage_dtype != .i8) return x.to(storage_dtype);
+
+    // HACK: Assumed to be f8e4m3fn on platform that don't support FP8 such as Intel B70
     const magnitude = x.abs();
     const bits = magnitude.bitCast(.i32);
     const mantissa_lsb = bits.div(0x100000).bitAnd(1);
@@ -51,6 +54,7 @@ fn encodeE4m3(b: *Builder, x: Value) Value {
 pub const PerTokenGroupQuantFp8 = struct {
     pub const Cfg = struct {
         input_dtype: DType,
+        /// I8 stores E4M3FN bytes for MXFP8.
         output_dtype: DType,
         scale_dtype: DType,
         block: usize,
@@ -63,24 +67,28 @@ pub const PerTokenGroupQuantFp8 = struct {
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
+        const out_dt = cfg.output_dtype;
+        const scale_dt = cfg.scale_dtype;
+        const fp8_max: f32 = switch (out_dt) {
+            .f8e4m3fn => 448.0,
+            .f8e4m3fnuz => 224.0,
+            // HACK: Assumed to be f8e4m3fn on platform that don't support FP8 such as Intel B70
+            .i8 => if (cfg.quant_scheme == .mxfp8) 448.0 else return error.InvalidMlir,
+            else => return error.InvalidMlir,
+        };
+        if (cfg.quant_scheme == .mxfp8 and scale_dt != .i8) return error.InvalidMlir;
+
         const a = try b.declareArgs(.{
             .y_ptr = .{ .ptr = cfg.input_dtype },
             .group_size_ptr = .{ .ptr = .i64 },
             .y_num_columns_ptr = .{ .ptr = .i64 },
             .y_row_stride_ptr = .{ .ptr = .i64 },
             .eps_ptr = .{ .ptr = .f32 },
-            .y_q_ptr = .{ .ptr = cfg.output_dtype },
-            .y_s_ptr = .{ .ptr = cfg.scale_dtype },
+            .y_q_ptr = .{ .ptr = out_dt },
+            .y_s_ptr = .{ .ptr = scale_dt },
         });
 
         const block: i64 = @intCast(cfg.block);
-        const out_dt = cfg.output_dtype;
-        const fp8_max: f32 = switch (out_dt) {
-            .f8e4m3fn => 448.0,
-            .f8e4m3fnuz => 224.0,
-            else => return error.InvalidMlir,
-        };
-        const scale_dt = cfg.scale_dtype;
 
         const group_size = b.load(a.group_size_ptr);
         const y_num_columns = b.load(a.y_num_columns_ptr);
@@ -126,22 +134,15 @@ pub const PerTokenGroupQuantFp8 = struct {
         // scale_raw = _absmax * (1.0 / fp8_max)
         const scale_raw = absmax.mul(1.0 / fp8_max);
         const y_s: Value, const stored_scale: Value = switch (cfg.quant_scheme) {
-            .mxfp8 => blk: {
-                const exponent = b.ceil(b.log2(scale_raw));
-                // E8M0 stores the biased exponent as a byte.
-                break :blk .{ b.exp2(exponent), exponent.add(127).to(.i32).to(.i8) };
-            },
             .fp8_per_channel, .fp8_per_tensor, .fp8_block128 => .{ scale_raw, scale_raw.to(scale_dt) },
-            .fp8_block32 => blk: {
-                // Match quantizeBlockFp8(..., .f8e8m0), but store the scales as FP32 here.
-                // It is unclear whether power-of-two scaling is best for this kernel,
-                // but it keeps activation quantization consistent with that function.
-                // Round up from the FP32 bits, including values just above a power of two.
+            .mxfp8, .fp8_block32 => blk: {
+                // Epsilon keeps scale_raw normal. Round up from its FP32 bits
+                // so values just above a power of two do not round down.
                 const bits = scale_raw.bitCast(.i32);
-                const exponent = bits.div(0x800000);
-                const fractional = bits.bitAnd(0x7fffff).ne(0).to(.i32);
-                const scale = exponent.add(fractional).mul(0x800000).bitCast(.f32);
-                break :blk .{ scale, scale.to(scale_dt) };
+                const exponent = bits.add(0x7fffff).div(0x800000);
+                const scale = exponent.mul(0x800000).bitCast(.f32);
+                // MXFP8 stores the biased exponent as an E8M0 byte.
+                break :blk .{ scale, if (cfg.quant_scheme == .mxfp8) exponent.to(.i8) else scale.to(scale_dt) };
             },
             .mxfp4, .nvfp4 => unreachable,
         };
@@ -153,7 +154,7 @@ pub const PerTokenGroupQuantFp8 = struct {
             b.splat(-fp8_max, &.{block}),
             b.splat(fp8_max, &.{block}),
         );
-        const y_q = clamped.to(out_dt);
+        const y_q = toFp8(b, clamped, out_dt);
 
         const y_q_ptrs = y_q_ptr_shifted.addPtr(cols_i64);
         b.storeOpts(y_q_ptrs, y_q, .{ .mask = mask });
@@ -652,19 +653,36 @@ pub const FusedMoe = struct {
     }
 };
 
-test "FP8 activation quantization emits float and E8M0 scales" {
+test "FP8 activation quantization emits native FP8 and MXFP8 byte storage" {
+    const allocator = std.testing.allocator;
     for ([_]Quantization.Scheme{ .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 }) |scheme| {
         for ([_]DType{ .bf16, .f32 }) |input_dtype| {
-            const ir = try PerTokenGroupQuantFp8.Kernel.emit(std.testing.allocator, .{
-                .input_dtype = input_dtype,
-                .output_dtype = .f8e4m3fn,
-                .scale_dtype = if (scheme == .mxfp8) .i8 else .f32,
-                .block = if (scheme == .mxfp8 or scheme == .fp8_block32) 32 else 256,
-                .quant_scheme = scheme,
-            });
-            defer std.testing.allocator.free(ir);
-            if (scheme == .mxfp8) {
-                try std.testing.expect(std.mem.indexOf(u8, ir, "arith.trunci") != null);
+            for ([_]DType{ .f8e4m3fn, .f8e4m3fnuz, .i8 }) |output_dtype| {
+                if (output_dtype == .i8 and scheme != .mxfp8) continue;
+                const ir = try PerTokenGroupQuantFp8.Kernel.emit(allocator, .{
+                    .input_dtype = input_dtype,
+                    .output_dtype = output_dtype,
+                    .scale_dtype = if (scheme == .mxfp8) .i8 else .f32,
+                    .block = switch (scheme) {
+                        .mxfp8, .fp8_block32 => 32,
+                        .fp8_block128 => 128,
+                        else => 256,
+                    },
+                    .quant_scheme = scheme,
+                });
+                defer allocator.free(ir);
+                const pointer_type = switch (output_dtype) {
+                    .f8e4m3fn => "!tt.ptr<f8E4M3FN>",
+                    .f8e4m3fnuz => "!tt.ptr<f8E4M3FNUZ>",
+                    .i8 => "!tt.ptr<i8>",
+                    else => unreachable,
+                };
+                try std.testing.expect(std.mem.indexOf(u8, ir, pointer_type) != null);
+                if (output_dtype == .i8) try std.testing.expect(std.mem.indexOf(u8, ir, "f8E4M3") == null);
+                if (scheme == .mxfp8) {
+                    try std.testing.expect(std.mem.indexOf(u8, ir, "!tt.ptr<i8>") != null);
+                    try std.testing.expect(std.mem.indexOf(u8, ir, "arith.trunci") != null);
+                }
             }
         }
     }
@@ -981,9 +999,9 @@ pub const QuantizeNvfp4Rows = struct {
         /// Values per quantized row.
         width: i64,
         input_dtype: DType,
+        /// E4M3FN block scales, optionally stored as I8 bytes.
+        scale_dtype: DType,
         strategy: Nvfp4QuantizationStrategy,
-        /// Whether the backend supports native E4M3FN conversion.
-        fp8_support: bool,
         /// Applied to input rows holding the gate values then the up values.
         activation: ?Activation,
         /// The dtype of each row's weight, applied after the activation.
@@ -1007,12 +1025,12 @@ pub const QuantizeNvfp4Rows = struct {
     const Candidate = struct { even: Value, odd: Value, scales: Value, err: Value };
 
     fn run(b: *Builder, c: Cfg) tri.FinishError!void {
-        const scale_dtype: DType = if (c.fp8_support) .f8e4m3fn else .i8;
+        if (c.scale_dtype != .f8e4m3fn and c.scale_dtype != .i8) return error.InvalidMlir;
         const a = try b.declareArgs(.{
             .x = .{ .ptr = c.input_dtype },
             .weights = .{ .ptr = c.weight_dtype orelse .f32 },
             .values = .{ .ptr = .i8 },
-            .scales = .{ .ptr = scale_dtype },
+            .scales = .{ .ptr = c.scale_dtype },
             .row_scale = .{ .ptr = .f32 },
         });
         const pairs = @divExact(c.width, 2);
@@ -1070,7 +1088,7 @@ pub const QuantizeNvfp4Rows = struct {
         const packed_values = b.reshape(chosen.even.add(chosen.odd.mul(16)), &.{half}).to(.i8);
         b.storeOpts(a.values.addPtr(row.mul(pairs).add(pair)), packed_values, .{ .mask = in_row });
         const block = ar(b, @divExact(half, 8));
-        const scales = if (c.fp8_support) chosen.scales.to(.f8e4m3fn) else encodeE4m3(b, chosen.scales);
+        const scales = toFp8(b, chosen.scales, c.scale_dtype);
         b.storeOpts(a.scales.addPtr(row.mul(blocks).add(block)), scales, .{ .mask = block.lt(blocks) });
     }
 
@@ -1122,6 +1140,23 @@ pub const QuantizeNvfp4Rows = struct {
         };
     }
 };
+
+test "NVFP4 row quantization emits native E4M3FN or byte scales" {
+    const allocator = std.testing.allocator;
+    for ([_]DType{ .f8e4m3fn, .i8 }) |scale_dtype| {
+        const ir = try QuantizeNvfp4Rows.Kernel.emit(allocator, .{
+            .width = 80,
+            .input_dtype = .bf16,
+            .scale_dtype = scale_dtype,
+            .strategy = .best_of_four_or_six,
+            .activation = null,
+            .weight_dtype = null,
+        });
+        defer allocator.free(ir);
+        try std.testing.expectEqual(scale_dtype == .f8e4m3fn, std.mem.indexOf(u8, ir, "f8E4M3FN") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ir, "!tt.ptr<i8>") != null);
+    }
+}
 
 // =============================================================================
 // mxfp4_triton_quant
