@@ -2,7 +2,7 @@
 //! `persistent_nvfp4.zig`: routed NVFP4 input quantization.
 const std = @import("std");
 
-const Nvfp4QuantizationStrategy = @import("zml/quantization").Nvfp4QuantizationStrategy;
+const quantization = @import("zml/quantization");
 const zml = @import("zml/core");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
@@ -177,7 +177,7 @@ pub const RowQuantConfig = struct {
     capacity: i64,
     /// Route `r` goes to row `r * group_size`; `route_map` is not read.
     direct: bool = false,
-    strategy: Nvfp4QuantizationStrategy,
+    block_scale_strategy: quantization.nvfp4.QuantizationStrategy.BlockScale,
     /// Input rows hold interleaved gate and up values, activated before their quantization.
     activation: ?CappedSwiglu = null,
     /// Input rows per entry of `pre_scale`, which multiplies them first; null leaves them as they are.
@@ -196,10 +196,10 @@ const QuantizeRows = cute.Program(RowQuantConfig, .{
 const quantize_rows_kernel_name = "nvfp4_cute_quantize_rows_kernel";
 
 /// NVFP4 quantization of activation rows with a dynamic scale per row, for experts
-/// without calibrated activation scales. As `quantization.quantizeNvfp4Rows`, for each row:
+/// without calibrated activation scales. For each row:
 ///   1. `row_scale` is the power of two at or above `max|row| / 1536`, computed from the
 ///      row itself: the block scales of `row / row_scale` then fit E4M3;
-///   2. every 16-value block of `row / row_scale` takes the E4M3 scale `cfg.strategy` picks;
+///   2. every 16-value block of `row / row_scale` takes the E4M3 scale `cfg.block_scale_strategy` picks;
 ///   3. values are rounded to E2M1 against the scale of their block.
 /// The GEMM reads `q` and `s`, and its output for the row is then multiplied by its entry
 /// of `row_scale`, `[rows]` FP32. Rows are scattered to the physical rows of their routes
@@ -357,7 +357,7 @@ fn quantizeRowsKernel(b: *B, cfg: RowQuantConfig) cute.FinishError!void {
     block_maximum = block_maximum.maximum(b.shuffleXor(block_maximum, 1));
 
     const six = blockCandidate(b, values, block_maximum, 6);
-    const chosen: struct { word: V, bits: V } = switch (cfg.strategy) {
+    const chosen: struct { word: V, bits: V } = switch (cfg.block_scale_strategy) {
         .largest_maps_to_six => .{ .word = six.word, .bits = six.bits },
         .best_of_four_or_six => blk: {
             // The finer steps of amax/4 give up the largest value; ties keep amax/6.
@@ -437,7 +437,7 @@ test "NVFP4 CuTe row quantization emits with and without the activation" {
             .group_size = 16,
             .capacity = tokens * 8,
             .direct = tokens == 1,
-            .strategy = .best_of_four_or_six,
+            .block_scale_strategy = .best_of_four_or_six,
         });
         defer std.testing.allocator.free(plain);
         try std.testing.expect(std.mem.indexOf(u8, plain, "cvt.rn.satfinite.e2m1x2.f32") != null);
@@ -448,7 +448,7 @@ test "NVFP4 CuTe row quantization emits with and without the activation" {
             .group_size = 16,
             .capacity = tokens * 8,
             .direct = tokens == 1,
-            .strategy = .best_of_four_or_six,
+            .block_scale_strategy = .best_of_four_or_six,
             .activation = .{ .gate_cap = 4, .up_cap = 25 },
             .pre_scale_rows = 8,
             .weights = true,

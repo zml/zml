@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const quantization = @import("zml/quantization");
 const zml = @import("zml/core");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
@@ -989,7 +990,7 @@ const Gemv = struct {
     }
 };
 
-/// NVFP4 rounding of BF16 activation rows as `quantization.quantizeNvfp4Rows`.
+/// NVFP4 rounding of BF16 activations with a power-of-two scale per row.
 /// A block rounds one row; each thread rounds one 16-value block of it.
 pub const RoundNvfp4 = struct {
     const threads = 256;
@@ -1009,12 +1010,12 @@ pub const RoundNvfp4 = struct {
     };
 
     /// The rounded rows and, for `f16`, the F32 scale of each row.
-    pub fn call(x: Tensor, strategy: @import("zml/quantization").Nvfp4QuantizationStrategy, format: Format) struct { Tensor, ?Tensor } {
+    pub fn call(x: Tensor, block_scale_strategy: quantization.nvfp4.QuantizationStrategy.BlockScale, format: Format) struct { Tensor, ?Tensor } {
         std.debug.assert(x.rank() == 2 and x.dtype() == .bf16 and @mod(x.dim(1), 16) == 0 and x.dim(1) <= 16 * threads);
         const cfg: Config = .{
             .words = @divExact(x.dim(1), 2),
             .blocks = @divExact(x.dim(1), 16),
-            .four_or_six = @intFromBool(strategy == .best_of_four_or_six),
+            .four_or_six = @intFromBool(block_scale_strategy == .best_of_four_or_six),
             .f16 = @intFromBool(format == .f16),
         };
         const words = x.reshape(.{ x.dim(0), cfg.words, 2 }).bitCast(.i32);

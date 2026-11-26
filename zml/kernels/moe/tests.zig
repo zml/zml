@@ -133,7 +133,10 @@ fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier
         .remainder(Tensor.scalar(2, .i32)).convert(.f32).addConstant(1).scale(1.0 / 16.0)
         .reshape(scale_shape.withDtype(.f32)).convert(scale_shape.dtype());
 
-    const input_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = Tensor.scalar(1, .f32), .operation = .multiply } else null;
+    const nvfp4_input: ?zml.quantization.nvfp4.QuantizationStrategy = if (s == .nvfp4) .{
+        .global_scale = .{ .calibrated = .{ .value = Tensor.scalar(1, .f32), .operation = .multiply } },
+        .block_scale = .largest_maps_to_six,
+    } else null;
     const global_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = Tensor.scalar(1, .f32).broad(.init(.{ .expert = shape.dim(0) }, .f32)), .operation = .multiply } else null;
 
     return .{
@@ -143,7 +146,7 @@ fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier
         .quantization = .{
             .scheme = s,
             .scales = scales,
-            .input_scale = input_scale,
+            .nvfp4_input = nvfp4_input,
             .global_scale = global_scale,
         },
     };
@@ -169,7 +172,7 @@ fn makeExpertFixture(c: Case) ExpertFixture {
             const q = &projection.quantization.?;
             std.debug.assert(q.scheme == .nvfp4);
             // Exercise both scale polarity and distinct per-expert multipliers.
-            q.input_scale = .{ .value = Tensor.scalar(@as(f32, if (i == 0) 2 else 0.5), .f32), .operation = .divide };
+            q.nvfp4_input.?.global_scale = .{ .calibrated = .{ .value = Tensor.scalar(@as(f32, if (i == 0) 2 else 0.5), .f32), .operation = .divide } };
             q.global_scale = .{
                 .value = Tensor.arange(.{ .end = @intCast(c.experts) }, .i32)
                     .remainder(Tensor.scalar(2, .i32)).addConstant(1).convert(.f32).withTags(.{.expert}),
@@ -259,11 +262,11 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend, row_sca
                     // CuTe takes the input quantization multiplier and a GEMM
                     // output multiplier that folds in its inverse.
                     if (row_scaled) {
-                        q.input_scale = null;
+                        q.nvfp4_input.?.global_scale = .per_row;
                     } else {
-                        const input_scale = q.input_scale.?.asMultiplier();
+                        const input_scale = q.nvfp4_input.?.global_scale.calibrated.asMultiplier();
                         q.global_scale = .{ .value = q.global_scale.?.asMultiplier().mul(input_scale), .operation = .multiply };
-                        q.input_scale = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply };
+                        q.nvfp4_input.?.global_scale = .{ .calibrated = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply } };
                     }
                 }
             },

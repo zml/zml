@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "quantization",
+    srcs = ["nvfp4.zig"],
     import_name = "zml/quantization",
     main = "quantization.zig",
     tags = ["manual"],

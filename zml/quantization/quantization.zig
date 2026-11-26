@@ -9,14 +9,16 @@ const Platform = platform_mod.Platform;
 const Shape = zml.Shape;
 const Tensor = zml.Tensor;
 
-pub const nvfp4_block_size = 16;
+pub const nvfp4 = @import("nvfp4.zig");
+
 pub const mx_block_size = 32;
 
 pub const Quantization = struct {
     scheme: Scheme, // decided when the checkpoint is read
     scales: Tensor,
     global_scale: ?GlobalScale = null,
-    input_scale: ?GlobalScale = null,
+    /// How the activations these weights multiply are quantized, with NVFP4 weights only.
+    nvfp4_input: ?nvfp4.QuantizationStrategy = null,
     /// HACK: `scales` is stored in the 128x4 blocked layout of Blackwell's block-scaled mma.
     // Something cleaner will need to be done to differentiate different kinds of swizzling
     swizzled_scales: bool = false,
@@ -69,7 +71,7 @@ pub const Quantization = struct {
             return switch (self) {
                 .nvfp4 => (weight.dtype() == .u8 or weight.dtype() == .f4e2m1) and
                     scale.dtype() == .f8e4m3fn and scale.rank() == 2 and
-                    scale.dim(0) == n and scale.dim(1) * nvfp4_block_size == k,
+                    scale.dim(0) == n and scale.dim(1) * nvfp4.block_size == k,
                 .mxfp8 => weight.dtype() == .f8e4m3fn and isMxScale(scale) and
                     scale.dim(0) == n and scale.dim(1) * mx_block_size == k,
                 .mxfp4 => (weight.dtype() == .u8 or weight.dtype() == .i8 or weight.dtype() == .f4e2m1) and
@@ -108,6 +110,8 @@ pub const Quantization = struct {
 pub const QuantizedInput = struct {
     values: Tensor,
     scales: Tensor,
+    /// Multiplies `values * scales`: a scalar, or one scale per row, shaped like the input
+    /// without its quantized axis.
     global_scale: ?Tensor,
 
     pub fn reuseBuffer(self: QuantizedInput, other: QuantizedInput) QuantizedInput {
@@ -120,10 +124,8 @@ pub const QuantizedInput = struct {
 };
 
 pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag, platform: *const Platform) ?QuantizedInput {
-    const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
-
     return switch (quantization.scheme) {
-        .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis, .largest_maps_to_six) else null,
+        .nvfp4 => nvfp4.quantizeInput(input, axis, quantization.nvfp4_input, platform),
         .fp8_block32, .fp8_block128 => blk: {
             const dtype: DataType = switch (platform.target) {
                 .cuda => .f8e4m3fn,
@@ -209,12 +211,6 @@ pub fn roundE4m3Normal(x: Tensor) Tensor {
     return bits.add(odd).addConstant(0x7ffff).logical(.AND, .scalar(0xfff00000, .u32)).bitCast(.f32);
 }
 
-/// A power of two per row that keeps the NVFP4 block scales of `rows / scale` in E4M3's normal range.
-/// Dynamic activation quantization uses it in place of a calibrated input scale.
-pub fn nvfp4RowScale(rows: Tensor, axis: anytype) Tensor {
-    return ceilPowerOfTwo(rows.abs().max(axis).scale(1.0 / 1536.0).maximum(.scalar(std.math.floatMin(f32), .f32)));
-}
-
 /// Quantize activation blocks, preserving the input's axes.
 /// E8M0 scales round upward to a power of two to avoid overflowing FP8 values.
 pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataType, scale_dtype: DataType) QuantizedInput {
@@ -250,103 +246,16 @@ pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataTy
     };
 }
 
-/// How NVFP4 quantization picks the E4M3 scale of each 16-value block.
-pub const Nvfp4QuantizationStrategy = enum {
-    /// The block's largest magnitude maps to 6, the largest E2M1 value.
-    largest_maps_to_six,
-    /// Whichever of amax/6 and amax/4 reconstructs the block with the lower absolute error.
-    /// amax/4 gives up the largest value for finer steps; ties keep amax/6.
-    best_of_four_or_six,
-};
-
-pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype, strategy: Nvfp4QuantizationStrategy) QuantizedInput {
-    const grouped = nvfp4Blocks(x, input_global_scale, axis);
-    const six = nvfp4Candidate(grouped, 6);
-    const values, const scales = switch (strategy) {
-        .largest_maps_to_six => .{ six.values, six.scales },
-        .best_of_four_or_six => blk: {
-            const four = nvfp4Candidate(grouped, 4);
-            const use_four = nvfp4Error(four, grouped).cmp(.LT, nvfp4Error(six, grouped));
-            break :blk .{
-                use_four.broad(grouped.shape().withDtype(.bool)).select(four.values, six.values),
-                use_four.select(four.scales, six.scales),
-            };
-        },
-    };
-    return .{
-        .values = values.reshape(x.shape().withDtype(.f4e2m1)),
-        .scales = scales.squeeze(.blk),
-        .global_scale = input_global_scale,
-    };
-}
-
-/// NVFP4 quantization of activation rows over their `nvfp4RowScale`, which becomes
-/// the result's global scale, with the reduced axis kept as size 1.
-pub fn quantizeNvfp4Rows(rows: Tensor, axis: anytype, strategy: Nvfp4QuantizationStrategy) QuantizedInput {
-    return quantizeNvfp4(rows, nvfp4RowScale(rows, axis), axis, strategy);
-}
-
-/// The FP32 values an NVFP4 input along `axis` represents.
-pub fn dequantizeNvfp4(input: QuantizedInput, axis: anytype) Tensor {
-    const blocks = input.values.convert(.f32).splitAxis(axis, .{ .sc = -1, .blk = nvfp4_block_size });
-    const values = blocks.mul(input.scales.convert(.f32).broad(blocks.shape())).reshape(input.values.shape().withDtype(.f32));
-    const global = input.global_scale orelse return values;
-    return values.mul(global.convert(.f32).broad(values.shape()));
-}
-
-fn nvfp4Blocks(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Tensor {
-    stdx.debug.assert(x.shape().hasTag(axis) != null, "quantizeNvfp4 expects x to have {any} tag, got {f}", .{ axis, x.shape() });
-    stdx.debug.assert(@rem(x.dim(axis), nvfp4_block_size) == 0, "quantizeNvfp4 expects {any} to be a multiple of {}, got {f}", .{ axis, nvfp4_block_size, x.shape() });
-
-    const scaled = if (input_global_scale) |igs|
-        x.div(igs.convert(x.dtype()).broad(x.shape()))
-    else
-        x;
-    return scaled.splitAxis(axis, .{ .sc = -1, .blk = nvfp4_block_size });
-}
-
-const Nvfp4Candidate = struct { values: Tensor, scales: Tensor, divisor: Tensor };
-
-/// The quantized blocks whose largest magnitude maps to `value_max`.
-fn nvfp4Candidate(grouped: Tensor, value_max: f32) Nvfp4Candidate {
-    const scale_min_normal = 0x1p-6;
-    const scale_max = DataType.f8e4m3fn.maxValue().as(f32);
-    const dt = grouped.dtype();
-
-    const amax = grouped.abs()
-        .scale(1.0 / value_max)
-        .clamp(.scalar(scale_min_normal, dt), .scalar(scale_max, dt))
-        .max(.blk);
-
-    // With excess precision allowed (XLA's default), XLA may drop the f32 -> f8 -> f32 round trip
-    // below and divide by the unrounded scale, so the stored values would not match the stored
-    // scales. The barrier keeps the E4M3 rounding; it also ends the fusion here.
-    const scales = amax.convert(.f8e4m3fn).optimizationBarrier();
-
-    const divisor = scales.convert(dt)
-        .maximum(.scalar(scale_min_normal, dt))
-        .broad(grouped.shape());
-
-    return .{ .values = grouped.div(divisor).convert(.f4e2m1), .scales = scales, .divisor = divisor };
-}
-
-/// Each block's absolute reconstruction error.
-fn nvfp4Error(candidate: Nvfp4Candidate, grouped: Tensor) Tensor {
-    // As for the scales, the barrier keeps XLA from dropping the FP4 round trip.
-    return candidate.values.optimizationBarrier().convert(grouped.dtype())
-        .mul(candidate.divisor).sub(grouped).abs().sum(.blk);
-}
-
-fn supportsNvfp4InputQuantization(platform: *const Platform) bool {
-    return if (platform_mod.cuda.computeCapability(platform)) |cc| cc.atLeast(.{ .major = 10, .minor = 0 }) else false;
-}
-
 fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
     return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
 }
 
 fn isMxScale(scale: Shape) bool {
     return scale.rank() == 2 and (scale.dtype() == .f8e8m0 or scale.dtype() == .u8);
+}
+
+test {
+    _ = nvfp4;
 }
 
 // Note: this test will evolve as we support more (INT4/8 and FP8 block-128 as a
@@ -532,90 +441,6 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
             try std.testing.expectApproxEqAbs(host[i].toF32(), value * scales.constItems(f32)[scale_index], 1e-6);
         }
     }
-}
-
-test "NVFP4 four-or-six keeps the block scale with the lower error" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    const platform = zml.testing.env();
-    const Local = struct {
-        const Outputs = struct { six: Tensor, best: Tensor, scales: Tensor };
-
-        fn reconstruct(q: QuantizedInput) Tensor {
-            const blocks = q.values.optimizationBarrier().convert(.f32).splitAxis(.k, .{ .sc = -1, .blk = nvfp4_block_size });
-            const scales = q.scales.optimizationBarrier().convert(.f32).appendAxes(.{.blk});
-            return blocks.mul(scales.broad(blocks.shape())).merge(.{ .k = .{ .sc, .blk } });
-        }
-
-        fn forward(x: Tensor) Outputs {
-            const best = quantizeNvfp4(x, null, .k, .best_of_four_or_six);
-            return .{ .six = reconstruct(quantizeNvfp4(x, null, .k, .largest_maps_to_six)), .best = reconstruct(best), .scales = best.scales.convert(.f32) };
-        }
-    };
-    const x: Tensor = .init(.{ .k = 2 * nvfp4_block_size }, .f32);
-    var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
-    defer exe.deinit();
-    // The first block peaks at 4 and is exact with amax/4; the second peaks at 6 and is exact with amax/6.
-    const pattern = [2][8]f32{ .{ 4, 3, 2, 1.5, 1, 0.5, 0, -4 }, .{ 6, 3, 1.5, 0.5, 1, -6, 2, 0 } };
-    var host: [2 * nvfp4_block_size]f32 = undefined;
-    for (&host, 0..) |*value, i| value.* = pattern[i / nvfp4_block_size][i % 8];
-    var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&host));
-    defer buffer.deinit();
-    var output: zml.Bufferized(Local.Outputs) = undefined;
-    var runner = try exe.runner(allocator);
-    defer runner.deinit(allocator);
-    runner.run(io, .{buffer}, .{&output}, .{ .wait = true });
-    defer zml.Buffer.deinitAll(Local.Outputs, &output);
-    var six = try output.six.toSliceAlloc(allocator, io);
-    defer six.free(allocator);
-    var best = try output.best.toSliceAlloc(allocator, io);
-    defer best.free(allocator);
-    var scales = try output.scales.toSliceAlloc(allocator, io);
-    defer scales.free(allocator);
-    try std.testing.expectEqualSlices(f32, &.{ 1, 1 }, scales.constItems(f32));
-    try std.testing.expectEqualSlices(f32, &host, best.constItems(f32));
-    var six_error: f32 = 0;
-    for (host[0..nvfp4_block_size], six.constItems(f32)[0..nvfp4_block_size]) |expected, actual| six_error += @abs(expected - actual);
-    try std.testing.expect(six_error > 0);
-    try std.testing.expectEqualSlices(f32, host[nvfp4_block_size..], six.constItems(f32)[nvfp4_block_size..]);
-}
-
-test "E4M3 tensor-math rounding matches the FP8 conversion on normal values" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    const platform = zml.testing.env();
-    const Local = struct {
-        fn forward(x: Tensor) Tensor {
-            return Tensor.stack(&.{ x.convert(.f8e4m3fn).optimizationBarrier().convert(.f32), roundE4m3Normal(x) }, 0, .method);
-        }
-    };
-    // Every E4M3 normal value, the midpoints to its neighbors and one ulp around each midpoint.
-    var host: [4 * 8 * 16]f32 = undefined;
-    for (&host, 0..) |*value, i| {
-        const mantissa: f32 = @floatFromInt(8 + i / 4 % 8);
-        const code: f32 = std.math.ldexp(mantissa, @as(i32, @intCast(i / 32)) - 9);
-        const midpoint: u32 = @bitCast(code + std.math.ldexp(@as(f32, 0.5), @as(i32, @intCast(i / 32)) - 9));
-        value.* = @min(448, switch (i % 4) {
-            0 => code,
-            1 => @as(f32, @bitCast(midpoint - 1)),
-            2 => @as(f32, @bitCast(midpoint)),
-            else => @as(f32, @bitCast(midpoint + 1)),
-        });
-    }
-    const x: Tensor = .init(.{ .i = host.len }, .f32);
-    var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
-    defer exe.deinit();
-    var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&host));
-    defer buffer.deinit();
-    var output: zml.Buffer = undefined;
-    var runner = try exe.runner(allocator);
-    defer runner.deinit(allocator);
-    runner.run(io, .{buffer}, .{&output}, .{ .wait = true });
-    defer output.deinit();
-    var result = try output.toSliceAlloc(allocator, io);
-    defer result.free(allocator);
-    const values = result.constItems(f32);
-    try std.testing.expectEqualSlices(f32, values[0..host.len], values[host.len..]);
 }
 
 test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" {

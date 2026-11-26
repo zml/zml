@@ -8,7 +8,7 @@
 const std = @import("std");
 
 const Activation = @import("zml/kernels/moe/api").Activation;
-const Nvfp4QuantizationStrategy = @import("zml/quantization").Nvfp4QuantizationStrategy;
+const quantization = @import("zml/quantization");
 const Quantization = @import("zml/quantization").Quantization;
 const RoutingWeightPlacement = @import("zml/kernels/moe/api").RoutingWeightPlacement;
 const zml = @import("zml/core");
@@ -955,16 +955,15 @@ pub fn tiles(tokens: i64, topk: i64, experts: i64, bn: i64) i64 {
 // nvfp4_quantize_rows
 // =============================================================================
 
-/// NVFP4 quantization of activation rows, as `quantization.quantizeNvfp4Rows`, in one
-/// program per row: the row's power-of-two scale, then the E4M3 scale and the E2M1 values
-/// of every block of 16. Rows of gate and up projections are activated first, and rows
-/// can take a weight, so a projection's GEMM reads what the previous one wrote.
+/// One program per row computes the power-of-two row scale followed by the E4M3 scale
+/// and E2M1 values of each 16-value block. The program can first apply the gate and up
+/// activation and a per-row weight so a projection's GEMM reads what the previous one wrote.
 pub const QuantizeNvfp4Rows = struct {
     pub const Cfg = struct {
         /// Values per quantized row.
         width: i64,
         input_dtype: DType,
-        strategy: Nvfp4QuantizationStrategy,
+        block_scale_strategy: quantization.nvfp4.QuantizationStrategy.BlockScale,
         /// Applied to input rows holding the gate values then the up values.
         activation: ?Activation,
         /// The dtype of each row's weight, applied after the activation.
@@ -1031,7 +1030,7 @@ pub const QuantizeNvfp4Rows = struct {
         const even = b.reshape(parts[0].div(row_scale), &.{ @divExact(half, 8), 8 });
         const odd = b.reshape(parts[1].div(row_scale), &.{ @divExact(half, 8), 8 });
         const six = candidate(b, even, odd, 6);
-        const chosen: Candidate = switch (c.strategy) {
+        const chosen: Candidate = switch (c.block_scale_strategy) {
             .largest_maps_to_six => six,
             .best_of_four_or_six => blk: {
                 // The finer steps of amax/4 give up the largest value; ties keep amax/6.

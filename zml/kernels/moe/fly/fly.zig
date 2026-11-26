@@ -183,7 +183,8 @@ fn prepareOperand(x: Tensor, linear: nn.Linear, ids: Tensor, opts: Options, rout
     switch (scheme) {
         .nvfp4 => {
             // Decode GEMVs take the rounded values over their row scale in F16, the others in BF16.
-            const rounded, const row_scale = fly.RoundNvfp4.call(input, opts.nvfp4_input_scale, if (routing.naive_block_assignment) .f16 else .bf16);
+            const strategy = linear.quantization.?.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input");
+            const rounded, const row_scale = fly.RoundNvfp4.call(input, strategy.block_scale, if (routing.naive_block_assignment) .f16 else .bf16);
             return .{ .input = rounded, .output_scale = nvfp4OutputScale(row_scale, linear.quantization.?, ids) };
         },
         .mxfp8 => return .{ .input = if (opts.quantize_input) fly.RoundMxfp8.call(input) else input },
@@ -363,18 +364,18 @@ test "RoundMxfp8 rounds to E4M3 over power-of-two block scales" {
     try zml.testing.expectClose(io, outputs[0], outputs[1], .{ .absolute_tolerance = 0, .relative_tolerance = 0, .minimum_close_fraction = 1 });
 }
 
-test "RoundNvfp4 matches quantizeNvfp4Rows" {
+test "RoundNvfp4 matches per-row NVFP4 quantization" {
     const platform = zml.testing.env();
     if (platform.target != .rocm) return error.SkipZigTest;
     const Outputs = struct { bf16: Tensor, f16: Tensor, reference: Tensor };
     const Local = struct {
-        fn forward(x: Tensor, strategy: quantization.Nvfp4QuantizationStrategy) Outputs {
-            const quantized = quantization.quantizeNvfp4Rows(x.convert(.f32), .in, strategy);
+        fn forward(x: Tensor, strategy: quantization.nvfp4.QuantizationStrategy.BlockScale) Outputs {
+            const quantized = quantization.nvfp4.quantize(x, .in, .{ .global_scale = .per_row, .block_scale = strategy });
             const normalized, const row_scales = fly.RoundNvfp4.call(x, strategy, .f16);
             return .{
                 .bf16 = fly.RoundNvfp4.call(x, strategy, .bf16)[0],
                 .f16 = normalized.convert(.f32).mul(row_scales.?.withTags(.{.t}).broad(normalized.shape().withDtype(.f32))).convert(.bf16),
-                .reference = quantization.dequantizeNvfp4(quantized, .in).convert(.bf16),
+                .reference = quantization.nvfp4.dequantize(quantized, .in).convert(.bf16),
             };
         }
     };
@@ -391,7 +392,7 @@ test "RoundNvfp4 matches quantizeNvfp4Rows" {
     }
     var input = try zml.Buffer.fromSlice(io, platform, host);
     defer input.deinit();
-    for ([_]quantization.Nvfp4QuantizationStrategy{ .largest_maps_to_six, .best_of_four_or_six }) |strategy| {
+    for ([_]quantization.nvfp4.QuantizationStrategy.BlockScale{ .largest_maps_to_six, .best_of_four_or_six }) |strategy| {
         var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, strategy }, .{});
         defer exe.deinit();
         var runner = try exe.runner(allocator);
