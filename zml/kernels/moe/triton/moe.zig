@@ -25,6 +25,23 @@ fn blockFloor16(v: Value) Value {
     return v.div(16).mul(16);
 }
 
+/// Round a finite, clamped FP32 value to the E4M3FN byte encoding.
+fn encodeE4m3(b: *Builder, x: Value) Value {
+    const magnitude = x.abs();
+    const bits = magnitude.bitCast(.i32);
+    const mantissa_lsb = bits.div(0x100000).bitAnd(1);
+    const normal = bits.add(0x7ffff).add(mantissa_lsb).div(0x100000).sub((127 - 7) * 8);
+
+    const units = magnitude.mul(512.0);
+    const truncated = units.to(.i32);
+    const fraction = units.sub(truncated.to(.f32));
+    const round_up = fraction.gt(0.5).bitOr(fraction.eq(0.5).bitAnd(truncated.bitAnd(1).ne(0)));
+    const subnormal = truncated.add(round_up.to(.i32));
+
+    const sign = x.bitCast(.i32).lt(0).to(.i32).mul(128);
+    return b.select(magnitude.lt(0x1p-6), subnormal, normal).bitOr(sign).to(.i8);
+}
+
 // =============================================================================
 // per_token_group_quant_fp8
 // =============================================================================
@@ -965,6 +982,8 @@ pub const QuantizeNvfp4Rows = struct {
         width: i64,
         input_dtype: DType,
         strategy: Nvfp4QuantizationStrategy,
+        /// Whether the backend supports native E4M3FN conversion.
+        fp8_support: bool,
         /// Applied to input rows holding the gate values then the up values.
         activation: ?Activation,
         /// The dtype of each row's weight, applied after the activation.
@@ -988,11 +1007,12 @@ pub const QuantizeNvfp4Rows = struct {
     const Candidate = struct { even: Value, odd: Value, scales: Value, err: Value };
 
     fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const scale_dtype: DType = if (c.fp8_support) .f8e4m3fn else .i8;
         const a = try b.declareArgs(.{
             .x = .{ .ptr = c.input_dtype },
             .weights = .{ .ptr = c.weight_dtype orelse .f32 },
             .values = .{ .ptr = .i8 },
-            .scales = .{ .ptr = .f8e4m3fn },
+            .scales = .{ .ptr = scale_dtype },
             .row_scale = .{ .ptr = .f32 },
         });
         const pairs = @divExact(c.width, 2);
@@ -1050,7 +1070,8 @@ pub const QuantizeNvfp4Rows = struct {
         const packed_values = b.reshape(chosen.even.add(chosen.odd.mul(16)), &.{half}).to(.i8);
         b.storeOpts(a.values.addPtr(row.mul(pairs).add(pair)), packed_values, .{ .mask = in_row });
         const block = ar(b, @divExact(half, 8));
-        b.storeOpts(a.scales.addPtr(row.mul(blocks).add(block)), chosen.scales.to(.f8e4m3fn), .{ .mask = block.lt(blocks) });
+        const scales = if (c.fp8_support) chosen.scales.to(.f8e4m3fn) else encodeE4m3(b, chosen.scales);
+        b.storeOpts(a.scales.addPtr(row.mul(blocks).add(block)), scales, .{ .mask = block.lt(blocks) });
     }
 
     /// `cap * tanh(x / cap)`, with the tanh written over the exponential Triton lowers.

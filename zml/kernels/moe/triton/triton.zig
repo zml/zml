@@ -520,11 +520,12 @@ fn quantizeNvfp4Rows(x: Tensor, strategy: quantization.Nvfp4QuantizationStrategy
     const input = x.withTags(.{ .token, .in });
     const rows = input.dim(.token);
     const width = if (prologue.activation != null) @divExact(input.dim(.in), 2) else input.dim(.in);
+    const fp8_support = zml.Compiler.current().platform.target != .oneapi;
     const quantized = kernels.QuantizeNvfp4Rows.Kernel.call(
         .{ .x = input, .weights = prologue.weights orelse Tensor.scalar(1.0, .f32) },
         .{
             .values = Shape.init(.{ .token = rows, .in = @divExact(width, 2) }, .u8),
-            .scales = Shape.init(.{ .token = rows, .sc = @divExact(width, 16) }, .f8e4m3fn),
+            .scales = Shape.init(.{ .token = rows, .sc = @divExact(width, 16) }, if (fp8_support) .f8e4m3fn else .u8),
             .row_scale = Shape.init(.{ .token = rows, .in = 1 }, .f32),
         },
         .{
@@ -532,6 +533,7 @@ fn quantizeNvfp4Rows(x: Tensor, strategy: quantization.Nvfp4QuantizationStrategy
                 .width = width,
                 .input_dtype = toDType(input.dtype()),
                 .strategy = strategy,
+                .fp8_support = fp8_support,
                 .activation = prologue.activation,
                 .weight_dtype = if (prologue.weights) |weights| toDType(weights.dtype()) else null,
             },
