@@ -30,10 +30,16 @@ pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
 }
 
 pub fn validateOptions(opts: Options) void {
-    stdx.debug.assert(opts.activation == .swiglu, "cute backend only accepts swiglu activation, got {}", .{opts.activation});
-    stdx.debug.assert(opts.activation.swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
-    stdx.debug.assert(opts.activation.swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
-    stdx.debug.assert(opts.nvfp4_input_scale == .largest_maps_to_six, "cute backend scales NVFP4 activation blocks by amax/6", .{});
+    switch (opts.activation) {
+        .swiglu => |swiglu| {
+            stdx.debug.assert(swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
+            stdx.debug.assert(swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
+            stdx.debug.assert(opts.nvfp4_input_scale == .largest_maps_to_six, "cute backend scales calibrated NVFP4 activation blocks by amax/6", .{});
+        },
+        // NVFP4 only. Activations take calibrated scales (amax/6 blocks) or are quantized row by row.
+        .capped_swiglu => stdx.debug.assert(opts.quantize_input or opts.nvfp4_input_scale == .largest_maps_to_six, "cute backend scales calibrated NVFP4 activation blocks by amax/6", .{}),
+        else => stdx.debug.panic("cute backend only accepts swiglu and capped swiglu activations, got {}", .{opts.activation}),
+    }
 }
 
 /// MXFP4 weights are `u8` (or `i8`) packed FP4 with E8M0 block scales. NVFP4
@@ -63,6 +69,7 @@ pub fn fusedExperts(
             stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
             stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{down.weight.dtype()});
             // Check the boundary quantizer and CuTe GEMM tile constraints.
+            stdx.debug.assert(options.activation == .swiglu, "cute MXFP4 backend only accepts swiglu activation, got {}", .{options.activation});
             kernels.validateMxfp4Shapes(down.weight.dim(1), down.weight.dim(2) * 2);
             // The SwiGLU clamp is a kernel parameter, but the routing weight is
             // multiplied in the up epilogue, before the down projection: applying it
@@ -71,7 +78,6 @@ pub fn fusedExperts(
             break :blk .mxfp4;
         },
         .nvfp4 => blk: {
-            stdx.debug.assert(!options.quantize_input, "cute NVFP4 backend always quantizes its inputs to NVFP4", .{});
             stdx.debug.assert(gq.swizzled_scales and dq.swizzled_scales, "cute NVFP4 backend expects swizzled block scales", .{});
             stdx.debug.assert(gate_up.weight.dtype() == .u8 and down.weight.dtype() == .u8, "cute NVFP4 backend expects packed u8 weights, got {} and {}", .{ gate_up.weight.dtype(), down.weight.dtype() });
             const scale = struct {
@@ -79,18 +85,25 @@ pub fn fusedExperts(
                     return (global orelse @panic("cute NVFP4 backend requires global and input scales")).asMultiplier();
                 }
             }.f;
+            // Activations are quantized row by row when asked to; the global scales then only
+            // dequantize the weights. Otherwise they take the calibrated input scales.
+            if (options.quantize_input) {
+                stdx.debug.assert(options.activation == .capped_swiglu, "cute NVFP4 backend quantizes activations row by row around a capped swiglu, got {}", .{options.activation});
+                stdx.debug.assert(gq.input_scale == null and dq.input_scale == null, "cute NVFP4 backend quantizes activations row by row without calibrated input scales", .{});
+                break :blk .{ .nvfp4 = .{ .alpha1 = scale(gq.global_scale), .alpha2 = scale(dq.global_scale), .act = null } };
+            }
             break :blk .{ .nvfp4 = .{
                 .alpha1 = scale(gq.global_scale),
                 .alpha2 = scale(dq.global_scale),
-                .act1 = scale(gq.input_scale),
-                .act2 = scale(dq.input_scale),
+                .act = .{ scale(gq.input_scale), scale(dq.input_scale) },
             } };
         },
         else => stdx.debug.panic("cute backend only supports mxfp4 and nvfp4 quantization, got {}", .{gq.scheme}),
     };
 
     const hidden = down.weight.dim(1);
-    const intermediate = down.weight.dim(2) * 2;
+    // The gate and up rows count the intermediate values; the down projection may pad them.
+    const intermediate = @divExact(gate_up.weight.dim(1), 2);
     const topk = routing.ids.dim(.topk);
     const experts = gate_up.weight.dim(.expert);
     const ids = routing.localIds().convert(.i32).reshape(.{ .token = .auto, .topk = topk });
@@ -98,7 +111,7 @@ pub fn fusedExperts(
     const routing_weights = routing.weights.convert(.f32).reshape(.{ tokens, topk });
 
     return switch (format) {
-        .mxfp4 => kernels.forwardMxfp4(tokens, hidden, intermediate, experts, topk, options.activation.swiglu.limit, .{
+        .mxfp4 => kernels.forwardMxfp4(tokens, hidden, down.weight.dim(2) * 2, experts, topk, options.activation.swiglu.limit, .{
             .x = input.reshape(.{ tokens, hidden }),
             .routing_weights = routing_weights,
             .w1 = gate_up.weight,
@@ -119,11 +132,16 @@ pub fn fusedExperts(
             // expert, which the kernels read per expert.
             .alpha1 = f.alpha1.reshape(.{experts}),
             .alpha2 = f.alpha2.reshape(.{experts}),
-            .act1 = f.act1.reshape(.{}).broad(.init(.{experts}, .f32)),
-            .act2 = f.act2.reshape(.{}).broad(.init(.{experts}, .f32)),
-        }, .{
-            .swiglu_limit = options.activation.swiglu.limit,
-            .routing_weight_placement = options.routing_weight_placement,
+            .act1 = if (f.act) |act| act[0].reshape(.{}).broad(.init(.{experts}, .f32)) else f.alpha1.reshape(.{experts}),
+            .act2 = if (f.act) |act| act[1].reshape(.{}).broad(.init(.{experts}, .f32)) else f.alpha2.reshape(.{experts}),
+        }, switch (options.activation) {
+            .swiglu => |swiglu| .{ .swiglu_limit = swiglu.limit, .routing_weight_placement = options.routing_weight_placement },
+            .capped_swiglu => |caps| .{
+                .routing_weight_placement = options.routing_weight_placement,
+                .capped = .{ .gate_cap = caps.gate_cap, .up_cap = caps.up_cap },
+                .row_scaled = if (f.act == null) .{ .strategy = options.nvfp4_input_scale, .activation = .{ .gate_cap = caps.gate_cap, .up_cap = caps.up_cap } } else null,
+            },
+            else => unreachable,
         }),
     }.reshape(input.shape().dims()).withTags(input.shape());
 }
@@ -136,7 +154,7 @@ const Format = union(enum) {
     nvfp4: struct {
         alpha1: zml.Tensor,
         alpha2: zml.Tensor,
-        act1: zml.Tensor,
-        act2: zml.Tensor,
+        /// The calibrated input scales of the two GEMMs; null quantizes activations row by row.
+        act: ?[2]zml.Tensor,
     },
 };

@@ -205,10 +205,24 @@ fn prepareGateUp(tensor: Tensor, layout: ExpertsLayout) Tensor {
     };
 }
 
+/// `x` padded with zeros along its last axis to a multiple of `multiple`.
+fn padLast(x: Tensor, multiple: i64) Tensor {
+    const padded = std.mem.alignForward(i64, x.dim(2), multiple);
+    if (padded == x.dim(2)) return x;
+    return Tensor.concatenate(&.{ x, Tensor.zeroes(x.shape().setDim(2, padded - x.dim(2))) }, 2);
+}
+
 /// Adapt a copy of both projections to the backend's storage and layout contract.
-fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertFixture {
+/// `row_scaled` NVFP4 activations are quantized row by row, without a calibrated input scale.
+fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend, row_scaled: bool) ExpertFixture {
     var prepared = canonical;
     const scheme = canonical.gate_up.quantizationScheme();
+    if (backend == .cute and scheme == .nvfp4 and row_scaled) {
+        // The CuTe down GEMM reduces over whole K tiles: pad it with zero weights and scales.
+        const k_tile = zml.moe.cute.kernels.nvfp4_persistent.k_tile;
+        prepared.down.weight = padLast(prepared.down.weight, k_tile);
+        prepared.down.quantization.?.scales = padLast(prepared.down.quantization.?.scales, @divExact(k_tile, 16));
+    }
     const layout = backend.expertsLayout(scheme) catch |err| zml.stdx.debug.panic("fixture layout: {}", .{err});
     // Plain activations have one projection, so gate/up ordering does not apply.
     const gated = canonical.gate_up.weight.dim(1) == 2 * canonical.down.weight.dim(2);
@@ -244,9 +258,13 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
                     q.scales = q.scales.bitCast(.u8);
                     // CuTe takes the input quantization multiplier and a GEMM
                     // output multiplier that folds in its inverse.
-                    const input_scale = q.input_scale.?.asMultiplier();
-                    q.global_scale = .{ .value = q.global_scale.?.asMultiplier().mul(input_scale), .operation = .multiply };
-                    q.input_scale = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply };
+                    if (row_scaled) {
+                        q.input_scale = null;
+                    } else {
+                        const input_scale = q.input_scale.?.asMultiplier();
+                        q.global_scale = .{ .value = q.global_scale.?.asMultiplier().mul(input_scale), .operation = .multiply };
+                        q.input_scale = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply };
+                    }
                 }
             },
             .triton => if (scheme == .mxfp4) {
@@ -278,7 +296,7 @@ const Outputs = struct { actual: Tensor, expected: Tensor };
 /// reference implementation. Return both outputs for comparison.
 fn forward(input: Tensor, c: Case) Outputs {
     const canonical = makeExpertFixture(c);
-    const prepared = prepareForBackend(canonical, c.backend);
+    const prepared = prepareForBackend(canonical, c.backend, c.quantize_input);
 
     const route_shape = Shape.init(.{ .t = c.tokens, .topk = c.topk }, .i32);
     const route = Tensor.arange(.{ .end = @intCast(route_shape.count()) }, .i32).reshape(route_shape);
@@ -306,6 +324,16 @@ fn forward(input: Tensor, c: Case) Outputs {
         },
         .out_specs = data_spec,
     }, options);
+    // The StableHLO reference quantizes activations with static scales. Activations quantized
+    // row by row are checked against the Triton backend, which quantizes them the same way.
+    if (c.backend == .cute and c.scheme == .nvfp4 and c.quantize_input) {
+        const triton = prepareForBackend(canonical, .triton, true);
+        const expected = zml.moe.forwardMoe(input.replicate(), ids, weights, triton.gate_up, triton.down, .triton, c.expert_mesh, .{
+            .in_specs = .{ .input = .replicated, .ids = .replicated, .weights = .replicated, .gate_up = expert_spec, .down = expert_spec },
+            .out_specs = .replicated,
+        }, options);
+        return .{ .actual = actual, .expected = expected };
+    }
     // Keep the oracle input replicated so token sharding does not change its GEMM rounding.
     const expected = reference.reference(input.replicate(), ids, weights, canonical.gate_up, canonical.down, .{
         .activation = c.activation,
@@ -707,12 +735,35 @@ test "CuTe NVFP4 compatibility matrix" {
             .{ .scheme = .nvfp4 },
             .{ .scheme = .nvfp4, .non_unit_scales = true },
         },
-        .activations = &.{ .{ .swiglu = .{} }, .{ .swiglu = .{ .limit = 0.25 } } },
+        .activations = &.{ .{ .swiglu = .{} }, .{ .swiglu = .{ .limit = 0.25 } }, .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } } },
         .placements = &.{ .before_down, .after_down },
         .shapes = &.{
             .{ .width = 5120, .intermediate = 2304, .tokens = 1, .topk = 2 },
             .{ .width = 5120, .intermediate = 2304, .tokens = 17, .topk = 2 },
             .{ .width = 5120, .intermediate = 2304, .tokens = 34, .topk = 3 },
+        },
+    }, .{});
+}
+
+test "CuTe NVFP4 row-scaled activation quantization matrix" {
+    const platform = zml.testing.env();
+    if (!zml.moe.cute.isNvfp4Supported(platform)) return error.SkipZigTest;
+
+    const pipeline: Pipeline = .{ .platform = platform };
+    try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
+        .formats = &.{
+            .{ .scheme = .nvfp4 },
+            .{ .scheme = .nvfp4, .non_unit_scales = true },
+        },
+        .activations = &.{.{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } }},
+        .quantize_inputs = &.{true},
+        .placements = &.{ .before_down, .after_down },
+        // The last shapes pad the down GEMM's reduction dimension to whole K tiles.
+        .shapes = &.{
+            .{ .width = 5120, .intermediate = 2304, .tokens = 1, .topk = 2 },
+            .{ .width = 5120, .intermediate = 2304, .tokens = 17, .topk = 2 },
+            .{ .width = 2304, .intermediate = 1152, .tokens = 1, .topk = 2 },
+            .{ .width = 2304, .intermediate = 1152, .tokens = 34, .topk = 3 },
         },
     }, .{});
 }
