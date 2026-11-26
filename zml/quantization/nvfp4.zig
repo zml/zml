@@ -3,10 +3,10 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 const zml = @import("zml/core");
-
-const quantization = @import("quantization.zig");
 const DataType = zml.DataType;
 const Tensor = zml.Tensor;
+
+const quantization = @import("quantization.zig");
 const QuantizedInput = quantization.QuantizedInput;
 
 pub const block_size = 16;
@@ -118,22 +118,30 @@ const Scaling = struct {
     outer: Tensor,
 };
 
-/// The E4M3 scale, in FP32, of blocks whose largest magnitude maps to `value_max`.
-/// XLA keeps FP32 round trips through 8-bit and smaller floats: no barrier is needed here
-/// or for the E2M1 values.
-fn blockScale(block_max: Tensor, encoder: Tensor, comptime value_max: f32) Tensor {
-    return block_max.mul(encoder.scale(1.0 / value_max).broad(block_max.shape()))
-        .minimum(.scalar(DataType.f8e4m3fn.maxValue().as(f32), .f32))
-        .convert(.f8e4m3fn).convert(.f32);
+/// A conversion to E4M3 or E2M1 that a conversion back to FP32 cannot cancel.
+/// XLA keeps FP32 round trips through floats of 8 bits or fewer, so they need no barrier.
+/// HACK: the oneAPI plugin's XLA predates this and drops them. The barrier keeps them there,
+/// and ends the fusion; it goes away with a oneAPI plugin whose XLA keeps these round trips.
+/// It misses "preserve FP8 round trips" change (286cef081b).
+fn keepConversion(converted: Tensor) Tensor {
+    return if (zml.Compiler.current().platform.target == .oneapi) converted.optimizationBarrier() else converted;
 }
 
-/// The E2M1 values of `blocks` under the block scales `scale`.
+/// The E4M3 scale, in FP32, of blocks whose largest magnitude maps to `value_max`.
+fn blockScale(block_max: Tensor, encoder: Tensor, comptime value_max: f32) Tensor {
+    const scale = block_max.mul(encoder.scale(1.0 / value_max).broad(block_max.shape()))
+        .minimum(.scalar(DataType.f8e4m3fn.maxValue().as(f32), .f32));
+    return keepConversion(scale.convert(.f8e4m3fn)).convert(.f32);
+}
+
+/// The E2M1 values of `blocks` under the block scales `scale`. They are what `quantize`
+/// returns: a caller converting them back to FP32 reads rounded values too.
 fn quantizeValues(blocks: Tensor, scale: Tensor, decoder: Tensor) Tensor {
     // A block too small for E4M3 has a zero scale; its capped inverse saturates values that
     // the scale then reads as zeros.
     const inverse = Tensor.scalar(1, .f32).div(scale.mul(decoder.broad(scale.shape())))
         .minimum(.scalar(std.math.floatMax(f32), .f32));
-    return blocks.mul(inverse.broad(blocks.shape())).convert(.f4e2m1);
+    return keepConversion(blocks.mul(inverse.broad(blocks.shape())).convert(.f4e2m1));
 }
 
 /// Each block's absolute reconstruction error under the block scales `scale`.
@@ -210,12 +218,15 @@ test "NVFP4 four-or-six keeps the block scale with the lower error, a calibrated
 }
 
 test "FP32 round trips through E2M1 and E4M3 round to nearest even inside a graph" {
-    // quantize relies on XLA keeping both conversions, with ties to even and E2M1 saturation.
+    // quantize relies on both conversions being kept, with ties to even and E2M1 saturation.
     const Local = struct {
         const Outputs = struct { e2m1: Tensor, e4m3: Tensor };
 
         fn forward(e2m1: Tensor, e4m3: Tensor) Outputs {
-            return .{ .e2m1 = e2m1.convert(.f4e2m1).convert(.f32), .e4m3 = e4m3.convert(.f8e4m3fn).convert(.f32) };
+            return .{
+                .e2m1 = keepConversion(e2m1.convert(.f4e2m1)).convert(.f32),
+                .e4m3 = keepConversion(e4m3.convert(.f8e4m3fn)).convert(.f32),
+            };
         }
     };
     const e2m1 = [_]f32{ -7, -5, -3.5, -2.5, -1.75, -1.25, -0.75, -0.25, 0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 7, std.math.inf(f32) };
