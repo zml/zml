@@ -82,12 +82,6 @@ zig_library(
         "//zml/profiling",
         "@zio",
     ] + select({
-        # The platform C++ toolchain normally contributes these to the final link.
-        "//bazel:zig_direct_enabled": [
-            "@rules_zig//zig/lib:static_cpp_runtime",
-        ],
-        "//conditions:default": [],
-    }) + select({
         "//platforms:neuron.enabled": [
             "//platforms/neuron:nki_kernel",
             "//platforms/neuron:topology",

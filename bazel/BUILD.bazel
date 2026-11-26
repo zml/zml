@@ -8,13 +8,6 @@ bool_flag(
     visibility = ["//visibility:public"],
 )
 
-config_setting(
-    name = "zig_direct_enabled",
-    constraint_values = ["@platforms//os:linux"],
-    flag_values = {":zig_direct": "true"},
-    visibility = ["//visibility:public"],
-)
-
 cc_library(
     name = "retain_runfiles_init",
     srcs = ["runfiles_init.c"],
