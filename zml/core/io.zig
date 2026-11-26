@@ -1224,12 +1224,18 @@ pub const DirectMemoryWriter = struct {
         buffer: *Buffer,
         memory: Memory.Kind,
     ) !DirectMemoryWriter {
+        // A zero-byte tensor yields no dispatch span, so no shard would ever
+        // submit its final transfer.
+        stdx.debug.assert(shape.byteSize() > 0, "DirectMemoryWriter doesn't support zero-byte tensors, got {f}", .{shape});
+
         var placed_shape = shape;
         if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
         const placement = try Sharding.Placement.init(&placed_shape);
         const mesh = placement.mesh().?;
+        // `local_device_indices` index `platform.physical_mesh`; any other
+        // physical mesh would map shards to the wrong devices.
+        stdx.debug.assert(mesh.physical == &platform.physical_mesh, "DirectMemoryWriter expects a mesh of this platform's physical mesh, got {f}", .{mesh.*});
         const ordered_devices = mesh.devicesInCanonicalOrder();
-        std.debug.assert(ordered_devices.len == platform.physical_mesh.devices_in_canonical_order.len);
 
         // Shard writer `i` feeds local shard `i`, i.e. `platform.localShardDevice(i)`.
         const local_device_indices = platform.local_device_indices;
