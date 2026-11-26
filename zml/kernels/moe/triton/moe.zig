@@ -866,7 +866,8 @@ pub const CountAndSortExpertTokens = struct {
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
-            .topk_ids_ptr = .{ .ptr = .i32 },
+            // Keep adjacent expert IDs in adjacent lanes so the scatter can reuse the validity mask.
+            .topk_ids_ptr = .{ .ptr_opts = .{ .dtype = .i32, .divisibility = @alignOf(i32) } },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .cumsum_ptr = .{ .ptr = .i32 },
             .out0_ptr = .{ .ptr = .i32 },
