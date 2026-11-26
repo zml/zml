@@ -32,10 +32,9 @@ pub const AttentionMask = union(enum) {
 pub const AttentionOptions = struct {
     mask: AttentionMask = .{ .standard = .{} },
     scale: ?f32 = null,
-    /// Sink logits, one per query head `{.h}`, or per query token and head `{.b, .h}`
-    /// (Triton and Metal).
+    /// Sink logits, one per query head `{.h}`, or per query token and head `{.b, .h}`.
     sink: ?Tensor = null,
     /// `{.b, .h, .distance}` logit biases added to the key `distance` positions before
-    /// the query, for distances below the `.distance` axis (Triton and Metal).
+    /// the query, for distances below the `.distance` axis.
     rel_bias: ?Tensor = null,
 };
