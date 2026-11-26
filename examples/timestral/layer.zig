@@ -119,20 +119,23 @@ pub const Attention = struct {
     pub const AttentionGate = enum { none, sdpa_sigmoid };
 
     const Options = struct {
-        embed_dim: u32,
         num_heads: u32,
         is_time: bool,
-        gate: AttentionGate,
-
-        pub fn head_dim(self: Options) u32 {
-            return self.embed_dim / self.num_heads;
-        }
     };
 
     options: Options,
     wQKV: zml.nn.Linear,
     wO: zml.nn.Linear,
-    _gate: ?zml.nn.Linear,
+    /// Present iff the gate is `sdpa_sigmoid`.
+    gate: ?zml.nn.Linear,
+
+    pub fn embedDim(self: Attention) i64 {
+        return self.wQKV.weight.dim(.in);
+    }
+
+    pub fn headDim(self: Attention) i64 {
+        return @divExact(self.embedDim(), self.options.num_heads);
+    }
 
     pub fn init(store: zml.io.TensorStore.View, options: Options) Attention {
         const gate = if (store.hasKey("_gate"))
@@ -143,7 +146,7 @@ pub const Attention = struct {
             .options = options,
             .wQKV = loadLinear(store.withPrefix("wQKV"), .{ .hidden, .in }),
             .wO = loadLinear(store.withPrefix("wO"), .{ .out, .hidden }),
-            ._gate = gate,
+            .gate = gate,
         };
     }
 
@@ -155,7 +158,7 @@ pub const Attention = struct {
         // TODO: apply config.split_context_horizon_attn to reduce size of attention matrix
 
         var h = sdpa(qkv, mask);
-        if (self._gate) |gate| {
+        if (self.gate) |gate| {
             const g = gate.forward(x, x.dtype());
             h = .mul(h, g.sigmoid());
         }
@@ -172,7 +175,7 @@ pub const Attention = struct {
     fn forwardQKV(self: Attention, x: Tensor) QKV {
         const qkv = self.wQKV.forward(x, x.dtype()).splitAxis(.h, .{
             .qkv = 3,
-            .head_dim = self.options.head_dim(),
+            .head_dim = self.headDim(),
             .head = self.options.num_heads,
         }).chunkExact(.qkv, 3);
         return .{
@@ -212,6 +215,62 @@ pub const Attention = struct {
             .{ .attn_mask = attn_mask },
         );
         return out.mergeTranspose(.{ .h, .hd }, .out);
+    }
+};
+
+/// The attention(s) of one layer kind, in order, each a pre-norm residual, then one MLP.
+pub const TransformerBlock = struct {
+    pub const Kind = enum { time, variate };
+
+    pub const max_blocks = 2;
+    /// Ordered attention axes each layer kind runs before its shared MLP.
+    pub const KindList = stdx.BoundedArray(Kind, max_blocks);
+    const AttentionBlock = struct { attention: Attention, norm: RmsNorm, kind: Kind };
+    const AttentionBlockList = stdx.BoundedArray(AttentionBlock, max_blocks);
+
+    attns: AttentionBlockList,
+    mlp_norm: RmsNorm,
+    mlp: FusedSwiGlu,
+
+    pub const Options = struct {
+        num_heads: u32,
+        eps: f32,
+    };
+
+    pub fn init(store: zml.io.TensorStore.View, options: Options, kinds: KindList) TransformerBlock {
+        var attns: AttentionBlockList = .init();
+        for (kinds, 0..) |kd, i| {
+            const attention: Attention = .init(
+                store.withLayer(i).withPrefix("attns"),
+                .{ .num_heads = options.num_heads, .is_time = kd == .time },
+            );
+            const norm: RmsNorm = .init(store.withLayer(i).withPrefix("attn_norms"), options.eps);
+            attns.appendAssumeCapacity(.{ .attention = attention, .norm = norm, .kind = kd });
+        }
+        return .{
+            .attns = attns,
+            .mlp_norm = .init(store.withPrefix("mlp_norm"), options.eps),
+            .mlp = .init(store.withPrefix("mlp")),
+        };
+    }
+
+    pub const Inputs = struct {
+        inputs: Tensor,
+        time_mask: Tensor,
+        variate_mask: Tensor,
+        cos_sin: SinCosRope.CosSin,
+    };
+
+    pub fn forward(self: TransformerBlock, x: Inputs) Tensor {
+        var h = x.inputs;
+        for (self.attns) |an| {
+            const mask = switch (an.kind) {
+                .time => x.time_mask,
+                .variate => x.variate_mask,
+            };
+            h = .add(h, an.attention(an.norm(h), mask, x.cos_sin));
+        }
+        return .add(h, self.mlp(self.mlp_norm(h)));
     }
 };
 
