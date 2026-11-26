@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Nvfp4QuantizationStrategy = @import("zml/quantization").Nvfp4QuantizationStrategy;
+const Quantization = @import("zml/quantization").Quantization;
 const stdx = @import("stdx");
 const Tensor = @import("zml/core").Tensor;
 
@@ -8,9 +10,12 @@ const log = std.log.scoped(.@"zml/moe");
 pub const Options = struct {
     activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
+    /// NVFP4 experts always quantize their activations.
     quantize_input: bool,
     /// Where routing weights are applied; FlashInfer, Mosaic, Metal and TCL require after_down.
     routing_weight_placement: RoutingWeightPlacement,
+    /// How quantized NVFP4 activations pick the E4M3 scale of each block.
+    nvfp4_input_scale: Nvfp4QuantizationStrategy = .largest_maps_to_six,
 };
 
 pub const ActivationKind = enum {
@@ -110,6 +115,18 @@ pub const Activation = union(ActivationKind) {
 };
 
 pub const RoutingWeightPlacement = enum { before_down, after_down };
+
+/// The factor that dequantizes the GEMM output of each NVFP4 route in `ids` {.token, .topk}:
+/// the scale of its input row, if rows have one, times the global scale of its expert.
+/// Gate/up input rows are tokens and down input rows are routes; both expand to routes.
+pub fn nvfp4OutputScale(row_scale: ?Tensor, quantization: Quantization, ids: Tensor) ?Tensor {
+    const shape = ids.shape().withDtype(.f32);
+    const rows: ?Tensor = if (row_scale) |scale| scale.reshape(.{ .token = ids.dim(.token), .topk = .auto }).broad(shape) else null;
+    const global = (quantization.global_scale orelse return rows).asMultiplier();
+    // Routes without a local expert produce no output; any expert works for them.
+    const experts = if (global.rank() == 0) global.broad(shape) else global.withTags(.{.expert}).gather(.{ .expert = ids.maximum(.scalar(0, .i32)) }, .{});
+    return if (rows) |r| r.mul(experts) else experts;
+}
 
 pub const ProjectionLayout = enum {
     concatenated, // G0 G1 … Gn U0 U1 … Un

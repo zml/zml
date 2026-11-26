@@ -1,20 +1,18 @@
 const std = @import("std");
 
-const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
-const platforms = @import("platforms");
-const stdx = @import("stdx");
-
-const nn = @import("zml/nn");
-const Quantization = @import("zml/quantization").Quantization;
-
-const zml = @import("zml/core");
-const GlobalOptions = @import("zml/kernels/moe/api").Options;
 const Activation = @import("zml/kernels/moe/api").Activation;
-const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
-const unpackedWeight = @import("zml/kernels/moe/weights").unpackedWeight;
 const contract = @import("zml/core").flashinfer_cutlass.contract;
 const Attributes = contract.Attributes;
+const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
+const GlobalOptions = @import("zml/kernels/moe/api").Options;
+const LocalRouting = @import("zml/kernels/moe/api").LocalRouting;
+const nn = @import("zml/nn");
+const platforms = @import("platforms");
+const Quantization = @import("zml/quantization").Quantization;
 const runtime = @import("zml/core").flashinfer_cutlass.runtime;
+const stdx = @import("stdx");
+const unpackedWeight = @import("zml/kernels/moe/weights").unpackedWeight;
+const zml = @import("zml/core");
 
 const log = std.log.scoped(.@"zml/moe/flashinfer_cutlass");
 
@@ -49,6 +47,7 @@ pub fn validateOptions(opts: GlobalOptions) void {
     stdx.debug.assert(opts.activation.swiglu.limit == null, "Activation thresholds require the Triton MoE backend", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "flashinfer_cutlass backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "flashinfer_cutlass backend requires swiglu scale to be null", .{});
+    stdx.debug.assert(opts.nvfp4_input_scale == .largest_maps_to_six, "flashinfer_cutlass backend scales NVFP4 activation blocks by amax/6", .{});
 }
 
 const Inputs = contract.Inputs(zml.Tensor);

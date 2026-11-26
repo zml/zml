@@ -25,6 +25,7 @@ const Case = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
+    unrouted: bool = false,
     expert_mesh: *const zml.Mesh,
 
     fn inputShape(c: Case) Shape {
@@ -280,7 +281,8 @@ fn forward(input: Tensor, c: Case) Outputs {
     const route = Tensor.arange(.{ .end = @intCast(route_shape.count()) }, .i32).reshape(route_shape);
 
     // Only six of eight experts receive routes, with nonuniform counts.
-    const ids = route.mul(Tensor.scalar(5, .i32)).addConstant(2).remainder(Tensor.scalar(@min(c.experts, 6), .i32));
+    const experts = route.mul(Tensor.scalar(5, .i32)).addConstant(2).remainder(Tensor.scalar(@min(c.experts, 6), .i32));
+    const ids = if (c.unrouted) experts.mask(route.remainder(Tensor.scalar(3, .i32)).cmp(.NE, Tensor.scalar(2, .i32)), -1) else experts;
 
     const weights = route.remainder(Tensor.scalar(3, .i32)).convert(.f32).addConstant(1).scale(0.25);
     const options: GlobalOptions = .{
@@ -340,6 +342,8 @@ const FixtureShape = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
+    /// Every third route selects no expert.
+    unrouted: bool = false,
 };
 
 // Every option combination runs with 1, 17, and 34 flattened tokens.
@@ -407,6 +411,7 @@ const Matrix = struct {
             .width = shape.width,
             .intermediate = shape.intermediate,
             .experts = shape.experts,
+            .unrouted = shape.unrouted,
             .expert_mesh = expert_mesh,
         };
     }
@@ -615,6 +620,31 @@ test "Triton MXFP4 compatibility matrix" {
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
+    }, .{});
+}
+
+test "Triton NVFP4 compatibility matrix" {
+    const platform = zml.testing.env();
+    if (!zml.moe.triton.isNvfp4Supported(platform)) return error.SkipZigTest;
+    const pipeline: Pipeline = .{ .platform = platform };
+
+    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+        .formats = &.{
+            .{ .scheme = .nvfp4 },
+            .{ .scheme = .nvfp4, .non_unit_scales = true },
+        },
+        // The up-bias variants are left out: one of their cases misses the shared NVFP4 budget by a few elements.
+        .activations = &.{
+            .{ .swiglu = .{} },
+            .{ .swiglu = .{ .limit = 0.25 } },
+            .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } },
+            .{ .swiglu_step = .{} },
+            .{ .swiglu_step = .{ .limit = 0.25 } },
+            .geglu,
+            .geglu_tanh,
+        },
+        .placements = &.{ .before_down, .after_down },
+        .shapes = &(fixture_shapes ++ [_]FixtureShape{.{ .tokens = 17, .topk = 2, .unrouted = true }}),
     }, .{});
 }
 

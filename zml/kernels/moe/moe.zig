@@ -53,6 +53,8 @@ pub const Backend = enum {
                         .cute
                     else if (flashinfer_cutlass.isNvfp4Supported(platform))
                         .flashinfer_cutlass
+                    else if (triton.isNvfp4Supported(platform))
+                        .triton
                     else
                         error.UnsupportedQuantization,
                     .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
@@ -183,6 +185,7 @@ pub const Partitioning = struct {
 
 /// Input has shape {.t, .d}; routing IDs and weights have shape {.t, .topk}.
 /// Returns {.t, .d}. Flatten batched input with merge(.{ .t = .{ .b, .s } }).
+/// A routing ID of -1 selects no expert: the route reads no weights and contributes zero.
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
