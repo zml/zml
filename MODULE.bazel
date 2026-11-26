@@ -129,7 +129,11 @@ zig.mirrors(urls = [
 ])
 use_repo(zig, "zig_toolchains")
 
-register_toolchains("@rules_zig//zig/target:all")
+register_toolchains(
+    "//platforms:zig_linux_x86_64_glibc_toolchain",
+    "//platforms:zig_linux_aarch64_glibc_toolchain",
+    "@rules_zig//zig/target:all",
+)
 
 register_toolchains("@zig_toolchains//:all")
 
