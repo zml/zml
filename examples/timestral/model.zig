@@ -216,7 +216,7 @@ const PatchRepresentation = struct {
         assertTags(rows.mask, .{ .row, .token, .h });
         const dtype = rows.values.dtype();
         const x: Tensor = .concatenate(&[_]Tensor{ rows.values, rows.mask.not().convert(dtype) }, .h);
-        const out = self.patch_proj.forward(x.renameTag(.h, .d)).renameTag(.out, .h);
+        const out = self.patch_proj.forward(x.renameTag(.h, .in)).renameTag(.out, .h);
         return assertedTags(out, .{ .row, .token, .h });
     }
 

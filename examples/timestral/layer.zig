@@ -1,3 +1,4 @@
+const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
@@ -72,47 +73,14 @@ pub const ResidualBlock = struct {
     residual_layer: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) ResidualBlock {
-        const hl = store.withPrefix("hidden_layer");
-        const hidden_layer: zml.nn.Linear = .init(
-            hl.createTensor(
-                "weight",
-                .{ .h, .d },
-                .replicated,
-                .{ .h = .replicated, .d = .replicated },
-            ),
-            hl.maybeCreateTensor("bias", .{.h}, .replicated, .{ .h = .replicated }),
-            .d,
-        );
-        const ol = store.withPrefix("output_layer");
-        const output_layer: zml.nn.Linear = .init(
-            ol.createTensor(
-                "weight",
-                .{ .out, .h },
-                .replicated,
-                .{ .out = .replicated, .h = .replicated },
-            ),
-            ol.maybeCreateTensor("bias", .{.out}, .replicated, .{ .out = .replicated }),
-            .h,
-        );
-        const rl = store.withPrefix("residual_layer");
-        const residual_layer: zml.nn.Linear = .init(
-            rl.createTensor(
-                "weight",
-                .{ .out, .d },
-                .replicated,
-                .{ .out = .replicated, .d = .replicated },
-            ),
-            rl.maybeCreateTensor("bias", .{.out}, .replicated, .{ .out = .replicated }),
-            .d,
-        );
-
         return .{
-            .hidden_layer = hidden_layer,
-            .output_layer = output_layer,
-            .residual_layer = residual_layer,
+            .hidden_layer = loadLinear(store.withPrefix("hidden_layer"), .{ .h, .in }),
+            .output_layer = loadLinear(store.withPrefix("output_layer"), .{ .out, .h }),
+            .residual_layer = loadLinear(store.withPrefix("residual_layer"), .{ .out, .in }),
         };
     }
 
+    /// `x` has an `.in` axis; the output has it replaced by `.out`.
     pub fn forward(self: ResidualBlock, x: Tensor) Tensor {
         const h = self.hidden_layer.forward(x, x.dtype()).silu();
         const out = self.output_layer.forward(h, h.dtype());
@@ -122,40 +90,32 @@ pub const ResidualBlock = struct {
 
 /// SwiGLU MLP with one fused input projection; computes `gate * silu(up)`.
 pub const FusedSwiGlu = struct {
-    /// `{.hidden = 2 * hidden_dim, .d}`, fused gate and up projections.
+    /// `{.out = 2 * hidden_dim, .in = d}`, fused gate and up projections.
     w12: zml.nn.Linear,
-    /// `{.d, .hidden}` output projection.
+    /// `{.out = d, .in = hidden_dim}` output projection.
     w3: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) FusedSwiGlu {
-        const s12 = store.withPrefix("w12");
-        const w12: zml.nn.Linear = .init(
-            s12.createTensor(
-                "weight",
-                .{ .hidden, .d },
-                .replicated,
-                .{ .hidden = .replicated, .d = .replicated },
-            ),
-            s12.maybeCreateTensor("bias", .{.hidden}, .replicated, .{ .hidden = .replicated }),
-            .d,
-        );
-        const s3 = store.withPrefix("w3");
-        const w3: zml.nn.Linear = .init(
-            s3.createTensor(
-                "weight",
-                .{ .d, .hidden },
-                .replicated,
-                .{ .d = .replicated, .hidden = .replicated },
-            ),
-            s3.maybeCreateTensor("bias", .{.d}, .replicated, .{ .d = .replicated }),
-            .hidden,
-        );
-        return .{ .w12 = w12, .w3 = w3 };
+        return .{
+            .w12 = loadLinear(store.withPrefix("w12"), .{ .out, .in }),
+            .w3 = loadLinear(store.withPrefix("w3"), .{ .out, .in }),
+        };
     }
 
     /// `x` has a `.d` axis; the output has the same shape.
     pub fn forward(self: FusedSwiGlu, x: Tensor) Tensor {
-        const gate, const up = self.w12.forward(x, x.dtype()).chunkExact(.hidden, 2);
-        return self.w3.forward(gate.mul(up.silu()), x.dtype());
+        const gate, const up = self.w12.forward(x.renameTag(.d, .in), x.dtype()).chunkExact(.out, 2);
+        const h = gate.mul(up.silu()).renameTag(.out, .in);
+        return self.w3.forward(h, x.dtype()).renameTag(.out, .d);
     }
 };
+
+/// Load a replicated linear layer with `weight` tagged `{out, in}` and `bias` tagged `{out}`.
+fn loadLinear(store: zml.io.TensorStore.View, tags: anytype) zml.nn.Linear {
+    const out, const in = tags;
+    return .init(
+        store.createTensor("weight", .{ out, in }, .replicated, .{}),
+        store.maybeCreateTensor("bias", .{out}, .replicated, .{}),
+        in,
+    );
+}
