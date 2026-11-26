@@ -67,42 +67,34 @@ fn applyGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tensor) T
     return output.convert(.f32).mul(selected.broad(output.shape().withDtype(.f32)));
 }
 
-/// The activations Triton multiplies, in BF16, which holds them exactly.
-fn emulateInput(x: Tensor, axis: anytype, mode: QuantMode, linear: nn.Linear) Tensor {
-    // Triton rounds activations to BF16 before quantizing; the barrier keeps that rounding.
-    const rows = (if (x.dtype() == .bf16) x else x.convert(.bf16).optimizationBarrier()).convert(.f32);
-    const values = switch (mode) {
-        .nvfp4 => emulateNvfp4(rows, axis, (linear.quantization.?.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input")).block_scale),
-        .mxfp8 => emulateMxfp8(rows, axis),
-        .none, .fp8 => unreachable,
-    };
-    return values.convert(.bf16);
-}
+/// The rows of a projection, quantized or not. The kernel reads `values`, which hold quantized
+/// rows times their block scales; its output is left to multiply by their `global_scale`, a
+/// scalar or one per row.
+const MaybeQuantizedInput = struct { values: Tensor, global_scale: ?Tensor = null };
 
-/// NVFP4 rows: each row is divided by a power of two, and each block of 16 gets an E4M3 scale
-/// and E2M1 values. Rounding uses tensor math, which fuses better than FP8 and FP4 conversions
-/// and avoids FP4 vector stores Metal cannot emit for every shape.
-fn emulateNvfp4(rows: Tensor, axis: anytype, strategy: quantization.nvfp4.QuantizationStrategy.BlockScale) Tensor {
-    const row_scale = quantization.nvfp4.rowScale(rows, axis).broad(rows.shape());
-    const blocks = rows.div(row_scale).splitAxis(axis, .{ .sc = -1, .blk = quantization.nvfp4.block_size });
-    const six = nvfp4Candidate(blocks, 6);
-    const values = switch (strategy) {
-        .largest_maps_to_six => six.values,
-        .best_of_four_or_six => blk: {
-            const four = nvfp4Candidate(blocks, 4);
-            // Ties keep amax/6.
-            break :blk four.err.cmp(.LT, six.err).broad(blocks.shape().withDtype(.bool)).select(four.values, six.values);
+/// The activations Triton multiplies, in BF16 for the kernels.
+fn emulateInput(x: Tensor, axis: anytype, q: Quantization) MaybeQuantizedInput {
+    switch (q.scheme) {
+        .nvfp4 => {
+            const quantized = quantization.nvfp4.quantize(x, axis, q.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input"));
+            // Without the global scale: BF16 holds the values times their block scales exactly,
+            // not their product with a global scale, which multiplies the kernel's output instead.
+            const values = quantization.nvfp4.dequantize(.{ .values = quantized.values, .scales = quantized.scales, .global_scale = null }, axis);
+            return .{ .values = values.convert(.bf16), .global_scale = quantized.global_scale };
         },
-    };
-    return values.reshape(rows.shape()).mul(row_scale);
+        .mxfp8 => {
+            // Triton rounds activations to BF16 before quantizing; the barrier keeps that rounding.
+            const rows = (if (x.dtype() == .bf16) x else x.convert(.bf16).optimizationBarrier()).convert(.f32);
+            return .{ .values = emulateMxfp8(rows, axis).convert(.bf16) };
+        },
+        else => stdx.debug.panic("metal backend only emulates NVFP4 and MXFP8 activations, got {s}", .{@tagName(q.scheme)}),
+    }
 }
 
-/// Dequantized blocks whose largest magnitude maps to `value_max`, and each block's absolute error.
-fn nvfp4Candidate(blocks: Tensor, value_max: f32) struct { values: Tensor, err: Tensor } {
-    const amax = blocks.abs().max(.blk).scale(1.0 / value_max);
-    const scale = quantization.roundE4m3Normal(amax.clamp(.scalar(0x1p-6, .f32), .scalar(448, .f32))).broad(blocks.shape());
-    const values = quantization.roundE2m1(blocks.div(scale)).mul(scale);
-    return .{ .values = values, .err = values.sub(blocks).abs().sum(.blk) };
+/// `output` {.r, ...} times `scale`, a scalar or one per route.
+fn scaleRoutes(output: Tensor, scale: ?Tensor) Tensor {
+    const factor = scale orelse return output;
+    return output.mul(factor.broad(output.shape()));
 }
 
 /// MXFP8 rows: blocks of 32 with a power-of-two scale and E4M3 values.
@@ -251,23 +243,26 @@ pub fn fusedExperts(
 
     // Tokens are quantized once, before each route copies its own.
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .d = d }).withTags(.{ .token, .d });
-    const tokens = if (quantize_input) emulateInput(hidden, .d, mode, gate_up_) else hidden.convert(act_dtype);
-    const gate_up_input = tokens.gather(.{ .token = order.divByConst(topk).withTags(.{.r}) }, .{});
+    const tokens: MaybeQuantizedInput = if (quantize_input) emulateInput(hidden, .d, gate_up_.quantization.?) else .{ .values = hidden.convert(act_dtype) };
+    const route_tokens = order.divByConst(topk).withTags(.{.r});
+    const gate_up_input = tokens.values.gather(.{ .token = route_tokens }, .{});
+    // A calibrated scale is a scalar; row scales follow their tokens to the routes.
+    const gate_up_input_global_scale: ?Tensor = if (tokens.global_scale) |scale| (if (scale.rank() == 0) scale else scale.gather(.{ .token = route_tokens }, .{})) else null;
 
     const gate_up_shape = zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype);
-    const gate_up_out = applyGlobalScale(if (format) |f|
+    const gate_up_out = scaleRoutes(applyGlobalScale(if (format) |f|
         grouped(gate_up_input, gate_up_, sorted_ids, gate_up_shape, f)
     else
-        moeGemm(gate_up_input, gate_up, gate_up_scales, expert_ids, gate_up_shape, mode), gate_up_global_scale, expert_ids);
+        moeGemm(gate_up_input, gate_up, gate_up_scales, expert_ids, gate_up_shape, mode), gate_up_global_scale, expert_ids), gate_up_input_global_scale);
     var activated = opts.activation.applyActivation(gate_up_out, .concatenated);
     if (opts.routing_weight_placement == .before_down) activated = activated.mul(weights.broad(activated.shape()));
-    const down_input = if (quantize_input) emulateInput(activated, .out, mode, down_) else activated.convert(act_dtype);
+    const down_input: MaybeQuantizedInput = if (quantize_input) emulateInput(activated, .out, down_.quantization.?) else .{ .values = activated.convert(act_dtype) };
 
     const down_shape = zml.Shape.init(.{ .r = num_routes, .d = down.dim(.d) }, act_dtype);
-    var down_out = applyGlobalScale(if (format) |f|
-        grouped(down_input, down_, sorted_ids, down_shape, f)
+    var down_out = scaleRoutes(applyGlobalScale(if (format) |f|
+        grouped(down_input.values, down_, sorted_ids, down_shape, f)
     else
-        moeGemm(down_input, down, down_scales, expert_ids, down_shape, mode), down_global_scale, expert_ids);
+        moeGemm(down_input.values, down, down_scales, expert_ids, down_shape, mode), down_global_scale, expert_ids), down_input.global_scale);
     if (opts.routing_weight_placement == .after_down) down_out = down_out.mul(weights.broad(down_out.shape()));
     down_out = down_out.mask(has_expert, 0);
 
