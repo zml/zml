@@ -44,9 +44,10 @@ pub fn validateOptions(opts: Options) void {
 
 /// MXFP4 weights are `u8` (or `i8`) packed FP4 with E8M0 block scales. NVFP4
 /// weights are packed `u8` with E4M3 block scales; their weight global scale
-/// is the per-expert multiplier dequantizing each GEMM output (it folds in
-/// the inverse of the input's global scale), and their input scale is the
-/// multiplier applied to the GEMM's input before NVFP4 quantization. Both
+/// is the per-expert multiplier dequantizing each GEMM output. Their input
+/// scale, when present, multiplies the GEMM's input before NVFP4 quantization,
+/// and the weight global scale folds in its inverse; without input scales,
+/// activations are quantized row by row. Both
 /// expect block scales in the 128x4 tensor-core layout. MXFP4 gate/up rows
 /// interleave by 8 and its scale atoms are MN-major packed i32 words.
 pub fn fusedExperts(
@@ -96,11 +97,9 @@ pub fn fusedExperts(
             }.f;
             const gate_up_input = gq.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input");
             const down_input = dq.nvfp4_input orelse @panic("NVFP4 experts need Quantization.nvfp4_input");
-            // Activations are quantized row by row when asked to; the global scales then only
-            // dequantize the weights. Otherwise they take the calibrated input scales.
-            if (options.quantize_input) {
-                stdx.debug.assert(options.activation == .capped_swiglu, "cute NVFP4 backend quantizes activations row by row around a capped swiglu, got {}", .{options.activation});
-                stdx.debug.assert(gate_up_input.global_scale == .per_row and down_input.global_scale == .per_row, "cute NVFP4 backend quantizes activations row by row without calibrated input scales", .{});
+            stdx.debug.assert((gate_up_input.global_scale == .per_row) == (down_input.global_scale == .per_row), "cute NVFP4 backend expects per-row input scales for both projections or neither", .{});
+            // With per-row activation scales, the global scales only dequantize the weights.
+            if (gate_up_input.global_scale == .per_row) {
                 stdx.debug.assert(gate_up_input.block_scale == down_input.block_scale, "cute NVFP4 backend picks the block scales of both projections' activations the same way, got {} and {}", .{ gate_up_input.block_scale, down_input.block_scale });
                 break :blk .{ .nvfp4 = .{ .alpha1 = scale(gq.global_scale), .alpha2 = scale(dq.global_scale), .act = null } };
             }
@@ -146,12 +145,17 @@ pub fn fusedExperts(
             .alpha2 = f.alpha2.reshape(.{experts}),
             .act1 = if (f.act) |act| act[0].reshape(.{}).broad(.init(.{experts}, .f32)) else f.alpha1.reshape(.{experts}),
             .act2 = if (f.act) |act| act[1].reshape(.{}).broad(.init(.{experts}, .f32)) else f.alpha2.reshape(.{experts}),
-        }, switch (options.activation) {
+        }, if (f.act == null) .{
+            .routing_weight_placement = options.routing_weight_placement,
+            .row_scaled = .{
+                .block_scale_strategy = gq.nvfp4_input.?.block_scale,
+                .activation = options.activation,
+            },
+        } else switch (options.activation) {
             .swiglu => |swiglu| .{ .swiglu_limit = swiglu.limit, .routing_weight_placement = options.routing_weight_placement },
             .capped_swiglu => |caps| .{
                 .routing_weight_placement = options.routing_weight_placement,
                 .capped = .{ .gate_cap = caps.gate_cap, .up_cap = caps.up_cap },
-                .row_scaled = if (f.act == null) .{ .block_scale_strategy = gq.nvfp4_input.?.block_scale, .activation = .{ .gate_cap = caps.gate_cap, .up_cap = caps.up_cap } } else null,
             },
             else => unreachable,
         }),

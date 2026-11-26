@@ -222,12 +222,12 @@ fn padLast(x: Tensor, multiple: i64) Tensor {
 }
 
 /// Adapt a copy of both projections to the backend's storage and layout contract.
-/// `row_scaled` NVFP4 activations are quantized row by row, without a calibrated input scale.
-fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend, row_scaled: bool) ExpertFixture {
+fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertFixture {
     var prepared = canonical;
     const scheme = canonical.gate_up.quantizationScheme();
-    if (backend == .cute and scheme == .nvfp4 and row_scaled) {
-        // The CuTe down GEMM reduces over whole K tiles: pad it with zero weights and scales.
+    if (backend == .cute and scheme == .nvfp4 and canonical.down.quantization.?.nvfp4_input.?.global_scale == .per_row) {
+        // Without calibrated input scales, activations are quantized row by row, and the CuTe
+        // down GEMM reduces over whole K tiles: pad it with zero weights and scales.
         const k_tile = zml.moe.cute.kernels.nvfp4_persistent.k_tile;
         prepared.down.weight = padLast(prepared.down.weight, k_tile);
         prepared.down.quantization.?.scales = padLast(prepared.down.quantization.?.scales, @divExact(k_tile, 16));
@@ -267,7 +267,7 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend, row_sca
                     q.scales = q.scales.bitCast(.u8);
                     // CuTe takes the input quantization multiplier and a GEMM
                     // output multiplier that folds in its inverse.
-                    if (!row_scaled) {
+                    if (q.nvfp4_input.?.global_scale == .calibrated) {
                         const input_scale = q.nvfp4_input.?.global_scale.calibrated.asMultiplier();
                         q.global_scale = .{ .value = q.global_scale.?.asMultiplier().mul(input_scale), .operation = .multiply };
                         q.nvfp4_input.?.global_scale = .{ .calibrated = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply } };
@@ -303,7 +303,7 @@ const Outputs = struct { actual: Tensor, expected: Tensor };
 /// reference implementation. Return both outputs for comparison.
 fn forward(input: Tensor, c: Case) Outputs {
     const canonical = makeExpertFixture(c);
-    const prepared = prepareForBackend(canonical, c.backend, c.quantize_input);
+    const prepared = prepareForBackend(canonical, c.backend);
 
     const route_shape = Shape.init(.{ .t = c.tokens, .topk = c.topk }, .i32);
     const route = Tensor.arange(.{ .end = @intCast(route_shape.count()) }, .i32).reshape(route_shape);
@@ -758,8 +758,9 @@ test "CuTe NVFP4 row-scaled activation quantization matrix" {
         .formats = &.{
             .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six },
             .{ .scheme = .nvfp4, .nvfp4_block_scale = .largest_maps_to_six, .non_unit_scales = true },
+            .{ .scheme = .nvfp4, .nvfp4_block_scale = .best_of_four_or_six },
         },
-        .activations = &.{.{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } }},
+        .activations = &.{ .{ .swiglu = .{ .limit = 0.25 } }, .{ .capped_swiglu = .{ .gate_cap = 0.5, .up_cap = 0.25 } } },
         .quantize_inputs = &.{true},
         .placements = &.{ .before_down, .after_down },
         // The last shapes pad the down GEMM's reduction dimension to whole K tiles.
@@ -768,6 +769,7 @@ test "CuTe NVFP4 row-scaled activation quantization matrix" {
             .{ .width = 5120, .intermediate = 2304, .tokens = 17, .topk = 2 },
             .{ .width = 2304, .intermediate = 1152, .tokens = 1, .topk = 2 },
             .{ .width = 2304, .intermediate = 1152, .tokens = 34, .topk = 3 },
+            .{ .width = 2304, .intermediate = 1152, .tokens = 17, .topk = 2, .unrouted = true },
         },
     }, .{});
 }
