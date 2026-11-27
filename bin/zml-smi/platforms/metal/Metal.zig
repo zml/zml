@@ -40,7 +40,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal
         .keys = undefined,
         .accelerator = 0,
         .smc = null,
-        .mem_total_bytes = memoryTotal(),
+        .mem_total_bytes = smi.Host.memoryTotalBytes(),
         .frequencies = &.{},
         .channels = undefined,
         .subscription = undefined,
@@ -94,13 +94,13 @@ fn poll(platform: *smi.Platform, _: std.mem.Allocator, samples: []smi.Sample) vo
     const gpu = &samples[0].metal;
 
     gpu.mem_total_bytes = self.mem_total_bytes;
+    gpu.mem_used_bytes = smi.Host.memoryUsedBytes(self.mem_total_bytes);
     gpu.clock_graphics_max_mhz = if (self.frequencies.len > 0) std.mem.max(u64, self.frequencies) else null;
 
     if (self.property(self.accelerator, .PerformanceStatistics)) |statistics| {
         defer c.CFRelease(statistics);
         if (as(c.CFDictionary, statistics)) |values| {
             gpu.util_percent = number(c.CFDictionaryGetValue(values, self.keys.get(.@"Device Utilization %")));
-            gpu.mem_used_bytes = number(c.CFDictionaryGetValue(values, self.keys.get(.@"In use system memory")));
         }
     }
 
@@ -184,7 +184,6 @@ const Key = enum {
     IOReportChannels,
     PerformanceStatistics,
     @"Device Utilization %",
-    @"In use system memory",
     IOUserClientCreator,
     AppUsage,
     accumulatedGPUTime,
@@ -273,7 +272,9 @@ fn readReport(self: *Metal, gpu: *smi.Sample.Metal) void {
             const unit = text(c.IOReportChannelGetUnitLabel(channel), &unit_buffer);
             energy.getPtr(kind).* +|= milliwatts(amount, unit, elapsed);
         } else if (std.mem.eql(u8, group, "GPU Stats") and std.mem.eql(u8, name, "GPUPH")) {
-            gpu.clock_graphics_mhz = self.clock(channel);
+            const stats = self.gpuStats(channel);
+            gpu.clock_graphics_mhz = stats.clock_mhz;
+            if (stats.util_percent) |util| gpu.util_percent = util;
         } else if (isPmpGroup(group) and isPmpCpuPower(name)) {
             pmp_cpu_mw +|= histogramMilliwatts(channel);
         }
@@ -284,7 +285,8 @@ fn readReport(self: *Metal, gpu: *smi.Sample.Metal) void {
     if (cpu == 0 and pmp_cpu_mw > 0) self.cpu_from_pmp = true;
 
     gpu.cpu_power_mw = if (self.cpu_from_pmp) pmp_cpu_mw else cpu;
-    gpu.power_mw = if (energy.get(.gpu) > 0) energy.get(.gpu) else energy.get(.gpu_alias);
+    const gpu_base = if (energy.get(.gpu) > 0) energy.get(.gpu) else energy.get(.gpu_alias);
+    gpu.power_mw = gpu_base +| energy.get(.gpu_sram);
     gpu.ane_power_mw = if (energy.get(.ane_block) > 0) energy.get(.ane_block) else energy.get(.ane);
 }
 
@@ -295,6 +297,7 @@ const Energy = enum {
     cpu_cluster,
     gpu,
     gpu_alias,
+    gpu_sram,
     ane_block,
     ane,
 
@@ -307,6 +310,7 @@ const Energy = enum {
         if (std.mem.find(u8, name, "CPU Energy") != null) return .cpu;
         if (std.mem.eql(u8, name, "GPU Energy")) return .gpu;
         if (std.mem.eql(u8, name, "GPU")) return .gpu_alias;
+        if (std.mem.startsWith(u8, name, "GPU SRAM")) return .gpu_sram;
 
         for ([_][]const u8{ "ANE", "NPU", "Neural", "ane" }) |engine| {
             if (std.mem.find(u8, name, engine) == null) continue;
@@ -330,26 +334,39 @@ fn milliwatts(amount: u64, unit: []const u8, elapsed: std.Io.Duration) u64 {
     return std.math.lossyCast(u64, @as(u128, amount) * scale / @as(u128, @intCast(elapsed.nanoseconds)));
 }
 
-fn clock(self: *Metal, channel: *const c.CFDictionary) ?u64 {
-    if (self.frequencies.len == 0) return null;
-
+fn gpuStats(self: *Metal, channel: *const c.CFDictionary) struct { clock_mhz: ?u64, util_percent: ?u64 } {
+    var total: u64 = 0;
     var active: u64 = 0;
     var weighted: u128 = 0;
     var state_index: usize = 0;
 
     var state: i32 = 0;
     while (state < c.IOReportStateGetCount(channel)) : (state += 1) {
+        const residency = std.math.cast(u64, c.IOReportStateGetResidency(channel, state)) orelse 0;
+        total +|= residency;
+
         var buffer: [32]u8 = undefined;
         const name = text(c.IOReportStateGetNameForIndex(channel, state), &buffer);
-        if (std.mem.eql(u8, name, "OFF") or std.mem.eql(u8, name, "IDLE") or std.mem.eql(u8, name, "DOWN")) continue;
+        if (name.len == 0 or std.mem.eql(u8, name, "OFF") or std.mem.eql(u8, name, "IDLE") or std.mem.eql(u8, name, "DOWN")) continue;
 
-        const residency = std.math.cast(u64, c.IOReportStateGetResidency(channel, state)) orelse 0;
-        active += residency;
+        active +|= residency;
         if (state_index < self.frequencies.len) weighted += @as(u128, self.frequencies[state_index]) * residency;
         state_index += 1;
     }
 
-    return if (active > 0) @intCast(weighted / active) else 0;
+    const clock_mhz: ?u64 = blk: {
+        if (self.frequencies.len == 0) break :blk null;
+        if (active == 0) break :blk 0;
+
+        break :blk @intCast(weighted / active);
+    };
+    const util_percent: ?u64 = blk: {
+        if (total == 0) break :blk null;
+
+        break :blk @min(@as(u64, @intCast((@as(u128, active) * 100 + total / 2) / total)), 100);
+    };
+
+    return .{ .clock_mhz = clock_mhz, .util_percent = util_percent };
 }
 
 /// The power of a CPU cluster from its histogram, whose states are named by watts ("   2W", " 0.250W"):
@@ -523,14 +540,6 @@ fn text(string: c.CFStringRef, buffer: []u8) []const u8 {
     if (c.CFStringGetCString(string orelse return "", buffer.ptr, @intCast(buffer.len), c.kCFStringEncodingUTF8) == 0) return "";
 
     return std.mem.sliceTo(buffer, 0);
-}
-
-fn memoryTotal() ?u64 {
-    var bytes: u64 = 0;
-    var size: usize = @sizeOf(u64);
-    if (std.c.sysctlbyname("hw.memsize", &bytes, &size, null, 0) != 0) return null;
-
-    return bytes;
 }
 
 test share {

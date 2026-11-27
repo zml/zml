@@ -17,7 +17,7 @@ pub const Host = struct {
         data.kernel = sysctlString(arena, "kern.osrelease");
         data.cpu_name = sysctlString(arena, "machdep.cpu.brand_string");
         data.cpu_cores = if (sysctl(u32, "hw.logicalcpu")) |cores| cores else null;
-        data.mem_total_kib = if (sysctl(u64, "hw.memsize")) |bytes| bytes / 1024 else null;
+        data.mem_total_kib = if (Host.memoryTotalBytes()) |bytes| bytes / 1024 else null;
 
         var timebase: c.mach_timebase_info_data = .{ .numer = 1, .denom = 1 };
         if (c.mach_timebase_info(&timebase) != KERN_SUCCESS or timebase.denom == 0) timebase = .{ .numer = 1, .denom = 1 };
@@ -31,7 +31,13 @@ pub const Host = struct {
     }
 
     pub fn sample(_: *Host, data: *smi.HostData) void {
-        data.mem_available_kib = memAvailable();
+        data.mem_available_kib = blk: {
+            const total_kib = data.mem_total_kib orelse break :blk null;
+            const total_bytes = total_kib * 1024;
+            const used_bytes = Host.memoryUsedBytes(total_bytes) orelse break :blk null;
+
+            break :blk (total_bytes -| used_bytes) / 1024;
+        };
 
         var load: [3]f64 = undefined;
         const loaded = getloadavg(&load, 3) == 3;
@@ -112,6 +118,30 @@ pub const Host = struct {
 
         row.cpu_percent = @intCast(@min(@as(u128, @intCast(cpu_time.nanoseconds - prev.nanoseconds)) * 1000 / (@as(u128, @intCast(dt.nanoseconds)) * self.cpus), std.math.maxInt(u16)));
     }
+
+    pub fn memoryTotalBytes() ?u64 {
+        return sysctl(u64, "hw.memsize");
+    }
+
+    /// Total unified memory in use, matching macOS Activity Monitor:
+    /// app memory (anonymous minus purgeable) + wired + compressed.
+    pub fn memoryUsedBytes(total: ?u64) ?u64 {
+        const host = c.mach_host_self();
+        defer _ = c.mach_port_deallocate(c.mach_task_self(), host);
+
+        var stats: vm_statistics64 = undefined;
+        var count: c_uint = @sizeOf(vm_statistics64) / @sizeOf(c_int);
+        if (host_statistics64(host, HOST_VM_INFO64, &stats, &count) != KERN_SUCCESS) return null;
+
+        var page_size: u64 = 0;
+        if (c._host_page_size(host, &page_size) != KERN_SUCCESS) return null;
+
+        const pages: u64 = @as(u64, stats.internal_page_count -| stats.purgeable_count) +
+            stats.wire_count +
+            stats.compressor_page_count;
+        const bytes = pages * page_size;
+        return if (total) |limit| @min(bytes, limit) else bytes;
+    }
 };
 
 const PROC_PIDTASKINFO: c_int = 4;
@@ -187,26 +217,15 @@ const vm_statistics64 = extern struct {
     total_uncompressed_pages_in_compressor: u64,
 };
 
+comptime {
+    std.debug.assert(@sizeOf(vm_statistics64) == 152);
+}
+
 const HOST_VM_INFO64: c_int = 4;
 const KERN_SUCCESS: c_int = 0;
 
 extern "c" fn host_statistics64(host: c.mach_port_t, flavor: c_int, info: *anyopaque, count: *c_uint) c.kern_return_t;
 extern "c" fn getloadavg(loadavg: *[3]f64, nelem: c_int) c_int;
-
-fn memAvailable() ?u64 {
-    const host = c.mach_host_self();
-    defer _ = c.mach_port_deallocate(c.mach_task_self(), host);
-
-    var stats: vm_statistics64 = undefined;
-    var count: c_uint = @sizeOf(vm_statistics64) / @sizeOf(c_int);
-    if (host_statistics64(host, HOST_VM_INFO64, &stats, &count) != KERN_SUCCESS) return null;
-
-    var page_size: u64 = 0;
-    if (c._host_page_size(host, &page_size) != KERN_SUCCESS) return null;
-
-    const pages = @as(u64, stats.free_count) + stats.inactive_count + stats.purgeable_count;
-    return pages * page_size / 1024;
-}
 
 fn sysctl(comptime T: type, name: [*:0]const u8) ?T {
     var value: T = undefined;
