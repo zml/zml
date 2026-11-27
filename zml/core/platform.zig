@@ -34,6 +34,14 @@ fn disableXlaLogs() void {
     );
 }
 
+fn bumpXlaHostMemoryLimit() void {
+    _ = c.setenv(
+        "XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB",
+        std.c.getenv("XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB") orelse "192",
+        1,
+    );
+}
+
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
     if (num_devices == 0) {
         log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
@@ -53,6 +61,7 @@ fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*cons
     return switch (target) {
         inline else => |tgt| api_map.get(tgt) orelse b: {
             disableXlaLogs();
+            bumpXlaHostMemoryLimit();
             const api = try tgt.load(allocator, io);
             api_map.set(tgt, api);
             break :b api;
