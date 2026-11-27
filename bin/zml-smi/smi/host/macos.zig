@@ -107,7 +107,13 @@ pub const Host = struct {
         var task: ProcTaskInfo = undefined;
         if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, @sizeOf(ProcTaskInfo)) != @sizeOf(ProcTaskInfo)) return;
 
-        row.rss_kib = task.resident_size / 1024;
+        // phys_footprint matches Activity Monitor/top by counting GPU/IOKit allocations and compressed pages.
+        var rusage: RusageInfoV0 = undefined;
+        const mem_bytes = if (proc_pid_rusage(pid, RUSAGE_INFO_V0, &rusage) == 0)
+            rusage.phys_footprint
+        else
+            task.resident_size;
+        row.rss_kib = mem_bytes / 1024;
         const ticks = @as(u128, task.total_user) + task.total_system;
         const cpu_time: std.Io.Duration = .fromNanoseconds(std.math.lossyCast(i96, ticks * self.timebase.numer / self.timebase.denom));
         self.curr_cpu.put(self.gpa, row.pid, cpu_time) catch return;
@@ -147,6 +153,7 @@ pub const Host = struct {
 const PROC_PIDTASKINFO: c_int = 4;
 const PROC_PIDT_SHORTBSDINFO: c_int = 13;
 const PROC_PIDPATHINFO_MAXSIZE = 4096;
+const RUSAGE_INFO_V0: c_int = 0;
 
 /// struct proc_bsdshortinfo, which libproc gives for every process.
 const ProcBsdShortInfo = extern struct {
@@ -187,8 +194,27 @@ const ProcTaskInfo = extern struct {
     priority: i32,
 };
 
+const RusageInfoV0 = extern struct {
+    uuid: [16]u8,
+    user_time: u64,
+    system_time: u64,
+    pkg_idle_wkups: u64,
+    interrupt_wkups: u64,
+    pageins: u64,
+    wired_size: u64,
+    resident_size: u64,
+    phys_footprint: u64,
+    proc_start_abstime: u64,
+    proc_exit_abstime: u64,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(RusageInfoV0) == 96);
+}
+
 extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *anyopaque, size: c_int) c_int;
 extern "c" fn proc_pidpath(pid: c_int, buffer: [*]u8, size: u32) c_int;
+extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *anyopaque) c_int;
 
 const vm_statistics64 = extern struct {
     free_count: c_uint,
