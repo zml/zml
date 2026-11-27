@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const theme = @import("../theme.zig");
 const ui = @import("../lib/ui.zig");
+const compose = @import("../lib/compose.zig");
 const Image = @import("../lib/image.zig");
 
 const Text = vxfw.Text;
@@ -17,10 +18,10 @@ cell_size: vxfw.Size = .{},
 value_label: ?[]const u8 = null,
 value_label_style: vaxis.Cell.Style = theme.value_style,
 border_style: vaxis.Cell.Style = theme.border_style,
-padding: vxfw.Padding.PadValues = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
+padding: compose.PadValues = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
 
 pub fn draw(self: *const TitledBorder, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const pad: vxfw.Padding = .{
+    const pad: compose.Padding = .{
         .child = self.child,
         .padding = self.padding,
     };

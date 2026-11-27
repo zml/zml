@@ -350,7 +350,6 @@ use_repo(
     "translate-c",
     "uucode",
     "xla",
-    "zigimg",
     "zio",
 )
 

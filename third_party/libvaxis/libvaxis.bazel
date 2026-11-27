@@ -10,7 +10,6 @@ zig_library(
     ]),
     main = "src/main.zig",
     deps = [
-        "@zigimg",
         "@uucode",
     ],
     visibility = ["//visibility:public"],

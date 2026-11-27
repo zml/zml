@@ -14,7 +14,6 @@ load("//third_party/stb:repo.bzl", stb = "repo")
 load("//third_party/translate-c:repo.bzl", translate_c = "repo")
 load("//third_party/uucode:repo.bzl", uucode = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
-load("//third_party/zigimg:repo.bzl", zigimg = "repo")
 load("//third_party/zio:repo.bzl", zio = "repo")
 
 def _non_module_deps_impl(mctx):
@@ -28,7 +27,6 @@ def _non_module_deps_impl(mctx):
     flashinfer_cutlass_moe()
     linenoise()
     stb()
-    zigimg()
     uucode()
     libvaxis()
     iree()
