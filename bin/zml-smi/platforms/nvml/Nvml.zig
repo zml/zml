@@ -56,12 +56,10 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Nvml {
         null;
 
     var cuda: c_int = 0;
-    const details: []const smi.Device.Detail = if (ok(api.nvmlSystemGetCudaDriverVersion_v2(&cuda))) try arena.dupe(smi.Device.Detail, &.{.{
-        .key = "cuda_version",
-        .label = "CUDA",
-        .value = try std.fmt.allocPrint(arena, "{d}.{d}", .{ @divTrunc(cuda, 1000), @divTrunc(@mod(cuda, 1000), 10) }),
-        .in_title = true,
-    }}) else &.{};
+    const cuda_version = if (ok(api.nvmlSystemGetCudaDriverVersion_v2(&cuda)))
+        try std.fmt.allocPrint(arena, "{d}.{d}", .{ @divTrunc(cuda, 1000), @divTrunc(@mod(cuda, 1000), 10) })
+    else
+        null;
 
     var count: c_uint = 0;
     try check(api.nvmlDeviceGetCount_v2(&count));
@@ -73,10 +71,8 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Nvml {
         var name: [c.NVML_DEVICE_NAME_V2_BUFFER_SIZE]u8 = undefined;
         gpus.appendAssumeCapacity(.{ .handle = handle });
         devices.appendAssumeCapacity(.{
-            .target = .cuda,
             .name = if (ok(api.nvmlDeviceGetName(handle, &name, name.len))) try arena.dupe(u8, std.mem.sliceTo(&name, 0)) else null,
-            .driver_version = driver_version,
-            .details = details,
+            .info = .{ .cuda = .{ .driver_version = driver_version, .cuda_version = cuda_version } },
         });
     }
 

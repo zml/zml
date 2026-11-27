@@ -76,7 +76,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Neuro
         const index, const handle = entry;
         chip.* = try openChip(arena, io, index, handle, cores_per_chip);
         initialized += 1;
-        for (chip.memory) |_| devices.appendAssumeCapacity(.{ .target = .neuron, .name = chip.name, .driver_version = driver_version });
+        for (chip.memory) |_| devices.appendAssumeCapacity(.{ .name = chip.name, .info = .{ .neuron = .{ .driver_version = driver_version } } });
     }
 
     return .{

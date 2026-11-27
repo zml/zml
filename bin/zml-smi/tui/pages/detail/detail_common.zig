@@ -11,8 +11,20 @@ const Chart = @import("../../widgets/chart.zig");
 const ColumnLayout = @import("../../widgets/column_layout.zig");
 
 pub fn headerText(arena: std.mem.Allocator, id: u16, device: smi.Device) std.mem.Allocator.Error!vxfw.Text {
+    const driver: ?[]const u8, const extra: ?[]const u8 = switch (device.info) {
+        .cuda => |info| .{ info.driver_version, if (info.cuda_version) |v| try std.fmt.allocPrint(arena, "CUDA {s}", .{v}) else null },
+        .furiosa => |info| .{ info.driver_version, if (info.firmware_version) |v| try std.fmt.allocPrint(arena, "Firmware {s}", .{v}) else null },
+        .tpu => .{ null, null },
+        inline else => |info| .{ info.driver_version, null },
+    };
+    const suffix = if (driver != null and extra != null)
+        try std.fmt.allocPrint(arena, " ({s}, {s})", .{ driver.?, extra.? })
+    else if (driver orelse extra) |v|
+        try std.fmt.allocPrint(arena, " ({s})", .{v})
+    else
+        "";
     return .{
-        .text = try std.fmt.allocPrint(arena, "Device {d}: {s}{s}", .{ id, device.name orelse "Unknown", try utils.versions(arena, device, .all) }),
+        .text = try std.fmt.allocPrint(arena, "Device {d}: {s}{s}", .{ id, device.name orelse "Unknown", suffix }),
         .style = theme.header_style,
         .softwrap = false,
         .overflow = .clip,

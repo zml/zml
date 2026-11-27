@@ -80,9 +80,8 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !Metal
 
     const devices = try arena.alloc(smi.Device, 1);
     devices[0] = .{
-        .target = .metal,
         .name = try self.propertyText(arena, .model),
-        .driver_version = try self.propertyText(arena, .IOSourceVersion),
+        .info = .{ .metal = .{ .driver_version = try self.propertyText(arena, .IOSourceVersion) } },
     };
     self.platform = .{ .devices = devices, .two_readings = true, .vtable = &vtable };
 

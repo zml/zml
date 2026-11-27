@@ -124,15 +124,13 @@ pub fn write(writer: *std.Io.Writer, collector: *smi.Collector) !void {
 
     try writer.writeAll("# HELP zml_device_info Device metadata\n# TYPE zml_device_info gauge\n");
     for (devices, 0..) |device, i| {
-        try writer.print("zml_device_info{{device=\"{d}\",type=\"{t}\"", .{ i, device.target });
+        try writer.print("zml_device_info{{device=\"{d}\",type=\"{t}\"", .{ i, device.info });
         if (device.name) |name| try label(writer, "name", name);
-        if (device.driver_version) |driver| try label(writer, "driver", driver);
-        details: for (device.details, 0..) |detail, detail_index| {
-            if (!isValidLabelName(detail.key)) continue;
-            for (device.details[0..detail_index]) |prev| {
-                if (std.mem.eql(u8, prev.key, detail.key)) continue :details;
-            }
-            try label(writer, detail.key, detail.value);
+        switch (device.info) {
+            inline else => |info| inline for (@typeInfo(@TypeOf(info)).@"struct".field_names) |name| {
+                const key = if (comptime std.mem.eql(u8, name, "driver_version")) "driver" else name;
+                if (@field(info, name)) |value| try label(writer, key, value);
+            },
         }
         try writer.writeAll("} 1\n");
     }
@@ -179,7 +177,7 @@ fn writeSample(writer: *std.Io.Writer, metric: Metric, written: *bool, index: us
         try header(writer, metric);
         written.* = true;
     }
-    try writer.print("{s}{{device=\"{d}\",type=\"{t}\",name=\"", .{ metric.name, index, device.target });
+    try writer.print("{s}{{device=\"{d}\",type=\"{t}\",name=\"", .{ metric.name, index, device.info });
     try std.zig.stringEscape(device.name orelse "", writer);
     try writer.writeAll("\"} ");
     try number(writer, metric, value);
@@ -196,19 +194,6 @@ fn label(writer: *std.Io.Writer, name: []const u8, value: []const u8) !void {
     try writer.writeAll("\"");
 }
 
-fn isValidLabelName(name: []const u8) bool {
-    if (name.len == 0) return false;
-    if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_') return false;
-    for (name[1..]) |ch| {
-        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
-    }
-
-    return !std.mem.eql(u8, name, "device") and
-        !std.mem.eql(u8, name, "type") and
-        !std.mem.eql(u8, name, "name") and
-        !std.mem.eql(u8, name, "driver");
-}
-
 fn number(writer: *std.Io.Writer, metric: Metric, value: anytype) !void {
     if (@TypeOf(value) == f32) return writer.printFloat(value, .{ .mode = .decimal, .precision = metric.decimals });
     const scaled = value *| metric.factor;
@@ -217,17 +202,6 @@ fn number(writer: *std.Io.Writer, metric: Metric, value: anytype) !void {
     try writer.printInt(scaled / one, 10, .lower, .{});
     try writer.writeByte('.');
     try writer.printInt(scaled % one, 10, .lower, .{ .width = metric.decimals, .fill = '0', .alignment = .right });
-}
-
-test "prometheus label validation" {
-    try std.testing.expect(isValidLabelName("cuda_version"));
-    try std.testing.expect(isValidLabelName("_custom0"));
-    try std.testing.expect(!isValidLabelName(""));
-    try std.testing.expect(!isValidLabelName("0bad"));
-    try std.testing.expect(!isValidLabelName("bad-key"));
-    try std.testing.expect(!isValidLabelName("x=\"1\"} 1\nfake"));
-    try std.testing.expect(!isValidLabelName("name"));
-    try std.testing.expect(!isValidLabelName("driver"));
 }
 
 test "prometheus metric names are unique" {

@@ -72,9 +72,8 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !AmdSm
             // amdsmi reports the version of an in-tree driver, which has none, as N/A.
             const version = if (ok(api.amdsmi_get_gpu_driver_info(handle, &driver))) std.mem.sliceTo(&driver.driver_version, 0) else "N/A";
             try devices.append(arena, .{
-                .target = .rocm,
                 .name = if (ok(api.amdsmi_get_gpu_asic_info(handle, &asic))) try arena.dupe(u8, std.mem.sliceTo(&asic.market_name, 0)) else null,
-                .driver_version = if (std.mem.eql(u8, version, "N/A")) null else try arena.dupe(u8, version),
+                .info = .{ .rocm = .{ .driver_version = if (std.mem.eql(u8, version, "N/A")) null else try arena.dupe(u8, version) } },
             });
         }
     }

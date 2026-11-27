@@ -57,7 +57,7 @@ pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io) !OneAp
             gpu.close(io);
             return err;
         };
-        try devices.append(arena, .{ .target = .oneapi, .name = try name(arena, io, gpu), .driver_version = driver_version });
+        try devices.append(arena, .{ .name = try name(arena, io, gpu), .info = .{ .oneapi = .{ .driver_version = driver_version } } });
     }
 
     return .{
