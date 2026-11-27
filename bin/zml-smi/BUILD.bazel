@@ -18,6 +18,7 @@ run_binary(
         "$(location libnrt.so.1)",
         "$(location @aws-neuronx-runtime-lib//:libnrt.patchelf)",
     ],
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
     tool = "@llvm//tools:llvm-strip",
 )
@@ -32,6 +33,7 @@ run_binary(
         "$(location libncfw.so.2)",
         "$(location @aws-neuronx-runtime-lib//:libncfw.patchelf)",
     ],
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
     tool = "@llvm//tools:llvm-strip",
 )
@@ -53,6 +55,7 @@ copy_to_directory(
         "libnrt.so.1": "lib/libnrt.so.1",
         "libncfw.so.2": "lib/libncfw.so.2",
     },
+    tags = ["manual"],
     visibility = ["//bin/zml-smi:__subpackages__"],
 )
 
@@ -66,6 +69,7 @@ run_binary(
         "$(location zml-smi.stripped)",
         "$(location :zml-smi)",
     ],
+    tags = ["manual"],
     tool = "@llvm//tools:llvm-strip",
 )
 

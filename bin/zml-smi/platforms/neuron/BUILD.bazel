@@ -4,6 +4,7 @@ zig_library(
     name = "neuron",
     import_name = "zml-smi/platforms/neuron",
     main = "Neuron.zig",
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [

@@ -4,6 +4,7 @@ zig_library(
     name = "nvml",
     import_name = "zml-smi/platforms/nvml",
     main = "Nvml.zig",
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//bin/zml-smi:__subpackages__"],
     deps = ["//bin/zml-smi/smi"] + select({

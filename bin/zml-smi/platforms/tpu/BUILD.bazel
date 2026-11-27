@@ -5,6 +5,7 @@ cc_library(
     name = "tpuinfo",
     srcs = ["tpuinfo.cc"],
     hdrs = ["tpuinfo.h"],
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
     deps = [
         "@cloud_accelerator_diagnostics//:tpu_metric_service_cc_grpc",
@@ -16,6 +17,7 @@ zig_library(
     name = "tpu",
     import_name = "zml-smi/platforms/tpu",
     main = "Tpu.zig",
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [

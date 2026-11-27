@@ -4,6 +4,7 @@ zig_library(
     name = "amdsmi",
     import_name = "zml-smi/platforms/amdsmi",
     main = "AmdSmi.zig",
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [

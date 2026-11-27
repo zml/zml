@@ -21,6 +21,7 @@ zig_library(
     ],
     import_name = "zml-smi",
     main = "smi.zig",
+    tags = ["manual"],
     visibility = ["//bin/zml-smi:__subpackages__"],
     deps = ["@rules_zig//zig/runfiles"],
 )
