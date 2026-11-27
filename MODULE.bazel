@@ -24,6 +24,15 @@ bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")
+
+# The Zig-owned ELF link lacks section bounds for weak message defaults.
+single_version_override(
+    module_name = "protobuf",
+    patch_strip = 1,
+    patches = ["//:third_party/protobuf/zig-elf2-compat-35.0.patch"],
+    version = "35.0",
+)
+
 bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_cc", version = "0.2.19")

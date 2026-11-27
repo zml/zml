@@ -1,0 +1,57 @@
+diff --git a/build_defs/BUILD.bazel b/build_defs/BUILD.bazel
+--- a/build_defs/BUILD.bazel
++++ b/build_defs/BUILD.bazel
+@@ -13,2 +13,7 @@
+     ],
++)
++
++config_setting(
++    name = "zig_elf2_compat",
++    define_values = {"zig_elf2_compat": "true"},
+ )
+diff --git a/src/google/protobuf/BUILD.bazel b/src/google/protobuf/BUILD.bazel
+--- a/src/google/protobuf/BUILD.bazel
++++ b/src/google/protobuf/BUILD.bazel
+@@ -376,2 +376,6 @@
+     ],
++    defines = select({
++        "//build_defs:zig_elf2_compat": ["PROTOBUF_DISABLE_WEAK_DEFAULTS"],
++        "//conditions:default": [],
++    }),
+     strip_include_prefix = "/src",
+diff --git a/src/google/protobuf/port_def.inc b/src/google/protobuf/port_def.inc
+--- a/src/google/protobuf/port_def.inc
++++ b/src/google/protobuf/port_def.inc
+@@ -605,3 +605,3 @@
+     !defined(_MSC_VER) && !defined(_WIN32) && !defined(__wasm__) &&   \
+-    !defined(__EMSCRIPTEN__)
++    !defined(__EMSCRIPTEN__) && !defined(PROTOBUF_DISABLE_WEAK_DEFAULTS)
+ #define PROTOBUF_DESCRIPTOR_WEAK_MESSAGES_ALLOWED
+diff --git a/upb/mini_table/BUILD b/upb/mini_table/BUILD
+--- a/upb/mini_table/BUILD
++++ b/upb/mini_table/BUILD
+@@ -38,2 +38,6 @@
+     copts = UPB_DEFAULT_COPTS,
++    defines = select({
++        "//build_defs:zig_elf2_compat": ["UPB_DISABLE_LINKED_EXTENSIONS"],
++        "//conditions:default": [],
++    }),
+     visibility = ["//visibility:public"],
+diff --git a/upb/mini_table/extension_registry.c b/upb/mini_table/extension_registry.c
+--- a/upb/mini_table/extension_registry.c
++++ b/upb/mini_table/extension_registry.c
+@@ -92,3 +92,3 @@
+-#ifdef UPB_LINKARR_DECLARE
+-
++#if defined(UPB_LINKARR_DECLARE) && !defined(UPB_DISABLE_LINKED_EXTENSIONS)
++
+ UPB_LINKARR_DECLARE(upb_AllExts, const upb_MiniTableExtension);
+diff --git a/upb/mini_table/extension_registry.h b/upb/mini_table/extension_registry.h
+--- a/upb/mini_table/extension_registry.h
++++ b/upb/mini_table/extension_registry.h
+@@ -82,3 +82,3 @@
+-#ifdef UPB_LINKARR_DECLARE
+-
++#if defined(UPB_LINKARR_DECLARE) && !defined(UPB_DISABLE_LINKED_EXTENSIONS)
++
+ // Adds all extensions linked into the binary into the registry.  The set of

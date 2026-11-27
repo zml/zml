@@ -113,7 +113,9 @@ common:zig_direct --@rules_zig//zig/settings:use_cc_common_link=false
 common:zig_direct --@rules_zig//zig/settings:incremental=true
 common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-llvm
 common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-lld
-common:zig_direct --@rules_zig//zig/settings:zigopt=-fno-new-linker
+common:zig_direct --@rules_zig//zig/settings:zigopt=-fnew-linker
+common:zig_direct --define=zig_elf2_compat=true
+common:zig_direct --//bazel:zig_direct=true
 build:zig_direct --strategy=ZigIncrementalCompile=worker
 build:zig_direct --worker_max_instances=ZigIncrementalCompile=1
 

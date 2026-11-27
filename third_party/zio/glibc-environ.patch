@@ -1,0 +1,22 @@
+diff --git a/src/io.zig b/src/io.zig
+--- a/src/io.zig
++++ b/src/io.zig
+@@ -52,4 +52,5 @@
+ const MemoryPool = @import("utils/memory_pool.zig").MemoryPool;
+ const zio_options = @import("options.zig").options;
+-
++const zio_build_options = @import("zio_build_options");
++
+ /// Must match `net.Stream.max_iovecs_len` in std.Io. Used as the cap on
+@@ -1953,3 +1954,10 @@
+     if (builtin.link_libc) {
+-        const slice = std.mem.sliceTo(std.c.environ, null);
++        const workaround = @hasDecl(zio_build_options, "zig_direct") and zio_build_options.zig_direct;
++        const environ = if (workaround and builtin.os.tag == .linux and builtin.abi == .gnu) env: {
++            // ELF2 can create an uninitialized copy relocation for environ with debug info.
++            const address = std.c.dlsym(null, "__environ") orelse unreachable;
++            const storage: *const @TypeOf(std.c.environ) = @ptrCast(@alignCast(address));
++            break :env storage.*;
++        } else std.c.environ;
++        const slice = std.mem.sliceTo(environ, null);
+         return .{ .block = .{ .slice = @ptrCast(slice) } };
