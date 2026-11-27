@@ -9,6 +9,7 @@ cc_library(
         "-Wl,-framework,IOKit",
         "-lIOReport",
     ],
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:macos"],
 )
 
@@ -20,6 +21,7 @@ zig_library(
     ],
     import_name = "zml-smi/platforms/metal",
     main = "Metal.zig",
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:macos"],
     visibility = ["//bin/zml-smi:__subpackages__"],
     deps = [
