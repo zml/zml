@@ -47,10 +47,19 @@ pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16, f
         self.processes.append(state.gpa, row) catch break;
     }
 
-    // Sort by dev_mem descending
+    // Sort by GPU memory, GPU utilization, host memory descending, then PID ascending.
     std.sort.insertion(ProcessInfo, self.processes.items, {}, struct {
         fn cmp(_: void, a: ProcessInfo, b: ProcessInfo) bool {
-            return (a.dev_mem_kib orelse 0) > (b.dev_mem_kib orelse 0);
+            const a_mem = a.dev_mem_kib orelse 0;
+            const b_mem = b.dev_mem_kib orelse 0;
+            if (a_mem != b_mem) return a_mem > b_mem;
+
+            const a_util = a.dev_util_percent orelse 0;
+            const b_util = b.dev_util_percent orelse 0;
+            if (a_util != b_util) return a_util > b_util;
+
+            if (a.rss_kib != b.rss_kib) return a.rss_kib > b.rss_kib;
+            return a.pid < b.pid;
         }
     }.cmp);
 

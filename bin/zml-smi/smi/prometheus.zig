@@ -71,6 +71,20 @@ const furiosa: Metrics(smi.Sample.Furiosa) = .{
     .throttle_reasons = .{ .name = "zml_furiosa_throttle_reasons", .help = "Furiosa active throttle reasons as a bitmask" },
 };
 
+const metal: Metrics(smi.Sample.Metal) = .{
+    .util_percent = .{ .name = "zml_metal_utilization_percent", .help = "Metal GPU utilization percentage" },
+    .mem_used_bytes = .{ .name = "zml_metal_memory_used_bytes", .help = "Metal GPU memory used in bytes" },
+    .mem_total_bytes = .{ .name = "zml_metal_memory_total_bytes", .help = "Metal GPU memory total in bytes" },
+    .power_mw = .{ .name = "zml_metal_power_watts", .help = "Metal GPU power draw in watts", .decimals = 3 },
+    .temperature = .{ .name = "zml_metal_temperature_celsius", .help = "Metal GPU temperature in celsius" },
+    .fan_speed_percent = .{ .name = "zml_metal_fan_speed_percent", .help = "Metal fan speed percentage" },
+    .clock_graphics_mhz = .{ .name = "zml_metal_clock_graphics_mhz", .help = "Metal GPU clock frequency in MHz" },
+    .clock_graphics_max_mhz = null,
+    .ane_power_mw = .{ .name = "zml_metal_ane_power_watts", .help = "Apple Neural Engine power draw in watts", .decimals = 3 },
+    .cpu_power_mw = .{ .name = "zml_metal_cpu_power_watts", .help = "Metal CPU power draw in watts", .decimals = 3 },
+    .system_power_mw = .{ .name = "zml_metal_system_power_watts", .help = "Metal system power draw in watts", .decimals = 3 },
+};
+
 const host: Metrics(smi.HostData) = .{
     .hostname = null,
     .kernel = null,
@@ -84,7 +98,7 @@ const host: Metrics(smi.HostData) = .{
     .uptime_seconds = .{ .name = "zml_host_uptime_seconds", .help = "System uptime in seconds" },
 };
 
-const groups = .{ smi.Sample.Gpu, smi.Sample.Neuron, smi.Sample.Tpu, smi.Sample.Furiosa };
+const groups = .{ smi.Sample.Gpu, smi.Sample.Neuron, smi.Sample.Tpu, smi.Sample.Furiosa, smi.Sample.Metal };
 
 fn metricsOf(comptime T: type) Metrics(T) {
     return switch (T) {
@@ -92,6 +106,7 @@ fn metricsOf(comptime T: type) Metrics(T) {
         smi.Sample.Neuron => neuron,
         smi.Sample.Tpu => tpu,
         smi.Sample.Furiosa => furiosa,
+        smi.Sample.Metal => metal,
         else => @compileError("no metrics for " ++ @typeName(T)),
     };
 }

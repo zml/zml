@@ -83,6 +83,15 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
             .mem_total = chip.mem_total_bytes,
             .suffix = try gpuSuffix(ctx.arena, .{ .temperature = chip.temperature, .power_mw = chip.power_mw, .power_limit_mw = chip.power_limit_mw }),
         },
+        .metal => |gpu| .{
+            .label = "GPU",
+            .util_label = "GPU",
+            .util_percent = gpu.util_percent,
+            .mem_used = gpu.mem_used_bytes,
+            .mem_total = gpu.mem_total_bytes,
+            // An Apple GPU idles below a watt.
+            .suffix = try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C | {d}.{d} W", .{ gpu.temperature orelse 0, (gpu.power_mw orelse 0) / 1000, (gpu.power_mw orelse 0) % 1000 / 100 }),
+        },
     };
     const util_percent: u8 = @intCast(@min(usage.util_percent orelse 0, 100));
     const mem_used = usage.mem_used orelse 0;

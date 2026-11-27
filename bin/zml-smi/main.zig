@@ -47,7 +47,12 @@ const CliArgs = struct {
 };
 
 const platforms = switch (builtin.os.tag) {
-    .macos => .{},
+    .macos => switch (builtin.cpu.arch) {
+        .aarch64 => .{
+            @import("zml-smi/platforms/metal"),
+        },
+        else => .{},
+    },
     .linux => switch (builtin.cpu.arch) {
         .x86_64 => .{
             @import("zml-smi/platforms/nvml"),
