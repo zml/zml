@@ -1286,6 +1286,7 @@ pub const PhysicalMesh = struct {
     /// Builds a two-tier mesh for multi-process CUDA and ROCm jobs: a `.network` axis
     /// over processes, each holding a `.link` axis over its local devices.
     /// Every process must own the same number of devices.
+    /// `devices` must have unique ids and be sorted by id, as `Platform.init` provides.
     pub fn distributedGpu(
         allocator: std.mem.Allocator,
         target: Target,
@@ -1296,28 +1297,8 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => {},
             else => return error.UnsupportedPlatform,
         }
-        if (process_count == 0 or process_count > devices.len or devices.len > Platform.MAX_NUM_DEVICES) {
-            return error.InvalidDeviceTopology;
-        }
 
-        const sorted = try allocator.dupe(ProcessDevice, devices);
-        defer allocator.free(sorted);
-        const Sort = struct {
-            fn lessThan(_: void, lhs: ProcessDevice, rhs: ProcessDevice) bool {
-                if (lhs.process_index != rhs.process_index) return lhs.process_index < rhs.process_index;
-                return lhs.id < rhs.id;
-            }
-        };
-        std.mem.sort(ProcessDevice, sorted, {}, Sort.lessThan);
-
-        if (@mod(sorted.len, process_count) != 0) return error.InvalidDeviceTopology;
-        const devices_per_process = sorted.len / process_count;
-        for (sorted, 0..) |device, index| {
-            if (device.process_index != index / devices_per_process) return error.InvalidDeviceTopology;
-            for (sorted[0..index]) |previous| {
-                if (previous.id == device.id) return error.InvalidDeviceTopology;
-            }
-        }
+        if (process_count == 0 or devices.len % process_count != 0) return error.InvalidDeviceTopology;
 
         const hosts = try allocator.alloc(PhysicalNode, process_count);
         var hosts_built: usize = 0;
@@ -1325,11 +1306,22 @@ pub const PhysicalMesh = struct {
             for (hosts[0..hosts_built]) |host| freeNode(allocator, host);
             allocator.free(hosts);
         }
+
+        const devices_per_process = devices.len / process_count;
         for (hosts, 0..) |*host, process_index| {
             const local_devices = try allocator.alloc(PhysicalNode, devices_per_process);
-            for (local_devices, sorted[process_index * devices_per_process ..][0..devices_per_process]) |*node, device| {
-                node.* = .deviceId(device.id);
+            errdefer allocator.free(local_devices);
+
+            // Also rejects uneven splits and out-of-range process indices: some process comes up short.
+            var count: usize = 0;
+            for (devices) |device| {
+                if (device.process_index != process_index) continue;
+                if (count == devices_per_process) return error.InvalidDeviceTopology;
+                local_devices[count] = .deviceId(device.id);
+                count += 1;
             }
+
+            if (count != devices_per_process) return error.InvalidDeviceTopology;
             host.* = .axis(.link, .point_to_point, local_devices);
             hosts_built += 1;
         }
