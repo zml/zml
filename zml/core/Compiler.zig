@@ -967,7 +967,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 // before each one captured in a CUDA graph (hostStreamPlanCallback in NCCL's
                 // enqueue.cc). Each costs ~0.4 ms on GB10, more than the collective itself.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", if (platform.isDistributed())
-                    "CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION"
+                    "COLLECTIVES_KERNEL,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION"
                 else
                     "COLLECTIVES_KERNEL,COLLECTIVES,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
                 // With SKIP_TEMP, captured NCCL collectives can retain stale physical mappings
