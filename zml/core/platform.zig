@@ -398,7 +398,7 @@ pub const Platform = struct {
         }
 
         var runtime: ?distributed.Runtime = if (options.distributed) |config|
-            try distributed.Runtime.init(allocator, io, config)
+            try distributed.Runtime.init(allocator, config)
         else
             null;
         errdefer if (runtime) |*r| r.deinit();
