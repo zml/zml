@@ -10,6 +10,20 @@ pub const loader_opts: zml.io.Loader.Opts = .{
     .parallelism = 8,
 };
 
+/// Pi-H3 requires native non-causal attention in both DiT and DWD.
+/// Keep unsupported backends explicit instead of selecting ordinary SDPA.
+pub fn piAttentionBackend(platform: *const zml.Platform) error{PiRequiresNativeAttention}!zml.attention.Backend {
+    const backend: zml.attention.Backend = .auto(platform);
+    switch (backend) {
+        .flash_attention => |native| switch (native) {
+            .cute, .metal => return backend,
+            else => {},
+        },
+        .stablehlo => {},
+    }
+    return error.PiRequiresNativeAttention;
+}
+
 /// Allocator, IO, platform, mesh, and progress for one generation.
 pub const Run = struct {
     allocator: std.mem.Allocator,

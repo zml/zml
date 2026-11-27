@@ -96,8 +96,6 @@ fn rotateVideo(x: Tensor, pe: Rotary) Tensor {
     return Tensor.concatenate(&.{ v, x.slice(.s, .{ .start = n }) }, .s);
 }
 
-const cute: zml.attention.Backend = .{ .flash_attention = .cute };
-
 fn scatterAttention(out_: Tensor, qkv: Qkv, buckets: []const dwd_plan.Bucket, backend: zml.attention.Backend) Tensor {
     var out = out_;
     const replicated: zml.attention.Partitioning = .{
@@ -286,8 +284,7 @@ pub const Dwd = struct {
     }
 
     pub fn compile(self: *Dwd, run: *const ops.Run, geo: config.Geometry) !void {
-        if (!cute.isAvailable(run.platform)) return error.DwdRequiresCudaCute;
-        return self.compileBackend(run, geo, cute);
+        return self.compileBackend(run, geo, try ops.piAttentionBackend(run.platform));
     }
 
     fn compileBackend(self: *Dwd, run: *const ops.Run, geo: config.Geometry, backend: zml.attention.Backend) !void {

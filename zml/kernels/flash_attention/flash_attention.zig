@@ -132,8 +132,8 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
     zml.stdx.debug.assert(zml.Compiler.current().manual_computation_depth > 0, "Attention kernels require an explicit manualComputation boundary", .{});
     return switch (parameters) {
         .cute => cute.attention(q, k, v, token_index, opts.causal),
-        // The NKI and Metal kernels are causal only.
+        // The NKI kernel is causal only.
         .nki => if (opts.causal) nki.attention(q, k, v, token_index, parameters.nki) else zml.nn.sdpa(q, k, v, .{}),
-        .metal => if (opts.causal) metal.attention(q, k, v, token_index, metadata.metal) else zml.nn.sdpa(q, k, v, .{}),
+        .metal => metal.attention(q, k, v, token_index, metadata.metal, opts.causal),
     };
 }

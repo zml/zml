@@ -216,6 +216,7 @@ pub fn main(init: std.process.Init) !void {
         .physical_mesh = .{ .custom = config.Shardings.physicalMesh },
         .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = false } } },
         .rocm = .{ .allocator = .{ .bfc = .{ .preallocate = false } } },
+        .metal = .{ .allocator = .{ .bfc = .{ .preallocate = false } } },
     });
     defer platform.deinit(allocator, io);
     defer logPeakMemory(platform);

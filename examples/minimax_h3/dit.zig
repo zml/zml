@@ -562,9 +562,7 @@ pub const Dit = struct {
     /// carry LoRA tensors and FP32 folded biases; late blocks [46, 49] take FP16
     /// replacement linears and biases. Never bind one to the other's runner.
     pub fn compile(self: *Dit, run: *const Run, geo: config.Geometry, text_len: u32, packed_run: Packed, text_dt: zml.DataType) !void {
-        const attn: zml.attention.Backend = .auto(run.platform);
-        if (self.pi_h3 and (run.platform.target != .cuda or attn != .flash_attention))
-            return error.PiRequiresFusedCudaAttention;
+        const attn: zml.attention.Backend = if (self.pi_h3) try ops.piAttentionBackend(run.platform) else .auto(run.platform);
         const attnName: []const u8 = switch (attn) {
             .stablehlo => "stablehlo",
             .flash_attention => |backend| @tagName(backend),
@@ -852,7 +850,11 @@ pub const Dit = struct {
             for (tables[0..tables_filled]) |*tb| tb.deinit();
             allocator.free(tables);
         }
-        var cores = try allocator.alloc(zml.Bufferized(Block), n_blocks);
+        // Metal shares system memory: keep only the executing block's weights
+        // resident. Other platforms retain their existing load-once strategy.
+        const stream_blocks = run.platform.target == .metal;
+        const resident_blocks = if (stream_blocks) 0 else n_blocks;
+        var cores = try allocator.alloc(zml.Bufferized(Block), resident_blocks);
         var cores_filled: usize = 0;
         defer {
             for (cores[0..cores_filled]) |*core| zml.Buffer.deinitAll(Block, core);
@@ -861,7 +863,7 @@ pub const Dit = struct {
         var loader: zml.io.Loader = try .init(allocator, run.platform, ops.loader_opts);
         defer loader.deinit();
         const AdaLnRunner = zml.FnExe(BlockAdaLn.prepare).Runner(.{.adaln});
-        for (self.adalns, self.blocks, tables, cores, 0..) |adaln, block, *table, *core, i| {
+        for (self.adalns, self.blocks, tables, 0..) |adaln, block, *table, i| {
             var adaln_bufs = try load(run, store, BlockAdaLn, &adaln, &loader);
             defer zml.Buffer.deinitAll(BlockAdaLn, &adaln_bufs);
             const late = self.pi_h3 and i >= pi.first_replacement_block;
@@ -873,8 +875,10 @@ pub const Dit = struct {
                 .outputs = .{ .table = table },
             }, .{ .wait = true });
             tables_filled += 1;
-            core.* = try load(run, store, Block, &block, &loader);
-            cores_filled += 1;
+            if (!stream_blocks) {
+                cores[i] = try load(run, store, Block, &block, &loader);
+                cores_filled += 1;
+            }
         }
 
         var final_table: zml.Buffer = undefined;
@@ -913,7 +917,7 @@ pub const Dit = struct {
         defer finish_runner.deinit(allocator);
 
         const BlockRunner = zml.FnExe(Block.forward).Runner(.{.layer});
-        const block_runners = try allocator.alloc(BlockRunner, n_blocks);
+        const block_runners = try allocator.alloc(BlockRunner, resident_blocks);
         var runners_ready: usize = 0;
         defer {
             for (block_runners[0..runners_ready]) |*r| r.deinit(allocator);
@@ -936,11 +940,12 @@ pub const Dit = struct {
         var final_features: ?zml.Buffer = null;
         errdefer if (final_features) |*features| features.deinit();
 
-        log.info("denoise: blocks={d} seq={d} audio_tokens={d} devices={d}", .{
+        log.info("denoise: blocks={d} seq={d} audio_tokens={d} devices={d} weights={s}", .{
             n_blocks,
             seq_len,
             geo.audio_tokens,
             run.platform.devices.len,
+            if (stream_blocks) "streamed" else "resident",
         });
         const denoise_start: std.Io.Timestamp = .now(io, .awake);
         for (0..steps) |step_i| {
@@ -976,8 +981,17 @@ pub const Dit = struct {
             }, .{ .wait = true });
             defer hidden.deinit();
 
-            // Host sync per block.
-            for (block_runners, tables) |*block_runner, table| {
+            // Wait before releasing streamed weights or replacing hidden.
+            var block_progress = run.progress.start("DiT blocks", n_blocks);
+            defer block_progress.end();
+            for (self.blocks, tables, 0..) |block, table, i| {
+                var streamed_core = if (stream_blocks) try load(run, store, Block, &block, &loader) else null;
+                defer if (streamed_core) |*core| zml.Buffer.deinitAll(Block, core);
+                const late = self.pi_h3 and i >= pi.first_replacement_block;
+                const exe = if (late) &compiled.late_block.? else &compiled.block;
+                var streamed_runner = if (streamed_core) |core| try BlockRunner.init(exe, allocator, .{ .layer = core }) else null;
+                defer if (streamed_runner) |*runner| runner.deinit(allocator);
+                const block_runner = if (streamed_runner) |*runner| runner else &block_runners[i];
                 block_runner.run(io, .{
                     .inputs = .{
                         .hidden = hidden,
@@ -989,6 +1003,7 @@ pub const Dit = struct {
                     },
                     .outputs = .{ .hidden = &hidden },
                 }, .{ .wait = true });
+                block_progress.completeOne();
             }
 
             // Pi-H3 decodes video (and only video, not audio) from the final-step DiT features instead of the video latents. This block computes the DWD decoder input out of the final DiT hidden states.

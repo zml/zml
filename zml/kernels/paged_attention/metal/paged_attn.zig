@@ -664,7 +664,9 @@ pub const PagedAttentionTiled = struct {
         const TD = @divExact(HEAD_SIZE, 8);
         const TK = @divExact(TILE_KV, 8);
         if (@divExact(BQ, NUM_SG) != 8) @panic("paged_attention_tiled: ROWS_PER_SG must be 8");
-        const unroll: metal.LoopOpts = .{ .unroll = .enable };
+        // Fully unroll the BF16/128 fragment loops: this improves M4 Max
+        // throughput without changing the tile layout or accumulation order.
+        const unroll: metal.LoopOpts = .{ .unroll = if (!cfg.causal and cfg.dtype.eql(.bfloat) and cfg.head_size == 128) .full else .enable };
 
         const thread_idx = a.tpt.x().to(.int);
         const head_idx = a.tgp.x().to(.int);

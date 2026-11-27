@@ -134,7 +134,13 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
 
 /// `attention`, causal or not depending on `opts`.
 pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: Options, mesh: *const zml.Mesh, partitioning: Partitioning) zml.Tensor {
-    const args: Attention = .{ .q = q, .k = k, .v = v, .token_index = token_index, .metadata = metadata, .parameters = parameters, .opts = opts };
+    var call_metadata = metadata;
+    if (!opts.causal and parameters == .flash_attention and parameters.flash_attention == .metal) {
+        // Decoder metadata may be an unbound placeholder in full-sequence calls.
+        // Replace it before manualComputation collects the input tensors.
+        call_metadata.flash_attention.metal.num_tokens = zml.Tensor.scalar(0, .u32);
+    }
+    const args: Attention = .{ .q = q, .k = k, .v = v, .token_index = token_index, .metadata = call_metadata, .parameters = parameters, .opts = opts };
     return zml.ops.manualComputation2(Attention.forward, args, q.shape(), mesh, .{
         .in_specs = .{
             .q = partitioning.in_specs.q,
