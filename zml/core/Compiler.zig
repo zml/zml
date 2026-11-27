@@ -999,6 +999,9 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLASLT,CUSTOM_CALL,FUSION", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
+                // FIXME: Probably a problem in the Intel plugin.
+                // Small SYCL graphs consume device memory outside the XLA buffer pool.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_graph_min_graph_size", 16, upb_arena);
 
                 // Grouped GEMM still needs a oneDNN lowering.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_ragged_dot_grouped_gemm", false, upb_arena);
