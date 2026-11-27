@@ -74,6 +74,15 @@ bazel_dep(name = "llvm", version = "0.8.27")
 bazel_dep(name = "libxml2", version = "2.15.3")
 bazel_dep(name = "xz", version = "5.4.5.bcr.9", repo_name = "llvm_xz")
 bazel_dep(name = "zlib-ng", version = "2.3.3", repo_name = "llvm_zlib")
+
+# The zlib-compatible API installs zconf.h as a public header.
+single_version_override(
+    module_name = "zlib-ng",
+    patch_strip = 1,
+    patches = ["//:third_party/zlib-ng/public-zconf-header.patch"],
+    version = "2.3.3.bcr.2",
+)
+
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1", repo_name = "llvm_zstd")
 
 # Keep one zlib-compatible implementation in links that also use LLVM.
