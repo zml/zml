@@ -38,3 +38,24 @@ ffmpeg -y -f rawvideo -pix_fmt rgb24 -s 1344x768 -r 24 -i out/video.rgb \
 - `--width=<pixels>`: Optional. Canvas width, multiple of 32. Defaults to `1344`.
 - `--height=<pixels>`: Optional. Canvas height, multiple of 32. Defaults to `768`. Area must be at most `768×1344`.
 - `--duration=<seconds>`: Optional. Clip length 5–15. Defaults to `5`. Frame count is snapped to a VAE-legal `17n+5`.
+
+## Run Pi-H3
+
+Pi-H3 requires CUDA, a pruned MiniMax-H3 transformer, and a matching DWD adapter.
+For 4-step generation:
+
+```bash
+bazel run //examples/minimax_h3 --@zml//platforms:cuda=true -- \
+  --model=/var/models/MiniMax-H3 \
+  --variant=pi4 \
+  --transformer=/var/models/MiniMax-H3-Pruned/transformer \
+  --adapter=/var/models/pi-H3/pi_h3_4step_dwd_adapter \
+  --prompt="A cinematic wide shot of waves at dusk."
+```
+
+For 2-step generation, use `--variant=pi2` and
+`--adapter=/var/models/pi-H3/pi_h3_2step_dwd_adapter`.
+
+The variant fixes the step count; `--steps` is H3-only. Other options, output
+files, and the ffmpeg command above are unchanged. Pi-H3 reuses the base model
+components, including `vae/config.json`, but does not need video VAE weights.

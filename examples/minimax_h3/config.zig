@@ -62,6 +62,8 @@ pub const DitConfig = struct {
     norm_eps: f32,
     qk_norm_eps: f32,
     final_norm_eps: f32,
+    adaln_rank: ?i64 = null,
+    time_table_size: ?i64 = null,
 
     /// MM-RoPE width: 3 axes × `rope_freq_dim`, then duplicated (`ops.ropeCat3`).
     pub fn rotaryDim(self: DitConfig) i64 {
@@ -138,7 +140,7 @@ pub const Configs = struct {
     audio_shift: f32,
 };
 
-/// `CreatePhysicalMeshFn` has no extra args. `load` writes head counts here before `Platform.auto`.
+/// `CreatePhysicalMeshFn` has no extra args. `loadSelected` writes head counts here before `Platform.auto`.
 var mesh_heads: struct {
     dit: i64 = 1,
     encoder: i64 = 1,
@@ -165,9 +167,24 @@ fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: 
     return parsed.value;
 }
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !Configs {
+// We only support https://huggingface.co/Lakonik/pi-H3 with  https://huggingface.co/multimodalart/MiniMax-H3-Pruned
+// They are written with specific assumptions: 50 layers, hidden size 5376, rotary dim 96,
+// f32 {1025, 8} timestep table. Indeed, the Pi-H3 adapters are trained on top of
+// it. Those checks validate the base config assumptions hold. They fail early if the config
+// or checkpoint is not the one it assumes.
+pub fn loadPrunedDitConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !DitConfig {
+    const dit = try parseConfig(DitConfig, allocator, io, dir, "config.json");
+    if (dit.adaln_rank != 8 or
+        dit.time_table_size != 1025 or
+        dit.num_layers != 50 or
+        dit.hidden_size != 5376 or
+        dit.rotaryDim() != 96) return error.IncompatiblePrunedTransformer;
+    return dit;
+}
+
+pub fn loadSelected(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, pruned: ?std.Io.Dir) !Configs {
     const encoder_file = try parseConfig(TextEncoderFile, allocator, io, repo, "text_encoder/config.json");
-    const dit = try parseConfig(DitConfig, allocator, io, repo, "transformer/config.json");
+    const dit = if (pruned) |p| try loadPrunedDitConfig(allocator, io, p) else try parseConfig(DitConfig, allocator, io, repo, "transformer/config.json");
     const vae = try parseConfig(VisualConfig, allocator, io, repo, "vae/config.json");
     const audio = try parseConfig(AudioConfig, allocator, io, repo, "audio_vae/config.json");
     const video_sched = try parseConfig(SchedulerFile, allocator, io, repo, "scheduler/scheduler_config.json");

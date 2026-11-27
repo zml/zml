@@ -55,13 +55,25 @@ fn spatialAxis(dim: u32, sqrt_area: f64, out: []f32) []f32 {
 pub const Schedule = struct {
     sigmas: []f32,
 
-    pub fn init(allocator: std.mem.Allocator, shift: f32, n: u32) error{ OutOfMemory, TooFewSteps }!Schedule {
-        if (n < 2) return error.TooFewSteps;
-        const sigmas = try allocator.alloc(f32, n);
-        for (sigmas, 0..) |*sigma, i| {
-            const t_lin = 1.0 - @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n - 1));
-            sigma.* = shift * t_lin / (1.0 + (shift - 1.0) * t_lin);
+    fn init(allocator: std.mem.Allocator, spec: ScheduleSpec, shift: f32) error{ OutOfMemory, TooFewSteps }!Schedule {
+        if (spec == .h3 and spec.h3.steps < 2) return error.TooFewSteps;
+        const evaluations = spec.evaluations();
+        const sigmas = try allocator.alloc(f32, evaluations + 1);
+        for (sigmas[0..evaluations], 0..) |*sigma, i| {
+            const raw_t: f32 = switch (spec) {
+                .h3 => 1.0 - @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(evaluations)),
+                .pi2, .pi4 => blk: {
+                    // The reference uses numpy.linspace(dtype=float32): compute raw
+                    // positions in double, then apply the shift in float32.
+                    const start = spec.maxRawTime();
+                    const intervals: f64 = @floatFromInt(evaluations - 1);
+                    const end = start * 0.6 / (intervals + 0.6);
+                    break :blk @floatCast(if (i == evaluations - 1) end else start + @as(f64, @floatFromInt(i)) * ((end - start) / intervals));
+                },
+            };
+            sigma.* = shift * raw_t / (1.0 + (shift - 1.0) * raw_t);
         }
+        sigmas[evaluations] = 0;
         return .{ .sigmas = sigmas };
     }
 
@@ -75,10 +87,60 @@ pub const Schedule = struct {
     }
 };
 
+pub const ScheduleSpec = union(enum) {
+    h3: struct { steps: u32, video_shift: f32, audio_shift: f32 },
+    pi2,
+    pi4,
+
+    pub fn evaluations(self: ScheduleSpec) u32 {
+        return switch (self) {
+            .h3 => |h3| h3.steps - 1,
+            .pi2 => 2,
+            .pi4 => 4,
+        };
+    }
+
+    /// Starting raw timestep, before applying the sigma shift.
+    /// Source: LakonLab https://github.com/Lakonik/LakonLab/blob/2ee2b334374ec91b7cee371a85a524bf4ba644d3/demo/example_pih3_pipeline.py#L14
+    /// Those values are the Pi-H3 inference recipe’s fixed MAX_RAW_T choices
+    fn maxRawTime(self: ScheduleSpec) f64 {
+        return switch (self) {
+            .h3 => 1.0,
+            .pi2 => 0.93,
+            .pi4 => 0.96,
+        };
+    }
+};
+
+pub const Variant = std.meta.Tag(ScheduleSpec);
+
 pub const Packed = struct {
     layout: Layout,
     video: Schedule,
     audio: Schedule,
+
+    pub fn init(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, spec: ScheduleSpec) !Packed {
+        const shifts: struct { video: f32, audio: f32 } = switch (spec) {
+            .h3 => |h3| .{
+                .video = h3.video_shift,
+                .audio = h3.audio_shift,
+            },
+            .pi2, .pi4 => .{
+                .video = 12,
+                .audio = 3,
+            },
+        };
+        const video = try Schedule.init(allocator, spec, shifts.video);
+        errdefer video.deinit(allocator);
+        const audio = try Schedule.init(allocator, spec, shifts.audio);
+        errdefer audio.deinit(allocator);
+
+        return .{
+            .video = video,
+            .audio = audio,
+            .layout = try makeLayout(allocator, geo, text_len),
+        };
+    }
 
     pub fn deinit(self: *Packed, allocator: std.mem.Allocator) void {
         self.layout.deinit(allocator);
@@ -87,13 +149,7 @@ pub const Packed = struct {
     }
 };
 
-/// Build the packed sequence and video/audio σ schedules for this prompt length.
-pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, steps: u32, video_shift: f32, audio_shift: f32) !Packed {
-    const video = try Schedule.init(allocator, video_shift, steps);
-    errdefer video.deinit(allocator);
-    const audio = try Schedule.init(allocator, audio_shift, steps);
-    errdefer audio.deinit(allocator);
-
+fn makeLayout(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32) !Layout {
     const n = text_len + geo.audio_tokens + geo.video_tokens;
     const positions = try allocator.alloc([3]f32, n);
     errdefer allocator.free(positions);
@@ -136,14 +192,10 @@ pub fn pack(allocator: std.mem.Allocator, geo: config.Geometry, text_len: u32, s
     }
 
     return .{
-        .layout = .{
-            .positions = positions,
-            .text_len = text_len,
-            .audio_len = geo.audio_tokens,
-            .video_len = geo.video_tokens,
-        },
-        .video = video,
-        .audio = audio,
+        .positions = positions,
+        .text_len = text_len,
+        .audio_len = geo.audio_tokens,
+        .video_len = geo.video_tokens,
     };
 }
 
@@ -211,7 +263,7 @@ pub fn writeRowPlan(
     @memset(timestep_indices[text_end..audio_end], slots.audio);
     @memset(timestep_indices[audio_end..seq], slots.video);
 
-    @memset(adaln_indices[0..text_end], slots.video * n_mod + @intFromEnum(Modality.text));
-    @memset(adaln_indices[text_end..audio_end], slots.audio * n_mod + @intFromEnum(Modality.audio));
-    @memset(adaln_indices[audio_end..seq], slots.video * n_mod + @intFromEnum(Modality.video));
+    @memset(adaln_indices[0..text_end], slots.video * n_mod + @backingInt(Modality.text));
+    @memset(adaln_indices[text_end..audio_end], slots.audio * n_mod + @backingInt(Modality.audio));
+    @memset(adaln_indices[audio_end..seq], slots.video * n_mod + @backingInt(Modality.video));
 }

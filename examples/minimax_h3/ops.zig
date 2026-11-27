@@ -82,6 +82,17 @@ pub const RmsNorm = struct {
     }
 };
 
+/// With bias, compute the dot product and add the bias in FP32 so the dot
+/// result is not rounded to BF16 before the addition. Convert to BF16 afterward.
+/// Without bias, use BF16 operands for the dot product.
+pub fn bf16Linear(layer: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
+    if (layer.bias) |b| {
+        const acc = x.convert(.f32).dot(layer.weight.convert(.f32), .d);
+        return acc.add(b.convert(.f32).broad(acc.shape())).convert(.bf16);
+    }
+    return x.convert(.bf16).dot(layer.weight.convert(.bf16), .d);
+}
+
 // Split half prefix RoPE. x has an even width final .hd axis
 // cos and sin have identical shapes and duplicated coeficcient halfs
 pub fn applyRotary(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {

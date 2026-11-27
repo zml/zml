@@ -3,11 +3,14 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 zig_binary(
     name = "minimax_h3",
     srcs = [
+        "adapter.zig",
         "audio.zig",
         "config.zig",
         "dit.zig",
+        "dit_pi.zig",
+        "dwd.zig",
+        "dwd_plan.zig",
         "encoder.zig",
-        "main.zig",
         "ops.zig",
         "pack.zig",
         "vae.zig",
