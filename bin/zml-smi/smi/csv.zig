@@ -2,43 +2,29 @@ const std = @import("std");
 const smi = @import("smi.zig");
 
 pub fn write(writer: *std.Io.Writer, collector: *smi.Collector) !void {
-    inline for (@typeInfo(smi.Target).@"enum".field_names) |name| {
-        try writeTable(writer, collector, @field(smi.Target, name));
+    inline for (comptime std.meta.tags(smi.Target)) |target| {
+        try writeTable(writer, collector, target);
     }
 }
 
 fn writeTable(writer: *std.Io.Writer, collector: *smi.Collector, comptime target: smi.Target) !void {
+    const info_fields = @typeInfo(@FieldType(smi.Device.Info, @tagName(target))).@"struct".field_names;
     const fields = @typeInfo(@FieldType(smi.Sample, @tagName(target))).@"struct".field_names;
 
-    var rows: usize = 0;
-    var names = false;
-    var drivers = false;
-    var key_buffer: [16][]const u8 = undefined;
-    var keys: std.ArrayList([]const u8) = .initBuffer(&key_buffer);
-    for (collector.devices.items) |device| {
-        if (device.target != target) continue;
-        rows += 1;
-        names = names or device.name != null;
-        drivers = drivers or device.driver_version != null;
-        for (device.details) |detail| {
-            if (!contains(keys.items, detail.key)) keys.appendBounded(detail.key) catch {};
-        }
-    }
-    if (rows == 0) return;
-
-    try writer.writeAll("index,type,remote");
-    if (names) try writer.writeAll(",name");
-    if (drivers) try writer.writeAll(",driver_version");
-    for (keys.items) |key| try writeField(writer, key);
-    inline for (fields) |field| try writer.writeAll("," ++ field);
-    try writer.writeAll("\n");
-
+    var header_written = false;
     for (collector.devices.items, 0..) |device, i| {
-        if (device.target != target) continue;
+        if (device.info != target) continue;
+        if (!header_written) {
+            try writer.writeAll("index,type,remote,name");
+            inline for (info_fields) |name| try writer.writeAll("," ++ name);
+            inline for (fields) |field| try writer.writeAll("," ++ field);
+            try writer.writeAll("\n");
+            header_written = true;
+        }
         try writer.print("{d},{t},{any}", .{ i, target, device.remote });
-        if (names) try writeField(writer, device.name orelse "");
-        if (drivers) try writeField(writer, device.driver_version orelse "");
-        for (keys.items) |key| try writeField(writer, detailValue(device, key) orelse "");
+        try writeField(writer, device.name orelse "");
+        const info = @field(device.info, @tagName(target));
+        inline for (info_fields) |name| try writeField(writer, @field(info, name) orelse "");
 
         const sample = @field(collector.sample(@intCast(i)), @tagName(target));
         inline for (fields) |field| {
@@ -50,20 +36,6 @@ fn writeTable(writer: *std.Io.Writer, collector: *smi.Collector, comptime target
         }
         try writer.writeAll("\n");
     }
-}
-
-fn contains(keys: []const []const u8, key: []const u8) bool {
-    for (keys) |other| {
-        if (std.mem.eql(u8, other, key)) return true;
-    }
-    return false;
-}
-
-fn detailValue(device: smi.Device, key: []const u8) ?[]const u8 {
-    for (device.details) |item| {
-        if (std.mem.eql(u8, item.key, key)) return item.value;
-    }
-    return null;
 }
 
 fn writeField(writer: *std.Io.Writer, text: []const u8) !void {

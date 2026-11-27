@@ -131,7 +131,7 @@ pub const Collector = struct {
         };
 
         for (&source.sides.values) |side| {
-            for (side.samples, platform.devices) |*sample_, device| sample_.* = .init(device.target);
+            for (side.samples, platform.devices) |*sample_, device| sample_.* = .init(device.info);
         }
 
         try self.sources.ensureUnusedCapacity(self.arena, 1);
@@ -193,12 +193,12 @@ pub const Collector = struct {
         const scratch = source.scratch.allocator();
         defer _ = source.scratch.reset(.{ .retain_with_limit = scratch_retain_limit });
 
-        for (back.samples, platform.devices) |*sample_, device| sample_.* = .init(device.target);
+        for (back.samples, platform.devices) |*sample_, device| sample_.* = .init(device.info);
         back.processes.clear();
 
         platform.vtable.poll(platform, scratch, back.samples);
         for (back.samples, platform.devices) |*sample_, device| {
-            if (std.meta.activeTag(sample_.*) != device.target) sample_.* = .init(device.target);
+            if (std.meta.activeTag(sample_.*) != std.meta.activeTag(device.info)) sample_.* = .init(device.info);
         }
 
         if (platform.vtable.processes) |processes| {
@@ -264,12 +264,12 @@ test "Collector.add enforces u16 device cap" {
     defer collector.deinit();
 
     const one = try arena.allocator().alloc(smi.Device, 1);
-    one[0] = .{ .target = .cuda };
+    one[0] = .{ .info = .{ .cuda = .{} } };
     var first: smi.Platform = .{ .devices = one, .vtable = &dummy_vtable };
     try collector.add(&first);
 
     const overflow = try arena.allocator().alloc(smi.Device, @as(usize, std.math.maxInt(u16)) + 1);
-    @memset(overflow, .{ .target = .cuda });
+    @memset(overflow, .{ .info = .{ .cuda = .{} } });
     var second: smi.Platform = .{ .devices = overflow, .vtable = &dummy_vtable };
     try std.testing.expectError(error.TooManyDevices, collector.add(&second));
 }

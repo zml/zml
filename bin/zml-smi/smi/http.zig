@@ -88,7 +88,7 @@ pub const Client = struct {
 
         var scratch: std.heap.ArenaAllocator = .init(gpa);
         defer scratch.deinit();
-        const response = try fetch(arena, scratch.allocator(), io, url);
+        const response = try fetch(smi.json.Row, arena, scratch.allocator(), io, url);
 
         const devices = try arena.alloc(smi.Device, response.devices.len);
         for (devices, response.devices) |*device, row| {
@@ -102,13 +102,11 @@ pub const Client = struct {
         const self: *Client = @alignCast(@fieldParentPtr("platform", platform));
 
         self.rows = null;
-        const response = fetch(scratch, scratch, self.io, self.url) catch return;
+        const response = fetch(smi.Sample, scratch, scratch, self.io, self.url) catch return;
 
         // TODO: read the new devices once the collector supports a device list that changes.
         if (response.devices.len != samples.len) std.debug.panic("{s}: the devices changed since zml-smi started. Please restart.", .{self.url});
-        for (samples, response.devices) |*sample, row| {
-            sample.* = row.sample;
-        }
+        @memcpy(samples, response.devices);
 
         self.rows = response.processes;
     }
@@ -127,7 +125,7 @@ pub const Client = struct {
     }
 
     /// The HTTP client lives in `scratch`, the body and the response in `allocator`.
-    fn fetch(allocator: std.mem.Allocator, scratch: std.mem.Allocator, io: std.Io, url: []const u8) !smi.json.Response([]const smi.json.Row) {
+    fn fetch(comptime T: type, allocator: std.mem.Allocator, scratch: std.mem.Allocator, io: std.Io, url: []const u8) !smi.json.Response([]const T) {
         var client: std.http.Client = .{ .allocator = scratch, .io = io };
         defer client.deinit();
 
@@ -135,6 +133,6 @@ pub const Client = struct {
         const result = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &body.writer });
         if (result.status != .ok) return error.HttpError;
 
-        return std.json.parseFromSliceLeaky(smi.json.Response([]const smi.json.Row), allocator, body.written(), .{ .ignore_unknown_fields = true });
+        return std.json.parseFromSliceLeaky(smi.json.Response([]const T), allocator, body.written(), .{ .ignore_unknown_fields = true });
     }
 };

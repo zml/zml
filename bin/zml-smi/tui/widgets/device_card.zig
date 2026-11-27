@@ -98,8 +98,19 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const mem_total = usage.mem_total orelse 0;
     const mem_pct: u8 = utils.percent(usage.mem_used, usage.mem_total);
 
+    const driver: ?[]const u8, const extra: ?[]const u8 = switch (device.info) {
+        .cuda => |info| .{ info.driver_version, if (info.cuda_version) |v| try std.fmt.allocPrint(ctx.arena, "CUDA {s}", .{v}) else null },
+        .tpu => .{ null, null },
+        inline else => |info| .{ info.driver_version, null },
+    };
+    const ver_suffix = if (driver != null and extra != null)
+        try std.fmt.allocPrint(ctx.arena, " ({s}, {s})", .{ driver.?, extra.? })
+    else if (driver orelse extra) |v|
+        try std.fmt.allocPrint(ctx.arena, " ({s})", .{v})
+    else
+        "";
     const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}{s}", .{
-        usage.label, i, device.name orelse "Unknown", try utils.versions(ctx.arena, device, .in_title),
+        usage.label, i, device.name orelse "Unknown", ver_suffix,
     });
 
     const mem_used_mb = utils.bytesToMb(mem_used);
@@ -114,7 +125,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
 
     var card: MetricCard = .{
         .title = card_title,
-        .title_image = image_cache.global.get(device.target),
+        .title_image = image_cache.global.get(device.info),
         .title_right = if (device.remote) "remote" else null,
         .cell_size = ctx.cell_size,
         .highlighted = self.highlighted,

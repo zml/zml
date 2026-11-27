@@ -33,7 +33,7 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Tpu {
     const chip = found orelse return error.TpuUnavailable;
 
     const devices = try arena.alloc(smi.Device, count * chip.devices_per_chip);
-    @memset(devices, .{ .target = .tpu, .name = chip.name });
+    @memset(devices, .{ .name = chip.name, .info = .{ .tpu = .{} } });
 
     return .{
         .platform = .{ .devices = devices, .vtable = &vtable },

@@ -1,3 +1,4 @@
+const std = @import("std");
 const builtin = @import("builtin");
 
 const collector = @import("collector.zig");
@@ -28,17 +29,18 @@ pub const http = @import("http.zig");
 pub const Target = enum { cuda, rocm, oneapi, neuron, tpu, furiosa, metal };
 
 pub const Device = struct {
-    target: Target,
     remote: bool = false,
     name: ?[]const u8 = null,
-    driver_version: ?[]const u8 = null,
-    details: []const Detail = &.{},
+    info: Info,
 
-    pub const Detail = struct {
-        key: []const u8,
-        label: []const u8,
-        value: []const u8,
-        in_title: bool = false,
+    pub const Info = union(Target) {
+        cuda: struct { driver_version: ?[]const u8 = null, cuda_version: ?[]const u8 = null },
+        rocm: struct { driver_version: ?[]const u8 = null },
+        oneapi: struct { driver_version: ?[]const u8 = null },
+        neuron: struct { driver_version: ?[]const u8 = null },
+        tpu: struct {},
+        furiosa: struct { driver_version: ?[]const u8 = null, firmware_version: ?[]const u8 = null },
+        metal: struct { driver_version: ?[]const u8 = null },
     };
 };
 
@@ -168,6 +170,25 @@ pub const Sample = union(Target) {
         clock_graphics_max_mhz: ?u64 = null,
     };
 };
+
+// JSON and CSV flatten `Device`, `Device.Info`, and `Sample` into one namespace per target.
+// so let's make sure no fields are duplicated
+comptime {
+    for (std.meta.tags(Target)) |target| {
+        const Info = @FieldType(Device.Info, @tagName(target));
+        const Metrics = @FieldType(Sample, @tagName(target));
+
+        for (@typeInfo(Device).@"struct".field_names) |f| {
+            if (@hasField(Info, f) or @hasField(Metrics, f))
+                @compileError("duplicate device field: " ++ f);
+        }
+
+        for (@typeInfo(Info).@"struct".field_names) |f| {
+            if (@hasField(Metrics, f))
+                @compileError("duplicate info/sample field: " ++ f);
+        }
+    }
+}
 
 pub const HostData = struct {
     hostname: ?[]const u8 = null,

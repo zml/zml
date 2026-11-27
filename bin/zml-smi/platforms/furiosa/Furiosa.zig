@@ -52,22 +52,16 @@ pub fn init(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io) !Furiosa
     const devices = try arena.alloc(smi.Device, chips.items.len);
     for (devices, chips.items) |*device, chip| {
         var buffer: [128]u8 = undefined;
-        var details: std.ArrayList(smi.Device.Detail) = .empty;
 
         const fw = chip.mgmt.read("fw_version", &buffer) catch "";
-        if (fw.len > 0) try details.append(arena, .{ .key = "firmware_version", .label = "Firmware", .value = try arena.dupe(u8, fw) });
-
-        const sn = chip.mgmt.read("device_sn", &buffer) catch "";
-        if (sn.len > 0) try details.append(arena, .{ .key = "serial", .label = "Serial", .value = try arena.dupe(u8, sn) });
+        const firmware_version = if (fw.len > 0) try arena.dupe(u8, fw) else null;
 
         const version = chip.mgmt.read("version", &buffer) catch "";
         const driver_version = if (version.len > 0) try arena.dupe(u8, version) else null;
 
         device.* = .{
-            .target = .furiosa,
             .name = chip.model.name,
-            .driver_version = driver_version,
-            .details = details.items,
+            .info = .{ .furiosa = .{ .driver_version = driver_version, .firmware_version = firmware_version } },
         };
     }
 
