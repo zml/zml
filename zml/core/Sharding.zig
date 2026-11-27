@@ -1063,9 +1063,8 @@ pub const PhysicalMesh = struct {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => if (self.hasAxis(.network)) &.{ .link, .network } else &.{.link},
-            .oneapi => if (self.hasAxis(.network)) &.{ .link, .network } else &.{ .link, .bus },
-            .metal => if (self.hasAxis(.network)) &.{ .link, .network } else &.{.bus},
-            .cpu, .furiosa => &.{.bus},
+            .cpu, .metal, .furiosa => &.{.bus},
+            .oneapi => &.{ .link, .bus },
         };
     }
 
@@ -1284,7 +1283,7 @@ pub const PhysicalMesh = struct {
         return mesh;
     }
 
-    /// Builds a two-tier mesh for multi-process GPU jobs: a `.network` axis
+    /// Builds a two-tier mesh for multi-process CUDA and ROCm jobs: a `.network` axis
     /// over processes, each holding a `.link` axis over its local devices.
     /// Every process must own the same number of devices.
     pub fn distributedGpu(
@@ -1294,7 +1293,7 @@ pub const PhysicalMesh = struct {
         process_count: usize,
     ) !PhysicalMesh {
         switch (target) {
-            .cuda, .rocm, .oneapi, .metal => {},
+            .cuda, .rocm => {},
             else => return error.UnsupportedPlatform,
         }
         if (process_count == 0 or process_count > devices.len or devices.len > Platform.MAX_NUM_DEVICES) {
@@ -3364,49 +3363,4 @@ test "GSPMD executes a reduction across a folded logical axis" {
     var output = try exe.eval(allocator, io, .{input_buffer});
     defer output.deinit();
     try std.testing.expectEqual(expected, try output.getValue([4]i32, io));
-}
-
-test "distributed GPU mesh puts processes on the network axis" {
-    const allocator = std.testing.allocator;
-    const devices = [_]ProcessDevice{
-        .{ .id = 3, .process_index = 1 },
-        .{ .id = 1, .process_index = 0 },
-        .{ .id = 2, .process_index = 1 },
-        .{ .id = 0, .process_index = 0 },
-    };
-    for ([_]Target{ .cuda, .rocm, .oneapi, .metal }) |target| {
-        var physical = try PhysicalMesh.distributedGpu(allocator, target, &devices, 2);
-        defer physical.deinit(allocator);
-
-        try std.testing.expectEqual(2, physical.axis(.network));
-        try std.testing.expectEqual(2, physical.axis(.link));
-        for (physical.devices_in_canonical_order, 0..) |device, id| {
-            try std.testing.expectEqual(@as(u32, @intCast(id)), device.id);
-        }
-
-        // Low-bandwidth axes go across hosts, high-bandwidth axes within a host.
-        const logical: LogicalMesh = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth });
-        const mesh: Mesh = try .init("distributed", &physical, logical, .suggest(logical, &physical));
-        try std.testing.expectEqualSlices(PhysicalAxisTag, &.{.network}, mesh.binding(0));
-        try std.testing.expectEqualSlices(PhysicalAxisTag, &.{.link}, mesh.binding(1));
-    }
-}
-
-test "distributed GPU mesh rejects invalid topologies" {
-    const allocator = std.testing.allocator;
-    const valid = [_]ProcessDevice{
-        .{ .id = 0, .process_index = 0 },
-        .{ .id = 1, .process_index = 1 },
-    };
-    try std.testing.expectError(error.UnsupportedPlatform, PhysicalMesh.distributedGpu(allocator, .cpu, &valid, 2));
-    const invalid = [_][]const ProcessDevice{
-        &.{},
-        &.{ .{ .id = 0, .process_index = 0 }, .{ .id = 0, .process_index = 1 } },
-        &.{ .{ .id = 0, .process_index = 0 }, .{ .id = 1, .process_index = 0 } },
-        &.{ .{ .id = 0, .process_index = 0 }, .{ .id = 1, .process_index = 1 }, .{ .id = 2, .process_index = 1 } },
-        &.{ .{ .id = 0, .process_index = 0 }, .{ .id = 1, .process_index = 2 } },
-    };
-    for (invalid) |devices| {
-        try std.testing.expectError(error.InvalidDeviceTopology, PhysicalMesh.distributedGpu(allocator, .cuda, devices, 2));
-    }
 }

@@ -391,7 +391,7 @@ pub const Platform = struct {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         if (options.distributed != null) {
             switch (target) {
-                .cuda, .rocm, .oneapi, .metal => {},
+                .cuda, .rocm => {},
                 else => return error.UnsupportedDistributedTarget,
             }
             if (options.physical_mesh != .auto) return error.UnsupportedDistributedPhysicalMesh;
@@ -947,7 +947,9 @@ pub const CreateOptions = struct {
     };
 
     physical_mesh: PhysicalMesh = .auto,
-    /// Joins a multi-process job. GPU targets only, with the automatic physical mesh.
+    /// Joins a multi-process job. CUDA and ROCm only: they share XLA's GPU PJRT
+    /// client, which takes `node_id`, `num_nodes` and `visible_devices` and runs
+    /// collectives across processes through NCCL/RCCL.
     distributed: ?distributed.Config = null,
     cpu: Cpu = .{ .device_count = 4 },
 
@@ -1083,7 +1085,7 @@ pub const CreateOptions = struct {
             },
         }
         if (self.distributed) |config| switch (target) {
-            .cuda, .rocm, .oneapi, .metal => {
+            .cuda, .rocm => {
                 values.appendSliceAssumeCapacity(&.{
                     .init(.int64, "node_id", @intCast(config.process_index)),
                     .init(.int64, "num_nodes", @intCast(config.process_count)),
