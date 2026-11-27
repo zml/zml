@@ -1139,13 +1139,18 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 }
 
 /// NVFP4 uses a BF16 dot on oneAPI, native block-scaled MMA on SM120,
-/// and Triton's decomposition of that MMA on SM10x.
+/// and Triton's decomposition of that MMA on SM10x and ROCm.
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
     if (requiresBf16Dot(platform, .nvfp4)) return true;
-    if (platform.target != .cuda) return false;
-    const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return switch (cc.major) {
-        10, 12 => true,
+    return switch (platform.target) {
+        .rocm => true,
+        .cuda => {
+            const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
+            return switch (cc.major) {
+                10, 12 => true,
+                else => false,
+            };
+        },
         else => false,
     };
 }
