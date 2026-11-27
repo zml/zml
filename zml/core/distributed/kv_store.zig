@@ -134,15 +134,10 @@ pub const Client = struct {
         key: []const u8,
     ) Error!?[]u8 {
         const started = std.Io.Clock.awake.now(self.io);
-        const result = self.requestUntil(
-            .get,
-            key,
-            "",
-            allocator,
-            std.Io.Clock.awake.now(self.io).addDuration(
-                self.options.operation_timeout,
-            ),
-        ) catch |err| {
+        const deadline = std.Io.Clock.awake.now(self.io).addDuration(
+            self.options.operation_timeout,
+        );
+        const result = self.tryGetUntil(allocator, key, deadline) catch |err| {
             self.logOperation(.get, key.len, 0, started, @errorName(err));
             return err;
         };
@@ -154,6 +149,33 @@ pub const Client = struct {
             if (result == null) "not_found" else "ok",
         );
         return result;
+    }
+
+    /// Like `getUntilInner`, retries while the server is unreachable, but
+    /// returns null as soon as the server answers that the key is missing.
+    /// PJRT fails compilation on any error from `TryGet`, and transient
+    /// connection failures happen while many processes poll the store.
+    fn tryGetUntil(
+        self: *const Client,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        deadline: std.Io.Timestamp,
+    ) Error!?[]u8 {
+        while (true) {
+            return self.requestUntil(
+                .get,
+                key,
+                "",
+                allocator,
+                deadline,
+            ) catch |cause| switch (cause) {
+                error.Unavailable => {
+                    try self.waitToRetry(deadline);
+                    continue;
+                },
+                else => return cause,
+            };
+        }
     }
 
     pub fn put(
@@ -859,6 +881,31 @@ test "key-value client retries until the server starts" {
     const value = (try client.tryGet(allocator, "ready")).?;
     defer allocator.free(value);
     try std.testing.expectEqualStrings("yes", value);
+}
+
+test "key-value tryGet retries until the server starts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var reservation = try loopback.listen(io, .{
+        .reuse_address = true,
+    });
+    const address = reservation.socket.address;
+    reservation.deinit(io);
+
+    const client: Client = .init(io, address, test_options);
+    var future = try io.concurrent(Client.tryGet, .{ &client, allocator, "missing" });
+    try io.sleep(.fromMilliseconds(20), .awake);
+
+    var server = try Server.init(
+        allocator,
+        io,
+        address,
+        test_options,
+    );
+    defer server.deinit();
+    try server.start();
+    try std.testing.expect((try future.await(io)) == null);
 }
 
 test "key-value server bounds concurrent handlers" {
