@@ -143,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Load buffers
     var mnist_buffers = blk: {
-        log.info("Transfering weights....", .{});
+        log.info("Transferring weights....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Transferred weights [{f}]", .{
             start.untilNow(io, .awake),

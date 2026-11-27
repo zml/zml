@@ -397,7 +397,7 @@ pub const Location = opaque {
         else if (c.mlirLocationIsAFused(loc_ptr))
             .{ .fused = @ptrCast(location) }
         else
-            // Theoritically the C++ API has "OpaqueLoc" but it's not part of C bindings,
+            // Theoretically the C++ API has "OpaqueLoc" but it's not part of C bindings,
             // I think in this case it's fine to fall back to .unknown
             // https://mlir.llvm.org/docs/Dialects/Builtin/#opaqueloc
             .unknown;

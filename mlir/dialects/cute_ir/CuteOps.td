@@ -546,7 +546,7 @@ def Cute_ComplementOp : Cute_InferredOp<"complement", [Pure]> {
     The complement of a layout L is a layout L* such that (L,L*) achieves greater surjectivity.
     That is, L* maps to elements in the codomain of L that are not in the image of L.
 
-    It's worth to note that (L,L*) isn't alway surjective.
+    It's worth to note that (L,L*) isn't always surjective.
 
     Examples:
     ```
