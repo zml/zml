@@ -28,12 +28,18 @@ pub const Config = struct {
 ///
 /// Process 0 owns the server; every process owns an immutable client. The
 /// allocated state keeps PJRT callback pointers valid even if `Runtime` moves.
+///
+/// The client and the server run on the runtime's own threads, not on the
+/// caller's `Io`: PJRT calls that wait on the store (client creation, compilation,
+/// the first execution's NCCL setup) block their calling thread, and process 0
+/// must keep serving the other processes, and its own PJRT client, meanwhile.
 pub const Runtime = struct {
     state: ?*State,
 
     const State = struct {
         allocator: std.mem.Allocator,
         config: Config,
+        threaded: std.Io.Threaded,
         client: kv_store.Client,
         key_value_store: pjrt.KeyValueStore,
         server: ?kv_store.Server,
@@ -43,7 +49,6 @@ pub const Runtime = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        io: std.Io,
         config: Config,
     ) Error!Runtime {
         try validateConfig(config);
@@ -72,14 +77,16 @@ pub const Runtime = struct {
         state.* = .{
             .allocator = allocator,
             .config = owned_config,
-            .client = .init(
-                io,
-                owned_config.coordinator_address,
-                options,
-            ),
+            // Unlimited async: each server connection gets its own thread
+            // instead of running inline on the accept thread.
+            .threaded = .init(allocator, .{ .async_limit = .unlimited }),
+            .client = undefined,
             .key_value_store = undefined,
             .server = null,
         };
+        errdefer state.threaded.deinit();
+        const io = state.threaded.io();
+        state.client = .init(io, owned_config.coordinator_address, options);
         state.key_value_store = state.client.keyValueStore();
 
         if (owned_config.process_index == 0) {
@@ -108,6 +115,7 @@ pub const Runtime = struct {
         const state = self.state orelse return;
         self.state = null;
         if (state.server) |*server| server.deinit();
+        state.threaded.deinit();
         state.allocator.free(state.config.local_device_ids);
         state.allocator.destroy(state);
     }
@@ -333,11 +341,11 @@ test "distributed runtime rendezvous" {
         .operation_timeout = .fromSeconds(1),
         .retry_delay = .fromMilliseconds(2),
     };
-    var rank0 = try Runtime.init(allocator, io, common);
+    var rank0 = try Runtime.init(allocator, common);
     defer rank0.deinit();
     var rank1_config = common;
     rank1_config.process_index = 1;
-    var rank1 = try Runtime.init(allocator, io, rank1_config);
+    var rank1 = try Runtime.init(allocator, rank1_config);
     defer rank1.deinit();
 
     try std.testing.expectEqual(0, rank0.processIndex());
