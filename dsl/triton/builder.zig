@@ -1292,6 +1292,7 @@ pub const Builder = struct {
 
     /// Numeric cast with options. Dispatch:
     ///   - fp↔fp with fp8: tt.fp_to_fp, with rounding only on downcasts.
+    ///   - f16↔bf16: tt.fp_to_fp with round-to-nearest-even.
     ///   - other fp↔fp narrow: truncf, except custom rounding → tt.fp_to_fp.
     ///   - other fp↔fp wide: extf.
     ///   - i1→fp: uitofp. int↔int: extsi/trunci/bitcast by width.
@@ -1315,7 +1316,8 @@ pub const Builder = struct {
             }
             if (tgt_bw > cur_bw) return self.extf(src, dtype);
             const custom_rounding = opts.fp_downcast_rounding != null and opts.fp_downcast_rounding.? != .rtne;
-            if (custom_rounding) {
+            // f16 and bf16 have equal width, so arith.truncf cannot convert between them.
+            if (tgt_bw == cur_bw or custom_rounding) {
                 return self.fpToFpOpts(src, dtype, .{ .rounding = opts.fp_downcast_rounding orelse .rtne });
             }
             return self.truncf(src, dtype);
@@ -2130,3 +2132,24 @@ pub const Builder = struct {
         return try self.allocator.dupeSentinel(u8, al.written(), 0);
     }
 };
+
+test "cast between f16 and bf16 verifies in both directions" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    registerDialects(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+
+    var b = try Builder.init(std.testing.allocator, ctx, "convert", &.{
+        .{ .name = "x", .kind = .{ .scalar = .f16 } },
+    });
+    defer b.deinit();
+    const bf = b.cast(b.arg(0), .bf16);
+    const fp = b.cast(bf, .f16);
+    try std.testing.expect(bf.elemType().eql(DType.bf16.toMlir(ctx)));
+    try std.testing.expect(fp.elemType().eql(DType.f16.toMlir(ctx)));
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "tt.fp_to_fp"));
+}
