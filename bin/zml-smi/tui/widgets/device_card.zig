@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const smi = @import("zml-smi");
 const data = @import("../data.zig");
 const theme = @import("../theme.zig");
 const utils = @import("../lib/utils.zig");
@@ -39,67 +40,53 @@ pub fn handleEvent(self: *DeviceCard, ctx: *vxfw.EventContext, event: vxfw.Event
     }
 }
 
+const Usage = struct {
+    label: []const u8,
+    util_label: []const u8,
+    util_percent: ?u64,
+    mem_used: ?u64,
+    mem_total: ?u64,
+    suffix: []const u8 = "",
+};
+
 pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const i = self.device_id;
-    const dev = self.state.devices[i];
-    const target: data.Target = std.meta.activeTag(dev.*);
-    const cf = switch (dev.*) {
-        inline else => |*sv| blk: {
-            const f = sv.front().*;
-            break :blk .{
-                .name = f.name orelse "Unknown",
-                .util_percent = @as(u8, @intCast(@min(f.util_percent orelse 0, 100))),
-                .mem_used = f.mem_used_bytes orelse 0,
-                .mem_total = f.mem_total_bytes orelse 0,
-            };
+    const device = self.state.device(i);
+    const usage: Usage = switch (self.state.sample(i)) {
+        .cuda, .rocm, .oneapi => |gpu| .{
+            .label = "GPU",
+            .util_label = "GPU",
+            .util_percent = gpu.util_percent,
+            .mem_used = gpu.mem_used_bytes,
+            .mem_total = gpu.mem_total_bytes,
+            .suffix = try gpuSuffix(ctx.arena, gpu),
+        },
+        .neuron => |core| .{
+            .label = "NC",
+            .util_label = "Core",
+            .util_percent = core.util_percent,
+            .mem_used = core.mem_used_bytes,
+            .mem_total = core.mem_total_bytes,
+        },
+        .tpu => |chip| .{
+            .label = "TPU",
+            .util_label = "Duty",
+            .util_percent = chip.util_percent,
+            .mem_used = chip.mem_used_bytes,
+            .mem_total = chip.mem_total_bytes,
         },
     };
-    const mem_pct: u8 = if (cf.mem_total > 0) @intCast(@min(cf.mem_used * 100 / cf.mem_total, 100)) else 0;
+    const util_percent: u8 = @intCast(@min(usage.util_percent orelse 0, 100));
+    const mem_used = usage.mem_used orelse 0;
+    const mem_total = usage.mem_total orelse 0;
+    const mem_pct: u8 = utils.percent(usage.mem_used, usage.mem_total);
 
-    const device_label, const util_label = switch (target) {
-        .cuda, .rocm, .oneapi => .{ "GPU", "GPU" },
-        .neuron => .{ "NC", "Core" },
-        .tpu => .{ "TPU", "Duty" },
-    };
-    const driver_ver: []const u8 = switch (dev.*) {
-        .cuda => |*sv| blk: {
-            const gpu = sv.front();
-            const drv = gpu.driver_version orelse "";
-            const cuda = gpu.cuda_driver_version orelse "";
-            break :blk if (drv.len > 0 and cuda.len > 0)
-                try std.fmt.allocPrint(ctx.arena, " ({s}, CUDA {s})", .{ drv, cuda })
-            else if (drv.len > 0)
-                try std.fmt.allocPrint(ctx.arena, " ({s})", .{drv})
-            else if (cuda.len > 0)
-                try std.fmt.allocPrint(ctx.arena, " (CUDA {s})", .{cuda})
-            else
-                @as([]const u8, "");
-        },
-        .rocm, .oneapi => |*sv| if (sv.front().driver_version) |v| try std.fmt.allocPrint(ctx.arena, " ({s})", .{v}) else "",
-        .neuron => |*sv| if (sv.front().driver_version) |v| try std.fmt.allocPrint(ctx.arena, " ({s})", .{v}) else "",
-        else => "",
-    };
-    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}{s}", .{ device_label, i, cf.name, driver_ver });
+    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}{s}", .{
+        usage.label, i, device.name orelse "Unknown", try utils.versions(ctx.arena, device, .in_title),
+    });
 
-    const dev_suffix = switch (dev.*) {
-        .cuda, .rocm, .oneapi => |*sv| blk: {
-            const gpu = sv.front().*;
-            const power = (gpu.power_mw orelse 0) / 1000;
-            const power_limit = (gpu.power_limit_mw orelse 0) / 1000;
-
-            const power_limit_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{power_limit});
-            const power_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{power});
-
-            const pad = try utils.repeatStr(ctx.arena, " ", @intCast(power_limit_str.len -| power_str.len));
-            break :blk try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C | {s}{s} W", .{
-                gpu.temperature orelse 0, pad, power_str,
-            });
-        },
-        else => "",
-    };
-
-    const mem_used_mb = utils.bytesToMb(cf.mem_used);
-    const mem_total_mb = utils.bytesToMb(cf.mem_total);
+    const mem_used_mb = utils.bytesToMb(mem_used);
+    const mem_total_mb = utils.bytesToMb(mem_total);
     const mem_total_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{mem_total_mb});
     const mem_used_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{mem_used_mb});
 
@@ -110,14 +97,8 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
 
     var card: MetricCard = .{
         .title = card_title,
-        .title_image = image_cache.global.get(switch (dev.*) {
-            .cuda => "gpu_cuda",
-            .rocm => "gpu_rocm",
-            .oneapi => "gpu_oneapi",
-            .neuron => "gpu_neuron",
-            .tpu => "gpu_tpu",
-        }),
-        .title_right = if (self.state.devices[i].isRemote()) "remote" else null,
+        .title_image = image_cache.global.get(device.target),
+        .title_right = if (device.remote) "remote" else null,
         .cell_size = ctx.cell_size,
         .highlighted = self.highlighted,
     };
@@ -126,11 +107,11 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const mem_chart_data = try utils.normalizeRange(ctx.arena, &self.state.history.mem_util[i], 0, 100);
 
     const chart_entries = [2]MetricCard.ChartEntry{
-        .{ .label = util_label, .value = cf.util_percent, .suffix = dev_suffix, .data = util_chart_data },
+        .{ .label = usage.util_label, .value = util_percent, .suffix = usage.suffix, .data = util_chart_data },
         .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix, .data = mem_chart_data },
     };
     const gauge_entries = [2]MetricCard.GaugeEntry{
-        .{ .label = util_label, .value = cf.util_percent, .suffix = dev_suffix },
+        .{ .label = usage.util_label, .value = util_percent, .suffix = usage.suffix },
         .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix },
     };
 
@@ -143,4 +124,11 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     var card_surf = try card.draw(ctx);
     card_surf.widget = ui.widget(self);
     return card_surf;
+}
+
+fn gpuSuffix(arena: std.mem.Allocator, gpu: smi.Sample.Gpu) std.mem.Allocator.Error![]const u8 {
+    const power_str = try std.fmt.allocPrint(arena, "{d}", .{(gpu.power_mw orelse 0) / 1000});
+    const power_limit_str = try std.fmt.allocPrint(arena, "{d}", .{(gpu.power_limit_mw orelse 0) / 1000});
+    const pad = try utils.repeatStr(arena, " ", @intCast(power_limit_str.len -| power_str.len));
+    return std.fmt.allocPrint(arena, "{d}\u{00b0}C | {s}{s} W", .{ gpu.temperature orelse 0, pad, power_str });
 }

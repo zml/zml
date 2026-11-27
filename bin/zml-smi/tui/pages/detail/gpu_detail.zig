@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const smi = @import("zml-smi");
 const data = @import("../../data.zig");
 const utils = @import("../../lib/utils.zig");
 const ui = @import("../../lib/ui.zig");
@@ -16,23 +17,12 @@ pub fn draw(
     ctx: vxfw.DrawContext,
     w: u16,
     id: u16,
-    gpu: data.GpuInfo,
+    device: smi.Device,
+    gpu: smi.Sample.Gpu,
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {
     // ── Header ──────────────────────────────────────────────
-    const name_suffix: []const u8 = blk: {
-        const drv = gpu.driver_version orelse "";
-        const cuda = gpu.cuda_driver_version orelse "";
-        break :blk if (drv.len > 0 and cuda.len > 0)
-            try std.fmt.allocPrint(ctx.arena, " ({s}, CUDA {s})", .{ drv, cuda })
-        else if (drv.len > 0)
-            try std.fmt.allocPrint(ctx.arena, " ({s})", .{drv})
-        else if (cuda.len > 0)
-            try std.fmt.allocPrint(ctx.arena, " (CUDA {s})", .{cuda})
-        else
-            @as([]const u8, "");
-    };
-    const header = try common.headerText(ctx.arena, id, try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ gpu.name orelse "Unknown", name_suffix }));
+    const header = try common.headerText(ctx.arena, id, device);
 
     // ── GPU Utilization + Memory charts ─────────────────────
     const util_chart = try common.historyChart(ctx, state, id, state.history.util, .{
@@ -47,7 +37,7 @@ pub fn draw(
     });
     const mem_chart = try common.historyChart(ctx, state, id, state.history.mem_util, .{
         .title = "Memory",
-        .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{if (gpu.mem_total_bytes) |total| if (total > 0) (gpu.mem_used_bytes orelse 0) * 100 / total else 0 else 0}),
+        .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{utils.percent(gpu.mem_used_bytes, gpu.mem_total_bytes)}),
         .info_line = if (gpu.mem_bus_width) |bw|
             try std.fmt.allocPrint(ctx.arena, "VRAM {d} / {d} MB ({d}-bit)", .{
                 utils.bytesToMb(gpu.mem_used_bytes), utils.bytesToMb(gpu.mem_total_bytes), bw,
