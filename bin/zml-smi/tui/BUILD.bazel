@@ -13,6 +13,7 @@ zig_library(
         "lib/utils.zig",
         "pages/detail.zig",
         "pages/detail/detail_common.zig",
+        "pages/detail/furiosa_detail.zig",
         "pages/detail/gpu_detail.zig",
         "pages/detail/neuron_detail.zig",
         "pages/detail/tpu_detail.zig",

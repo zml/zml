@@ -118,6 +118,11 @@ pub const SystemState = struct {
                     self.record(&self.history.temp[i], 0);
                     self.record(&self.history.power[i], 0);
                 },
+                .furiosa => |chip| {
+                    self.recordUsage(i, chip.util_percent, chip.mem_used_bytes, chip.mem_total_bytes);
+                    self.record(&self.history.temp[i], chip.temperature orelse 0);
+                    self.record(&self.history.power[i], chip.power_mw orelse 0);
+                },
             }
         }
     }

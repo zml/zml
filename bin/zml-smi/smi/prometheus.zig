@@ -54,6 +54,23 @@ const tpu: Metrics(smi.Sample.Tpu) = .{
     .mem_total_bytes = .{ .name = "zml_tpu_memory_total_bytes", .help = "TPU memory total in bytes" },
 };
 
+const furiosa: Metrics(smi.Sample.Furiosa) = .{
+    .util_percent = .{ .name = "zml_furiosa_utilization_percent", .help = "Furiosa utilization percentage" },
+    .mem_used_bytes = .{ .name = "zml_furiosa_memory_used_bytes", .help = "Furiosa memory used in bytes" },
+    .mem_total_bytes = .{ .name = "zml_furiosa_memory_total_bytes", .help = "Furiosa memory total in bytes" },
+    .power_mw = .{ .name = "zml_furiosa_power_watts", .help = "Furiosa power draw in watts", .decimals = 3 },
+    .power_limit_mw = .{ .name = "zml_furiosa_power_limit_watts", .help = "Furiosa power limit in watts", .decimals = 3 },
+    .temperature = .{ .name = "zml_furiosa_temperature_celsius", .help = "Furiosa temperature in celsius" },
+    .ambient_temperature = .{ .name = "zml_furiosa_ambient_temperature_celsius", .help = "Furiosa ambient temperature in celsius" },
+    .clock_core_mhz = .{ .name = "zml_furiosa_clock_core_mhz", .help = "Furiosa core clock frequency in MHz" },
+    .pcie_bandwidth_mbps = null,
+    .pcie_link_gen = null,
+    .pcie_link_width = null,
+    .governor = .{ .name = "zml_furiosa_governor", .help = "Furiosa governor profile: 0 performance, 1 powersave" },
+    .liveness = .{ .name = "zml_furiosa_liveness", .help = "Furiosa liveness: 1 alive, 0 unknown" },
+    .throttle_reasons = .{ .name = "zml_furiosa_throttle_reasons", .help = "Furiosa active throttle reasons as a bitmask" },
+};
+
 const host: Metrics(smi.HostData) = .{
     .hostname = null,
     .kernel = null,
@@ -67,13 +84,14 @@ const host: Metrics(smi.HostData) = .{
     .uptime_seconds = .{ .name = "zml_host_uptime_seconds", .help = "System uptime in seconds" },
 };
 
-const groups = .{ smi.Sample.Gpu, smi.Sample.Neuron, smi.Sample.Tpu };
+const groups = .{ smi.Sample.Gpu, smi.Sample.Neuron, smi.Sample.Tpu, smi.Sample.Furiosa };
 
 fn metricsOf(comptime T: type) Metrics(T) {
     return switch (T) {
         smi.Sample.Gpu => gpu,
         smi.Sample.Neuron => neuron,
         smi.Sample.Tpu => tpu,
+        smi.Sample.Furiosa => furiosa,
         else => @compileError("no metrics for " ++ @typeName(T)),
     };
 }

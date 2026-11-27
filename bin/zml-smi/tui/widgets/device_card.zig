@@ -75,6 +75,14 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
             .mem_used = chip.mem_used_bytes,
             .mem_total = chip.mem_total_bytes,
         },
+        .furiosa => |chip| .{
+            .label = "NPU",
+            .util_label = "NPU",
+            .util_percent = chip.util_percent,
+            .mem_used = chip.mem_used_bytes,
+            .mem_total = chip.mem_total_bytes,
+            .suffix = try gpuSuffix(ctx.arena, .{ .temperature = chip.temperature, .power_mw = chip.power_mw, .power_limit_mw = chip.power_limit_mw }),
+        },
     };
     const util_percent: u8 = @intCast(@min(usage.util_percent orelse 0, 100));
     const mem_used = usage.mem_used orelse 0;
