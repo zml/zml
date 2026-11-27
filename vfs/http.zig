@@ -402,6 +402,8 @@ pub const HTTP = struct {
             if (cr.start < offset) {
                 try reader.discardAll(offset - cr.start);
             }
+        } else if (res.head.status == .ok and data[0].len > 0) {
+            _ = try reader.discardShort(offset);
         }
 
         return try reader.readSliceShort(data[0]);
