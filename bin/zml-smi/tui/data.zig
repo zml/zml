@@ -18,57 +18,26 @@ pub const ProcessEnricher = if (builtin.os.tag == .macos)
 else
     @import("zml-smi/platforms/linux").process.ProcessEnricher;
 
-pub const history_len: usize = 500;
-
-pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
-    return struct {
-        const Self = @This();
-
-        buf: [capacity]T = @splat(0),
-        head: usize = 0,
-        len: usize = 0,
-
-        pub fn push(self: *Self, value: T) void {
-            self.buf[self.head] = value;
-            self.head = (self.head + 1) % capacity;
-            if (self.len < capacity) {
-                self.len += 1;
-            }
-        }
-
-        pub fn sliceLast(self: *const Self, arena: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]const T {
-            const count = @min(n, self.len);
-            if (count == 0) {
-                return &.{};
-            }
-            const out = try arena.alloc(T, count);
-            const start = (self.head + capacity - count) % capacity;
-            for (0..count) |i| {
-                out[i] = self.buf[(start + i) % capacity];
-            }
-            return out;
-        }
-    };
-}
+pub const History = std.Deque(u64);
 
 pub const HistoryBuffers = struct {
-    util: []RingBuffer(u64, history_len) = &.{},
-    mem_util: []RingBuffer(u64, history_len) = &.{},
-    temp: []RingBuffer(u64, history_len) = &.{},
-    power: []RingBuffer(u64, history_len) = &.{},
+    util: []History = &.{},
+    mem_util: []History = &.{},
+    temp: []History = &.{},
+    power: []History = &.{},
 
     pub fn init(allocator: std.mem.Allocator, count: usize) !HistoryBuffers {
         const h: HistoryBuffers = .{
-            .util = try allocator.alloc(RingBuffer(u64, history_len), count),
-            .mem_util = try allocator.alloc(RingBuffer(u64, history_len), count),
-            .temp = try allocator.alloc(RingBuffer(u64, history_len), count),
-            .power = try allocator.alloc(RingBuffer(u64, history_len), count),
+            .util = try allocator.alloc(History, count),
+            .mem_util = try allocator.alloc(History, count),
+            .temp = try allocator.alloc(History, count),
+            .power = try allocator.alloc(History, count),
         };
 
-        @memset(h.util, .{});
-        @memset(h.mem_util, .{});
-        @memset(h.temp, .{});
-        @memset(h.power, .{});
+        @memset(h.util, .empty);
+        @memset(h.mem_util, .empty);
+        @memset(h.temp, .empty);
+        @memset(h.power, .empty);
 
         return h;
     }
@@ -85,6 +54,9 @@ pub const SystemState = struct {
     devices: []*DeviceInfo,
     host: *HostInfo,
     history: HistoryBuffers = .{},
+    /// Charts plot one sample per braille dot, two per cell: the history
+    /// keeps enough of them to fill the widest terminal seen.
+    history_len: usize = 0,
     targets: Targets,
     process_lists: []*ProcessDoubleBuffer,
     enricher: *ProcessEnricher,
@@ -133,23 +105,30 @@ pub const SystemState = struct {
             switch (self.devices[i].*) {
                 .cuda, .rocm, .oneapi => |*sv| {
                     const gpu = sv.front().*;
-                    self.history.util[i].push(gpu.util_percent orelse 0);
+                    self.record(&self.history.util[i], gpu.util_percent orelse 0);
                     const used = gpu.mem_used_bytes orelse 0;
                     const total = gpu.mem_total_bytes orelse 0;
-                    self.history.mem_util[i].push(if (total > 0) used * 100 / total else 0);
-                    self.history.temp[i].push(gpu.temperature orelse 0);
-                    self.history.power[i].push(gpu.power_mw orelse 0);
+                    self.record(&self.history.mem_util[i], if (total > 0) used * 100 / total else 0);
+                    self.record(&self.history.temp[i], gpu.temperature orelse 0);
+                    self.record(&self.history.power[i], gpu.power_mw orelse 0);
                 },
                 inline else => |*sv| {
                     const info = sv.front().*;
-                    self.history.util[i].push(info.util_percent orelse 0);
+                    self.record(&self.history.util[i], info.util_percent orelse 0);
                     const used = info.mem_used_bytes orelse 0;
                     const total = info.mem_total_bytes orelse 0;
-                    self.history.mem_util[i].push(if (total > 0) used * 100 / total else 0);
-                    self.history.temp[i].push(0);
-                    self.history.power[i].push(0);
+                    self.record(&self.history.mem_util[i], if (total > 0) used * 100 / total else 0);
+                    self.record(&self.history.temp[i], 0);
+                    self.record(&self.history.power[i], 0);
                 },
             }
         }
+    }
+
+    fn record(self: *SystemState, history: *History, value: u64) void {
+        if (history.len > 0 and history.len >= self.history_len) {
+            _ = history.popFront();
+        }
+        history.pushBack(self.arena, value) catch {};
     }
 };

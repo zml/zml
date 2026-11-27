@@ -93,9 +93,9 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     }
 
     // ── X-axis time labels ───────────────────────────────────
-    const total_ms: u32 = @as(u32, chart_w) * 2 * @as(u32, self.tui_refresh_rate);
-    const total_s: u16 = @intCast(std.math.divCeil(u32, total_ms, 1000) catch unreachable);
-    const mid_s: u16 = @intCast(std.math.divCeil(u32, total_ms / 2, 1000) catch unreachable);
+    const total_ms: u64 = @as(u64, chart_w) * 2 * @as(u64, self.tui_refresh_rate);
+    const total_s: u32 = @intCast(std.math.divCeil(u64, total_ms, 1000) catch unreachable);
+    const mid_s: u32 = @intCast(std.math.divCeil(u64, total_ms / 2, 1000) catch unreachable);
     const label_row = self.chart_height + x_axis_h;
     const left_str = try fmtTime(ctx.arena, total_s);
     const mid_str = try fmtTime(ctx.arena, mid_s);
@@ -132,7 +132,7 @@ fn writeStr(surface: *vxfw.Surface, col: u16, row: u16, text: []const u8, style:
     }
 }
 
-fn fmtTime(arena: std.mem.Allocator, seconds: u16) std.mem.Allocator.Error![]const u8 {
+fn fmtTime(arena: std.mem.Allocator, seconds: u32) std.mem.Allocator.Error![]const u8 {
     if (seconds >= 120) {
         return std.fmt.allocPrint(arena, "-{d}m", .{seconds / 60});
     } else {

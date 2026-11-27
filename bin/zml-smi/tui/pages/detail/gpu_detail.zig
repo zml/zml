@@ -70,15 +70,10 @@ pub fn draw(
 
     const power_limit_mw = gpu.power_limit_mw orelse 0;
     const power_limit_w = power_limit_mw / 1000;
-    const power_raw = try state.history.power[id].sliceLast(ctx.arena, data.history_len);
-    const power_watts = try ctx.arena.alloc(u64, power_raw.len);
-    for (power_raw, 0..) |p, j| {
-        power_watts[j] = p / 1000;
-    }
     const y_max = if (power_limit_w > 0) power_limit_w else 1;
     const power_chart: Chart = .{
         .title = "Power",
-        .data = try utils.normalizeRange(ctx.arena, power_watts, 0, y_max),
+        .data = try utils.normalizeRange(ctx.arena, &state.history.power[id], 0, y_max * 1000),
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}W", .{(gpu.power_mw orelse 0) / 1000}),
         .info_line = if (power_limit_w > 0)
             try std.fmt.allocPrint(ctx.arena, "Limit {d}W", .{power_limit_w})

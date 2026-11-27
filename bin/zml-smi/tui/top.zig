@@ -57,8 +57,6 @@ const Model = struct {
     pub fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .init => {
-                self.overview = try Overview.init(self.allocator, self.state, &self.process_table, &self.viewing_device);
-                self.overview.use_braille = true;
                 image_cache.global.loadAll(self.vx, self.allocator, self.tty.writer());
                 try ctx.tick(1000, ui.widget(self));
             },
@@ -111,6 +109,7 @@ const Model = struct {
     pub fn draw(self: *Model, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const screen = ctx.max.size();
         const content_w = @max(screen.width, min_width);
+        self.state.history_len = @max(self.state.history_len, 2 * @as(usize, content_w));
 
         if (self.viewing_device != self.prev_viewing_device) {
             self.scroll.reset();
@@ -162,6 +161,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
         .vx = &app.vx,
         .tty = &app.tty,
     };
+    model.overview = try Overview.init(allocator, state, &model.process_table, &model.viewing_device);
+    model.overview.use_braille = true;
     defer model.deinit();
 
     try app.run(ui.widget(&model), .{});
