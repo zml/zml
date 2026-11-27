@@ -19,6 +19,45 @@ fn silentResize(vx: *vaxis.Vaxis, allocator: std.mem.Allocator, winsize: vaxis.W
     vx.screen_last = screen_last;
 }
 
+fn resetModes(vx: *vaxis.Vaxis, tty: *std.Io.Writer) !void {
+    tty.writeAll(vaxis.ctlseqs.show_cursor) catch {};
+    tty.writeAll(vaxis.ctlseqs.sgr_reset) catch {};
+    if (vx.screen.cursor_shape != .default) {
+        tty.print(vaxis.ctlseqs.cursor_shape, .{@backingInt(vaxis.Cell.CursorShape.default)}) catch {};
+    }
+    if (vx.state.kitty_keyboard) {
+        try tty.writeAll(vaxis.ctlseqs.csi_u_pop);
+        vx.state.kitty_keyboard = false;
+    }
+    if (vx.state.mouse) {
+        try vx.setMouseMode(tty, false);
+    }
+    if (vx.state.bracketed_paste) {
+        try vx.setBracketedPaste(tty, false);
+    }
+    if (vx.state.color_scheme_updates) {
+        try tty.writeAll(vaxis.ctlseqs.color_scheme_reset);
+        vx.state.color_scheme_updates = false;
+    }
+    if (vx.state.in_band_resize) {
+        try tty.writeAll(vaxis.ctlseqs.in_band_resize_reset);
+        vx.state.in_band_resize = false;
+    }
+    if (vx.state.changed_default_fg) {
+        try tty.writeAll(vaxis.ctlseqs.osc10_reset);
+        vx.state.changed_default_fg = false;
+    }
+    if (vx.state.changed_default_bg) {
+        try tty.writeAll(vaxis.ctlseqs.osc11_reset);
+        vx.state.changed_default_bg = false;
+    }
+    if (vx.state.changed_cursor_color) {
+        try tty.writeAll(vaxis.ctlseqs.osc12_reset);
+        vx.state.changed_cursor_color = false;
+    }
+    try tty.flush();
+}
+
 pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, state: *data.SystemState) !void {
     var tty_buffer: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(io, &tty_buffer);
@@ -27,7 +66,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envir
     var vx = try vaxis.init(io, allocator, env_map, .{});
     defer {
         // Reset terminal modes without clearing screen content.
-        vx.resetModes(tty.writer()) catch {};
+        resetModes(&vx, tty.writer()) catch {};
         var buf: [256]u8 = undefined;
         var discarding: std.Io.Writer.Discarding = .init(&buf);
         vx.deinit(allocator, &discarding.writer);

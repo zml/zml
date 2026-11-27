@@ -39,8 +39,65 @@ pub fn sized(arena: std.mem.Allocator, child: vxfw.Widget, size: vxfw.Size) std.
     return s.widget();
 }
 
-pub fn pad(arena: std.mem.Allocator, child: vxfw.Widget, padding: vxfw.Padding.PadValues) std.mem.Allocator.Error!vxfw.Widget {
-    const p = try arena.create(vxfw.Padding);
+pub const PadValues = struct {
+    left: u16 = 0,
+    right: u16 = 0,
+    top: u16 = 0,
+    bottom: u16 = 0,
+};
+
+/// Padding wrapper matching vxfw.Padding without its non-null ctx.max asserts,
+/// so unbounded-height layouts (e.g. fixedWidth) work cleanly.
+pub const Padding = struct {
+    child: vxfw.Widget,
+    padding: PadValues = .{},
+
+    pub fn widget(self: *const Padding) vxfw.Widget {
+        return .{
+            .userdata = @constCast(self),
+            .drawFn = typeErasedDrawFn,
+        };
+    }
+
+    fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *const Padding = @ptrCast(@alignCast(ptr));
+        return self.draw(ctx);
+    }
+
+    pub fn draw(self: *const Padding, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const p = self.padding;
+        const inner_min: vxfw.Size = .{
+            .width = ctx.min.width -| (p.right + p.left),
+            .height = ctx.min.height -| (p.top + p.bottom),
+        };
+        const inner_max: vxfw.MaxSize = .{
+            .width = if (ctx.max.width) |max| max -| (p.right + p.left) else null,
+            .height = if (ctx.max.height) |max| max -| (p.top + p.bottom) else null,
+        };
+
+        const child_surface = try self.child.draw(ctx.withConstraints(inner_min, inner_max));
+
+        const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+        children[0] = .{
+            .surface = child_surface,
+            .z_index = 0,
+            .origin = .{ .row = p.top, .col = p.left },
+        };
+
+        return .{
+            .size = .{
+                .width = child_surface.size.width + (p.right + p.left),
+                .height = child_surface.size.height + (p.top + p.bottom),
+            },
+            .widget = self.widget(),
+            .buffer = &.{},
+            .children = children,
+        };
+    }
+};
+
+pub fn pad(arena: std.mem.Allocator, child: vxfw.Widget, padding: PadValues) std.mem.Allocator.Error!vxfw.Widget {
+    const p = try arena.create(Padding);
     p.* = .{ .child = child, .padding = padding };
     return p.widget();
 }
