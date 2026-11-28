@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
+
 const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 
@@ -501,6 +503,22 @@ pub const Tensor = struct {
 
     pub fn byteSize(self: Tensor) u64 {
         return self.shape.byteSize();
+    }
+
+    /// This tensor narrowed to `count` consecutive slices along its first axis, starting at
+    /// `start`. The result reads the same checkpoint bytes: tensors are stored row-major, so
+    /// a range of the first axis is contiguous.
+    pub fn sliceFirstAxis(self: Tensor, start: i64, count: i64) Tensor {
+        stdx.debug.assert(
+            start >= 0 and count > 0 and start + count <= self.shape.dim(0),
+            "slice {}..{} is outside the first axis of {s} {f}",
+            .{ start, start + count, self.name, self.shape },
+        );
+
+        var sliced = self;
+        sliced.offset += @intCast(start * self.shape.computeByteStrides().get(0));
+        sliced.shape = self.shape.setDim(0, count);
+        return sliced;
     }
 
     pub fn reader(self: Tensor, io: std.Io, buffer: []u8, opts: TensorReader.InitOpts) !TensorReader {
