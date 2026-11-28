@@ -6,4 +6,6 @@ def repo():
         remote = "https://github.com/lalinsky/zio",
         commit = "1b4e9787f8a4a67d91372a603b23258364f89bf0",
         build_file = Label("//third_party/zio:zio.bazel"),
+        patches = [Label("//third_party/zio:glibc-environ.patch")],
+        patch_args = ["-p1"],
     )

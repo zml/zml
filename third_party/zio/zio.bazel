@@ -25,6 +25,7 @@ zig_option(name = "scheduling_option", flag = ":scheduling")
 zig_option(name = "resolve_beneath_mode_option", flag = ":resolve_beneath_mode")
 zig_option(name = "no_hacks", bool = False)
 zig_option(name = "scheduler_metrics", bool = False)
+zig_option(name = "zig_direct", flag = "@zml//bazel:zig_direct")
 
 zig_options(
     name = "zio_build_options",
@@ -34,6 +35,7 @@ zig_options(
         ":resolve_beneath_mode_option",
         ":no_hacks",
         ":scheduler_metrics",
+        ":zig_direct",
     ],
 )
 

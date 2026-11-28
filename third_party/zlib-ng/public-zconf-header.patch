@@ -1,0 +1,13 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -133,8 +133,8 @@
+         ":gzread_gen",
+-        ":zconf_gen",
+         ":zlib_name_mangling_gen",
+     ],
+     hdrs = [
++        ":zconf_gen",
+         ":zlib_gen",
+     ],
+     copts = _COPTS,

@@ -24,6 +24,15 @@ bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")
+
+# The Zig-owned ELF link lacks section bounds for weak message defaults.
+single_version_override(
+    module_name = "protobuf",
+    patch_strip = 1,
+    patches = ["//:third_party/protobuf/zig-elf2-compat-35.0.patch"],
+    version = "35.0",
+)
+
 bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_cc", version = "0.2.19")
@@ -52,12 +61,12 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
 bazel_dep(name = "rules_zig", version = "0.17.0")
 
-# Zig 0.17 ZLS support is not yet released.
+# Zig-owned links need the C++ toolchain runtime from https://github.com/hermeticbuild/rules_zig/pull/725.
 archive_override(
     module_name = "rules_zig",
-    integrity = "sha256-VbmdSIShN+sogoD3yI7yrvdZNXEf2a0MNLtxLAo1vDo=",
-    strip_prefix = "rules_zig-fdad034e362e5de4190bd704cc8d17907117c57e",
-    urls = ["https://github.com/hermeticbuild/rules_zig/archive/fdad034e362e5de4190bd704cc8d17907117c57e.tar.gz"],
+    integrity = "sha256-ei+6eg21d7hLvCKlaXQXBGLgFiKI0iCCJ1uXbn5ML8o=",
+    strip_prefix = "rules_zig-534ff23878eca58304260d34ca33ee22da3ace4a",
+    urls = ["https://github.com/hermeticbuild/rules_zig/archive/534ff23878eca58304260d34ca33ee22da3ace4a.tar.gz"],
 )
 
 bazel_dep(name = "tar.bzl", version = "0.10.4")
@@ -65,7 +74,25 @@ bazel_dep(name = "llvm", version = "0.8.27")
 bazel_dep(name = "libxml2", version = "2.15.3")
 bazel_dep(name = "xz", version = "5.4.5.bcr.9", repo_name = "llvm_xz")
 bazel_dep(name = "zlib-ng", version = "2.3.3", repo_name = "llvm_zlib")
+
+# The zlib-compatible API installs zconf.h as a public header.
+single_version_override(
+    module_name = "zlib-ng",
+    patch_strip = 1,
+    patches = ["//:third_party/zlib-ng/public-zconf-header.patch"],
+    version = "2.3.3.bcr.2",
+)
+
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1", repo_name = "llvm_zstd")
+
+# Keep one zlib-compatible implementation in links that also use LLVM.
+single_version_override(
+    module_name = "zlib",
+    patch_strip = 1,
+    patches = ["//:third_party/zlib/use-zlib-ng.patch"],
+    version = "1.3.1.bcr.5",
+)
+
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "highway", version = "1.4.0")
 bazel_dep(name = "grpc", version = "1.80.0")
@@ -129,7 +156,11 @@ zig.mirrors(urls = [
 ])
 use_repo(zig, "zig_toolchains")
 
-register_toolchains("@rules_zig//zig/target:all")
+register_toolchains(
+    "//platforms:zig_linux_x86_64_glibc_toolchain",
+    "//platforms:zig_linux_aarch64_glibc_toolchain",
+    "@rules_zig//zig/target:all",
+)
 
 register_toolchains("@zig_toolchains//:all")
 

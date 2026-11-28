@@ -1,5 +1,12 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
+
+bool_flag(
+    name = "zig_direct",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "retain_runfiles_init",

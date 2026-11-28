@@ -1,0 +1,29 @@
+diff --git a/build_defs/BUILD.bazel b/build_defs/BUILD.bazel
+--- a/build_defs/BUILD.bazel
++++ b/build_defs/BUILD.bazel
+@@ -14,2 +14,7 @@
+     ],
++)
++
++config_setting(
++    name = "zig_elf2_compat",
++    define_values = {"zig_elf2_compat": "true"},
+ )
+diff --git a/src/google/protobuf/BUILD.bazel b/src/google/protobuf/BUILD.bazel
+--- a/src/google/protobuf/BUILD.bazel
++++ b/src/google/protobuf/BUILD.bazel
+@@ -406,2 +406,6 @@
+     ],
++    defines = select({
++        "//build_defs:zig_elf2_compat": ["PROTOBUF_DISABLE_WEAK_DEFAULTS"],
++        "//conditions:default": [],
++    }),
+     strip_include_prefix = "/src",
+diff --git a/src/google/protobuf/port_def.inc b/src/google/protobuf/port_def.inc
+--- a/src/google/protobuf/port_def.inc
++++ b/src/google/protobuf/port_def.inc
+@@ -563,3 +563,3 @@
+     !defined(_MSC_VER) && !defined(_WIN32) && !defined(__wasm__) &&   \
+-    !defined(__EMSCRIPTEN__)
++    !defined(__EMSCRIPTEN__) && !defined(PROTOBUF_DISABLE_WEAK_DEFAULTS)
+ #define PROTOBUF_DESCRIPTOR_WEAK_MESSAGES_ALLOWED
