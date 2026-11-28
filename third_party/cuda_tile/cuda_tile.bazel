@@ -444,7 +444,4 @@ cc_library(
         ":CudaTileTransforms",
         "@llvm-project//mlir:CAPIIR",
     ],
-    # MLIR_DEFINE_CAPI_DIALECT_REGISTRATION expands to a global static
-    # initializer that the linker would otherwise dead-strip.
-    alwayslink = True,
 )
