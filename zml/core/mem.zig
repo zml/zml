@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
-const assert = std.debug.assert;
 
 const meta = @import("zml/meta");
 const pjrt = @import("pjrt");
