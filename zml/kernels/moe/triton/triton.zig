@@ -903,16 +903,17 @@ test "NVFP4 routed GEMM matches dequantized operands" {
         }
     };
 
-    const cases = [_]struct { tokens: i64, strategy: quantization.Nvfp4QuantizationStrategy }{
-        .{ .tokens = 1, .strategy = .largest_maps_to_six },
-        .{ .tokens = 17, .strategy = .largest_maps_to_six },
-        .{ .tokens = 40, .strategy = .largest_maps_to_six },
-        .{ .tokens = 17, .strategy = .best_of_four_or_six },
+    const cases = [_]struct { tokens: i64, n: i64, k: i64, strategy: quantization.Nvfp4QuantizationStrategy }{
+        .{ .tokens = 1, .n = 48, .k = 256, .strategy = .largest_maps_to_six },
+        .{ .tokens = 17, .n = 48, .k = 256, .strategy = .largest_maps_to_six },
+        .{ .tokens = 40, .n = 48, .k = 256, .strategy = .largest_maps_to_six },
+        .{ .tokens = 17, .n = 48, .k = 256, .strategy = .best_of_four_or_six },
+        .{ .tokens = 17, .n = 80, .k = 96, .strategy = .best_of_four_or_six },
     };
     for (cases) |case| {
-        const x: Tensor = .init(.{ .token = case.tokens, .in = 256 }, .bf16);
-        const w: Tensor = .init(.{ .expert = 8, .out = 48, .in = 256 }, .f32);
-        const scales: Tensor = .init(.{ .expert = 8, .out = 48, .sc = 16 }, .f32);
+        const x: Tensor = .init(.{ .token = case.tokens, .in = case.k }, .bf16);
+        const w: Tensor = .init(.{ .expert = 8, .out = case.n, .in = case.k }, .f32);
+        const scales: Tensor = .init(.{ .expert = 8, .out = case.n, .sc = @divExact(case.k, quantization.nvfp4_block_size) }, .f32);
         const ids: Tensor = .init(.{ .token = case.tokens, .topk = 1 }, .i32);
         var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, scales, ids, case.strategy }, .{});
         defer exe.deinit();
@@ -920,14 +921,15 @@ test "NVFP4 routed GEMM matches dequantized operands" {
         var initialized: usize = 0;
         defer for (buffers[0..initialized]) |*buffer| buffer.deinit();
         const fp4 = [_]f32{ 0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.5, -1, -1.5, -2, -3, -4, -6, 0 };
+        const width: usize = @intCast(case.k);
         for ([_]Shape{ x.shape(), w.shape(), scales.shape(), ids.shape() }, 0..) |shape, i| {
             const slice = try zml.Slice.alloc(allocator, shape);
             defer slice.free(allocator);
             for (0..shape.count()) |j| switch (i) {
                 // Rows span five octaves so that each one needs its own scales.
-                0 => slice.items(zml.floats.BFloat16)[j] = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast((j * 7 + j / 256) % 13)) - 6)) / 64 *
-                    @as(f32, @floatFromInt(@as(u32, 1) << @as(u5, @intCast(j / 256 % 5))))),
-                1 => slice.items(f32)[j] = fp4[(j * 5 + j / 256) % 16],
+                0 => slice.items(zml.floats.BFloat16)[j] = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast((j * 7 + j / width) % 13)) - 6)) / 64 *
+                    @as(f32, @floatFromInt(@as(u32, 1) << @as(u5, @intCast(j / width % 5))))),
+                1 => slice.items(f32)[j] = fp4[(j * 5 + j / width) % 16],
                 2 => slice.items(f32)[j] = @as(f32, @floatFromInt(@as(u32, 1) << @as(u5, @intCast(j % 4)))) / 16,
                 else => slice.items(i32)[j] = @intCast((j * 3 + 5) % 8),
             };
@@ -1083,7 +1085,7 @@ fn launchConfig(platform: *const zml.Platform, scheme: ?Quantization.Scheme, num
     if (requiresBf16Dot(platform, scheme)) {
         return .{
             .block_size_m = 16,
-            .block_size_n = 32,
+            .block_size_n = if (scheme == .nvfp4) 64 else 32,
             .block_size_k = 64,
             .group_size_m = 1,
             .num_warps = 4,

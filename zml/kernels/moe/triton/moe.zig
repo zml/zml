@@ -241,9 +241,9 @@ fn decodePackedE2m1(b: *Builder, encoded: Value) Value {
     return b.select(magnitude.lt(2), subnormal, normal).bitOr(sign).bitCast(.f32);
 }
 
-/// Values in [row, K] order, with one scale per block along K.
 const ScaledTile = struct { values: Value, scales: Value };
 
+/// Values are in [row, K] order, with one scale per block along K.
 fn applyBlockScalesAsBf16(b: *Builder, tile: ScaledTile, group_size: i64) Value {
     const rows = tile.scales.shape().get(0);
     const groups = tile.scales.shape().get(1);
@@ -264,6 +264,43 @@ fn nvfp4DotAsBf16(b: *Builder, input: ScaledTile, weight: ScaledTile, acc: Value
     const lhs = nvfp4TileAsBf16(b, input);
     const rhs = nvfp4TileAsBf16(b, weight);
     return b.dot(lhs, b.trans(rhs, &.{ 1, 0 }), acc);
+}
+
+fn nvfp4PlaneScales(b: *Builder, words: Value, cols: i64) Value {
+    const shape = [_]i64{ words.shape().get(0), cols };
+    // One i32 contains the four E4M3 scales for a K64 tile. Each scale
+    // applies to four packed words, independent of the nibble plane.
+    const shifts = b.arange(0, cols, .i32).div(4).mul(8).expandDims(0);
+    const bytes = b.shrui(b.broadcastTo(words.expandDims(1), &shape), b.broadcastTo(shifts, &shape));
+    return decodeE4m3(b, bytes.to(.i8));
+}
+
+fn nvfp4ByteScalesForPlanes(b: *Builder, bytes: Value) Value {
+    const rows = bytes.shape().get(0);
+    const groups = bytes.shape().get(1);
+    const scales = decodeE4m3(b, bytes).expandDims(2);
+    return b.reshape(b.broadcastTo(scales, &.{ rows, groups, 4 }), &.{ rows, groups * 4 });
+}
+
+fn nvfp4PlaneAsBf16(b: *Builder, tile: ScaledTile, comptime plane: u2) Value {
+    const shape = tile.values.shape().constSlice();
+    const nibble = if (plane == 0) tile.values else b.shrui(tile.values, b.full(shape, @as(u8, plane) * 4, .i16));
+    const magnitude = nibble.bitAnd(7);
+    const normal = magnitude.div(2).add(126).mul(128).bitOr(magnitude.bitAnd(1).mul(64));
+    const subnormal = magnitude.mul(0x3f00);
+    const sign = nibble.mul(4096).bitAnd(-32768);
+    const value = b.select(magnitude.lt(2), subnormal, normal).bitOr(sign).bitCast(.bf16);
+    return value.to(.f32).mul(tile.scales).to(.bf16);
+}
+
+fn nvfp4PlaneDot(b: *Builder, input: ScaledTile, weight: ScaledTile, acc: Value) Value {
+    var sum = acc;
+    // Each i16 lane becomes one BF16 lane. Keep K/4 in the DPAS operand
+    // layout through widening instead of interleaving the four nibbles.
+    inline for (0..4) |plane| {
+        sum = b.dot(nvfp4PlaneAsBf16(b, input, plane), nvfp4PlaneAsBf16(b, weight, plane), sum);
+    }
+    return sum;
 }
 
 fn mxfp4DotAsBf16(b: *Builder, input: Value, weight: ScaledTile, acc: Value) Value {
@@ -348,6 +385,15 @@ pub const FusedMoe = struct {
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
+        // Each K64 tile feeds four K16 BF16 dots, one per nibble of the i16 words.
+        const packed_planes = cfg.quant_scheme == .nvfp4 and cfg.dequantize_to_bf16 and cfg.block_size_k == 64;
+        const word_scales = packed_planes and if (cfg.dims) |dims|
+            @mod(dims.k, 64) == 0 and dims.stride_ask == 1 and dims.stride_bsk == 1 and
+                @mod(dims.stride_asm, 4) == 0 and @mod(dims.stride_bsn, 4) == 0 and @mod(dims.stride_bse, 4) == 0
+        else
+            false;
+        if (packed_planes) b.module.operation().setAttributeByName("ttg.threads-per-warp", .int(b.ctx, .i32, 32));
+
         const fp8_block_size: usize = if (cfg.quant_scheme == .fp8_block32) 32 else 128;
         if ((cfg.quant_scheme == .fp8_block128 or cfg.quant_scheme == .fp8_block32) and cfg.block_size_k != fp8_block_size) {
             log.err("fused_moe_kernel: block-scaled FP8 requires BLOCK_SIZE_K={}", .{fp8_block_size});
@@ -380,14 +426,18 @@ pub const FusedMoe = struct {
             }
         }
 
+        // The custom call passes row-major buffers. Choose the load width here
+        // so the HLO operands can keep their original byte storage.
+        const a_dtype: DType = if (packed_planes) .i16 else cfg.a_dtype;
+        const b_dtype: DType = if (packed_planes) .i16 else cfg.b_dtype;
         const a = try b.declareArgs(.{
-            .a_ptr = .{ .ptr = cfg.a_dtype },
-            .b_ptr = .{ .ptr_opts = .{ .dtype = cfg.b_dtype, .divisibility = cfg.b_ptr_divisibility } },
+            .a_ptr = .{ .ptr = a_dtype },
+            .b_ptr = .{ .ptr_opts = .{ .dtype = b_dtype, .divisibility = cfg.b_ptr_divisibility } },
             // The fixed signature requires concrete pointer types even for absent,
             // unused inputs. FP32 matches the caller's placeholder tensors.
             .b_bias_ptr = .{ .ptr = cfg.b_bias_dtype orelse .f32 },
-            .a_scale_ptr = .{ .ptr = cfg.a_scale_dtype orelse .f32 },
-            .b_scale_ptr = .{ .ptr = cfg.b_scale_dtype orelse .f32 },
+            .a_scale_ptr = .{ .ptr = if (word_scales) .i32 else cfg.a_scale_dtype orelse .f32 },
+            .b_scale_ptr = .{ .ptr = if (word_scales) .i32 else cfg.b_scale_dtype orelse .f32 },
             .routing_weights_ptr = .{ .ptr = cfg.routing_weights_dtype orelse .f32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .expert_ids_ptr = .{ .ptr = .i32 },
@@ -413,9 +463,9 @@ pub const FusedMoe = struct {
         const block_size_m: i64 = @intCast(cfg.block_size_m);
         const block_size_n: i64 = @intCast(cfg.block_size_n);
         const block_size_k: i64 = @intCast(cfg.block_size_k);
-        // K values per byte of each operand: FP4 packs two, and NVFP4 activations are FP4 like the weights.
+        // FP4 packs two K values per byte or four per i16 in the plane path.
         const weight_packing: i64, const input_packing: i64 = if (cfg.quant_scheme) |scheme| switch (scheme) {
-            .nvfp4 => .{ 2, 2 },
+            .nvfp4 => if (packed_planes) .{ 4, 4 } else .{ 2, 2 },
             .mxfp4 => .{ 2, 1 },
             .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .{ 1, 1 },
         } else .{ 1, 1 };
@@ -438,9 +488,9 @@ pub const FusedMoe = struct {
         const n_block = blockFloor16(n_raw);
         const k_block = blockFloor16(k_raw);
         const em_block = blockFloor16(em_raw);
-        const stride_am_block = blockFloor16(stride_am_raw);
-        const stride_be_block = blockFloor16(stride_be_raw);
-        const stride_bn_block = blockFloor16(stride_bn_raw);
+        const stride_am_block = if (packed_planes) blockFloor16(stride_am_raw).div(2) else blockFloor16(stride_am_raw);
+        const stride_be_block = if (packed_planes) blockFloor16(stride_be_raw).div(2) else blockFloor16(stride_be_raw);
+        const stride_bn_block = if (packed_planes) blockFloor16(stride_bn_raw).div(2) else blockFloor16(stride_bn_raw);
         const stride_cm_block = blockFloor16(stride_cm_raw);
         // stride_ak / stride_bk / stride_cn are all 1 in this port — the A/B/C
         // inner dimension is contiguous, so those mul-by-1 terms are elided.
@@ -536,7 +586,24 @@ pub const FusedMoe = struct {
         // addptr) — matches Python's left-to-right evaluation. Defer extsi
         // for offs_k to after offs_bn's expand_dims/mul (Python emit order).
         const b_ptr_shifted = a.b_ptr.addPtr(off_experts.mul(stride_be_block));
-        // MXFP4 and NVFP4 weights pack two K values per byte.
+        const weight_descriptor = if (packed_planes) descriptor: {
+            const dims = cfg.dims orelse break :descriptor null;
+            // Intel block I/O counts width and pitch in bytes. Each selected
+            // expert must start at a cache-line boundary.
+            const row_bytes = @divTrunc(dims.k, 2);
+            const max_extent = 1 << 24;
+            if (row_bytes < 64 or row_bytes > max_extent or dims.n > max_extent or
+                dims.stride_bn > max_extent or @mod(dims.stride_bn, 16) != 0 or @mod(dims.stride_be, 64) != 0)
+                break :descriptor null;
+            break :descriptor b.makeTensorDescriptor(
+                b_ptr_shifted,
+                &.{ n_block.to(.i32), k_block.div(weight_packing).to(.i32) },
+                &.{ stride_bn_block, b.constant(.i64, 1) },
+                .pad_zero,
+                &.{ block_size_n, block_size_bk },
+                .i16,
+            );
+        } else null;
         const offs_bk_i32 = b.arange(0, block_size_bk, .i32);
         const offs_k_col_i32 = b.expandDims(offs_bk_i32, 1);
         const offs_bn_row = b.expandDims(offs_bn, 0);
@@ -571,19 +638,40 @@ pub const FusedMoe = struct {
 
             const a_val = b.loadOpts(a_ptrs, .{
                 .mask = mask_a,
-                .other = b.zeros(&.{ block_size_m, block_size_ak }, cfg.a_dtype),
+                .other = b.zeros(&.{ block_size_m, block_size_ak }, a_dtype),
             });
 
             const offs_k_col_b = b.expandDims(offs_bk_i32, 1).to(.i64);
             const offs_k_lt_b = offs_k_col_b.lt(b.splat(k_remaining.cdiv(weight_packing), &.{ block_size_bk, 1 }));
             const mask_b = b.broadcastTo(offs_k_lt_b, &.{ block_size_bk, block_size_n });
 
-            const b_val = if (whole_k) b.load(b_ptrs) else b.loadOpts(b_ptrs, .{
+            const b_val = if (weight_descriptor) |descriptor| b.trans(b.descriptorLoad(
+                descriptor,
+                &.{ pid_n_block_n.to(.i32), k_iter.mul(block_size_bk).to(.i32) },
+                &.{ block_size_n, block_size_bk },
+                .i16,
+            ), &.{ 1, 0 }) else if (whole_k) b.load(b_ptrs) else b.loadOpts(b_ptrs, .{
                 .mask = mask_b,
-                .other = b.zeros(&.{ block_size_bk, block_size_n }, cfg.b_dtype),
+                .other = b.zeros(&.{ block_size_bk, block_size_n }, b_dtype),
             });
 
-            const new_acc = if (cfg.quant_scheme) |scheme| switch (scheme) {
+            const new_acc = if (word_scales) packed_dot: {
+                const a_row_stride = Dims.value(b, cfg.dims, "stride_asm", a.stride_asm_ptr).div(4);
+                const a_words = b.loadOpts(a.a_scale_ptr.addPtr(offs_token.div(top_k).mul(a_row_stride).add(k_iter)), .{
+                    .mask = token_mask,
+                    .other = b.zeros(&.{block_size_m}, .i32),
+                });
+                const b_expert_stride = Dims.value(b, cfg.dims, "stride_bse", a.stride_bse_ptr).div(4);
+                const b_row_stride = Dims.value(b, cfg.dims, "stride_bsn", a.stride_bsn_ptr).div(4);
+                const b_words = b.load(a.b_scale_ptr.addPtr(off_experts.mul(b_expert_stride).add(offs_bn.mul(b_row_stride)).add(k_iter)));
+                break :packed_dot nvfp4PlaneDot(b, .{
+                    .values = a_val,
+                    .scales = nvfp4PlaneScales(b, a_words, block_size_ak),
+                }, .{
+                    .values = b_val,
+                    .scales = b.trans(nvfp4PlaneScales(b, b_words, block_size_bk), &.{ 1, 0 }),
+                }, acc);
+            } else if (cfg.quant_scheme) |scheme| switch (scheme) {
                 .mxfp4, .mxfp8, .nvfp4 => scaled: {
                     // NVFP4 has one E4M3 scale per 16 values, MX formats one E8M0 scale per 32.
                     const nvfp4 = scheme == .nvfp4;
@@ -616,6 +704,13 @@ pub const FusedMoe = struct {
                             .other = if (nvfp4) b.zeros(&.{ block_size_m, scale_k }, cfg.a_scale_dtype.?) else b.full(&.{ block_size_m, scale_k }, 127, .i8),
                         });
                     } else null;
+                    if (packed_planes) break :scaled nvfp4PlaneDot(b, .{
+                        .values = a_val,
+                        .scales = nvfp4ByteScalesForPlanes(b, a_scales orelse return error.InvalidMlir),
+                    }, .{
+                        .values = b_val,
+                        .scales = b.trans(nvfp4ByteScalesForPlanes(b, scales), &.{ 1, 0 }),
+                    }, acc);
                     if (cfg.dequantize_to_bf16) {
                         const weight: ScaledTile = .{ .values = b.trans(b_val, &.{ 1, 0 }), .scales = scales };
                         break :scaled switch (scheme) {
