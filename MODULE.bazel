@@ -61,12 +61,12 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
 bazel_dep(name = "rules_zig", version = "0.17.0")
 
-# Zig 0.17 ZLS support is not yet released.
+# Zig-owned links need the C++ toolchain runtime from https://github.com/hermeticbuild/rules_zig/pull/725.
 archive_override(
     module_name = "rules_zig",
-    integrity = "sha256-ioGflpWp4IpzD6BmrXsmwK1XzVRKLnR4bAZMZp6ysKo=",
-    strip_prefix = "rules_zig-84d739280921fa62b45f6a3e591e4691e3cdc5f8",
-    urls = ["https://github.com/hermeticbuild/rules_zig/archive/84d739280921fa62b45f6a3e591e4691e3cdc5f8.tar.gz"],
+    integrity = "sha256-ei+6eg21d7hLvCKlaXQXBGLgFiKI0iCCJ1uXbn5ML8o=",
+    strip_prefix = "rules_zig-534ff23878eca58304260d34ca33ee22da3ace4a",
+    urls = ["https://github.com/hermeticbuild/rules_zig/archive/534ff23878eca58304260d34ca33ee22da3ace4a.tar.gz"],
 )
 
 bazel_dep(name = "tar.bzl", version = "0.10.4")
