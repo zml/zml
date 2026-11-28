@@ -134,6 +134,13 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
 /// `attention`, causal or not depending on `opts`.
 pub fn attentionOpts(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: Options, mesh: *const zml.Mesh, partitioning: Partitioning) zml.Tensor {
     const args: Attention = .{ .q = q, .k = k, .v = v, .token_index = token_index, .metadata = metadata, .parameters = parameters, .opts = opts };
+    // XLA-NPU currently miscompiles manualComputation regions (even for a
+    // single device), so emit the plain stablehlo attention body directly.
+    if (zml.Compiler.currentOrNull()) |ctx| {
+        if (ctx.platform.target == .ascend and parameters == .stablehlo) {
+            return Attention.forward(args, q.shape());
+        }
+    }
     return zml.ops.manualComputation(Attention.forward, args, q.shape(), mesh, .{
         .in_specs = .{
             .q = partitioning.in_specs.q,

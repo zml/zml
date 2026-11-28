@@ -199,6 +199,14 @@ pub const Tensor = struct {
             return res;
         };
 
+        // XLA-NPU does not implement the Sharding custom call or sdy ops yet;
+        // a single-device replicated PoC only needs the partitioned shape.
+        if (ctx.platform.target == .ascend) {
+            var res = self;
+            res._shape = partitioned_shape;
+            return res;
+        }
+
         const attr = ctx.tensorShardingAttr(ctx.allocator, partitioned_shape) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioner) {
@@ -282,7 +290,7 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => {
+            .cpu, .neuron, .metal, .ascend => {
                 // A single memory needs no copy, but the result must still be a distinct
                 // tensor: `reuseBuffer` donations are keyed by tensor id.
                 var res = _result(self._shape, self.value());
@@ -355,7 +363,7 @@ pub const Tensor = struct {
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return flat_tensors,
+            .cpu, .neuron, .metal, .ascend => return flat_tensors,
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
@@ -373,7 +381,7 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return self,
+            .cpu, .neuron, .metal, .ascend => return self,
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
@@ -392,7 +400,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
-            .cpu, .neuron, .metal => return,
+            .cpu, .neuron, .metal, .ascend => return,
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
@@ -3637,6 +3645,38 @@ pub const Tensor = struct {
         const a = x.axis(axis_);
         const dt: DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
 
+        // XLA-NPU does not implement the two-result reduce used below. Emit a
+        // backend custom call implemented by aclnnArgMax instead.
+        if (dt == .i32) {
+            if (Compiler.currentOrNull()) |ctx| {
+                if (ctx.platform.target == .ascend) {
+                    const values = x.max(a);
+                    const out_shape = x.shape().setDim(a, 1).withDtype(dt);
+                    const out_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, out_shape);
+                    const config = std.fmt.allocPrint(
+                        ctx.arena.allocator(),
+                        "axis={d}",
+                        .{a},
+                    ) catch @panic("OOM");
+                    const op = stablehlo.custom_call(
+                        ctx.mlir_ctx,
+                        &.{x.value()},
+                        &.{out_type},
+                        .{
+                            .call_target_name = "npu$argmax",
+                            .has_side_effect = false,
+                            .backend_config = .{ .original = config },
+                        },
+                        ctx.location,
+                    ).appendTo(currentBlock());
+                    return .{
+                        .values = values,
+                        .indices = _result(out_shape, op.result(0)),
+                    };
+                }
+            }
+        }
+
         const values, const indices = ops.reduce(
             .{ x, Tensor.arange(.{ .end = x.dim(axis_) }, dt).broadcast(x.shape(), &.{a}) },
             .{ Tensor.constant(x.dtype().minValue()), Tensor.constant(dt.zero()) },
@@ -3871,7 +3911,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .ascend => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice(a, .{ .end = k });
@@ -4833,7 +4873,7 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {}, ctx.platform.replicated_mesh, .{ .in_specs = .{ .input = .replicated } });
             },
-            .oneapi, .neuron, .furiosa => {},
+            .oneapi, .neuron, .furiosa, .ascend => {},
         }
     }
 

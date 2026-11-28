@@ -47,8 +47,14 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
         return error.MissingDevices;
     }
+    // The Ascend backend is a single-device PoC: XLA-NPU does not implement
+    // Sharding/sdy, so more devices would silently run replicated.
+    if (target == .ascend and num_devices != 1) {
+        log.err("Ascend NPU support is currently single-device only, got {} devices", .{num_devices});
+        return error.InvalidDeviceCount;
+    }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa, .ascend => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -98,6 +104,13 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
+            .ascend => {
+                const pjrt_kind = self.kind();
+                if (std.mem.eql(u8, pjrt_kind, "npu") or std.mem.eql(u8, pjrt_kind, "device")) return kind_ == .device;
+                if (std.mem.eql(u8, pjrt_kind, "pinned_host")) return kind_ == .host_pinned;
+                if (std.mem.eql(u8, pjrt_kind, "unpinned_host") or std.mem.eql(u8, pjrt_kind, "host")) return kind_ == .host_unpinned;
+                return false;
+            },
             .cuda, .rocm, .oneapi, .tpu, .furiosa => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
@@ -234,7 +247,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .ascend => device.id(),
     };
 }
 
@@ -266,6 +279,7 @@ pub const State = union(Target) {
     oneapi: void,
     metal: void,
     furiosa: void,
+    ascend: void,
 
     pub const CudaState = struct {
         flashinfer_cutlass_moe_runners: ?*flashinfer_cutlass_runtime.Runners = null,
@@ -288,6 +302,7 @@ pub const State = union(Target) {
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
             .furiosa => .{ .furiosa = {} },
+            .ascend => .{ .ascend = {} },
         };
     }
 
@@ -421,6 +436,7 @@ pub const Platform = struct {
             .oneapi,
             .metal,
             .furiosa,
+            .ascend,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -701,7 +717,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .ascend => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -742,6 +758,7 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
+    ascend: struct {} = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,
