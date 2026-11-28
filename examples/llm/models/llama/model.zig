@@ -76,6 +76,7 @@ pub const LoadedModel = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
+        loader_opts: zml.io.Loader.Opts,
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -83,11 +84,7 @@ pub const LoadedModel = struct {
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer self.unloadBuffers(&buffers, allocator);
 
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
+        var loader: zml.io.Loader = try .init(allocator, platform, loader_opts);
         defer loader.deinit();
 
         try loader.load(io, Model, &self.inner, &buffers, store, .{ .progress = progress });

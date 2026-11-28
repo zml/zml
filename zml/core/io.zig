@@ -320,7 +320,9 @@ pub const Loader = struct {
     dma_allocators: []const mem.DmaAllocator,
     dma_chunk_size: usize,
     pinned_buffer_pools: []mem.DynamicBufferPool,
-    group: stdx.Io.LimitedGroup,
+    // Tasks use `concurrent`, not `async`: `std.Io.Threaded` runs `async` inline once its shared
+    // busy count reaches `async_limit`, which the VFS read-pool workers alone exceed.
+    group: stdx.Io.AllocatingLimitedConcurrentGroup,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
     delivered: std.AutoHashMapUnmanaged(Tensor.Id, void) = .empty,
 
@@ -352,17 +354,21 @@ pub const Loader = struct {
             pool_.deinit(dma_allocators[i].allocator());
         };
 
+        var group: stdx.Io.AllocatingLimitedConcurrentGroup = try .init(allocator, opts.parallelism);
+        errdefer group.deinit();
+
         return .{
             .allocator = allocator,
             .platform = platform,
             .dma_allocators = dma_allocators,
             .dma_chunk_size = opts.dma_chunk_size,
             .pinned_buffer_pools = buffer_pools,
-            .group = .init(opts.parallelism),
+            .group = group,
         };
     }
 
     pub fn deinit(self: *Loader) void {
+        self.group.deinit();
         self.delivered.deinit(self.allocator);
         for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
         self.allocator.free(self.pinned_buffer_pools);
@@ -420,7 +426,8 @@ pub const Loader = struct {
                 if (sources.transformed) continue;
             }
 
-            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts });
+            const args = .{ self, io, tensor, buffer, store, opts };
+            self.group.concurrent(io, defaultCallback, args) catch @call(.auto, defaultCallback, args);
         }
     }
 
@@ -439,7 +446,8 @@ pub const Loader = struct {
     }
 
     pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: *const Tensor, store: *const TensorStore, opts: LoadOpts) void {
-        loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts });
+        const args = .{ loader, io, tensor, buffer, store, opts };
+        loader.group.concurrent(io, defaultCallback, args) catch @call(.auto, defaultCallback, args);
     }
 
     fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts) void {
@@ -536,7 +544,8 @@ pub const Loader = struct {
         defer if (node) |*n| n.end();
 
         for (sources, 0..) |source, i| {
-            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], .{} });
+            const args = .{ self, io, source, source.shape, &buffers[i], &loaded[i], LoadOpts{} };
+            self.group.concurrent(io, loadSingle, args) catch @call(.auto, loadSingle, args);
         }
         self.group.await(io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,

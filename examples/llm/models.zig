@@ -5,6 +5,7 @@ const zml = @import("zml");
 const common = @import("models/common.zig");
 pub const Meshes = common.Meshes;
 pub const GenerationOptions = common.GenerationOptions;
+pub const default_loader_opts = common.default_loader_opts;
 pub const parseConfig = common.parseConfig;
 pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
@@ -62,12 +63,13 @@ pub const LoadedModel = union(ModelType) {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
+        loader_opts: zml.io.Loader.Opts,
     ) !Buffers {
         return switch (self.*) {
             inline else => |*m, t| @unionInit(
                 Buffers,
                 @tagName(t),
-                try m.loadBuffers(allocator, io, platform, store, progress),
+                try m.loadBuffers(allocator, io, platform, store, progress, loader_opts),
             ),
         };
     }

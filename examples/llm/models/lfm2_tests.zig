@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, common.default_loader_opts);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend: zml.attention.Backend = if (args.backend) |selected| switch (selected) {
